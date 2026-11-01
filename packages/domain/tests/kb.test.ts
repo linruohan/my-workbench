@@ -11,12 +11,23 @@ import {
   isMarkdownFile,
   isPathUnder,
   joinMdBlocks,
+  normalizeMdBlocks,
   outdentMarkdownSelection,
   parseHtmlImage,
   pastedImageAbs,
   pastedImageRel,
   resolveImageTarget,
   splitMdBlocks,
+  cutSelectedLines,
+  dedupeSelectedLines,
+  findAllMatches,
+  findNextMatch,
+  locateInBlocks,
+  replaceAllMatches,
+  replaceMatchWithQuery,
+  sortSelectedLines,
+  styleMarkdownSelection,
+  wrapMarkdownSelection,
 } from "../src/index.js";
 
 describe("knowledge images", () => {
@@ -159,5 +170,107 @@ describe("knowledge headings", () => {
     expect(blocks).toContain("![图](./a.png)");
     expect(blocks.some((block) => block.startsWith("```js"))).toBe(true);
     expect(joinMdBlocks(blocks)).toBe(source);
+  });
+
+  it("trims trailing blanks after closed fences when normalizing", () => {
+    const blocks = [
+      "```bash\necho hi\n```\n",
+      "",
+      "",
+      "正文",
+      "",
+    ];
+    expect(normalizeMdBlocks(blocks)).toEqual(["```bash\necho hi\n```", "", "正文"]);
+  });
+
+  it("wraps multi-line selections for bold and highlight", () => {
+    const bold = wrapMarkdownSelection("a\nb\n", 0, 3, "**");
+    expect(bold.text).toBe("**a**\n**b**\n");
+    const mark = wrapMarkdownSelection("hello", 0, 5, "==");
+    expect(mark.text).toBe("==hello==");
+    const undone = wrapMarkdownSelection("**a**", 0, 5, "**");
+    expect(undone.text).toBe("a");
+  });
+
+  it("applies and clears text color / background on selections", () => {
+    const colored = styleMarkdownSelection("hello", 0, 5, "color", "#e11d48");
+    expect(colored.text).toBe('<span style="color: #e11d48">hello</span>');
+    expect(colored.start).toBe('<span style="color: #e11d48">'.length);
+    expect(colored.end).toBe(colored.start + "hello".length);
+
+    const cleared = styleMarkdownSelection(colored.text, 0, colored.text.length, "color", null);
+    expect(cleared.text).toBe("hello");
+
+    const bg = styleMarkdownSelection("a\nb", 0, 3, "background", "#fef08a");
+    expect(bg.text).toBe(
+      '<span style="background-color: #fef08a">a</span>\n<span style="background-color: #fef08a">b</span>',
+    );
+
+    const nested = styleMarkdownSelection(
+      '<span style="color: #e11d48">hi</span>',
+      0,
+      '<span style="color: #e11d48">hi</span>'.length,
+      "background",
+      "#bfdbfe",
+    );
+    expect(nested.text).toBe(
+      '<span style="background-color: #bfdbfe"><span style="color: #e11d48">hi</span></span>',
+    );
+
+    const rejected = styleMarkdownSelection("x", 0, 1, "color", "red;evil");
+    expect(rejected.text).toBe("x");
+  });
+
+  it("cuts selected lines and sorts / dedupes them", () => {
+    const cut = cutSelectedLines("a\nb\nc", 2, 2);
+    expect(cut.cut).toBe("b\n");
+    expect(cut.text).toBe("a\nc");
+
+    const sorted = sortSelectedLines("c\na\nb", 0, 5);
+    expect(sorted.text).toBe("a\nb\nc");
+
+    const deduped = dedupeSelectedLines("a\nb\na\nc\nb", 0, 9);
+    expect(deduped.text).toBe("a\nb\nc");
+  });
+
+  it("finds and replaces with regex / selection scope", () => {
+    const text = "foo Foo FOO food";
+    const all = findAllMatches(text, { query: "foo", matchCase: false, wholeWord: true });
+    expect(all).toEqual([
+      { start: 0, end: 3 },
+      { start: 4, end: 7 },
+      { start: 8, end: 11 },
+    ]);
+
+    const next = findNextMatch(text, { query: "foo", matchCase: true }, 1);
+    expect(next).toEqual({ start: 12, end: 15 });
+
+    const replaced = replaceMatchWithQuery(
+      text,
+      { start: 0, end: 3 },
+      "foo",
+      "bar",
+      { preserveCase: true },
+    );
+    expect(replaced.text.startsWith("bar")).toBe(true);
+
+    const scoped = replaceAllMatches("aa bb aa", {
+      query: "aa",
+      replace: "xx",
+      inSelection: true,
+      selectionStart: 3,
+      selectionEnd: 8,
+    });
+    expect(scoped.text).toBe("aa bb xx");
+    expect(scoped.count).toBe(1);
+
+    const regex = replaceAllMatches("a1 a2", {
+      query: "a(\\d)",
+      replace: "b$1",
+      regex: true,
+    });
+    expect(regex.text).toBe("b1 b2");
+
+    expect(locateInBlocks(["hi", "there"], 4)).toEqual({ index: 1, offset: 1 });
   });
 });

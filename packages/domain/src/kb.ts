@@ -300,6 +300,430 @@ export function outdentMarkdownSelection(
   };
 }
 
+/**
+ * Wrap or unwrap the current selection (supports multi-line).
+ * Empty selection inserts markers and places the caret between them.
+ */
+export function wrapMarkdownSelection(
+  text: string,
+  start: number,
+  end: number,
+  prefix: string,
+  suffix = prefix,
+): { text: string; start: number; end: number } {
+  const selected = text.slice(start, end);
+  if (
+    selected.length >= prefix.length + suffix.length &&
+    selected.startsWith(prefix) &&
+    selected.endsWith(suffix)
+  ) {
+    const inner = selected.slice(prefix.length, selected.length - suffix.length);
+    return {
+      text: text.slice(0, start) + inner + text.slice(end),
+      start,
+      end: start + inner.length,
+    };
+  }
+
+  // Multi-line: wrap each non-empty line so bold/highlight stays per-line.
+  if (selected.includes("\n")) {
+    const wrapped = selected
+      .split("\n")
+      .map((line) => {
+        if (!line.trim()) return line;
+        if (line.startsWith(prefix) && line.endsWith(suffix)) {
+          return line.slice(prefix.length, line.length - suffix.length);
+        }
+        return `${prefix}${line}${suffix}`;
+      })
+      .join("\n");
+    return {
+      text: text.slice(0, start) + wrapped + text.slice(end),
+      start,
+      end: start + wrapped.length,
+    };
+  }
+
+  const next = `${prefix}${selected}${suffix}`;
+  return {
+    text: text.slice(0, start) + next + text.slice(end),
+    start: start + prefix.length,
+    end: start + prefix.length + selected.length,
+  };
+}
+
+export type InlineStyleKind = "color" | "background";
+
+export const TEXT_COLOR_PRESETS = [
+  { id: "default", label: "默认", value: null },
+  { id: "rose", label: "红", value: "#e11d48" },
+  { id: "orange", label: "橙", value: "#ea580c" },
+  { id: "amber", label: "黄", value: "#ca8a04" },
+  { id: "green", label: "绿", value: "#16a34a" },
+  { id: "teal", label: "青", value: "#0d9488" },
+  { id: "blue", label: "蓝", value: "#2563eb" },
+  { id: "violet", label: "紫", value: "#7c3aed" },
+  { id: "pink", label: "粉", value: "#db2777" },
+  { id: "gray", label: "灰", value: "#6b7280" },
+] as const;
+
+export const BG_COLOR_PRESETS = [
+  { id: "default", label: "默认", value: null },
+  { id: "rose", label: "红", value: "#fecdd3" },
+  { id: "orange", label: "橙", value: "#fed7aa" },
+  { id: "amber", label: "黄", value: "#fef08a" },
+  { id: "green", label: "绿", value: "#bbf7d0" },
+  { id: "teal", label: "青", value: "#99f6e4" },
+  { id: "blue", label: "蓝", value: "#bfdbfe" },
+  { id: "violet", label: "紫", value: "#ddd6fe" },
+  { id: "pink", label: "粉", value: "#fbcfe8" },
+  { id: "gray", label: "灰", value: "#e5e7eb" },
+] as const;
+
+const SAFE_COLOR =
+  /^(#[0-9a-fA-F]{3,8}|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)|[a-zA-Z]+)$/;
+
+export function isSafeCssColor(value: string): boolean {
+  return SAFE_COLOR.test(value.trim());
+}
+
+function styleProp(kind: InlineStyleKind): string {
+  return kind === "color" ? "color" : "background-color";
+}
+
+function stripStyleSpan(selected: string, kind: InlineStyleKind): string {
+  const prop = styleProp(kind);
+  const openRe = new RegExp(`^(\\s*)<span\\s+style="${prop}:\\s*[^"]+"\\s*>`, "i");
+  let result = selected;
+  for (;;) {
+    const match = openRe.exec(result);
+    if (!match) break;
+    const trail = result.match(/\s*$/)?.[0] ?? "";
+    const core = result.slice(0, result.length - trail.length);
+    if (!core.toLowerCase().endsWith("</span>")) break;
+    const lead = match[1] ?? "";
+    result =
+      lead +
+      core.slice(match[0].length, core.length - "</span>".length) +
+      trail;
+  }
+  return result;
+}
+
+function wrapStyleSpan(inner: string, kind: InlineStyleKind, color: string): string {
+  const prop = styleProp(kind);
+  const cleaned = stripStyleSpan(inner, kind);
+  return `<span style="${prop}: ${color}">${cleaned}</span>`;
+}
+
+/** Apply or clear text/background color on the selection (multi-line aware). */
+export function styleMarkdownSelection(
+  text: string,
+  start: number,
+  end: number,
+  kind: InlineStyleKind,
+  color: string | null,
+): { text: string; start: number; end: number } {
+  if (color != null && !isSafeCssColor(color)) {
+    return { text, start, end };
+  }
+  const selected = text.slice(start, end);
+  const transform = (chunk: string) => {
+    if (!chunk.trim()) return chunk;
+    if (color == null) return stripStyleSpan(chunk, kind);
+    return wrapStyleSpan(chunk, kind, color.trim());
+  };
+
+  if (selected.includes("\n")) {
+    const wrapped = selected.split("\n").map(transform).join("\n");
+    return {
+      text: text.slice(0, start) + wrapped + text.slice(end),
+      start,
+      end: start + wrapped.length,
+    };
+  }
+
+  const next = transform(selected);
+  const openLen = color ? `<span style="${styleProp(kind)}: ${color.trim()}">`.length : 0;
+  return {
+    text: text.slice(0, start) + next + text.slice(end),
+    start: color ? start + openLen : start,
+    end: color ? start + openLen + stripStyleSpan(selected, kind).length : start + next.length,
+  };
+}
+
+/** Inclusive line span covering the caret/selection (selection ending on `\n` stays on that line). */
+export function selectedLineRange(
+  text: string,
+  start: number,
+  end: number,
+): { lineStart: number; lineEnd: number } {
+  const from = Math.min(start, end);
+  const to = Math.max(start, end);
+  const adjustedTo = to > from && text[to - 1] === "\n" ? to - 1 : to;
+  const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
+  const nl = text.indexOf("\n", adjustedTo);
+  const lineEnd = nl === -1 ? text.length : nl;
+  return { lineStart, lineEnd };
+}
+
+/**
+ * Cut/delete whole lines covered by the caret or selection.
+ * `cut` is the removed text (including a trailing newline when present).
+ */
+export function cutSelectedLines(
+  text: string,
+  start: number,
+  end: number,
+): { text: string; start: number; end: number; cut: string } {
+  const { lineStart, lineEnd } = selectedLineRange(text, start, end);
+  if (lineEnd < text.length && text[lineEnd] === "\n") {
+    const cut = text.slice(lineStart, lineEnd + 1);
+    return {
+      text: text.slice(0, lineStart) + text.slice(lineEnd + 1),
+      start: lineStart,
+      end: lineStart,
+      cut,
+    };
+  }
+  // Last line: drop the preceding newline so we do not leave a trailing blank line.
+  if (lineStart > 0) {
+    const cut = text.slice(lineStart - 1, lineEnd);
+    return {
+      text: text.slice(0, lineStart - 1) + text.slice(lineEnd),
+      start: lineStart - 1,
+      end: lineStart - 1,
+      cut,
+    };
+  }
+  const cut = text.slice(lineStart, lineEnd);
+  return { text: "", start: 0, end: 0, cut };
+}
+
+function mapSelectedLines(
+  text: string,
+  start: number,
+  end: number,
+  mapLines: (lines: string[]) => string[],
+): { text: string; start: number; end: number } {
+  const { lineStart, lineEnd } = selectedLineRange(text, start, end);
+  const block = text.slice(lineStart, lineEnd);
+  const nextBlock = mapLines(block.split("\n")).join("\n");
+  return {
+    text: text.slice(0, lineStart) + nextBlock + text.slice(lineEnd),
+    start: lineStart,
+    end: lineStart + nextBlock.length,
+  };
+}
+
+/** Sort selected lines alphabetically (localeCompare). */
+export function sortSelectedLines(
+  text: string,
+  start: number,
+  end: number,
+  direction: "asc" | "desc" = "asc",
+): { text: string; start: number; end: number } {
+  return mapSelectedLines(text, start, end, (lines) => {
+    const sorted = [...lines].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    return direction === "desc" ? sorted.reverse() : sorted;
+  });
+}
+
+/** Remove duplicate lines in the selection (keep first occurrence). */
+export function dedupeSelectedLines(
+  text: string,
+  start: number,
+  end: number,
+): { text: string; start: number; end: number } {
+  return mapSelectedLines(text, start, end, (lines) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const line of lines) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      out.push(line);
+    }
+    return out;
+  });
+}
+
+export type FindReplaceOptions = {
+  query: string;
+  replace?: string;
+  regex?: boolean;
+  matchCase?: boolean;
+  wholeWord?: boolean;
+  /** Limit search to [selectionStart, selectionEnd). */
+  inSelection?: boolean;
+  selectionStart?: number;
+  selectionEnd?: number;
+  /** Preserve case patterns when replacing (foo→bar, Foo→Bar, FOO→BAR). */
+  preserveCase?: boolean;
+};
+
+export type TextMatch = { start: number; end: number };
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function buildFindRegExp(
+  query: string,
+  options: Pick<FindReplaceOptions, "regex" | "matchCase" | "wholeWord">,
+): RegExp | null {
+  if (!query) return null;
+  let source: string;
+  if (options.regex) {
+    source = query;
+  } else {
+    source = escapeRegExp(query);
+  }
+  if (options.wholeWord) {
+    source = `\\b(?:${source})\\b`;
+  }
+  const flags = options.matchCase ? "g" : "gi";
+  try {
+    return new RegExp(source, flags);
+  } catch {
+    return null;
+  }
+}
+
+function searchWindow(
+  text: string,
+  options: FindReplaceOptions,
+): { haystack: string; offset: number } {
+  if (
+    options.inSelection &&
+    options.selectionStart != null &&
+    options.selectionEnd != null &&
+    options.selectionEnd > options.selectionStart
+  ) {
+    return {
+      haystack: text.slice(options.selectionStart, options.selectionEnd),
+      offset: options.selectionStart,
+    };
+  }
+  return { haystack: text, offset: 0 };
+}
+
+/** All matches in document (or selection). */
+export function findAllMatches(text: string, options: FindReplaceOptions): TextMatch[] {
+  const re = buildFindRegExp(options.query, options);
+  if (!re) return [];
+  const { haystack, offset } = searchWindow(text, options);
+  const matches: TextMatch[] = [];
+  re.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(haystack))) {
+    if (match[0].length === 0) {
+      re.lastIndex += 1;
+      continue;
+    }
+    matches.push({ start: offset + match.index, end: offset + match.index + match[0].length });
+    if (matches.length > 10000) break;
+  }
+  return matches;
+}
+
+export function findNextMatch(
+  text: string,
+  options: FindReplaceOptions,
+  from: number,
+  reverse = false,
+): TextMatch | null {
+  const matches = findAllMatches(text, options);
+  if (matches.length === 0) return null;
+  if (reverse) {
+    for (let i = matches.length - 1; i >= 0; i -= 1) {
+      const m = matches[i]!;
+      if (m.start < from) return m;
+    }
+    return matches[matches.length - 1] ?? null;
+  }
+  for (const m of matches) {
+    if (m.start >= from) return m;
+  }
+  return matches[0] ?? null;
+}
+
+function applyPreserveCase(sample: string, replacement: string): string {
+  if (!sample || !replacement) return replacement;
+  if (sample === sample.toUpperCase()) return replacement.toUpperCase();
+  if (sample === sample.toLowerCase()) return replacement.toLowerCase();
+  if (sample[0] === sample[0]?.toUpperCase() && sample.slice(1) === sample.slice(1).toLowerCase()) {
+    return replacement.charAt(0).toUpperCase() + replacement.slice(1).toLowerCase();
+  }
+  return replacement;
+}
+
+/** Replace using the same pattern that found `match` (supports `$1` groups when regex). */
+export function replaceMatchWithQuery(
+  text: string,
+  match: TextMatch,
+  query: string,
+  replacement: string,
+  options: Pick<FindReplaceOptions, "regex" | "matchCase" | "wholeWord" | "preserveCase">,
+): { text: string; start: number; end: number } {
+  const matched = text.slice(match.start, match.end);
+  let next = replacement;
+  if (options.regex) {
+    const re = buildFindRegExp(query, {
+      regex: true,
+      matchCase: options.matchCase,
+      wholeWord: options.wholeWord,
+    });
+    if (re) {
+      re.lastIndex = 0;
+      next = matched.replace(re, replacement);
+    }
+  }
+  if (options.preserveCase) next = applyPreserveCase(matched, next);
+  const out = text.slice(0, match.start) + next + text.slice(match.end);
+  return { text: out, start: match.start, end: match.start + next.length };
+}
+
+export function replaceAllMatches(
+  text: string,
+  options: FindReplaceOptions & { replace: string },
+): { text: string; count: number } {
+  const matches = findAllMatches(text, options);
+  if (matches.length === 0) return { text, count: 0 };
+  let out = text;
+  // Replace from the end so earlier offsets stay valid.
+  for (let i = matches.length - 1; i >= 0; i -= 1) {
+    const m = matches[i]!;
+    const next = replaceMatchWithQuery(out, m, options.query, options.replace, options);
+    out = next.text;
+  }
+  return { text: out, count: matches.length };
+}
+
+/** Map a document offset into a block index / local caret (blocks joined by `\n`). */
+export function locateInBlocks(
+  blocks: string[],
+  offset: number,
+): { index: number; offset: number } {
+  let cursor = 0;
+  for (let i = 0; i < blocks.length; i += 1) {
+    const len = (blocks[i] ?? "").length;
+    if (offset <= cursor + len) {
+      return { index: i, offset: Math.max(0, offset - cursor) };
+    }
+    cursor += len + 1;
+  }
+  const last = Math.max(0, blocks.length - 1);
+  return { index: last, offset: (blocks[last] ?? "").length };
+}
+
+export function blockDocOffset(blocks: string[], index: number): number {
+  let offset = 0;
+  for (let i = 0; i < index; i += 1) {
+    offset += (blocks[i] ?? "").length + 1;
+  }
+  return offset;
+}
+
 /** ImagePaste: `{stem}/{stem}{index}.png` beside the markdown file. */
 export function pastedImageRel(
   stem: string,
@@ -474,6 +898,50 @@ export function headingMeta(
     const label = counts.slice(0, level).join(".");
     return { level, label };
   });
+}
+
+/** Leading auto-number already present in a heading title (`2.3 标题`). */
+const HEADING_NUMBER_PREFIX = /^(\d+(?:\.\d+)*)\.?[ \t]+(.*)$/;
+
+/** Strip a leading outline number from heading title text. */
+export function stripHeadingNumber(title: string): string {
+  const match = HEADING_NUMBER_PREFIX.exec(title.trim());
+  return match?.[2] != null ? match[2] : title.trim();
+}
+
+/**
+ * Write outline numbers into ATX headings so source matches render.
+ * Replaces an existing leading number (`### 2.3 标题` → correct label).
+ */
+export function applyHeadingNumbers(source: string): string {
+  const lines = (source ?? "").split(/\r?\n/);
+  const counts = [0, 0, 0, 0, 0, 0, 0, 0];
+  let fence: string | null = null;
+  const out = lines.map((line) => {
+    const mark = fenceChar(line);
+    if (mark) {
+      if (!fence) fence = mark;
+      else if (fence === mark) fence = null;
+      return line;
+    }
+    if (fence) return line;
+    const match = ATX_RE.exec(line);
+    if (!match?.[1]) return line;
+    const hashes = match[1];
+    const level = hashes.length;
+    if (level < 1 || level > 8) return line;
+    const after = match[2] ?? "";
+    if (after.length > 0 && !/^[ \t]/.test(after) && after.trim().length > 0) {
+      return line;
+    }
+    let title = after.replace(/^[ \t]+/, "").replace(/[ \t]+#*[ \t]*$/, "");
+    title = stripHeadingNumber(title);
+    counts[level - 1] = (counts[level - 1] ?? 0) + 1;
+    for (let i = level; i < counts.length; i += 1) counts[i] = 0;
+    const label = counts.slice(0, level).join(".");
+    return title ? `${hashes} ${label} ${title}` : `${hashes} ${label}`;
+  });
+  return out.join("\n");
 }
 
 function highlightInline(line: string): HighlightSeg[] {
@@ -655,6 +1123,45 @@ export function splitMdBlocks(source: string): string[] {
 
 export function joinMdBlocks(blocks: string[]): string {
   return blocks.join("\n");
+}
+
+export function isCompleteFenceBlock(text: string): boolean {
+  const lines = text.split("\n");
+  if (lines.length < 2) return false;
+  const open = fenceChar(lines[0] ?? "");
+  if (!open) return false;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (fenceChar(lines[i] ?? "") === open) return true;
+  }
+  return false;
+}
+
+/** Drop trailing blanks after a closed fence so re-splitting does not create empty blocks. */
+export function trimFenceBlock(text: string): string {
+  const lines = text.split("\n");
+  const open = fenceChar(lines[0] ?? "");
+  if (!open) return text;
+  let closeIdx = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (fenceChar(lines[i] ?? "") === open) {
+      closeIdx = i;
+      break;
+    }
+  }
+  if (closeIdx < 0) return text;
+  return lines.slice(0, closeIdx + 1).join("\n");
+}
+
+/** Collapse duplicate blank blocks and tidy closed fences. */
+export function normalizeMdBlocks(blocks: string[]): string[] {
+  const cleaned: string[] = [];
+  for (const raw of blocks) {
+    const block = isCompleteFenceBlock(raw) ? trimFenceBlock(raw) : raw;
+    if (block === "" && cleaned[cleaned.length - 1] === "") continue;
+    cleaned.push(block);
+  }
+  while (cleaned.length > 1 && cleaned[cleaned.length - 1] === "") cleaned.pop();
+  return cleaned.length > 0 ? cleaned : [""];
 }
 
 export function highlightMarkdown(source: string): HighlightLine[] {

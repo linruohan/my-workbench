@@ -36,4 +36,28 @@ describe("renderMarkdown", () => {
     expect(html).toContain('class="md-code__num">2<');
     expect(html).toContain("hljs");
   });
+
+  it("renders highlight and underline markers", () => {
+    const html = renderMarkdown("这是==高亮==和++下划线++");
+    expect(html).toContain("<mark>");
+    expect(html).toContain("高亮");
+    expect(html).toContain("<u>");
+    expect(html).toContain("下划线");
+  });
+
+  it("renders safe text color and background spans", () => {
+    const html = renderMarkdown(
+      '字<span style="color: #e11d48">红</span>和<span style="background-color: #fef08a">黄底</span>',
+    );
+    expect(html).toContain('style="color: #e11d48"');
+    expect(html).toContain("红");
+    expect(html).toContain('style="background-color: #fef08a"');
+    expect(html).toContain("黄底");
+  });
+
+  it("does not render unsafe span styles as HTML", () => {
+    const html = renderMarkdown('<span style="color: red; width:1px">x</span>');
+    expect(html).not.toContain("<span");
+    expect(html).toContain("&lt;span");
+  });
 });

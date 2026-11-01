@@ -1,5 +1,5 @@
 import MarkdownIt from "markdown-it";
-import { extractImageSlots, type ImageSlot } from "@wb/domain";
+import { extractImageSlots, isSafeCssColor, type ImageSlot } from "@wb/domain";
 import { renderCodeBlock } from "./code-block";
 
 type BlockState = {
@@ -107,6 +107,93 @@ md.renderer.rules.fence = (tokens, idx) => {
   if (!token) return "";
   return renderCodeBlock(token.content, token.info || "");
 };
+
+function addInlinePair(
+  name: string,
+  marker: string,
+  tag: string,
+): void {
+  md.inline.ruler.before("emphasis", name, (state, silent) => {
+    const start = state.pos;
+    if (state.src.slice(start, start + marker.length) !== marker) return false;
+    const close = state.src.indexOf(marker, start + marker.length);
+    if (close < 0) return false;
+    if (silent) return true;
+    const tokenOpen = state.push(`${name}_open`, tag, 1);
+    tokenOpen.markup = marker;
+    const tokenText = state.push("text", "", 0);
+    tokenText.content = state.src.slice(start + marker.length, close);
+    const tokenClose = state.push(`${name}_close`, tag, -1);
+    tokenClose.markup = marker;
+    state.pos = close + marker.length;
+    return true;
+  });
+}
+
+/** ==highlight== background and ++underline++. */
+addInlinePair("mark", "==", "mark");
+addInlinePair("underline", "++", "u");
+
+const SAFE_SPAN_OPEN =
+  /^<span\s+style="((?:color|background-color)\s*:\s*[^";]+)"\s*>/i;
+
+/** Allow only color / background-color spans (html remains disabled otherwise). */
+md.inline.ruler.before("emphasis", "safe_style_span", (state, silent) => {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0x3c /* < */) return false;
+  const slice = state.src.slice(start);
+  const open = SAFE_SPAN_OPEN.exec(slice);
+  if (!open?.[1]) return false;
+
+  const styleRaw = open[1].trim();
+  const parts = /^(color|background-color)\s*:\s*(.+)$/i.exec(styleRaw);
+  if (!parts?.[1] || parts[2] == null) return false;
+  const prop = parts[1].toLowerCase();
+  const color = parts[2].trim();
+  if (!isSafeCssColor(color)) return false;
+
+  const contentStart = start + open[0].length;
+  let depth = 1;
+  let pos = contentStart;
+  while (pos < state.posMax && depth > 0) {
+    if (state.src.charCodeAt(pos) === 0x3c /* < */) {
+      const rest = state.src.slice(pos);
+      if (SAFE_SPAN_OPEN.test(rest)) {
+        const nested = SAFE_SPAN_OPEN.exec(rest);
+        if (nested) {
+          depth += 1;
+          pos += nested[0].length;
+          continue;
+        }
+      }
+      if (rest.toLowerCase().startsWith("</span>")) {
+        depth -= 1;
+        if (depth === 0) break;
+        pos += 7;
+        continue;
+      }
+    }
+    pos += 1;
+  }
+  if (depth !== 0) return false;
+
+  if (silent) return true;
+
+  const tokenOpen = state.push("span_open", "span", 1);
+  tokenOpen.attrs = [["style", `${prop}: ${color}`]];
+  tokenOpen.markup = open[0];
+
+  const oldMax = state.posMax;
+  state.pos = contentStart;
+  state.posMax = pos;
+  state.md.inline.tokenize(state);
+  state.pos = pos + 7;
+  state.posMax = oldMax;
+
+  const tokenClose = state.push("span_close", "span", -1);
+  tokenClose.markup = "</span>";
+  return true;
+});
 
 function escapeAttr(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
