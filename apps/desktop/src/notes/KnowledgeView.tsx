@@ -1,9 +1,11 @@
-import type { Note } from "@wb/domain";
+import type { Note, NoteEditorMode } from "@wb/domain";
 import { NoteEditor } from "./NoteEditor";
 
 type Props = {
   notes: Note[];
   activeId: string | null;
+  preferLastNote?: boolean;
+  defaultEditorMode?: NoteEditorMode;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onChange: (id: string, patch: { title?: string; bodyMd?: string }) => void;
@@ -13,12 +15,15 @@ type Props = {
 export function KnowledgeView({
   notes,
   activeId,
+  preferLastNote = true,
+  defaultEditorMode = "live",
   onSelect,
   onCreate,
   onChange,
   onDelete,
 }: Props) {
-  const active = notes.find((n) => n.id === activeId) ?? notes[0] ?? null;
+  const selected = activeId ? notes.find((n) => n.id === activeId) : null;
+  const active = selected ?? (preferLastNote ? notes[0] ?? null : null);
 
   return (
     <section className="knowledge">
@@ -57,8 +62,9 @@ export function KnowledgeView({
       <div className="knowledge__editor">
         {active ? (
           <NoteEditor
-            key={active.id}
+            key={`${active.id}:${defaultEditorMode}`}
             note={active}
+            defaultMode={defaultEditorMode}
             onChange={(patch) => onChange(active.id, patch)}
             onDelete={() => onDelete(active.id)}
           />

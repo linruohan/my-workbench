@@ -17,6 +17,7 @@ import {
   type ResolvedTheme,
   type ThemeMode,
 } from "@wb/theme";
+import { hydrateThemeMode, persistThemeMode } from "../lib/theme-persist";
 
 interface ThemeContextValue {
   mode: ThemeMode;
@@ -48,6 +49,22 @@ export function ThemeProvider(props: { children: ReactNode }) {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void hydrateThemeMode(
+      readStoredThemeMode(
+        typeof localStorage === "undefined" ? null : localStorage,
+      ),
+    ).then((next) => {
+      if (cancelled) return;
+      setModeState(next);
+      writeStoredThemeMode(localStorage, next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const resolved = useMemo(
     () => resolveThemeMode(mode, prefersDark),
     [mode, prefersDark],
@@ -60,12 +77,14 @@ export function ThemeProvider(props: { children: ReactNode }) {
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next);
     writeStoredThemeMode(localStorage, next);
+    persistThemeMode(next);
   }, []);
 
   const cycleMode = useCallback(() => {
     setModeState((prev) => {
       const next = cycleThemeMode(prev);
       writeStoredThemeMode(localStorage, next);
+      persistThemeMode(next);
       return next;
     });
   }, []);

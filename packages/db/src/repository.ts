@@ -197,6 +197,32 @@ export class WorkbenchRepository {
     return this.getTask(taskId)!;
   }
 
+  getTaskBucket(taskId: string): ProjectBucket {
+    const row = this.db
+      .prepare(`SELECT bucket FROM project_tasks WHERE task_id = ?`)
+      .get(taskId) as { bucket: ProjectBucket } | undefined;
+    return row?.bucket ?? "active";
+  }
+
+  setTaskBucket(
+    taskId: string,
+    bucket: ProjectBucket,
+    nowMs = Date.now(),
+  ): Task {
+    if (bucket === "backlog") return this.moveToBacklog(taskId, nowMs);
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    this.db
+      .prepare(
+        `UPDATE project_tasks SET bucket = 'active' WHERE task_id = ?`,
+      )
+      .run(taskId);
+    this.db
+      .prepare(`UPDATE tasks SET updated_at = ? WHERE id = ?`)
+      .run(nowMs, taskId);
+    return this.getTask(taskId)!;
+  }
+
   moveToBacklog(taskId: string, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
@@ -221,12 +247,105 @@ export class WorkbenchRepository {
     return this.getTask(taskId)!;
   }
 
+  moveToActive(taskId: string, nowMs = Date.now()): Task {
+    return this.setTaskBucket(taskId, "active", nowMs);
+  }
+
+  updateTask(
+    taskId: string,
+    patch: {
+      title?: string;
+      notes?: string;
+      projectId?: string;
+      timeEstimate?: number;
+    },
+    nowMs = Date.now(),
+  ): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+
+    const title =
+      patch.title !== undefined
+        ? patch.title.trim() || "未命名任务"
+        : task.title;
+    const notes = patch.notes !== undefined ? patch.notes : task.notes;
+    const projectId =
+      patch.projectId !== undefined ? patch.projectId : task.projectId;
+    const timeEstimate =
+      patch.timeEstimate !== undefined
+        ? Math.max(0, Math.floor(patch.timeEstimate))
+        : task.timeEstimate;
+
+    if (patch.projectId !== undefined) {
+      const project = this.db
+        .prepare(`SELECT id FROM projects WHERE id = ?`)
+        .get(projectId);
+      if (!project) throw new DomainError(`unknown project: ${projectId}`);
+    }
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE tasks SET title = ?, notes = ?, project_id = ?, time_estimate = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(title, notes, projectId, timeEstimate, nowMs, taskId);
+
+      if (patch.projectId !== undefined && patch.projectId !== task.projectId) {
+        const bucket = this.getTaskBucket(taskId);
+        this.db
+          .prepare(`DELETE FROM project_tasks WHERE task_id = ?`)
+          .run(taskId);
+        const pos = (
+          this.db
+            .prepare(
+              `SELECT COALESCE(MAX(position), -1) + 1 AS p FROM project_tasks WHERE project_id = ? AND bucket = ?`,
+            )
+            .get(projectId, bucket) as { p: number }
+        ).p;
+        this.db
+          .prepare(
+            `INSERT INTO project_tasks (project_id, task_id, bucket, position) VALUES (?, ?, ?, ?)`,
+          )
+          .run(projectId, taskId, bucket, pos);
+      }
+    });
+    tx();
+    return this.getTask(taskId)!;
+  }
+
+  deleteTask(taskId: string): void {
+    if (!this.getTask(taskId)) {
+      throw new DomainError(`task not found: ${taskId}`);
+    }
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE tasks SET parent_id = NULL, updated_at = ? WHERE parent_id = ?`,
+        )
+        .run(Date.now(), taskId);
+      this.db.prepare(`DELETE FROM today_order WHERE task_id = ?`).run(taskId);
+      this.db.prepare(`DELETE FROM project_tasks WHERE task_id = ?`).run(taskId);
+      this.db.prepare(`DELETE FROM task_tags WHERE task_id = ?`).run(taskId);
+      this.db.prepare(`DELETE FROM tasks WHERE id = ?`).run(taskId);
+    });
+    tx();
+  }
+
   completeTask(taskId: string, nowMs = Date.now()): Task {
     this.db
       .prepare(
         `UPDATE tasks SET is_done = 1, done_on = ?, remind_at = NULL, deadline_remind_at = NULL, updated_at = ? WHERE id = ?`,
       )
       .run(nowMs, nowMs, taskId);
+    return this.getTask(taskId)!;
+  }
+
+  uncompleteTask(taskId: string, nowMs = Date.now()): Task {
+    this.db
+      .prepare(
+        `UPDATE tasks SET is_done = 0, done_on = NULL, updated_at = ? WHERE id = ?`,
+      )
+      .run(nowMs, taskId);
     return this.getTask(taskId)!;
   }
 

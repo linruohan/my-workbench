@@ -6,11 +6,17 @@ import {
   collectDueReminders,
   createId,
   createNoteDraft,
+  coerceTimedTask,
+  createTimedTaskDraft,
   DomainError,
   INBOX_PROJECT_ID,
   isPlannerMember,
   isScheduleMember,
+  markTaskComplete,
+  markTaskIncomplete,
   patchNote,
+  patchTaskContent,
+  patchTimedTask,
   selectTodayTasks,
   settleTimerSegment,
   sumTimeSpentOnDay,
@@ -19,6 +25,8 @@ import {
   type ReminderOptionId,
   type SchedulePatch,
   type Task,
+  type TimedSchedule,
+  type TimedTask,
   remindOptionToMilliseconds,
   shiftRemindAt,
 } from "@wb/domain";
@@ -35,6 +43,7 @@ export class MemoryWorkbenchRepository {
   private buckets = new Map<string, ProjectBucket>();
   private todayOrder: string[] = [];
   private notes = new Map<string, Note>();
+  private timedTasks = new Map<string, TimedTask>();
   private notifications: Array<{
     id: string;
     kind: string;
@@ -142,6 +151,26 @@ export class MemoryWorkbenchRepository {
     return next;
   }
 
+  getTaskBucket(taskId: string): ProjectBucket {
+    return this.buckets.get(taskId) ?? "active";
+  }
+
+  setTaskBucket(
+    taskId: string,
+    bucket: ProjectBucket,
+    nowMs = Date.now(),
+  ): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    if (bucket === "backlog") {
+      return this.moveToBacklog(taskId, nowMs);
+    }
+    const next = { ...task, updatedAt: nowMs };
+    this.tasks.set(taskId, next);
+    this.buckets.set(taskId, "active");
+    return next;
+  }
+
   moveToBacklog(taskId: string, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
@@ -162,18 +191,60 @@ export class MemoryWorkbenchRepository {
     return next;
   }
 
+  moveToActive(taskId: string, nowMs = Date.now()): Task {
+    return this.setTaskBucket(taskId, "active", nowMs);
+  }
+
+  updateTask(
+    taskId: string,
+    patch: {
+      title?: string;
+      notes?: string;
+      projectId?: string;
+      timeEstimate?: number;
+    },
+    nowMs = Date.now(),
+  ): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    if (patch.projectId !== undefined && !this.projects.has(patch.projectId)) {
+      throw new DomainError(`unknown project: ${patch.projectId}`);
+    }
+    const next = patchTaskContent(task, patch, nowMs);
+    this.tasks.set(taskId, next);
+    return next;
+  }
+
+  deleteTask(taskId: string): void {
+    if (!this.tasks.has(taskId)) {
+      throw new DomainError(`task not found: ${taskId}`);
+    }
+    this.tasks.delete(taskId);
+    this.buckets.delete(taskId);
+    this.todayOrder = this.todayOrder.filter((id) => id !== taskId);
+    for (const child of this.listTasks().filter((t) => t.parentId === taskId)) {
+      this.tasks.set(child.id, {
+        ...child,
+        parentId: null,
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
   completeTask(taskId: string, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
-    const next = {
-      ...task,
-      isDone: true,
-      doneOn: nowMs,
-      remindAt: null,
-      deadlineRemindAt: null,
-      updatedAt: nowMs,
-    };
+    const next = markTaskComplete(task, nowMs);
     this.tasks.set(taskId, next);
+    return next;
+  }
+
+  uncompleteTask(taskId: string, nowMs = Date.now()): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    const next = markTaskIncomplete(task, nowMs);
+    this.tasks.set(taskId, next);
+    if (!this.buckets.has(taskId)) this.buckets.set(taskId, "active");
     return next;
   }
 
@@ -310,6 +381,50 @@ export class MemoryWorkbenchRepository {
     this.notes.delete(id);
   }
 
+  listTimedTasks(): TimedTask[] {
+    return [...this.timedTasks.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  getTimedTask(id: string): TimedTask | null {
+    return this.timedTasks.get(id) ?? null;
+  }
+
+  createTimedTask(input: {
+    title?: string;
+    command?: string;
+    schedule?: TimedSchedule | null;
+    /** @deprecated use schedule */
+    schedules?: TimedSchedule[];
+    nowMs?: number;
+  }): TimedTask {
+    const task = createTimedTaskDraft(input);
+    this.timedTasks.set(task.id, task);
+    return task;
+  }
+
+  updateTimedTask(
+    id: string,
+    patch: {
+      title?: string;
+      command?: string;
+      schedule?: TimedSchedule | null;
+      /** @deprecated use schedule */
+      schedules?: TimedSchedule[];
+      enabled?: boolean;
+    },
+    nowMs = Date.now(),
+  ): TimedTask {
+    const current = this.timedTasks.get(id);
+    if (!current) throw new DomainError(`timed task not found: ${id}`);
+    const next = patchTimedTask(current, patch, nowMs);
+    this.timedTasks.set(id, next);
+    return next;
+  }
+
+  deleteTimedTask(id: string): void {
+    this.timedTasks.delete(id);
+  }
+
   /** Persist snapshot to a local JSON string (for localStorage). */
   exportSnapshot(): string {
     return JSON.stringify({
@@ -319,6 +434,7 @@ export class MemoryWorkbenchRepository {
       todayOrder: this.todayOrder,
       notifications: this.notifications,
       notes: [...this.notes.values()],
+      timedTasks: [...this.timedTasks.values()],
     });
   }
 
@@ -337,6 +453,9 @@ export class MemoryWorkbenchRepository {
         refId: string | null;
       }>;
       notes?: Note[];
+      timedTasks?: Array<
+        TimedTask & { schedule?: TimedSchedule | null; schedules?: TimedSchedule[] }
+      >;
     };
     this.tasks = new Map(data.tasks.map((t) => [t.id, t]));
     this.projects = new Map(data.projects.map((p) => [p.id, p]));
@@ -344,5 +463,11 @@ export class MemoryWorkbenchRepository {
     this.todayOrder = data.todayOrder ?? [];
     this.notifications = data.notifications ?? [];
     this.notes = new Map((data.notes ?? []).map((n) => [n.id, n]));
+    this.timedTasks = new Map(
+      (data.timedTasks ?? []).map((t) => {
+        const next = coerceTimedTask(t);
+        return [next.id, next];
+      }),
+    );
   }
 }

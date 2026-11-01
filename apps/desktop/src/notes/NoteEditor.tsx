@@ -9,12 +9,18 @@ import { renderMarkdown } from "../lib/markdown";
 
 type Props = {
   note: Note;
+  defaultMode?: NoteEditorMode;
   onChange: (patch: { title?: string; bodyMd?: string }) => void;
   onDelete: () => void;
 };
 
-export function NoteEditor({ note, onChange, onDelete }: Props) {
-  const [mode, setMode] = useState<NoteEditorMode>("live");
+export function NoteEditor({
+  note,
+  defaultMode = "live",
+  onChange,
+  onDelete,
+}: Props) {
+  const [mode, setMode] = useState<NoteEditorMode>(defaultMode);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const syncing = useRef(false);

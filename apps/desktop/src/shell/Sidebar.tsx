@@ -4,7 +4,6 @@ import {
   IconBot,
   IconChat,
   IconFolder,
-  IconLayout,
   IconPlus,
   IconSearch,
   IconSettings,
@@ -16,13 +15,15 @@ export type AppNavId =
   | "planner"
   | "schedule"
   | "projects"
-  | "knowledge";
+  | "knowledge"
+  | "timed";
 
 const NAV: Array<{ id: AppNavId; label: string }> = [
   { id: "today", label: "今日" },
   { id: "planner", label: "计划" },
   { id: "schedule", label: "时间表" },
   { id: "projects", label: "任务" },
+  { id: "timed", label: "定时任务" },
   { id: "knowledge", label: "知识库" },
 ];
 
@@ -34,12 +35,13 @@ type Props = {
   settingsOpen: boolean;
   onOpenSettings: () => void;
   projects: Array<{ id: string; title: string }>;
+  activeProjectId?: string | null;
   notes: Note[];
   onCreateProject: () => void;
+  onSelectProject?: (projectId: string | null) => void;
   onSelectNote: (id: string) => void;
   onNewChat: () => void;
   onAutomations: () => void;
-  onCustomize: () => void;
   displayName: string;
 };
 
@@ -51,12 +53,13 @@ export function Sidebar({
   settingsOpen,
   onOpenSettings,
   projects,
+  activeProjectId = null,
   notes,
   onCreateProject,
+  onSelectProject,
   onSelectNote,
   onNewChat,
   onAutomations,
-  onCustomize,
   displayName,
 }: Props) {
   const [query, setQuery] = useState("");
@@ -136,10 +139,6 @@ export function Sidebar({
           <IconBot />
           <span>自动化</span>
         </button>
-        <button type="button" className="sidebar__action" onClick={onCustomize}>
-          <IconLayout />
-          <span>个性化</span>
-        </button>
       </div>
 
       <div className="sidebar__scroll">
@@ -154,11 +153,16 @@ export function Sidebar({
               key={p.id}
               type="button"
               className={
-                nav === "projects" && !settingsOpen
+                nav === "projects" &&
+                !settingsOpen &&
+                activeProjectId === p.id
                   ? "sidebar__row is-active"
                   : "sidebar__row"
               }
-              onClick={() => onNav("projects")}
+              onClick={() => {
+                onSelectProject?.(p.id);
+                onNav("projects");
+              }}
             >
               <IconFolder size={15} />
               <span className="sidebar__row-text">{p.title}</span>
@@ -173,11 +177,16 @@ export function Sidebar({
               key={item.id}
               type="button"
               className={
-                nav === item.id && !settingsOpen
+                nav === item.id &&
+                !settingsOpen &&
+                (item.id !== "projects" || activeProjectId == null)
                   ? "sidebar__row is-active"
                   : "sidebar__row"
               }
-              onClick={() => onNav(item.id)}
+              onClick={() => {
+                if (item.id === "projects") onSelectProject?.(null);
+                onNav(item.id);
+              }}
             >
               <span className="sidebar__dot" />
               <span className="sidebar__row-text">{item.label}</span>

@@ -74,6 +74,47 @@ export interface Note {
 /** Typora-like editor presentation modes. */
 export type NoteEditorMode = "live" | "source" | "preview";
 
+/** Preset cadences for timed / automation jobs. */
+export type TimedSchedulePreset =
+  | "hourly"
+  | "daily"
+  | "weekdays"
+  | "weekly"
+  | "monthly";
+
+export type TimedIntervalUnit =
+  | "minute"
+  | "hour"
+  | "day"
+  | "week"
+  | "month"
+  | "year";
+
+export type TimedSchedule =
+  | { kind: "preset"; preset: TimedSchedulePreset; atTime: string }
+  | {
+      kind: "custom";
+      every: number;
+      unit: TimedIntervalUnit;
+      atTime: string;
+      endMode: "never" | "on_date";
+      endDate: string | null;
+    };
+
+/** Local scheduled job (automation / recurring instruction). */
+export interface TimedTask {
+  id: string;
+  title: string;
+  command: string;
+  /** Single recurrence plan for this task. */
+  schedule: TimedSchedule | null;
+  enabled: boolean;
+  lastRunAt: number | null;
+  nextRunAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AppNotification {
   id: string;
   kind: NotificationKind;

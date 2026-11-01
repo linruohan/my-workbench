@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-fs": "^2.7.1",
     "@wb/db": "0.1.0",
     "@wb/domain": "0.1.0",
     "@wb/theme": "0.1.0",

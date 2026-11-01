@@ -31,6 +31,14 @@ npm run dev
 npm run tauri:dev
 ```
 
+桌面壳下，数据与设置默认目录：
+
+`%APPDATA%\my-workbench`  
+（本机示例：`C:\Users\Administrator\AppData\Roaming\my-workbench`）
+
+目录内文件：`workbench.json`（业务快照）、`prefs.json`（设置）、`theme.json`（主题）。
+
+
 发版门禁与版本规范见 [`release.md`](release.md)。代码规范见 [`standards.md`](standards.md)。
 
 ## 生产构建
