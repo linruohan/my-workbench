@@ -24,6 +24,7 @@ import {
   type ProjectBucket,
   type ReminderOptionId,
   type SchedulePatch,
+  type Tag,
   type Task,
   type TimedSchedule,
   type TimedTask,
@@ -44,6 +45,8 @@ export class MemoryWorkbenchRepository {
   private todayOrder: string[] = [];
   private notes = new Map<string, Note>();
   private timedTasks = new Map<string, TimedTask>();
+  private tags = new Map<string, Tag>();
+  private taskTags = new Map<string, Set<string>>();
   private notifications: Array<{
     id: string;
     kind: string;
@@ -221,6 +224,7 @@ export class MemoryWorkbenchRepository {
     }
     this.tasks.delete(taskId);
     this.buckets.delete(taskId);
+    this.taskTags.delete(taskId);
     this.todayOrder = this.todayOrder.filter((id) => id !== taskId);
     for (const child of this.listTasks().filter((t) => t.parentId === taskId)) {
       this.tasks.set(child.id, {
@@ -321,10 +325,55 @@ export class MemoryWorkbenchRepository {
     return next;
   }
 
-  createTag(title: string, id?: string): { id: string; title: string } {
+  createTag(title: string, id?: string): Tag {
+    const trimmed = title.trim();
+    if (!trimmed) throw new DomainError("tag title is required");
     const tagId = id ?? createId();
     assertTagIdAllowed(tagId);
-    return { id: tagId, title };
+    if (this.tags.has(tagId)) throw new DomainError(`tag exists: ${tagId}`);
+    const tag: Tag = { id: tagId, title: trimmed, color: null };
+    this.tags.set(tagId, tag);
+    return tag;
+  }
+
+  listTags(): Tag[] {
+    return [...this.tags.values()].sort((a, b) =>
+      a.title.localeCompare(b.title, "zh-CN"),
+    );
+  }
+
+  deleteTag(tagId: string): void {
+    if (!this.tags.has(tagId)) throw new DomainError(`tag not found: ${tagId}`);
+    this.tags.delete(tagId);
+    for (const [taskId, set] of this.taskTags) {
+      set.delete(tagId);
+      if (set.size === 0) this.taskTags.delete(taskId);
+    }
+  }
+
+  assignTag(taskId: string, tagId: string): void {
+    assertTagIdAllowed(tagId);
+    if (!this.tasks.has(taskId)) throw new DomainError(`task not found: ${taskId}`);
+    if (!this.tags.has(tagId)) throw new DomainError(`tag not found: ${tagId}`);
+    const set = this.taskTags.get(taskId) ?? new Set<string>();
+    set.add(tagId);
+    this.taskTags.set(taskId, set);
+  }
+
+  unassignTag(taskId: string, tagId: string): void {
+    const set = this.taskTags.get(taskId);
+    if (!set) return;
+    set.delete(tagId);
+    if (set.size === 0) this.taskTags.delete(taskId);
+  }
+
+  listTagsForTask(taskId: string): Tag[] {
+    const ids = this.taskTags.get(taskId);
+    if (!ids) return [];
+    return [...ids]
+      .map((id) => this.tags.get(id))
+      .filter((t): t is Tag => t != null)
+      .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
   }
 
   setTodayOrder(taskIds: string[]): void {
@@ -481,6 +530,11 @@ export class MemoryWorkbenchRepository {
       notifications: this.notifications,
       notes: [...this.notes.values()],
       timedTasks: [...this.timedTasks.values()],
+      tags: [...this.tags.values()],
+      taskTags: [...this.taskTags.entries()].map(([taskId, set]) => [
+        taskId,
+        [...set],
+      ]),
     });
   }
 
@@ -502,6 +556,8 @@ export class MemoryWorkbenchRepository {
       timedTasks?: Array<
         TimedTask & { schedule?: TimedSchedule | null; schedules?: TimedSchedule[] }
       >;
+      tags?: Tag[];
+      taskTags?: Array<[string, string[]]>;
     };
     this.tasks = new Map(data.tasks.map((t) => [t.id, t]));
     this.projects = new Map(data.projects.map((p) => [p.id, p]));
@@ -514,6 +570,10 @@ export class MemoryWorkbenchRepository {
         const next = coerceTimedTask(t);
         return [next.id, next];
       }),
+    );
+    this.tags = new Map((data.tags ?? []).map((t) => [t.id, t]));
+    this.taskTags = new Map(
+      (data.taskTags ?? []).map(([taskId, ids]) => [taskId, new Set(ids)]),
     );
   }
 }

@@ -7,6 +7,7 @@ import {
   sortTasks,
   type ProjectBucket,
   type ReminderOptionId,
+  type Tag,
   type Task,
   type TaskBoardColumnId,
   type TaskSortKey,
@@ -22,6 +23,8 @@ export type TasksViewMode = "list" | "board";
 type Props = {
   tasks: Task[];
   projects: Array<{ id: string; title: string }>;
+  tags: Tag[];
+  taskTagMap: Record<string, Tag[]>;
   buckets: Record<string, ProjectBucket>;
   filterProjectId: string | null;
   viewMode: TasksViewMode;
@@ -29,16 +32,20 @@ type Props = {
   denseMeta?: boolean;
   defaultRemind: ReminderOptionId;
   confirmBeforeDelete: boolean;
+  activeTimerTaskId: string | null;
+  timerElapsedMs: number;
   onViewModeChange: (mode: TasksViewMode) => void;
   onFilterProject: (projectId: string | null) => void;
   onShowCompletedChange: (show: boolean) => void;
   onToggleDone: (task: Task) => void;
   onPlanToday: (task: Task) => void;
   onPlanTime: (task: Task) => void;
+  onToggleTimer: (task: Task) => void;
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
   onSaveTask: (taskId: string, draft: TaskEditorSave) => void;
   onDeleteTask: (taskId: string) => void;
   onDuplicateTask: (taskId: string) => void;
+  onCreateTag: (title: string) => Tag | null;
   onAddSubtask: (parentId: string, title: string) => void;
   onCreate: (title: string) => void;
 };
@@ -46,6 +53,8 @@ type Props = {
 export function TasksView({
   tasks,
   projects,
+  tags,
+  taskTagMap,
   buckets,
   filterProjectId,
   viewMode,
@@ -53,16 +62,20 @@ export function TasksView({
   denseMeta,
   defaultRemind,
   confirmBeforeDelete,
+  activeTimerTaskId,
+  timerElapsedMs,
   onViewModeChange,
   onFilterProject,
   onShowCompletedChange,
   onToggleDone,
   onPlanToday,
   onPlanTime,
+  onToggleTimer,
   onMoveColumn,
   onSaveTask,
   onDeleteTask,
   onDuplicateTask,
+  onCreateTag,
   onAddSubtask,
   onCreate,
 }: Props) {
@@ -71,6 +84,7 @@ export function TasksView({
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<TaskStatusFilter>("all");
   const [sortKey, setSortKey] = useState<TaskSortKey>("updated");
+  const [filterTagId, setFilterTagId] = useState<string | null>(null);
   const [statsExpanded, setStatsExpanded] = useState(false);
   const [today] = useState(() => formatLocalDay(Date.now()));
 
@@ -97,9 +111,21 @@ export function TasksView({
       showCompleted: status === "all" ? showCompleted : true,
       today,
       rootsOnly: true,
+    }).filter((task) => {
+      if (!filterTagId) return true;
+      return (taskTagMap[task.id] ?? []).some((t) => t.id === filterTagId);
     });
     return sortTasks(filtered, sortKey);
-  }, [scopedTasks, query, status, showCompleted, today, sortKey]);
+  }, [
+    scopedTasks,
+    query,
+    status,
+    showCompleted,
+    today,
+    sortKey,
+    filterTagId,
+    taskTagMap,
+  ]);
 
   const editing = editingId
     ? (tasks.find((t) => t.id === editingId) ?? null)
@@ -226,6 +252,20 @@ export function TasksView({
           <option value="done">已完成</option>
         </select>
         <select
+          aria-label="标签筛选"
+          value={filterTagId ?? ""}
+          onChange={(e) =>
+            setFilterTagId(e.target.value ? e.target.value : null)
+          }
+        >
+          <option value="">全部标签</option>
+          {tags.map((tag) => (
+            <option key={tag.id} value={tag.id}>
+              {tag.title}
+            </option>
+          ))}
+        </select>
+        <select
           aria-label="排序"
           value={sortKey}
           onChange={(e) => setSortKey(e.target.value as TaskSortKey)}
@@ -253,13 +293,20 @@ export function TasksView({
                         ? undefined
                         : projectTitles[task.projectId]
                     }
+                    tags={taskTagMap[task.id] ?? []}
                     childCount={listChildTasks(tasks, task.id).length}
                     denseMeta={denseMeta}
                     showDoneStyle
+                    timerRunning={activeTimerTaskId === task.id}
+                    timerElapsedMs={
+                      activeTimerTaskId === task.id ? timerElapsedMs : 0
+                    }
+                    canTime={listChildTasks(tasks, task.id).length === 0}
                     onToggleDone={onToggleDone}
                     onOpen={(t) => setEditingId(t.id)}
                     onPlanToday={onPlanToday}
                     onPlanTime={onPlanTime}
+                    onToggleTimer={onToggleTimer}
                     onDuplicate={(t) => onDuplicateTask(t.id)}
                     onDelete={(t) => confirmDelete(t.id)}
                   />
@@ -303,6 +350,8 @@ export function TasksView({
             task={editing}
             bucket={buckets[editing.id] ?? "active"}
             projects={projects}
+            tags={tags}
+            selectedTagIds={(taskTagMap[editing.id] ?? []).map((t) => t.id)}
             subtasks={editingSubtasks}
             defaultRemind={defaultRemind}
             onClose={() => setEditingId(null)}
@@ -311,6 +360,7 @@ export function TasksView({
               onDuplicateTask(editing.id);
               setEditingId(null);
             }}
+            onCreateTag={onCreateTag}
             onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
             onToggleSubtask={onToggleDone}
             onDeleteSubtask={(id) => confirmDelete(id)}

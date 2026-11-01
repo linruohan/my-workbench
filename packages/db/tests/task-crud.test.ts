@@ -44,4 +44,20 @@ describe("task CRUD on memory repository", () => {
     store.setTaskParent(child.id, null, 1400);
     expect(store.listSubtasks(parent.id)).toEqual([]);
   });
+
+  it("persists tags and task assignments in snapshots", () => {
+    const store = new MemoryWorkbenchRepository();
+    const task = store.createTask({ title: "带标签", nowMs: 1000 });
+    const tag = store.createTag("工作");
+    store.assignTag(task.id, tag.id);
+    expect(store.listTagsForTask(task.id).map((t) => t.title)).toEqual(["工作"]);
+
+    const restored = new MemoryWorkbenchRepository();
+    restored.importSnapshot(store.exportSnapshot());
+    expect(restored.listTags().map((t) => t.title)).toEqual(["工作"]);
+    expect(restored.listTagsForTask(task.id).map((t) => t.id)).toEqual([tag.id]);
+
+    restored.unassignTag(task.id, tag.id);
+    expect(restored.listTagsForTask(task.id)).toEqual([]);
+  });
 });

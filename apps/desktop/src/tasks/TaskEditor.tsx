@@ -5,6 +5,7 @@ import {
   millisecondsDiffToRemindOption,
   type ProjectBucket,
   type ReminderOptionId,
+  type Tag,
   type Task,
 } from "@wb/domain";
 
@@ -19,6 +20,7 @@ export type TaskEditorSave = {
   deadlineDay: string;
   remindOption: ReminderOptionId;
   timeEstimateMinutes: number;
+  tagIds: string[];
   isDone: boolean;
 };
 
@@ -26,11 +28,14 @@ type Props = {
   task: Task;
   bucket: ProjectBucket;
   projects: Array<{ id: string; title: string }>;
+  tags?: Tag[];
+  selectedTagIds?: string[];
   subtasks?: Task[];
   defaultRemind: ReminderOptionId;
   onSave: (patch: TaskEditorSave) => void;
   onDelete: () => void;
   onDuplicate?: () => void;
+  onCreateTag?: (title: string) => Tag | null;
   onAddSubtask?: (title: string) => void;
   onToggleSubtask?: (subtask: Task) => void;
   onDeleteSubtask?: (subtaskId: string) => void;
@@ -47,6 +52,7 @@ function fromTask(
   task: Task,
   bucket: ProjectBucket,
   defaultRemind: ReminderOptionId,
+  selectedTagIds: string[],
 ): TaskEditorSave {
   const remindOption =
     task.dueWithTime != null
@@ -68,6 +74,7 @@ function fromTask(
     deadlineDay: task.deadlineDay ?? "",
     remindOption,
     timeEstimateMinutes: Math.round(Math.max(0, task.timeEstimate) / 60_000),
+    tagIds: [...selectedTagIds],
     isDone: task.isDone,
   };
 }
@@ -76,20 +83,24 @@ export function TaskEditor({
   task,
   bucket,
   projects,
+  tags = [],
+  selectedTagIds = [],
   subtasks = [],
   defaultRemind,
   onSave,
   onDelete,
   onDuplicate,
+  onCreateTag,
   onAddSubtask,
   onToggleSubtask,
   onDeleteSubtask,
   onClose,
 }: Props) {
   const [draft, setDraft] = useState(() =>
-    fromTask(task, bucket, defaultRemind),
+    fromTask(task, bucket, defaultRemind, selectedTagIds),
   );
   const [subtaskTitle, setSubtaskTitle] = useState("");
+  const [newTagTitle, setNewTagTitle] = useState("");
 
   const patch = (partial: Partial<TaskEditorSave>) =>
     setDraft((d) => ({ ...d, ...partial }));
@@ -170,6 +181,61 @@ export function TaskEditor({
               })
             }
           />
+        </div>
+
+        <div className="field">
+          <div className="field__label">标签</div>
+          <div className="task-editor__tags" role="group" aria-label="任务标签">
+            {tags.length === 0 ? (
+              <p className="task-editor__hint">还没有标签，可在下方新建。</p>
+            ) : (
+              tags.map((tag) => {
+                const active = draft.tagIds.includes(tag.id);
+                return (
+                  <button
+                    key={tag.id}
+                    type="button"
+                    className={
+                      active
+                        ? "task-editor__tag is-active"
+                        : "task-editor__tag"
+                    }
+                    aria-pressed={active}
+                    onClick={() =>
+                      patch({
+                        tagIds: active
+                          ? draft.tagIds.filter((id) => id !== tag.id)
+                          : [...draft.tagIds, tag.id],
+                      })
+                    }
+                  >
+                    {tag.title}
+                  </button>
+                );
+              })
+            )}
+          </div>
+          {onCreateTag ? (
+            <div className="task-editor__sub-add">
+              <input
+                aria-label="新建标签"
+                className="field__control"
+                placeholder="新建标签，回车添加"
+                value={newTagTitle}
+                onChange={(e) => setNewTagTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const title = newTagTitle.trim();
+                  if (!title) return;
+                  const created = onCreateTag(title);
+                  setNewTagTitle("");
+                  if (created) {
+                    patch({ tagIds: [...draft.tagIds, created.id] });
+                  }
+                }}
+              />
+            </div>
+          ) : null}
         </div>
 
         <div className="field">

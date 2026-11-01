@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActiveTimer,
   formatLocalDay,
   inferNoteTitleFromBody,
   parseQuickCapture,
   ReminderUiCooldown,
   type ProjectBucket,
+  type Tag,
   type Task,
   type TaskBoardColumnId,
   type TimedSchedule,
@@ -76,6 +78,11 @@ export default function App() {
   const [showCompleted, setShowCompleted] = useState(() => readShowCompleted());
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [cooldown] = useState(() => new ReminderUiCooldown());
+  const [timer] = useState(() => new ActiveTimer());
+  const [activeTimerTaskId, setActiveTimerTaskId] = useState<string | null>(
+    null,
+  );
+  const [timerStartedAt, setTimerStartedAt] = useState<number | null>(null);
   const [activeReminders, setActiveReminders] = useState<
     Array<{ taskId: string; title: string; remindAt: number; isDeadline: boolean }>
   >([]);
@@ -124,6 +131,12 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [store, cooldown, refresh]);
 
+  useEffect(() => {
+    if (!activeTimerTaskId) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [activeTimerTaskId]);
+
   void tick;
   const todayTasks = store.listToday(now);
   const plannerTasks = store.listPlannerDay(today);
@@ -134,6 +147,7 @@ export default function App() {
   const notes = store.listNotes();
   const projects = store.listProjects();
   const timedTasks = store.listTimedTasks();
+  const allTags = store.listTags();
   const taskBuckets = useMemo(() => {
     const map: Record<string, ProjectBucket> = {};
     for (const t of allTasks) {
@@ -141,10 +155,21 @@ export default function App() {
     }
     return map;
   }, [allTasks, store]);
+  const taskTagMap = useMemo(() => {
+    const map: Record<string, Tag[]> = {};
+    for (const t of allTasks) {
+      map[t.id] = store.listTagsForTask(t.id);
+    }
+    return map;
+  }, [allTasks, store]);
 
   const editingTask = editingTaskId
     ? (store.getTask(editingTaskId) ?? null)
     : null;
+  const timerElapsedMs =
+    activeTimerTaskId && timerStartedAt != null
+      ? Math.max(0, now - timerStartedAt)
+      : 0;
 
   const capture = () => {
     const text = draft.trim();
@@ -222,6 +247,45 @@ export default function App() {
     refresh();
   };
 
+  const settleSegment = (segment: {
+    taskId: string;
+    startedAt: number;
+    endedAt: number;
+  }) => {
+    try {
+      store.addTimeSpent(segment.taskId, segment.startedAt, segment.endedAt);
+    } catch {
+      // parent-with-children cannot be timed; ignore settle
+    }
+  };
+
+  const toggleTimer = (task: Task) => {
+    const at = Date.now();
+    if (activeTimerTaskId === task.id) {
+      const stopped = timer.stop(at);
+      if (stopped) settleSegment(stopped);
+      setActiveTimerTaskId(null);
+      setTimerStartedAt(null);
+      refresh();
+      return;
+    }
+    const { previous } = timer.start(task.id, at);
+    if (previous) settleSegment(previous);
+    setActiveTimerTaskId(task.id);
+    setTimerStartedAt(at);
+    refresh();
+  };
+
+  const createTag = (title: string): Tag | null => {
+    try {
+      const tag = store.createTag(title);
+      refresh();
+      return tag;
+    } catch {
+      return null;
+    }
+  };
+
   const saveEditedTask = (taskId: string, draft: TaskEditorSave) => {
     const task = store.getTask(taskId);
     if (!task) return;
@@ -231,6 +295,14 @@ export default function App() {
       projectId: draft.projectId,
       timeEstimate: draft.timeEstimateMinutes * 60_000,
     });
+
+    const currentTagIds = store.listTagsForTask(taskId).map((t) => t.id);
+    for (const tagId of draft.tagIds) {
+      if (!currentTagIds.includes(tagId)) store.assignTag(taskId, tagId);
+    }
+    for (const tagId of currentTagIds) {
+      if (!draft.tagIds.includes(tagId)) store.unassignTag(taskId, tagId);
+    }
 
     if (draft.isDone && !task.isDone) store.completeTask(taskId);
     if (!draft.isDone && task.isDone) store.uncompleteTask(taskId);
@@ -453,10 +525,13 @@ export default function App() {
         empty={suggest ?? todayEmpty}
         tasks={todayTasks}
         denseMeta={prefs.workMode === "office"}
+        activeTimerTaskId={activeTimerTaskId}
+        timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onToggleTimer={toggleTimer}
       />
     );
   } else if (nav === "planner") {
@@ -465,10 +540,13 @@ export default function App() {
         title={`计划 · ${today}`}
         empty="这一天还没有全天计划任务。"
         tasks={plannerTasks}
+        activeTimerTaskId={activeTimerTaskId}
+        timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onToggleTimer={toggleTimer}
       />
     );
   } else if (nav === "schedule") {
@@ -477,10 +555,13 @@ export default function App() {
         title={`时间表 · ${today}`}
         empty="没有排到具体时刻的任务。"
         tasks={scheduleTasks}
+        activeTimerTaskId={activeTimerTaskId}
+        timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onToggleTimer={toggleTimer}
       />
     );
   } else if (nav === "knowledge") {
@@ -522,6 +603,8 @@ export default function App() {
       <TasksView
         tasks={allTasks}
         projects={projects}
+        tags={allTags}
+        taskTagMap={taskTagMap}
         buckets={taskBuckets}
         filterProjectId={filterProjectId}
         viewMode={tasksViewMode}
@@ -529,16 +612,20 @@ export default function App() {
         denseMeta={prefs.workMode === "office"}
         defaultRemind={prefs.defaultRemind}
         confirmBeforeDelete={prefs.confirmBeforeDelete}
+        activeTimerTaskId={activeTimerTaskId}
+        timerElapsedMs={timerElapsedMs}
         onViewModeChange={changeTasksViewMode}
         onFilterProject={setFilterProjectId}
         onShowCompletedChange={changeShowCompleted}
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onToggleTimer={toggleTimer}
         onMoveColumn={moveTaskColumn}
         onSaveTask={saveEditedTask}
         onDeleteTask={deleteTask}
         onDuplicateTask={duplicateTask}
+        onCreateTag={createTag}
         onAddSubtask={addSubtask}
         onCreate={createNamedTask}
       />
@@ -619,6 +706,10 @@ export default function App() {
                 task={editingTask}
                 bucket={taskBuckets[editingTask.id] ?? "active"}
                 projects={projects}
+                tags={allTags}
+                selectedTagIds={(taskTagMap[editingTask.id] ?? []).map(
+                  (t) => t.id,
+                )}
                 subtasks={store.listSubtasks(editingTask.id)}
                 defaultRemind={prefs.defaultRemind}
                 onClose={() => setEditingTaskId(null)}
@@ -635,6 +726,7 @@ export default function App() {
                   duplicateTask(editingTask.id);
                   setEditingTaskId(null);
                 }}
+                onCreateTag={createTag}
                 onAddSubtask={(title) => addSubtask(editingTask.id, title)}
                 onToggleSubtask={toggleDone}
                 onDeleteSubtask={(id) => {
@@ -680,10 +772,13 @@ function TaskList(props: {
   empty: string;
   tasks: Task[];
   denseMeta?: boolean;
+  activeTimerTaskId?: string | null;
+  timerElapsedMs?: number;
   onToggleDone: (t: Task) => void;
   onOpen: (t: Task) => void;
   onPlanToday: (t: Task) => void;
   onPlanTime: (t: Task) => void;
+  onToggleTimer?: (t: Task) => void;
 }) {
   return (
     <section className="panel">
@@ -700,10 +795,17 @@ function TaskList(props: {
               key={task.id}
               task={task}
               denseMeta={props.denseMeta}
+              timerRunning={props.activeTimerTaskId === task.id}
+              timerElapsedMs={
+                props.activeTimerTaskId === task.id
+                  ? (props.timerElapsedMs ?? 0)
+                  : 0
+              }
               onToggleDone={props.onToggleDone}
               onOpen={props.onOpen}
               onPlanToday={props.onPlanToday}
               onPlanTime={props.onPlanTime}
+              onToggleTimer={props.onToggleTimer}
             />
           ))}
         </ul>

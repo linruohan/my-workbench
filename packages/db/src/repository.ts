@@ -19,6 +19,7 @@ import {
   type ProjectBucket,
   type ReminderOptionId,
   type SchedulePatch,
+  type Tag,
   type Task,
   remindOptionToMilliseconds,
   shiftRemindAt,
@@ -428,22 +429,63 @@ export class WorkbenchRepository {
     return this.getTask(taskId)!;
   }
 
-  createTag(title: string, id?: string): { id: string; title: string } {
+  createTag(title: string, id?: string): Tag {
+    const trimmed = title.trim();
+    if (!trimmed) throw new DomainError("tag title is required");
     const tagId = id ?? createId();
     assertTagIdAllowed(tagId);
     this.db
       .prepare(`INSERT INTO tags (id, title, color) VALUES (?, ?, NULL)`)
-      .run(tagId, title);
-    return { id: tagId, title };
+      .run(tagId, trimmed);
+    return { id: tagId, title: trimmed, color: null };
+  }
+
+  listTags(): Tag[] {
+    const rows = this.db
+      .prepare(`SELECT id, title, color FROM tags ORDER BY title ASC`)
+      .all() as Array<{ id: string; title: string; color: string | null }>;
+    return rows.map((r) => ({ id: r.id, title: r.title, color: r.color }));
+  }
+
+  deleteTag(tagId: string): void {
+    const exists = this.db.prepare(`SELECT id FROM tags WHERE id = ?`).get(tagId);
+    if (!exists) throw new DomainError(`tag not found: ${tagId}`);
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM task_tags WHERE tag_id = ?`).run(tagId);
+      this.db.prepare(`DELETE FROM tags WHERE id = ?`).run(tagId);
+    });
+    tx();
   }
 
   assignTag(taskId: string, tagId: string): void {
     assertTagIdAllowed(tagId);
+    if (!this.getTask(taskId)) throw new DomainError(`task not found: ${taskId}`);
+    const tag = this.db.prepare(`SELECT id FROM tags WHERE id = ?`).get(tagId);
+    if (!tag) throw new DomainError(`tag not found: ${tagId}`);
     this.db
       .prepare(
         `INSERT OR IGNORE INTO task_tags (task_id, tag_id, position) VALUES (?, ?, 0)`,
       )
       .run(taskId, tagId);
+  }
+
+  unassignTag(taskId: string, tagId: string): void {
+    this.db
+      .prepare(`DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?`)
+      .run(taskId, tagId);
+  }
+
+  listTagsForTask(taskId: string): Tag[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id, t.title, t.color
+         FROM tags t
+         INNER JOIN task_tags tt ON tt.tag_id = t.id
+         WHERE tt.task_id = ?
+         ORDER BY t.title ASC`,
+      )
+      .all(taskId) as Array<{ id: string; title: string; color: string | null }>;
+    return rows.map((r) => ({ id: r.id, title: r.title, color: r.color }));
   }
 
   setTodayOrder(taskIds: string[]): void {
