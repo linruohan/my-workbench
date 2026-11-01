@@ -1548,6 +1548,7 @@ input {
 
 .md-live__block.is-editing {
   background: transparent;
+  overflow-anchor: none;
 }
 
 .md-live__preview {
@@ -1566,21 +1567,17 @@ input {
   margin-bottom: 0;
 }
 
-.md-live__blank {
-  margin: 0;
-  min-height: calc(var(--md-live-size) * var(--md-live-line));
-  color: var(--wb-text);
-  caret-color: var(--wb-text);
+.md-live__gap {
+  height: 0.55em;
+  cursor: text;
+  border: 0;
+  background: transparent;
+  outline: none;
 }
 
-.md-live__block.is-blank-block {
-  min-height: calc(var(--md-live-size) * var(--md-live-line) + 2 * var(--md-live-pad-y));
-}
-
-.md-live__preview.is-blank {
-  min-height: calc(var(--md-live-size) * var(--md-live-line));
-  /* Visible hit-area so empty lines are easy to click and edit. */
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wb-text) 6%, transparent);
+.md-live__gap:hover,
+.md-live__gap:focus {
+  background: transparent;
 }
 
 .goto-bar {
@@ -1648,8 +1645,15 @@ input {
   padding: var(--md-live-pad-y) var(--md-live-pad-x);
   overflow: hidden;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   min-height: calc(var(--md-live-size) * var(--md-live-line));
+}
+
+.md-live__source.is-fence {
+  font-family: var(--wb-font-mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
 }
 
 .md-live__source.is-empty,
@@ -1660,6 +1664,7 @@ input {
   outline: none;
   border: 0;
 }
+
 
 /* Keep edit/preview metrics identical so focusing a block does not jump. */
 .md-live .md-body {
@@ -2179,9 +2184,28 @@ input {
 }
 
 .md-live .md-code {
-  margin: 0.35em 0;
+  margin: 0;
   font-size: var(--md-live-size);
   line-height: var(--md-live-line);
+  border-radius: 6px;
+}
+
+.md-live .md-code__chrome {
+  padding: 4px 10px;
+}
+
+.md-live .md-code__main {
+  padding-bottom: 6px;
+}
+
+.md-live .md-body img {
+  /* Keep image preview height stable; avoid reflow when sibling blocks edit. */
+  max-height: min(70vh, 720px);
+  contain: layout paint;
+}
+
+.md-live .md-body > * {
+  overflow-anchor: none;
 }
 
 .md-code__chrome {
@@ -2254,6 +2278,7 @@ input {
 
 .md-code__num {
   display: block;
+  line-height: inherit;
 }
 
 .md-code__pre {
@@ -3081,15 +3106,15 @@ input {
 }
 
 .task-editor {
-  width: min(880px, calc(100vw - 32px));
-  max-height: min(900px, calc(100vh - 40px));
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(860px, calc(100vh - 40px));
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, #fff 16%, var(--wb-line));
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--wb-panel) 58%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--wb-panel) 72%, transparent);
   backdrop-filter: blur(32px) saturate(1.55);
   -webkit-backdrop-filter: blur(32px) saturate(1.55);
   box-shadow:

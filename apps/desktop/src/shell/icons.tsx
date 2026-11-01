@@ -266,3 +266,32 @@ export function IconTasks({ size, className }: IconProps) {
     </Svg>
   );
 }
+
+export function IconTag({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M20.6 13.05 12.7 21a1.6 1.6 0 0 1-2.25 0L3.2 13.7A2 2 0 0 1 2.7 12.3L7.7 3.8A2 2 0 0 1 9.45 3H16a2 2 0 0 1 2 2v6.55a2 2 0 0 1-.4 1.2Z" />
+      <circle cx="14.5" cy="7.5" r="1.2" fill="currentColor" stroke="none" />
+    </Svg>
+  );
+}
+
+export function IconRepeat({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M17 2v4h-4" />
+      <path d="M20 12a8 8 0 0 0-13.5-5.7L3 10" />
+      <path d="M7 22v-4h4" />
+      <path d="M4 12a8 8 0 0 0 13.5 5.7L21 14" />
+    </Svg>
+  );
+}
+
+export function IconFlag({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M5 21V4" />
+      <path d="M5 4h10l-1.5 3.5L15 11H5" />
+    </Svg>
+  );
+}

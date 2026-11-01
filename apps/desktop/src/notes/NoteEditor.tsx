@@ -84,10 +84,22 @@ function clipboardImage(data: DataTransfer | null): File | null {
   return null;
 }
 
-function autosize(area: HTMLTextAreaElement | null) {
+function autosize(area: HTMLTextAreaElement | null, opts?: { force?: boolean }) {
   if (!area) return;
-  area.style.height = "0px";
-  area.style.height = `${Math.max(area.scrollHeight, 28)}px`;
+  const min = 28;
+  // Prefer growing from current height so typing does not collapse the layout.
+  const current = area.offsetHeight;
+  area.style.height = "auto";
+  const needed = Math.max(area.scrollHeight, min);
+  if (!opts?.force && Math.abs(needed - current) <= 1) {
+    area.style.height = `${current}px`;
+    return;
+  }
+  area.style.height = `${needed}px`;
+}
+
+function isFenceSource(text: string): boolean {
+  return /^ {0,3}(`{3,}|~{3,})/.test(text);
 }
 
 /** Caret line metrics inside a textarea value (for leaving the block at edges). */
@@ -230,6 +242,7 @@ export function NoteEditor({
   const pendingSelection = useRef<{ start: number; end: number } | null>(null);
   const selectionScope = useRef<{ start: number; end: number } | null>(null);
   const suppressBlur = useRef(false);
+  const editMinHeight = useRef<number | null>(null);
   const findFrom = useRef(0);
   const gPending = useRef(false);
   const gTimer = useRef<number | null>(null);
@@ -302,11 +315,17 @@ export function NoteEditor({
     };
   }, [prepared, imageBaseDir, remoteUrls, slotKey]);
 
+  // Only re-focus / place caret when the active block changes — not on every keystroke.
+  // (Depending on `blocks` re-ran autosize→height:0 and caused the editor to jitter.)
   useLayoutEffect(() => {
     if (active == null) return;
     const area = editRef.current;
     if (!area) return;
-    autosize(area);
+    if (editMinHeight.current != null) {
+      area.style.minHeight = `${editMinHeight.current}px`;
+      editMinHeight.current = null;
+    }
+    autosize(area, { force: true });
     if (findOpen) return;
     area.focus({ preventScroll: true });
     const range = pendingSelection.current;
@@ -324,11 +343,10 @@ export function NoteEditor({
       area.setSelectionRange(pos, pos);
       pendingCaret.current = null;
     } else {
-      // Empty blocks still need an explicit caret so the cursor paints.
       const pos = Math.min(area.selectionStart, area.value.length);
       area.setSelectionRange(pos, pos);
     }
-  }, [active, blocks, note.id, findOpen]);
+  }, [active, note.id, findOpen]);
 
   const commitBlocks = (nextBlocks: string[], focus: number | null, caret?: number) => {
     const normalized = normalizeMdBlocks(nextBlocks);
@@ -624,6 +642,8 @@ export function NoteEditor({
     if (active == null) return;
     if (findOpen) return;
     setColorMenu(null);
+    if (editRef.current) editRef.current.style.minHeight = "";
+    editMinHeight.current = null;
     commitNumbered(blocks, null);
   };
 
@@ -655,20 +675,31 @@ export function NoteEditor({
   const beginEditAt = (
     index: number,
     caret: number,
-    event?: { preventDefault: () => void },
+    event?: { preventDefault: () => void; currentTarget?: EventTarget | null },
   ) => {
     event?.preventDefault();
     suppressBlur.current = true;
     pendingCaret.current = caret;
     pendingSelection.current = null;
+    // Lock min-height to the preview box so code/images/headings do not jump on enter.
+    const host = event?.currentTarget as HTMLElement | null | undefined;
+    if (host && typeof host.getBoundingClientRect === "function") {
+      editMinHeight.current = Math.ceil(host.getBoundingClientRect().height);
+    } else {
+      editMinHeight.current = null;
+    }
     setActive(index);
     requestAnimationFrame(() => {
       const area = editRef.current;
       if (area) {
+        if (editMinHeight.current != null) {
+          area.style.minHeight = `${editMinHeight.current}px`;
+          editMinHeight.current = null;
+        }
         area.focus({ preventScroll: true });
         const pos = Math.min(Math.max(0, caret), area.value.length);
         area.setSelectionRange(pos, pos);
-        autosize(area);
+        autosize(area, { force: true });
       }
       suppressBlur.current = false;
     });
@@ -801,9 +832,12 @@ export function NoteEditor({
     }
 
     if (event.key === "Enter" && !event.shiftKey) {
-      // Unclosed fence: keep typing inside the code block.
-      const openFence = /^ {0,3}(`{3,}|~{3,})/.test(value);
-      if (openFence && !isCompleteFenceBlock(value)) {
+      // Inside a fenced code block (open or closed): keep Enter as a real newline.
+      // Splitting would insert blank preview gaps and break the fence.
+      if (
+        /^ {0,3}(`{3,}|~{3,})/.test(value) ||
+        isCompleteFenceBlock(value)
+      ) {
         return;
       }
       // Split at caret so every line (including new blank lines) is its own editable row.
@@ -898,7 +932,7 @@ export function NoteEditor({
   };
 
   const renderBlock = (text: string) => {
-    if (!text) return '<p class="md-live__blank">&nbsp;</p>';
+    if (!text) return "";
     const { slots } = extractImageSlots(text);
     const blockUrls = slots.map((slot) => urlByDest.get(slot.dest) ?? null);
     return renderMarkdown(text, blockUrls);
@@ -1132,9 +1166,13 @@ export function NoteEditor({
                 <div key={`edit-${index}`} className="md-live__block is-editing">
                   <textarea
                     ref={editRef}
-                    className={
-                      block ? "md-live__source" : "md-live__source is-empty"
-                    }
+                    className={[
+                      "md-live__source",
+                      block ? "" : "is-empty",
+                      isFenceSource(block) ? "is-fence" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                     aria-label="Markdown 源码"
                     spellCheck={false}
                     value={block}
@@ -1157,19 +1195,38 @@ export function NoteEditor({
                 </div>
               );
             }
+            if (!block) {
+              // Blank source lines stay in the model, but no longer render as grey bars.
+              return (
+                <div
+                  key={`view-${index}`}
+                  className="md-live__gap"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`编辑空行（第 ${index + 1} 段）`}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    beginEditAt(index, 0, {
+                      preventDefault: () => e.preventDefault(),
+                      currentTarget: e.currentTarget,
+                    });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      beginEditAt(index, 0);
+                    }
+                  }}
+                />
+              );
+            }
             return (
               <div
                 key={`view-${index}`}
-                className={
-                  block ? "md-live__block" : "md-live__block is-blank-block"
-                }
+                className="md-live__block"
                 role="button"
                 tabIndex={0}
-                aria-label={
-                  block
-                    ? `编辑第 ${index + 1} 段`
-                    : `编辑空行（第 ${index + 1} 段）`
-                }
+                aria-label={`编辑第 ${index + 1} 段`}
                 onMouseDown={(e) => {
                   if (e.button !== 0) return;
                   const target = e.currentTarget.querySelector(
@@ -1178,7 +1235,10 @@ export function NoteEditor({
                   const caret = target
                     ? caretIndexFromClick(block, e.clientX, e.clientY, target)
                     : 0;
-                  beginEditAt(index, caret, e);
+                  beginEditAt(index, caret, {
+                    preventDefault: () => e.preventDefault(),
+                    currentTarget: e.currentTarget,
+                  });
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
@@ -1188,11 +1248,7 @@ export function NoteEditor({
                 }}
               >
                 <div
-                  className={
-                    block
-                      ? "md-live__preview md-body"
-                      : "md-live__preview md-body is-blank"
-                  }
+                  className="md-live__preview md-body"
                   dangerouslySetInnerHTML={{ __html: renderBlock(block) }}
                 />
               </div>

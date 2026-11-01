@@ -110,8 +110,13 @@ export function languageLabel(lang: string): string {
   return LANG_LABELS[lang] ?? lang;
 }
 
+/** Fence body for display: drop a single trailing newline markdown-it usually keeps. */
+export function normalizeFenceContent(code: string): string {
+  return code.replace(/\n$/, "");
+}
+
 export function highlightCode(code: string, lang: string): string {
-  const source = code.replace(/\n$/, "");
+  const source = normalizeFenceContent(code);
   if (lang && hljs.getLanguage(lang)) {
     try {
       return hljs.highlight(source, { language: lang, ignoreIllegals: true }).value;
@@ -127,7 +132,7 @@ export function highlightCode(code: string, lang: string): string {
 }
 
 function lineCount(code: string): number {
-  const trimmed = code.replace(/\n$/, "");
+  const trimmed = normalizeFenceContent(code);
   if (!trimmed) return 1;
   return trimmed.split("\n").length;
 }
@@ -137,7 +142,8 @@ function lineNumberHtml(count: number): string {
   for (let i = 1; i <= count; i += 1) {
     lines.push(`<span class="md-code__num">${i}</span>`);
   }
-  return lines.join("\n");
+  // Spans are already display:block — do not join with "\n" or <pre> doubles the gaps.
+  return lines.join("");
 }
 
 /** macOS-style fenced code block with language label, line numbers, and highlight.js. */
