@@ -1,7 +1,5 @@
-import {
-  normalizeTimedSchedule,
-  type TimedSchedule,
-} from "./timed-task.js";
+import { normalizeTimedSchedule } from "./timed-task.js";
+import type { TimedSchedule } from "./types.js";
 
 /** Encode a task repeat schedule into the `repeat_cfg_id` text field. */
 export function encodeTaskRepeat(schedule: TimedSchedule): string {
