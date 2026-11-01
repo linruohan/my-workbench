@@ -14,3 +14,7 @@ export * from "./task.js";
 export * from "./task-stats.js";
 export * from "./tag-color.js";
 export * from "./task-repeat.js";
+export * from "./agent.js";
+export * from "./agent-plan.js";
+export * from "./agent-model.js";
+export * from "./agent-reply.js";

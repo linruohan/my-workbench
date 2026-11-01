@@ -14,26 +14,18 @@ import {
   type TaskBoardColumnId,
   type TimedSchedule,
 } from "@wb/domain";
-import {
-  createPersistedStore,
-  hydrateStore,
-  saveStore,
-} from "./lib/persistence";
+import { createPersistedStore, hydrateStore, saveStore } from "./lib/persistence";
 import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
-import {
-  DEFAULT_DATA_DIR_DISPLAY,
-  isTauriRuntime,
-  resolveDataDir,
-} from "./lib/paths";
+import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
+import { AgentView } from "./agent/AgentView";
+import type { AgentUiEffect } from "./agent/execute";
+import { readProviderStore } from "./agent/providers";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
 import { PromptModal } from "./shell/PromptModal";
 import { Sidebar, type AppNavId } from "./shell/Sidebar";
 import { TitleBar } from "./shell/TitleBar";
-import {
-  TaskEditor,
-  type TaskEditorSave,
-} from "./tasks/TaskEditor";
+import { TaskEditor, type TaskEditorSave } from "./tasks/TaskEditor";
 import { TaskRow } from "./tasks/TaskRow";
 import { TasksView, type TasksViewMode } from "./tasks/TasksView";
 import { TimedTaskEditor } from "./timed/TimedTaskEditor";
@@ -52,10 +44,7 @@ function readShowCompleted(): boolean {
   return localStorage.getItem(TASKS_SHOW_DONE_KEY) === "1";
 }
 
-function composerPlaceholder(
-  nav: AppNavId,
-  projectTitle: string | undefined,
-): string {
+function composerPlaceholder(nav: AppNavId, projectTitle: string | undefined): string {
   if (nav === "knowledge") return "写下笔记标题，回车创建（Ctrl+N）";
   if (nav === "timed") return "写下定时任务标题，回车创建每天 09:00（Ctrl+N）";
   if (nav === "today") {
@@ -81,8 +70,7 @@ export default function App() {
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsSection, setSettingsSection] =
-    useState<SettingsSectionId>("general");
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("general");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [prefs, setPrefs] = useState<AppPrefs>(() => readPrefs());
   const [dataDir, setDataDir] = useState(DEFAULT_DATA_DIR_DISPLAY);
@@ -106,11 +94,10 @@ export default function App() {
   );
   const [showCompleted, setShowCompleted] = useState(() => readShowCompleted());
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [agentThreadId, setAgentThreadId] = useState<string | null>(null);
   const [cooldown] = useState(() => new ReminderUiCooldown());
   const [timer] = useState(() => new ActiveTimer());
-  const [activeTimerTaskId, setActiveTimerTaskId] = useState<string | null>(
-    null,
-  );
+  const [activeTimerTaskId, setActiveTimerTaskId] = useState<string | null>(null);
   const [timerStartedAt, setTimerStartedAt] = useState<number | null>(null);
   const [activeReminders, setActiveReminders] = useState<
     Array<{ taskId: string; title: string; remindAt: number; isDeadline: boolean }>
@@ -210,13 +197,9 @@ export default function App() {
     return map;
   }, [allTasks, store, tick]);
 
-  const editingTask = editingTaskId
-    ? (store.getTask(editingTaskId) ?? null)
-    : null;
+  const editingTask = editingTaskId ? (store.getTask(editingTaskId) ?? null) : null;
   const timerElapsedMs =
-    activeTimerTaskId && timerStartedAt != null
-      ? Math.max(0, now - timerStartedAt)
-      : 0;
+    activeTimerTaskId && timerStartedAt != null ? Math.max(0, now - timerStartedAt) : 0;
 
   const scheduleToday = (task: Task) => {
     store.scheduleTask(task.id, { dueDay: today });
@@ -228,9 +211,7 @@ export default function App() {
     at.setHours(15, 0, 0, 0);
     store.scheduleTask(task.id, {
       dueWithTime: at.getTime(),
-      ...(prefs.defaultRemind !== "none"
-        ? { remindOption: prefs.defaultRemind }
-        : {}),
+      ...(prefs.defaultRemind !== "none" ? { remindOption: prefs.defaultRemind } : {}),
     });
     refresh();
   };
@@ -393,10 +374,7 @@ export default function App() {
     });
 
     if (!task.parentId) {
-      store.setRepeatCfg(
-        taskId,
-        draft.repeat ? encodeTaskRepeat(draft.repeat) : null,
-      );
+      store.setRepeatCfg(taskId, draft.repeat ? encodeTaskRepeat(draft.repeat) : null);
     }
     refresh();
   };
@@ -567,10 +545,7 @@ export default function App() {
     refresh();
   };
 
-  const updateNote = (
-    id: string,
-    patch: { title?: string; bodyMd?: string },
-  ) => {
+  const updateNote = (id: string, patch: { title?: string; bodyMd?: string }) => {
     const current = store.getNote(id);
     if (!current) return;
     const nextPatch = { ...patch };
@@ -644,10 +619,7 @@ export default function App() {
   };
 
   const deleteTimedTask = (id: string) => {
-    if (
-      prefs.confirmBeforeDelete &&
-      !window.confirm("确定删除该定时任务？")
-    ) {
+    if (prefs.confirmBeforeDelete && !window.confirm("确定删除该定时任务？")) {
       return;
     }
     store.deleteTimedTask(id);
@@ -668,6 +640,55 @@ export default function App() {
     writePrefs(next);
   };
 
+  const openAgent = () => {
+    const threads = store.listAgentThreads();
+    const current = threads.find((item) => item.id === agentThreadId) ?? threads[0];
+    if (current) {
+      setAgentThreadId(current.id);
+    } else {
+      const created = store.createAgentThread({
+        nowMs: Date.now(),
+        modelRef: readProviderStore().defaultModelRef,
+      });
+      setAgentThreadId(created.id);
+      refresh();
+    }
+    goNav("agent");
+  };
+
+  const newAgentChat = () => {
+    const created = store.createAgentThread({
+      nowMs: Date.now(),
+      modelRef: readProviderStore().defaultModelRef,
+    });
+    setAgentThreadId(created.id);
+    refresh();
+    goNav("agent");
+  };
+
+  const applyAgentEffects = (effects: AgentUiEffect[]) => {
+    for (const effect of effects) {
+      if (effect.type === "navigate") goNav(effect.nav);
+      else if (effect.type === "open-task") setEditingTaskId(effect.taskId);
+      else if (effect.type === "open-note") {
+        setActiveNoteId(effect.noteId);
+        goNav("knowledge");
+      } else if (effect.type === "notifications") setNotificationsOpen(true);
+      else if (effect.type === "timer-start") {
+        const task = store.getTask(effect.taskId);
+        if (task && activeTimerTaskId !== task.id) toggleTimer(task);
+      } else if (effect.type === "timer-stop") {
+        if (activeTimerTaskId) {
+          const task = store.getTask(activeTimerTaskId);
+          if (task) toggleTimer(task);
+        }
+      } else if (effect.type === "rename") {
+        updatePrefs({ ...prefs, displayName: effect.displayName });
+      }
+    }
+    refresh();
+  };
+
   let body;
   if (settingsOpen) {
     body = (
@@ -681,10 +702,9 @@ export default function App() {
       />
     );
   } else if (nav === "today") {
-    const todayEmpty =
-      prefs.showTips
-        ? "从各项目里拖进来，或按下方输入写下今天要做的事。"
-        : "今天还没有任务。";
+    const todayEmpty = prefs.showTips
+      ? "从各项目里拖进来，或按下方输入写下今天要做的事。"
+      : "今天还没有任务。";
     const suggest =
       prefs.proactiveSuggest &&
       prefs.workMode === "office" &&
@@ -784,6 +804,21 @@ export default function App() {
         onDelete={deleteTimedTask}
       />
     );
+  } else if (nav === "agent") {
+    body = (
+      <AgentView
+        store={store}
+        threadId={agentThreadId}
+        displayName={prefs.displayName}
+        activeTimerTaskId={activeTimerTaskId}
+        timerStartedAt={timerStartedAt}
+        onSelectThread={setAgentThreadId}
+        onCreateThread={newAgentChat}
+        onOpenModels={() => openSettings("models")}
+        onEffects={applyAgentEffects}
+        onRefresh={refresh}
+      />
+    );
   } else {
     body = (
       <TasksView
@@ -848,11 +883,7 @@ export default function App() {
         }}
         onDismissReminder={dismissReminder}
       />
-      <div
-        className={
-          sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"
-        }
-      >
+      <div className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}>
         <Sidebar
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
@@ -869,10 +900,8 @@ export default function App() {
             setActiveNoteId(id);
             goNav("knowledge");
           }}
-          onNewChat={() => {
-            goNav("today");
-            window.alert("Agent 会话将在后续版本接入，当前可先用快速捕获。");
-          }}
+          onNewChat={newAgentChat}
+          onOpenAgent={openAgent}
           onAutomations={openTimedCreate}
           displayName={prefs.displayName || "本地用户"}
         />
@@ -885,9 +914,7 @@ export default function App() {
               bucket={taskBuckets[editingTask.id] ?? "active"}
               projects={projects}
               tags={allTags}
-              selectedTagIds={(taskTagMap[editingTask.id] ?? []).map(
-                (t) => t.id,
-              )}
+              selectedTagIds={(taskTagMap[editingTask.id] ?? []).map((t) => t.id)}
               subtasks={store.listSubtasks(editingTask.id)}
               defaultRemind={prefs.defaultRemind}
               onClose={() => setEditingTaskId(null)}
@@ -922,15 +949,12 @@ export default function App() {
               }}
             />
           ) : null}
-          {!settingsOpen ? (
+          {!settingsOpen && nav !== "agent" ? (
             <footer className="composer">
               <input
                 ref={composerRef}
                 aria-label="快速捕获"
-                placeholder={composerPlaceholder(
-                  nav,
-                  projectTitles[filterProjectId],
-                )}
+                placeholder={composerPlaceholder(nav, projectTitles[filterProjectId])}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -1004,9 +1028,7 @@ function TaskList(props: {
               denseMeta={props.denseMeta}
               timerRunning={props.activeTimerTaskId === task.id}
               timerElapsedMs={
-                props.activeTimerTaskId === task.id
-                  ? (props.timerElapsedMs ?? 0)
-                  : 0
+                props.activeTimerTaskId === task.id ? (props.timerElapsedMs ?? 0) : 0
               }
               draggable={props.reorderable}
               dropTarget={props.reorderable && overId === task.id && dragId !== task.id}
@@ -1018,11 +1040,7 @@ function TaskList(props: {
                     }
                   : undefined
               }
-              onDragOver={
-                props.reorderable
-                  ? (id) => setOverId(id)
-                  : undefined
-              }
+              onDragOver={props.reorderable ? (id) => setOverId(id) : undefined}
               onDropOn={
                 props.reorderable
                   ? (toId) => {

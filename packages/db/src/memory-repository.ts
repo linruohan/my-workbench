@@ -2,6 +2,8 @@ import {
   applySchedulePatch,
   assertNoRepeatOnSubtask,
   assertTagIdAllowed,
+  agentThreadTitle,
+  BUILTIN_MODEL_REF,
   clearPlanFields,
   collectDueReminders,
   createId,
@@ -22,6 +24,11 @@ import {
   selectTodayTasks,
   settleTimerSegment,
   sumTimeSpentOnDay,
+  type AgentApproval,
+  type AgentMessage,
+  type AgentPermissionMode,
+  type AgentRole,
+  type AgentThread,
   type Note,
   type ProjectBucket,
   type ReminderOptionId,
@@ -38,9 +45,21 @@ import {
  * Fully local in-memory repository for UI / browser tests.
  * Same behavioral surface as WorkbenchRepository (SQLite).
  */
+type MemProject = { id: string; title: string; isArchived?: boolean };
+
+type MemNotification = {
+  id: string;
+  kind: string;
+  title: string;
+  status: string;
+  fireAt: number;
+  refId: string | null;
+  snoozeUntil?: number | null;
+};
+
 export class MemoryWorkbenchRepository {
   private tasks = new Map<string, Task>();
-  private projects = new Map<string, { id: string; title: string }>([
+  private projects = new Map<string, MemProject>([
     [INBOX_PROJECT_ID, { id: INBOX_PROJECT_ID, title: "收件箱" }],
   ]);
   private buckets = new Map<string, ProjectBucket>();
@@ -49,14 +68,10 @@ export class MemoryWorkbenchRepository {
   private timedTasks = new Map<string, TimedTask>();
   private tags = new Map<string, Tag>();
   private taskTags = new Map<string, Set<string>>();
-  private notifications: Array<{
-    id: string;
-    kind: string;
-    title: string;
-    status: string;
-    fireAt: number;
-    refId: string | null;
-  }> = [];
+  private notifications: MemNotification[] = [];
+  private agentThreads = new Map<string, AgentThread>();
+  private agentMessages: AgentMessage[] = [];
+  private agentApprovals: AgentApproval[] = [];
 
   listTasks(): Task[] {
     return [...this.tasks.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -160,11 +175,7 @@ export class MemoryWorkbenchRepository {
     return this.buckets.get(taskId) ?? "active";
   }
 
-  setTaskBucket(
-    taskId: string,
-    bucket: ProjectBucket,
-    nowMs = Date.now(),
-  ): Task {
+  setTaskBucket(taskId: string, bucket: ProjectBucket, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
     if (bucket === "backlog") {
@@ -254,11 +265,7 @@ export class MemoryWorkbenchRepository {
     return next;
   }
 
-  setTaskParent(
-    taskId: string,
-    parentId: string | null,
-    nowMs = Date.now(),
-  ): Task {
+  setTaskParent(taskId: string, parentId: string | null, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
     if (parentId === taskId) {
@@ -293,11 +300,7 @@ export class MemoryWorkbenchRepository {
       bucket: this.getTaskBucket(taskId),
       nowMs,
     });
-    return this.updateTask(
-      copy.id,
-      { timeEstimate: task.timeEstimate },
-      nowMs,
-    );
+    return this.updateTask(copy.id, { timeEstimate: task.timeEstimate }, nowMs);
   }
 
   addTimeSpent(taskId: string, startedAt: number, endedAt: number): Task {
@@ -446,14 +449,173 @@ export class MemoryWorkbenchRepository {
     return [...this.notifications].sort((a, b) => b.fireAt - a.fireAt);
   }
 
-  listProjects(): Array<{ id: string; title: string }> {
-    return [...this.projects.values()];
+  listProjects(opts?: { includeArchived?: boolean }): MemProject[] {
+    const all = [...this.projects.values()];
+    if (opts?.includeArchived) return all;
+    return all.filter((project) => !project.isArchived);
   }
 
   createProject(title: string, nowMs = Date.now()) {
     const id = createId(nowMs);
-    this.projects.set(id, { id, title });
-    return { id, title };
+    const project = { id, title, isArchived: false };
+    this.projects.set(id, project);
+    return project;
+  }
+
+  archiveProject(projectId: string): MemProject {
+    if (projectId === INBOX_PROJECT_ID) {
+      throw new DomainError("inbox cannot be archived");
+    }
+    const project = this.projects.get(projectId);
+    if (!project) throw new DomainError(`unknown project: ${projectId}`);
+    const next = { ...project, isArchived: true };
+    this.projects.set(projectId, next);
+    return next;
+  }
+
+  dismissNotification(id: string): void {
+    const row = this.notifications.find((item) => item.id === id);
+    if (!row) throw new DomainError(`notification not found: ${id}`);
+    row.status = "dismissed";
+  }
+
+  snoozeNotification(id: string, untilMs: number): void {
+    const row = this.notifications.find((item) => item.id === id);
+    if (!row) throw new DomainError(`notification not found: ${id}`);
+    row.status = "snoozed";
+    row.snoozeUntil = untilMs;
+  }
+
+  createAgentThread(input?: {
+    title?: string;
+    projectId?: string | null;
+    modelRef?: string;
+    permissionMode?: AgentPermissionMode;
+    nowMs?: number;
+  }): AgentThread {
+    const now = input?.nowMs ?? Date.now();
+    const thread: AgentThread = {
+      id: createId(now),
+      projectId: input?.projectId ?? null,
+      title: input?.title?.trim() || "新会话",
+      modelRef: input?.modelRef || BUILTIN_MODEL_REF,
+      permissionMode: input?.permissionMode ?? "confirm",
+      queueJson: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.agentThreads.set(thread.id, thread);
+    return thread;
+  }
+
+  listAgentThreads(): AgentThread[] {
+    return [...this.agentThreads.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  getAgentThread(id: string): AgentThread | null {
+    return this.agentThreads.get(id) ?? null;
+  }
+
+  updateAgentThread(
+    id: string,
+    patch: Partial<
+      Pick<
+        AgentThread,
+        "title" | "modelRef" | "permissionMode" | "projectId" | "queueJson"
+      >
+    >,
+    nowMs = Date.now(),
+  ): AgentThread {
+    const current = this.agentThreads.get(id);
+    if (!current) throw new DomainError(`agent thread not found: ${id}`);
+    const next = { ...current, ...patch, updatedAt: nowMs };
+    this.agentThreads.set(id, next);
+    return next;
+  }
+
+  deleteAgentThread(id: string): void {
+    this.agentThreads.delete(id);
+    this.agentMessages = this.agentMessages.filter((message) => message.threadId !== id);
+    this.agentApprovals = this.agentApprovals.filter((item) => item.threadId !== id);
+  }
+
+  appendAgentMessage(input: {
+    threadId: string;
+    role: AgentRole;
+    content: string;
+    toolName?: string | null;
+    toolCallId?: string | null;
+    toolCallsJson?: string | null;
+    nowMs?: number;
+  }): AgentMessage {
+    const thread = this.agentThreads.get(input.threadId);
+    if (!thread) throw new DomainError(`agent thread not found: ${input.threadId}`);
+    const now = input.nowMs ?? Date.now();
+    const message: AgentMessage = {
+      id: createId(now),
+      threadId: input.threadId,
+      role: input.role,
+      content: input.content,
+      toolName: input.toolName ?? null,
+      toolCallId: input.toolCallId ?? null,
+      toolCallsJson: input.toolCallsJson ?? null,
+      createdAt: now,
+    };
+    this.agentMessages.push(message);
+    const title =
+      thread.title === "新会话" && input.role === "user"
+        ? agentThreadTitle(input.content)
+        : thread.title;
+    this.agentThreads.set(thread.id, { ...thread, title, updatedAt: now });
+    return message;
+  }
+
+  listAgentMessages(threadId: string): AgentMessage[] {
+    return this.agentMessages.filter((message) => message.threadId === threadId);
+  }
+
+  addAgentApproval(input: {
+    threadId: string;
+    toolCallId?: string | null;
+    toolName: string;
+    argsJson: string;
+    summary: string;
+    nowMs?: number;
+  }): AgentApproval {
+    if (!this.agentThreads.has(input.threadId)) {
+      throw new DomainError(`agent thread not found: ${input.threadId}`);
+    }
+    const now = input.nowMs ?? Date.now();
+    const approval: AgentApproval = {
+      id: createId(now),
+      threadId: input.threadId,
+      toolCallId: input.toolCallId ?? null,
+      toolName: input.toolName,
+      argsJson: input.argsJson,
+      summary: input.summary,
+      status: "pending",
+      createdAt: now,
+      resolvedAt: null,
+    };
+    this.agentApprovals.push(approval);
+    return approval;
+  }
+
+  listAgentApprovals(threadId: string): AgentApproval[] {
+    return this.agentApprovals.filter((item) => item.threadId === threadId);
+  }
+
+  resolveAgentApproval(
+    id: string,
+    status: "approved" | "denied",
+    nowMs = Date.now(),
+  ): AgentApproval {
+    const index = this.agentApprovals.findIndex((item) => item.id === id);
+    const current = this.agentApprovals[index];
+    if (!current) throw new DomainError(`agent approval not found: ${id}`);
+    const next: AgentApproval = { ...current, status, resolvedAt: nowMs };
+    this.agentApprovals[index] = next;
+    return next;
   }
 
   listNotes(): Note[] {
@@ -546,33 +708,29 @@ export class MemoryWorkbenchRepository {
       notes: [...this.notes.values()],
       timedTasks: [...this.timedTasks.values()],
       tags: [...this.tags.values()],
-      taskTags: [...this.taskTags.entries()].map(([taskId, set]) => [
-        taskId,
-        [...set],
-      ]),
+      taskTags: [...this.taskTags.entries()].map(([taskId, set]) => [taskId, [...set]]),
+      agentThreads: [...this.agentThreads.values()],
+      agentMessages: this.agentMessages,
+      agentApprovals: this.agentApprovals,
     });
   }
 
   importSnapshot(json: string): void {
     const data = JSON.parse(json) as {
       tasks: Task[];
-      projects: Array<{ id: string; title: string }>;
+      projects: MemProject[];
       buckets: Array<[string, ProjectBucket]>;
       todayOrder: string[];
-      notifications: Array<{
-        id: string;
-        kind: string;
-        title: string;
-        status: string;
-        fireAt: number;
-        refId: string | null;
-      }>;
+      notifications: MemNotification[];
       notes?: Note[];
       timedTasks?: Array<
         TimedTask & { schedule?: TimedSchedule | null; schedules?: TimedSchedule[] }
       >;
       tags?: Tag[];
       taskTags?: Array<[string, string[]]>;
+      agentThreads?: AgentThread[];
+      agentMessages?: AgentMessage[];
+      agentApprovals?: AgentApproval[];
     };
     this.tasks = new Map(data.tasks.map((t) => [t.id, t]));
     this.projects = new Map(data.projects.map((p) => [p.id, p]));
@@ -598,5 +756,19 @@ export class MemoryWorkbenchRepository {
     this.taskTags = new Map(
       (data.taskTags ?? []).map(([taskId, ids]) => [taskId, new Set(ids)]),
     );
+    this.agentThreads = new Map(
+      (data.agentThreads ?? []).map((thread) => [
+        thread.id,
+        { ...thread, queueJson: thread.queueJson ?? null },
+      ]),
+    );
+    this.agentMessages = (data.agentMessages ?? []).map((message) => ({
+      ...message,
+      toolCallsJson: message.toolCallsJson ?? null,
+    }));
+    this.agentApprovals = (data.agentApprovals ?? []).map((approval) => ({
+      ...approval,
+      toolCallId: approval.toolCallId ?? null,
+    }));
   }
 }

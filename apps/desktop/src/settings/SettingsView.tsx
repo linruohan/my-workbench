@@ -15,9 +15,11 @@ import {
   type WindowRestore,
   type WorkMode,
 } from "../lib/prefs";
+import { ModelsPane } from "../agent/ModelsPane";
 import {
   IconBack,
   IconBell,
+  IconBot,
   IconDatabase,
   IconInfo,
   IconLayout,
@@ -27,11 +29,7 @@ import {
 } from "../shell/icons";
 
 export type SettingsSectionId =
-  | "general"
-  | "appearance"
-  | "notifications"
-  | "data"
-  | "about";
+  "general" | "appearance" | "notifications" | "models" | "data" | "about";
 
 const SECTION_GROUPS: Array<{
   label: string;
@@ -44,6 +42,10 @@ const SECTION_GROUPS: Array<{
       { id: "appearance", label: "外观", icon: <IconSun size={15} /> },
       { id: "notifications", label: "通知", icon: <IconBell size={15} /> },
     ],
+  },
+  {
+    label: "Agent",
+    items: [{ id: "models", label: "模型", icon: <IconBot size={15} /> }],
   },
   {
     label: "数据与关于",
@@ -127,15 +129,20 @@ export function SettingsView({
       </aside>
 
       <div className="settings__main">
-        {section === "general" ? (
-          <GeneralPane prefs={prefs} onPatch={patch} />
-        ) : null}
+        {section === "general" ? <GeneralPane prefs={prefs} onPatch={patch} /> : null}
         {section === "appearance" ? (
-          <AppearancePane modeLabel={label} mode={mode} setMode={setMode} prefs={prefs} onPatch={patch} />
+          <AppearancePane
+            modeLabel={label}
+            mode={mode}
+            setMode={setMode}
+            prefs={prefs}
+            onPatch={patch}
+          />
         ) : null}
         {section === "notifications" ? (
           <NotificationsPane prefs={prefs} onPatch={patch} />
         ) : null}
+        {section === "models" ? <ModelsPane /> : null}
         {section === "data" ? (
           <DataPane prefs={prefs} dataDir={dataDir} onPatch={patch} />
         ) : null}
@@ -165,9 +172,7 @@ function GeneralPane({
         <div className="settings__row">
           <div>
             <div className="settings__row-title">本地账号</div>
-            <div className="settings__row-desc">
-              仅保存在本机的显示名称，无云端登录
-            </div>
+            <div className="settings__row-desc">仅保存在本机的显示名称，无云端登录</div>
           </div>
           <input
             className="settings__input"
@@ -221,9 +226,7 @@ function GeneralPane({
             ["projects", "项目"],
             ["knowledge", "知识库"],
           ]}
-          onChange={(startupView) =>
-            onPatch({ startupView: startupView as StartupView })
-          }
+          onChange={(startupView) => onPatch({ startupView: startupView as StartupView })}
         />
         <SelectRow
           title="窗口恢复"
@@ -309,7 +312,8 @@ function GeneralPane({
             <div>
               <div className="settings__row-title">HTTP 代理</div>
               <div className="settings__row-desc">
-                外部模型与后续 MCP / 命令工具将使用此代理；不读取系统环境变量。留空为直连，修改后需重启生效。
+                外部模型与后续 MCP /
+                命令工具将使用此代理；不读取系统环境变量。留空为直连，修改后需重启生效。
               </div>
             </div>
           </div>
@@ -464,8 +468,8 @@ function DataPane({
           <div>
             <div className="settings__row-title">默认保存路径</div>
             <div className="settings__row-desc">
-              数据与设置默认保存在本机 AppData；桌面壳写入该目录下的
-              workbench.json / prefs.json / theme.json
+              数据与设置默认保存在本机 AppData；桌面壳写入该目录下的 workbench.json /
+              prefs.json / theme.json
             </div>
           </div>
           <code className="settings__path" aria-label="数据目录">

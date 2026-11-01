@@ -18,12 +18,7 @@ import {
 } from "./icons";
 
 export type AppNavId =
-  | "today"
-  | "planner"
-  | "schedule"
-  | "projects"
-  | "knowledge"
-  | "timed";
+  "today" | "planner" | "schedule" | "projects" | "knowledge" | "timed" | "agent";
 
 type TaskNavItem = {
   id: "today" | "planner" | "schedule" | "timed";
@@ -53,6 +48,7 @@ type Props = {
   onSelectProject: (projectId: string) => void;
   onSelectNote: (id: string) => void;
   onNewChat: () => void;
+  onOpenAgent: () => void;
   onAutomations: () => void;
   displayName: string;
 };
@@ -71,6 +67,7 @@ export function Sidebar({
   onSelectProject,
   onSelectNote,
   onNewChat,
+  onOpenAgent,
   onAutomations,
   displayName,
 }: Props) {
@@ -95,13 +92,10 @@ export function Sidebar({
     return list.filter((p) => p.title.toLowerCase().includes(q));
   }, [projects, q]);
 
-  const showKnowledge =
-    !q || "知识库".includes(q) || "knowledge".includes(q);
+  const showKnowledge = !q || "知识库".includes(q) || "knowledge".includes(q);
+  const showAgent = !q || "agent".includes(q) || "会话".includes(q);
   const showTaskGroup =
-    !q ||
-    "任务".includes(q) ||
-    filteredTaskNav.length > 0 ||
-    filteredProjects.length > 0;
+    !q || "任务".includes(q) || filteredTaskNav.length > 0 || filteredProjects.length > 0;
 
   const taskGroupActive =
     !settingsOpen &&
@@ -130,9 +124,7 @@ export function Sidebar({
               key={item.id}
               type="button"
               className={
-                nav === item.id && !settingsOpen
-                  ? "icon-btn is-active"
-                  : "icon-btn"
+                nav === item.id && !settingsOpen ? "icon-btn is-active" : "icon-btn"
               }
               aria-label={item.label}
               aria-pressed={nav === item.id && !settingsOpen}
@@ -154,9 +146,7 @@ export function Sidebar({
           <button
             type="button"
             className={
-              nav === "knowledge" && !settingsOpen
-                ? "icon-btn is-active"
-                : "icon-btn"
+              nav === "knowledge" && !settingsOpen ? "icon-btn is-active" : "icon-btn"
             }
             aria-label="知识库"
             aria-pressed={nav === "knowledge" && !settingsOpen}
@@ -164,6 +154,18 @@ export function Sidebar({
             onClick={() => onNav("knowledge")}
           >
             <IconKnowledge size={15} />
+          </button>
+          <button
+            type="button"
+            className={
+              nav === "agent" && !settingsOpen ? "icon-btn is-active" : "icon-btn"
+            }
+            aria-label="Agent"
+            aria-pressed={nav === "agent" && !settingsOpen}
+            title="Agent"
+            onClick={onOpenAgent}
+          >
+            <IconChat size={15} />
           </button>
         </div>
         <button
@@ -228,9 +230,7 @@ export function Sidebar({
           <section className="sidebar__section" aria-label="任务分组">
             <div
               className={
-                taskGroupActive
-                  ? "sidebar__group-head is-active"
-                  : "sidebar__group-head"
+                taskGroupActive ? "sidebar__group-head is-active" : "sidebar__group-head"
               }
             >
               <button
@@ -288,9 +288,7 @@ export function Sidebar({
 
                 {filteredProjects.map((p) => {
                   const active =
-                    nav === "projects" &&
-                    !settingsOpen &&
-                    activeProjectId === p.id;
+                    nav === "projects" && !settingsOpen && activeProjectId === p.id;
                   return (
                     <button
                       key={p.id}
@@ -337,6 +335,25 @@ export function Sidebar({
           </section>
         ) : null}
 
+        {showAgent ? (
+          <section className="sidebar__section">
+            <button
+              type="button"
+              className={
+                nav === "agent" && !settingsOpen
+                  ? "sidebar__row is-active"
+                  : "sidebar__row"
+              }
+              onClick={onOpenAgent}
+            >
+              <span className="sidebar__row-icon" aria-hidden>
+                <IconChat size={15} />
+              </span>
+              <span className="sidebar__row-text">Agent</span>
+            </button>
+          </section>
+        ) : null}
+
         {recentNotes.length > 0 ? (
           <section className="sidebar__section">
             <div className="sidebar__section-label">最近笔记</div>
@@ -367,11 +384,7 @@ export function Sidebar({
           </div>
           <button
             type="button"
-            className={
-              settingsOpen
-                ? "sidebar__settings is-active"
-                : "sidebar__settings"
-            }
+            className={settingsOpen ? "sidebar__settings is-active" : "sidebar__settings"}
             aria-label="打开设置"
             aria-pressed={settingsOpen}
             onClick={onOpenSettings}

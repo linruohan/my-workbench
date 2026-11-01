@@ -101,6 +101,40 @@ CREATE TABLE IF NOT EXISTS notes (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_threads (
+  id TEXT PRIMARY KEY NOT NULL,
+  project_id TEXT,
+  title TEXT NOT NULL,
+  model_ref TEXT NOT NULL,
+  permission_mode TEXT NOT NULL,
+  queue_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY NOT NULL,
+  thread_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tool_name TEXT,
+  tool_call_id TEXT,
+  tool_calls_json TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_approvals (
+  id TEXT PRIMARY KEY NOT NULL,
+  thread_id TEXT NOT NULL,
+  tool_call_id TEXT,
+  tool_name TEXT NOT NULL,
+  args_json TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_due_day ON tasks(due_day);
 CREATE INDEX IF NOT EXISTS idx_tasks_due_with_time ON tasks(due_with_time);

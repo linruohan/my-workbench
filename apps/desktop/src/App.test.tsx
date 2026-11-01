@@ -152,15 +152,24 @@ describe("App shell", () => {
     await user.type(title, "深度巡检");
     await user.click(screen.getByRole("button", { name: "+ 添加计划" }));
     await user.click(screen.getByRole("menuitem", { name: "每天" }));
-    expect(
-      screen.queryByRole("button", { name: "+ 添加计划" }),
-    ).not.toBeInTheDocument();
-    await user.type(
-      screen.getByLabelText("指令"),
-      "总结昨日任务与阻塞",
-    );
+    expect(screen.queryByRole("button", { name: "+ 添加计划" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("指令"), "总结昨日任务与阻塞");
     await user.click(screen.getByRole("button", { name: "创建定时任务" }));
     expect(screen.getByText("深度巡检")).toBeInTheDocument();
     expect(screen.getByText(/每天 · 09:00/)).toBeInTheDocument();
+  });
+
+  it("creates a task from an agent session only after approval", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    await user.click(screen.getByRole("button", { name: "新建会话" }));
+    const box = await screen.findByLabelText("给 Agent 发消息");
+    await user.type(box, "创建任务 验收事项{Enter}");
+    await user.click(await screen.findByRole("button", { name: "批准" }));
+    expect(await screen.findByText(/已创建任务/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "收件箱" }));
+    expect(screen.getByText("验收事项")).toBeInTheDocument();
   });
 });

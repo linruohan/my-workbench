@@ -109,5 +109,11 @@ describe("WorkbenchRepository", () => {
       .prepare(`SELECT value FROM meta WHERE key = 'schema_version'`)
       .get() as { value: string };
     expect(version.value).toBe("1");
+    const threads = db
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_threads'`,
+      )
+      .get() as { name: string } | undefined;
+    expect(threads?.name).toBe("agent_threads");
   });
 });
