@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActiveTimer,
   formatLocalDay,
+  reorderIds,
   inferNoteTitleFromBody,
   parseQuickCapture,
   ReminderUiCooldown,
@@ -214,14 +215,61 @@ export default function App() {
     refresh();
   };
 
+  const clearPlan = (task: Task) => {
+    store.scheduleTask(task.id, {
+      dueDay: null,
+      dueWithTime: null,
+      remindAt: null,
+    });
+    refresh();
+  };
+
+  const settleSegment = (segment: {
+    taskId: string;
+    startedAt: number;
+    endedAt: number;
+  }) => {
+    try {
+      store.addTimeSpent(segment.taskId, segment.startedAt, segment.endedAt);
+    } catch {
+      // parent-with-children cannot be timed; ignore settle
+    }
+  };
+
+  const stopTimerIfTask = (taskId: string) => {
+    if (activeTimerTaskId !== taskId) return;
+    const stopped = timer.stop(Date.now());
+    if (stopped) settleSegment(stopped);
+    setActiveTimerTaskId(null);
+    setTimerStartedAt(null);
+  };
+
   const complete = (task: Task) => {
+    stopTimerIfTask(task.id);
     store.completeTask(task.id);
     refresh();
   };
 
   const toggleDone = (task: Task) => {
     if (task.isDone) store.uncompleteTask(task.id);
-    else store.completeTask(task.id);
+    else {
+      stopTimerIfTask(task.id);
+      store.completeTask(task.id);
+    }
+    refresh();
+  };
+
+  const clearCompletedTasks = (taskIds: string[]) => {
+    for (const id of taskIds) {
+      stopTimerIfTask(id);
+      store.deleteTask(id);
+    }
+    refresh();
+  };
+
+  const reorderToday = (fromId: string, toId: string) => {
+    const ids = todayTasks.map((t) => t.id);
+    store.setTodayOrder(reorderIds(ids, fromId, toId));
     refresh();
   };
 
@@ -239,24 +287,13 @@ export default function App() {
     const task = store.getTask(taskId);
     if (!task) return;
     if (column === "done") {
+      stopTimerIfTask(taskId);
       if (!task.isDone) store.completeTask(taskId);
     } else {
       if (task.isDone) store.uncompleteTask(taskId);
       store.setTaskBucket(taskId, column);
     }
     refresh();
-  };
-
-  const settleSegment = (segment: {
-    taskId: string;
-    startedAt: number;
-    endedAt: number;
-  }) => {
-    try {
-      store.addTimeSpent(segment.taskId, segment.startedAt, segment.endedAt);
-    } catch {
-      // parent-with-children cannot be timed; ignore settle
-    }
   };
 
   const toggleTimer = (task: Task) => {
@@ -525,13 +562,17 @@ export default function App() {
         empty={suggest ?? todayEmpty}
         tasks={todayTasks}
         denseMeta={prefs.workMode === "office"}
+        reorderable
+        hint="拖拽任务可调整今日顺序"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onClearPlan={clearPlan}
         onToggleTimer={toggleTimer}
+        onReorder={reorderToday}
       />
     );
   } else if (nav === "planner") {
@@ -546,6 +587,7 @@ export default function App() {
         onOpen={(t) => setEditingTaskId(t.id)}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onClearPlan={clearPlan}
         onToggleTimer={toggleTimer}
       />
     );
@@ -561,6 +603,7 @@ export default function App() {
         onOpen={(t) => setEditingTaskId(t.id)}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onClearPlan={clearPlan}
         onToggleTimer={toggleTimer}
       />
     );
@@ -620,11 +663,13 @@ export default function App() {
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+        onClearPlan={clearPlan}
         onToggleTimer={toggleTimer}
         onMoveColumn={moveTaskColumn}
         onSaveTask={saveEditedTask}
         onDeleteTask={deleteTask}
         onDuplicateTask={duplicateTask}
+        onClearCompleted={clearCompletedTasks}
         onCreateTag={createTag}
         onAddSubtask={addSubtask}
         onCreate={createNamedTask}
@@ -772,24 +817,34 @@ function TaskList(props: {
   empty: string;
   tasks: Task[];
   denseMeta?: boolean;
+  reorderable?: boolean;
+  hint?: string;
   activeTimerTaskId?: string | null;
   timerElapsedMs?: number;
   onToggleDone: (t: Task) => void;
   onOpen: (t: Task) => void;
   onPlanToday: (t: Task) => void;
   onPlanTime: (t: Task) => void;
+  onClearPlan?: (t: Task) => void;
   onToggleTimer?: (t: Task) => void;
+  onReorder?: (fromId: string, toId: string) => void;
 }) {
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+
   return (
     <section className="panel">
       <header className="panel__header">
         <h1>{props.title}</h1>
         <span className="panel__count">{props.tasks.length}</span>
       </header>
+      {props.hint && props.tasks.length > 0 ? (
+        <p className="panel__hint">{props.hint}</p>
+      ) : null}
       {props.tasks.length === 0 ? (
         <p className="empty">{props.empty}</p>
       ) : (
-        <ul className="list">
+        <ul className="list" aria-label={`${props.title}列表`}>
           {props.tasks.map((task) => (
             <TaskRow
               key={task.id}
@@ -801,10 +856,37 @@ function TaskList(props: {
                   ? (props.timerElapsedMs ?? 0)
                   : 0
               }
+              draggable={props.reorderable}
+              dropTarget={props.reorderable && overId === task.id && dragId !== task.id}
+              onDragStart={
+                props.reorderable
+                  ? (id) => {
+                      setDragId(id);
+                      setOverId(id);
+                    }
+                  : undefined
+              }
+              onDragOver={
+                props.reorderable
+                  ? (id) => setOverId(id)
+                  : undefined
+              }
+              onDropOn={
+                props.reorderable
+                  ? (toId) => {
+                      if (dragId && props.onReorder) {
+                        props.onReorder(dragId, toId);
+                      }
+                      setDragId(null);
+                      setOverId(null);
+                    }
+                  : undefined
+              }
               onToggleDone={props.onToggleDone}
               onOpen={props.onOpen}
               onPlanToday={props.onPlanToday}
               onPlanTime={props.onPlanTime}
+              onClearPlan={props.onClearPlan}
               onToggleTimer={props.onToggleTimer}
             />
           ))}

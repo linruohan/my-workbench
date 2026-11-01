@@ -15,6 +15,7 @@ type Props = {
   onOpen: (task: Task) => void;
   onToggleDone: (task: Task) => void;
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
+  onPlanToday?: (task: Task) => void;
 };
 
 export function TaskBoard({
@@ -24,6 +25,7 @@ export function TaskBoard({
   onOpen,
   onToggleDone,
   onMoveColumn,
+  onPlanToday,
 }: Props) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overColumn, setOverColumn] = useState<TaskBoardColumnId | null>(null);
@@ -122,6 +124,16 @@ export function TaskBoard({
                         ? ` · ${projectTitles[task.projectId]}`
                         : ""}
                     </div>
+                    {!task.isDone && onPlanToday ? (
+                      <div className="task-card__actions">
+                        <button
+                          type="button"
+                          onClick={() => onPlanToday(task)}
+                        >
+                          今天
+                        </button>
+                      </div>
+                    ) : null}
                   </article>
                 </li>
               ))

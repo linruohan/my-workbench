@@ -21,10 +21,14 @@ type Props = {
   onPlanToday?: (task: Task) => void;
   onPlanTime?: (task: Task) => void;
   onToggleTimer?: (task: Task) => void;
+  onClearPlan?: (task: Task) => void;
   onDelete?: (task: Task) => void;
   onDuplicate?: (task: Task) => void;
   draggable?: boolean;
+  dropTarget?: boolean;
   onDragStart?: (taskId: string) => void;
+  onDragOver?: (taskId: string) => void;
+  onDropOn?: (taskId: string) => void;
 };
 
 export function TaskRow({
@@ -42,12 +46,17 @@ export function TaskRow({
   onPlanToday,
   onPlanTime,
   onToggleTimer,
+  onClearPlan,
   onDelete,
   onDuplicate,
   draggable,
+  dropTarget,
   onDragStart,
+  onDragOver,
+  onDropOn,
 }: Props) {
   const overdue = isTaskOverdue(task);
+  const hasPlan = task.dueDay != null || task.dueWithTime != null;
 
   return (
     <li
@@ -56,6 +65,7 @@ export function TaskRow({
         showDoneStyle && task.isDone ? "is-done" : "",
         overdue ? "is-overdue" : "",
         timerRunning ? "is-timing" : "",
+        dropTarget ? "is-drop-target" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -66,6 +76,22 @@ export function TaskRow({
               e.dataTransfer.setData("text/task-id", task.id);
               e.dataTransfer.effectAllowed = "move";
               onDragStart(task.id);
+            }
+          : undefined
+      }
+      onDragOver={
+        draggable && onDragOver
+          ? (e) => {
+              e.preventDefault();
+              onDragOver(task.id);
+            }
+          : undefined
+      }
+      onDrop={
+        draggable && onDropOn
+          ? (e) => {
+              e.preventDefault();
+              onDropOn(task.id);
             }
           : undefined
       }
@@ -126,6 +152,11 @@ export function TaskRow({
         {onPlanTime ? (
           <button type="button" onClick={() => onPlanTime(task)}>
             15:00
+          </button>
+        ) : null}
+        {onClearPlan && hasPlan && !task.isDone ? (
+          <button type="button" onClick={() => onClearPlan(task)}>
+            清除排期
           </button>
         ) : null}
         {onDuplicate ? (

@@ -2665,3 +2665,43 @@ input {
 .list__row.is-timing {
   background: color-mix(in srgb, var(--wb-accent) 6%, transparent);
 }
+
+.panel__hint {
+  margin: 0 0 var(--wb-space-2);
+  color: var(--wb-muted);
+  font-size: var(--wb-text-xs);
+}
+
+.list__row.is-drop-target {
+  outline: 1px dashed var(--wb-accent);
+  background: color-mix(in srgb, var(--wb-accent) 8%, transparent);
+}
+
+.tasks__bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: var(--wb-space-3);
+}
+
+.tasks__bulk-hint {
+  margin-left: auto;
+  color: var(--wb-muted);
+  font-size: var(--wb-text-xs);
+}
+
+.task-card__actions {
+  margin-top: 8px;
+  padding-left: 26px;
+}
+
+.task-card__actions button {
+  border: 1px solid var(--wb-line);
+  background: var(--wb-panel);
+  color: var(--wb-text);
+  border-radius: var(--wb-radius-control);
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: var(--wb-text-xs);
+}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   computeTaskStats,
   filterTasks,
@@ -20,6 +20,31 @@ import { TaskStatsPanel } from "./TaskStatsPanel";
 
 export type TasksViewMode = "list" | "board";
 
+const FILTER_KEY = "wb.tasks.filterPrefs";
+
+type FilterPrefs = {
+  status: TaskStatusFilter;
+  sortKey: TaskSortKey;
+  statsExpanded: boolean;
+};
+
+function readFilterPrefs(): FilterPrefs {
+  try {
+    const raw = localStorage.getItem(FILTER_KEY);
+    if (!raw) {
+      return { status: "all", sortKey: "updated", statsExpanded: false };
+    }
+    const parsed = JSON.parse(raw) as Partial<FilterPrefs>;
+    return {
+      status: parsed.status ?? "all",
+      sortKey: parsed.sortKey ?? "updated",
+      statsExpanded: Boolean(parsed.statsExpanded),
+    };
+  } catch {
+    return { status: "all", sortKey: "updated", statsExpanded: false };
+  }
+}
+
 type Props = {
   tasks: Task[];
   projects: Array<{ id: string; title: string }>;
@@ -40,11 +65,13 @@ type Props = {
   onToggleDone: (task: Task) => void;
   onPlanToday: (task: Task) => void;
   onPlanTime: (task: Task) => void;
+  onClearPlan: (task: Task) => void;
   onToggleTimer: (task: Task) => void;
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
   onSaveTask: (taskId: string, draft: TaskEditorSave) => void;
   onDeleteTask: (taskId: string) => void;
   onDuplicateTask: (taskId: string) => void;
+  onClearCompleted: (taskIds: string[]) => void;
   onCreateTag: (title: string) => Tag | null;
   onAddSubtask: (parentId: string, title: string) => void;
   onCreate: (title: string) => void;
@@ -70,23 +97,55 @@ export function TasksView({
   onToggleDone,
   onPlanToday,
   onPlanTime,
+  onClearPlan,
   onToggleTimer,
   onMoveColumn,
   onSaveTask,
   onDeleteTask,
   onDuplicateTask,
+  onClearCompleted,
   onCreateTag,
   onAddSubtask,
   onCreate,
 }: Props) {
+  const initialPrefs = useMemo(() => readFilterPrefs(), []);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [createTitle, setCreateTitle] = useState("");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<TaskStatusFilter>("all");
-  const [sortKey, setSortKey] = useState<TaskSortKey>("updated");
+  const [status, setStatus] = useState<TaskStatusFilter>(initialPrefs.status);
+  const [sortKey, setSortKey] = useState<TaskSortKey>(initialPrefs.sortKey);
   const [filterTagId, setFilterTagId] = useState<string | null>(null);
-  const [statsExpanded, setStatsExpanded] = useState(false);
+  const [statsExpanded, setStatsExpanded] = useState(
+    initialPrefs.statsExpanded,
+  );
   const [today] = useState(() => formatLocalDay(Date.now()));
+  const createRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem(
+      FILTER_KEY,
+      JSON.stringify({ status, sortKey, statsExpanded } satisfies FilterPrefs),
+    );
+  }, [status, sortKey, statsExpanded]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && editingId) {
+        setEditingId(null);
+        return;
+      }
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "n" &&
+        !editingId
+      ) {
+        e.preventDefault();
+        createRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editingId]);
 
   const projectTitles = useMemo(() => {
     const map: Record<string, string> = {};
@@ -155,6 +214,9 @@ export function TasksView({
     onCreate(text);
     setCreateTitle("");
   };
+
+  const doneInScope = scopedTasks.filter((t) => t.isDone && !t.parentId);
+  const openVisible = visible.filter((t) => !t.isDone);
 
   return (
     <section className={editing ? "tasks panel tasks--editing" : "tasks panel"}>
@@ -277,6 +339,49 @@ export function TasksView({
         </select>
       </div>
 
+      <div className="tasks__bulk" role="toolbar" aria-label="批量操作">
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={openVisible.length === 0}
+          onClick={() => openVisible.forEach(onPlanToday)}
+        >
+          可见项排到今天 ({openVisible.length})
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={doneInScope.length === 0}
+          onClick={() => {
+            if (
+              confirmBeforeDelete &&
+              !window.confirm(
+                `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
+              )
+            ) {
+              return;
+            }
+            onClearCompleted(doneInScope.map((t) => t.id));
+          }}
+        >
+          清理已完成 ({doneInScope.length})
+        </button>
+        {(query || filterTagId || status !== "all") && (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={() => {
+              setQuery("");
+              setFilterTagId(null);
+              setStatus("all");
+            }}
+          >
+            清空筛选
+          </button>
+        )}
+        <span className="tasks__bulk-hint">Esc 关闭编辑 · Ctrl+N 新建</span>
+      </div>
+
       <div className="tasks__content">
         <div className="tasks__main">
           {viewMode === "list" ? (
@@ -306,6 +411,7 @@ export function TasksView({
                     onOpen={(t) => setEditingId(t.id)}
                     onPlanToday={onPlanToday}
                     onPlanTime={onPlanTime}
+                    onClearPlan={onClearPlan}
                     onToggleTimer={onToggleTimer}
                     onDuplicate={(t) => onDuplicateTask(t.id)}
                     onDelete={(t) => confirmDelete(t.id)}
@@ -321,13 +427,15 @@ export function TasksView({
               onOpen={(t) => setEditingId(t.id)}
               onToggleDone={onToggleDone}
               onMoveColumn={onMoveColumn}
+              onPlanToday={onPlanToday}
             />
           )}
 
           <div className="tasks__create">
             <input
+              ref={createRef}
               aria-label="新建任务标题"
-              placeholder="新建任务，回车添加"
+              placeholder="新建任务，回车添加（Ctrl+N）"
               value={createTitle}
               onChange={(e) => setCreateTitle(e.target.value)}
               onKeyDown={(e) => {

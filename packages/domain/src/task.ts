@@ -65,6 +65,23 @@ export function markTaskIncomplete(task: Task, nowMs = Date.now()): Task {
   };
 }
 
+/** Move `fromId` to the position of `toId` within an ordered id list. */
+export function reorderIds(
+  ids: string[],
+  fromId: string,
+  toId: string,
+): string[] {
+  if (fromId === toId) return [...ids];
+  const from = ids.indexOf(fromId);
+  const to = ids.indexOf(toId);
+  if (from < 0 || to < 0) return [...ids];
+  const next = [...ids];
+  const [item] = next.splice(from, 1);
+  if (!item) return [...ids];
+  next.splice(to, 0, item);
+  return next;
+}
+
 export function formatTaskPlanMeta(
   task: Pick<Task, "dueDay" | "dueWithTime" | "remindAt" | "deadlineDay">,
 ): string {

@@ -4,6 +4,7 @@ import {
   markTaskComplete,
   markTaskIncomplete,
   patchTaskContent,
+  reorderIds,
   resolveTaskBoardColumn,
 } from "../src/index.js";
 import type { Task } from "../src/index.js";
@@ -62,5 +63,10 @@ describe("task helpers", () => {
     expect(formatTaskPlanMeta(sample({ dueDay: "2026-11-01", remindAt: 1 }))).toBe(
       "2026-11-01 · 有提醒",
     );
+  });
+
+  it("reorders ids for today list", () => {
+    expect(reorderIds(["a", "b", "c"], "c", "a")).toEqual(["c", "a", "b"]);
+    expect(reorderIds(["a", "b", "c"], "a", "c")).toEqual(["b", "c", "a"]);
   });
 });
