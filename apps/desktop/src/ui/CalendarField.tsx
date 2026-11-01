@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addLocalDays,
   formatLocalDay,
@@ -13,21 +13,12 @@ type DateProps = {
   onChange: (day: string) => void;
   allowEmpty?: boolean;
   emptyLabel?: string;
-  variant?: "default" | "ghost";
-  compact?: boolean;
-  leading?: ReactNode;
 };
 
 type DateTimeProps = {
   label: string;
   valueLocal: string;
   onChange: (local: string) => void;
-  emptyLabel?: string;
-  variant?: "default" | "ghost";
-  compact?: boolean;
-  leading?: ReactNode;
-  allowEmpty?: boolean;
-  onClear?: () => void;
 };
 
 function monthMatrix(anchorDay: string): string[] {
@@ -56,20 +47,6 @@ function formatDisplayDay(day: string): string {
     day: "numeric",
     weekday: "short",
   });
-}
-
-function formatCompactDay(day: string): string {
-  if (!day) return "未设置";
-  const d = new Date(parseLocalDay(day));
-  return `${d.getMonth() + 1}/${d.getDate()}`;
-}
-
-function formatCompactDateTime(valueLocal: string): string {
-  const ms = Date.parse(valueLocal);
-  if (Number.isNaN(ms)) return "选择时刻";
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function formatMonthTitle(day: string): string {
@@ -156,9 +133,6 @@ export function DateField({
   onChange,
   allowEmpty,
   emptyLabel = "未设置",
-  variant = "default",
-  compact = false,
-  leading,
 }: DateProps) {
   const [open, setOpen] = useState(false);
   const [viewMonth, setViewMonth] = useState(
@@ -179,19 +153,8 @@ export function DateField({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
-  const display = value
-    ? compact
-      ? formatCompactDay(value)
-      : formatDisplayDay(value)
-    : emptyLabel;
-
   return (
-    <div
-      className={
-        variant === "ghost" ? "cal-field cal-field--ghost" : "cal-field"
-      }
-      ref={rootRef}
-    >
+    <div className="cal-field" ref={rootRef}>
       <button
         type="button"
         className="menu-select__trigger"
@@ -199,13 +162,10 @@ export function DateField({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        {leading}
-        <span>{display}</span>
-        {variant === "default" ? (
-          <span className="menu-select__caret" aria-hidden>
-            ▾
-          </span>
-        ) : null}
+        <span>{value ? formatDisplayDay(value) : emptyLabel}</span>
+        <span className="menu-select__caret" aria-hidden>
+          ▾
+        </span>
       </button>
       {open ? (
         <div className="cal-popover" role="dialog" aria-label="选择日期">
@@ -250,22 +210,11 @@ export function DateField({
   );
 }
 
-export function DateTimeField({
-  label,
-  valueLocal,
-  onChange,
-  emptyLabel = "安排时间",
-  variant = "default",
-  compact = false,
-  leading,
-  allowEmpty,
-  onClear,
-}: DateTimeProps) {
+export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
   const parts = splitDateTimeLocal(valueLocal);
   const [open, setOpen] = useState(false);
   const [viewMonth, setViewMonth] = useState(parts.day);
   const rootRef = useRef<HTMLDivElement>(null);
-  const hasValue = Boolean(valueLocal) && !Number.isNaN(Date.parse(valueLocal));
 
   useEffect(() => {
     setViewMonth(parts.day);
@@ -280,29 +229,21 @@ export function DateTimeField({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
-  const display = !hasValue
-    ? emptyLabel
-    : compact
-      ? formatCompactDateTime(valueLocal)
-      : (() => {
-          const ms = Date.parse(valueLocal);
-          return new Date(ms).toLocaleString("zh-CN", {
-            year: "numeric",
-            month: "long",
-            day: "numeric",
-            weekday: "short",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-        })();
+  const display = (() => {
+    const ms = Date.parse(valueLocal);
+    if (Number.isNaN(ms)) return "选择时刻";
+    return new Date(ms).toLocaleString("zh-CN", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  })();
 
   return (
-    <div
-      className={
-        variant === "ghost" ? "cal-field cal-field--ghost" : "cal-field"
-      }
-      ref={rootRef}
-    >
+    <div className="cal-field" ref={rootRef}>
       <button
         type="button"
         className="menu-select__trigger"
@@ -310,13 +251,10 @@ export function DateTimeField({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        {leading}
         <span>{display}</span>
-        {variant === "default" ? (
-          <span className="menu-select__caret" aria-hidden>
-            ▾
-          </span>
-        ) : null}
+        <span className="menu-select__caret" aria-hidden>
+          ▾
+        </span>
       </button>
       {open ? (
         <div
@@ -330,7 +268,7 @@ export function DateTimeField({
             onViewMonth={setViewMonth}
             onPick={(day) => onChange(`${day}T${parts.time}`)}
           />
-          <div className="cal-popover__footer">
+          <div className="cal-popover__footer cal-popover__footer--datetime">
             <button
               type="button"
               className="btn btn--ghost"
@@ -342,26 +280,12 @@ export function DateTimeField({
             >
               今天
             </button>
-            {allowEmpty ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => {
-                  onClear?.();
-                  setOpen(false);
-                }}
-              >
-                清除
-              </button>
-            ) : null}
-          </div>
-          <div className="cal-popover__time">
-            <label className="field__label" htmlFor="cal-time">
+            <label className="cal-popover__time-label" htmlFor="cal-time">
               时间
             </label>
             <input
               id="cal-time"
-              className="field__control"
+              className="field__control cal-popover__time-input"
               type="time"
               value={parts.time}
               onChange={(e) =>

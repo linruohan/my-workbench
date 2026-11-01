@@ -12,7 +12,6 @@ type Props<T extends string> = {
   onChange: (value: T) => void;
   disabled?: boolean;
   className?: string;
-  variant?: "default" | "ghost";
 };
 
 export function MenuSelect<T extends string>({
@@ -22,7 +21,6 @@ export function MenuSelect<T extends string>({
   onChange,
   disabled,
   className,
-  variant = "default",
 }: Props<T>) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -38,16 +36,11 @@ export function MenuSelect<T extends string>({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
-  const rootClass = [
-    "menu-select",
-    variant === "ghost" ? "menu-select--ghost" : "",
-    className ?? "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-
   return (
-    <div className={rootClass} ref={rootRef}>
+    <div
+      className={className ? `menu-select ${className}` : "menu-select"}
+      ref={rootRef}
+    >
       <button
         type="button"
         className="menu-select__trigger"
