@@ -28,7 +28,9 @@ export function loadKnowledgeRoots(): string[] {
     const raw = localStorage.getItem(ROOTS_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+    return parsed.filter(
+      (item): item is string => typeof item === "string" && item.length > 0,
+    );
   } catch {
     return [];
   }
@@ -129,7 +131,10 @@ export async function clipboardFileToPngBytes(file: File): Promise<Uint8Array> {
 }
 
 /** Resolve one image destination to a browser-loadable URL. */
-export async function resolveImageSrc(dest: string, baseDir: string | null): Promise<string | null> {
+export async function resolveImageSrc(
+  dest: string,
+  baseDir: string | null,
+): Promise<string | null> {
   const target = resolveImageTarget(dest, baseDir);
   if (target.kind === "remote") return target.url;
   if (!isTauriRuntime()) return null;

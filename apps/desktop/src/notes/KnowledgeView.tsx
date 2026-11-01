@@ -51,22 +51,24 @@ export function KnowledgeView({
   const [roots, setRoots] = useState<string[]>(() => loadKnowledgeRoots());
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
-  const [assetDir, setAssetDir] = useState<string | null>(null);
+  const [asset, setAsset] = useState<{ id: string; dir: string } | null>(null);
   const pendingSave = useRef<{ path: string; body: string } | null>(null);
   const saveTimer = useRef<number | null>(null);
 
   const selected = activeId ? notes.find((n) => n.id === activeId) : null;
-  const active = openFile ? null : selected ?? (preferLastNote ? notes[0] ?? null : null);
+  const active = openFile
+    ? null
+    : (selected ?? (preferLastNote ? (notes[0] ?? null) : null));
   const activeNoteId = active?.id ?? null;
 
+  const noteAssetDir = asset?.id === activeNoteId ? asset.dir : null;
+
   useEffect(() => {
-    if (!activeNoteId || !isTauriRuntime()) {
-      setAssetDir(null);
-      return;
-    }
+    if (!activeNoteId || !isTauriRuntime()) return;
     let cancel = false;
-    void ensureNoteAssetDir(activeNoteId).then((dir) => {
-      if (!cancel) setAssetDir(dir);
+    const noteId = activeNoteId;
+    void ensureNoteAssetDir(noteId).then((dir) => {
+      if (!cancel && dir) setAsset({ id: noteId, dir });
     });
     return () => {
       cancel = true;
@@ -88,7 +90,9 @@ export function KnowledgeView({
 
   const updateFileBody = (path: string, body: string) => {
     setOpenFile((current) =>
-      current && current.path === path && (current.kind === "md" || current.kind === "text")
+      current &&
+      current.path === path &&
+      (current.kind === "md" || current.kind === "text")
         ? { ...current, body }
         : current,
     );
@@ -185,7 +189,9 @@ export function KnowledgeView({
           />
           {roots.length > 0 ? <p className="knowledge__section">笔记</p> : null}
           {notes.length === 0 && roots.length === 0 ? (
-            <p className="empty">还没有笔记。可以「新建」，或「导入目录」浏览本地文件。</p>
+            <p className="empty">
+              还没有笔记。可以「新建」，或「导入目录」浏览本地文件。
+            </p>
           ) : notes.length === 0 ? (
             <p className="empty">没有应用内笔记。目录里的 Markdown 可以直接编辑。</p>
           ) : (
@@ -238,7 +244,8 @@ export function KnowledgeView({
               imageStem={fileStem(openFile.path)}
               onAssetSaved={() => setRefreshToken((value) => value + 1)}
               onChange={(patch) => {
-                if (patch.bodyMd !== undefined) updateFileBody(openFile.path, patch.bodyMd);
+                if (patch.bodyMd !== undefined)
+                  updateFileBody(openFile.path, patch.bodyMd);
               }}
             />
           </>
@@ -250,25 +257,29 @@ export function KnowledgeView({
             onChange={(body) => updateFileBody(openFile.path, body)}
           />
         ) : openFile?.kind === "image" ? (
-          <ImageFile path={openFile.path} title={openFile.title} />
+          <ImageFile key={openFile.path} path={openFile.path} title={openFile.title} />
         ) : openFile?.kind === "other" ? (
           <div className="knowledge__file-view">
             <h2>{openFile.title}</h2>
             <p className="knowledge__path">{openFile.path}</p>
-            <p className="empty">{openFile.message ?? "此文件类型只在目录树中展示，不能当作 Markdown 编辑。"}</p>
+            <p className="empty">
+              {openFile.message ?? "此文件类型只在目录树中展示，不能当作 Markdown 编辑。"}
+            </p>
           </div>
         ) : active ? (
           <NoteEditor
             key={`${active.id}:${defaultEditorMode}`}
             note={active}
             defaultMode={defaultEditorMode}
-            imageBaseDir={assetDir}
+            imageBaseDir={noteAssetDir}
             imageStem={active.title}
             onChange={(patch) => onChange(active.id, patch)}
             onDelete={() => onDelete(active.id)}
           />
         ) : (
-          <p className="empty knowledge__empty">选择或新建一篇笔记，或导入一个本地目录。</p>
+          <p className="empty knowledge__empty">
+            选择或新建一篇笔记，或导入一个本地目录。
+          </p>
         )}
       </div>
     </section>
@@ -289,7 +300,12 @@ function PlainTextFile({
   return (
     <div className="note-editor">
       <header className="note-editor__toolbar">
-        <input className="note-editor__title" aria-label="文件名" value={title} readOnly />
+        <input
+          className="note-editor__title"
+          aria-label="文件名"
+          value={title}
+          readOnly
+        />
       </header>
       <p className="knowledge__path" title={path}>
         {path}
@@ -310,8 +326,6 @@ function ImageFile({ path, title }: { path: string; title: string }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let cancel = false;
-    setUrl(null);
-    setError(null);
     void readImageDataUrl(path)
       .then((next) => {
         if (!cancel) setUrl(next);

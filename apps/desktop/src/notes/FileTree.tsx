@@ -10,7 +10,13 @@ type Props = {
   onRemoveRoot: (path: string) => void;
 };
 
-export function FileTree({ roots, activePath, refreshToken, onOpen, onRemoveRoot }: Props) {
+export function FileTree({
+  roots,
+  activePath,
+  refreshToken,
+  onOpen,
+  onRemoveRoot,
+}: Props) {
   if (roots.length === 0) return null;
   return (
     <div className="knowledge__tree" aria-label="导入的目录">
@@ -57,10 +63,11 @@ function DirNode({
   useEffect(() => {
     if (!open) return;
     let cancel = false;
-    setError(null);
     listDirectory(path)
       .then((rows) => {
-        if (!cancel) setEntries(rows);
+        if (cancel) return;
+        setEntries(rows);
+        setError(null);
       })
       .catch((err: unknown) => {
         if (!cancel) setError(err instanceof Error ? err.message : "无法读取目录");
@@ -119,7 +126,9 @@ function DirNode({
                 key={entry.path}
                 type="button"
                 className={
-                  activePath === entry.path ? "knowledge__file is-active" : "knowledge__file"
+                  activePath === entry.path
+                    ? "knowledge__file is-active"
+                    : "knowledge__file"
                 }
                 style={{ paddingLeft: 28 + (depth + 1) * 14 }}
                 title={entry.path}

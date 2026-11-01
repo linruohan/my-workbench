@@ -82,11 +82,25 @@ describe("knowledge images", () => {
 
 describe("knowledge headings", () => {
   it("numbers h1 through h8 and resets lower levels", () => {
-    const source = ["# A", "## B", "### C", "## D", "####### G", "######## H", "# E"].join(
-      "\n",
-    );
+    const source = [
+      "# A",
+      "## B",
+      "### C",
+      "## D",
+      "####### G",
+      "######## H",
+      "# E",
+    ].join("\n");
     const labels = headingMeta(source).map((item) => item?.label ?? null);
-    expect(labels).toEqual(["1", "1.1", "1.1.1", "1.2", "1.2.0.0.0.0.1", "1.2.0.0.0.0.1.1", "2"]);
+    expect(labels).toEqual([
+      "1",
+      "1.1",
+      "1.1.1",
+      "1.2",
+      "1.2.0.0.0.0.1",
+      "1.2.0.0.0.0.1.1",
+      "2",
+    ]);
   });
 
   it("highlights headings without numbering inside fences", () => {

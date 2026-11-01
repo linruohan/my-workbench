@@ -63,36 +63,46 @@ export function NoteEditor({
   const syncing = useRef(false);
   const prepared = useMemo(() => extractImageSlots(note.bodyMd), [note.bodyMd]);
   const highlighted = useMemo(() => highlightMarkdown(note.bodyMd), [note.bodyMd]);
-  const [urls, setUrls] = useState<Array<string | null>>([]);
+  const remoteUrls = useMemo(
+    () =>
+      prepared.slots.map((slot) => {
+        const target = resolveImageTarget(slot.dest, imageBaseDir);
+        return target.kind === "remote" ? target.url : null;
+      }),
+    [prepared, imageBaseDir],
+  );
+  const slotKey = remoteUrls
+    .map((url, index) => url ?? prepared.slots[index]?.dest ?? "")
+    .join("\0");
+  const [local, setLocal] = useState<{ key: string; urls: Array<string | null> }>({
+    key: "",
+    urls: [],
+  });
+  const urls = remoteUrls.map(
+    (url, index) => url ?? (local.key === slotKey ? (local.urls[index] ?? null) : null),
+  );
 
   useEffect(() => {
-    let cancel = false;
-    const sync = prepared.slots.map((slot) => {
-      const target = resolveImageTarget(slot.dest, imageBaseDir);
-      return target.kind === "remote" ? target.url : null;
-    });
-    setUrls(sync);
     if (!isTauriRuntime()) return;
-    if (sync.every((url, index) => url || !prepared.slots[index]?.dest)) return;
+    if (remoteUrls.every((url, index) => url || !prepared.slots[index]?.dest)) return;
+    let cancel = false;
+    const key = slotKey;
     void (async () => {
-      const next = [...sync];
+      const next: Array<string | null> = prepared.slots.map(() => null);
       for (let index = 0; index < prepared.slots.length; index += 1) {
-        if (next[index]) continue;
+        if (remoteUrls[index]) continue;
         const dest = prepared.slots[index]?.dest;
         if (!dest) continue;
         next[index] = await resolveImageSrc(dest, imageBaseDir);
       }
-      if (!cancel) setUrls(next);
+      if (!cancel) setLocal({ key, urls: next });
     })();
     return () => {
       cancel = true;
     };
-  }, [prepared, imageBaseDir]);
+  }, [prepared, imageBaseDir, remoteUrls, slotKey]);
 
-  const html = useMemo(
-    () => renderMarkdown(note.bodyMd, urls),
-    [note.bodyMd, urls],
-  );
+  const html = useMemo(() => renderMarkdown(note.bodyMd, urls), [note.bodyMd, urls]);
   const inlineImages = urls.filter((url): url is string => Boolean(url));
 
   const syncScroll = (from: "source" | "preview") => {
@@ -204,39 +214,39 @@ export function NoteEditor({
         {mode !== "preview" ? (
           <div className="md-editor">
             <div className="md-editor__pane">
-            <pre ref={highlightRef} className="md-editor__hl" aria-hidden="true">
-              {highlighted.map((line, index) => (
-                <span
-                  key={index}
-                  className={line.level ? `md-line is-h${line.level}` : "md-line"}
-                >
-                  {line.numberLabel ? (
-                    <span className="md-num">{line.numberLabel}</span>
-                  ) : null}
-                  {line.segs.map((seg, segIndex) =>
-                    seg.kind === "text" ? (
-                      <span key={segIndex}>{seg.text}</span>
-                    ) : (
-                      <span key={segIndex} className={`md-k-${seg.kind}`}>
-                        {seg.text}
-                      </span>
-                    ),
-                  )}
-                  {line.segs.length === 0 ? " " : null}
-                </span>
-              ))}
-            </pre>
-            <textarea
-              ref={sourceRef}
-              className="note-editor__source md-editor__input"
-              aria-label="Markdown 源码"
-              spellCheck={false}
-              value={note.bodyMd}
-              placeholder="用 Markdown 书写… 支持标题、图片和粘贴截图"
-              onChange={(e) => onChange({ bodyMd: e.target.value })}
-              onScroll={onSourceScroll}
-              onPaste={onPaste}
-            />
+              <pre ref={highlightRef} className="md-editor__hl" aria-hidden="true">
+                {highlighted.map((line, index) => (
+                  <span
+                    key={index}
+                    className={line.level ? `md-line is-h${line.level}` : "md-line"}
+                  >
+                    {line.numberLabel ? (
+                      <span className="md-num">{line.numberLabel}</span>
+                    ) : null}
+                    {line.segs.map((seg, segIndex) =>
+                      seg.kind === "text" ? (
+                        <span key={segIndex}>{seg.text}</span>
+                      ) : (
+                        <span key={segIndex} className={`md-k-${seg.kind}`}>
+                          {seg.text}
+                        </span>
+                      ),
+                    )}
+                    {line.segs.length === 0 ? " " : null}
+                  </span>
+                ))}
+              </pre>
+              <textarea
+                ref={sourceRef}
+                className="note-editor__source md-editor__input"
+                aria-label="Markdown 源码"
+                spellCheck={false}
+                value={note.bodyMd}
+                placeholder="用 Markdown 书写… 支持标题、图片和粘贴截图"
+                onChange={(e) => onChange({ bodyMd: e.target.value })}
+                onScroll={onSourceScroll}
+                onPaste={onPaste}
+              />
             </div>
             {mode === "source" && inlineImages.length > 0 ? (
               <div className="md-inline-images" aria-label="文中图片">

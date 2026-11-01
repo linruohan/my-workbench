@@ -22,7 +22,12 @@ type BlockState = {
 };
 
 /** ATX headings from one to eight hashes. markdown-it itself stops at h6. */
-function atxHeading(state: BlockState, startLine: number, _endLine: number, silent: boolean): boolean {
+function atxHeading(
+  state: BlockState,
+  startLine: number,
+  _endLine: number,
+  silent: boolean,
+): boolean {
   const src = state.src;
   if ((state.sCount?.[startLine] ?? 0) - (state.blkIndent ?? 0) >= 4) return false;
   const start = (state.bMarks[startLine] ?? 0) + (state.tShift[startLine] ?? 0);
@@ -40,9 +45,13 @@ function atxHeading(state: BlockState, startLine: number, _endLine: number, sile
   if (pos < max && after !== 0x20 && after !== 0x09) return false;
   if (silent) return true;
 
-  while (pos < max && (src.charCodeAt(pos) === 0x20 || src.charCodeAt(pos) === 0x09)) pos += 1;
+  while (pos < max && (src.charCodeAt(pos) === 0x20 || src.charCodeAt(pos) === 0x09))
+    pos += 1;
   let end = max;
-  while (end > pos && (src.charCodeAt(end - 1) === 0x20 || src.charCodeAt(end - 1) === 0x09)) {
+  while (
+    end > pos &&
+    (src.charCodeAt(end - 1) === 0x20 || src.charCodeAt(end - 1) === 0x09)
+  ) {
     end -= 1;
   }
   let hashes = end;
@@ -53,7 +62,10 @@ function atxHeading(state: BlockState, startLine: number, _endLine: number, sile
     (src.charCodeAt(hashes - 1) === 0x20 || src.charCodeAt(hashes - 1) === 0x09)
   ) {
     end = hashes;
-    while (end > pos && (src.charCodeAt(end - 1) === 0x20 || src.charCodeAt(end - 1) === 0x09)) {
+    while (
+      end > pos &&
+      (src.charCodeAt(end - 1) === 0x20 || src.charCodeAt(end - 1) === 0x09)
+    ) {
       end -= 1;
     }
   }
@@ -79,24 +91,40 @@ const md = new MarkdownIt({
   typographer: true,
 });
 
-md.block.ruler.at("heading", atxHeading as unknown as (state: unknown, start: number, end: number, silent: boolean) => boolean);
+md.block.ruler.at(
+  "heading",
+  atxHeading as unknown as (
+    state: unknown,
+    start: number,
+    end: number,
+    silent: boolean,
+  ) => boolean,
+);
 
 function escapeAttr(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
 function isDirectUrl(dest: string): boolean {
-  return /^https?:\/\//i.test(dest) || /^data:image\//i.test(dest) || dest.startsWith("//");
+  return (
+    /^https?:\/\//i.test(dest) || /^data:image\//i.test(dest) || dest.startsWith("//")
+  );
 }
 
-function applyImages(html: string, slots: ImageSlot[], imageUrls?: Array<string | null>): string {
+function applyImages(
+  html: string,
+  slots: ImageSlot[],
+  imageUrls?: Array<string | null>,
+): string {
   return html.replace(/src="wbimg-(\d+)"/g, (_full, num: string) => {
     const index = Number(num);
     const slot = slots[index];
     const provided = imageUrls?.[index];
     const url = provided || (slot && isDirectUrl(slot.dest) ? slot.dest : "");
     const style =
-      slot?.scale != null ? ` style="width:${Math.round(slot.scale * 100)}%;height:auto"` : "";
+      slot?.scale != null
+        ? ` style="width:${Math.round(slot.scale * 100)}%;height:auto"`
+        : "";
     if (!url) return 'src=""';
     return `src="${escapeAttr(url)}"${style}`;
   });

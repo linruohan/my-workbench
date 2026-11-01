@@ -6,8 +6,7 @@ export type ImageSlot = {
 };
 
 export type ImageTarget =
-  | { kind: "remote"; url: string }
-  | { kind: "local"; candidates: string[] };
+  { kind: "remote"; url: string } | { kind: "local"; candidates: string[] };
 
 export type HighlightKind =
   | "text"
@@ -173,7 +172,8 @@ export function parentDir(path: string): string {
 export function normalizePath(path: string): string {
   const unc = path.startsWith("\\\\") || path.startsWith("//");
   const drive = /^[a-zA-Z]:/.exec(path)?.[0] ?? "";
-  const absolute = unc || drive.length > 0 || path.startsWith("/") || path.startsWith("\\");
+  const absolute =
+    unc || drive.length > 0 || path.startsWith("/") || path.startsWith("\\");
   const sep = path.includes("\\") ? "\\" : "/";
   const rest = drive ? path.slice(drive.length) : path;
   const rawParts = rest.split(/[/\\]/).filter((part) => part.length > 0 && part !== ".");
@@ -244,7 +244,10 @@ export function imageDestination(raw: string): string {
   return trimmed;
 }
 
-export function parseHtmlImage(tag: string): { src: string | null; scale: number | null } {
+export function parseHtmlImage(tag: string): {
+  src: string | null;
+  scale: number | null;
+} {
   const match = /src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag);
   if (!match) return { src: null, scale: null };
   const src = (match[1] ?? match[2] ?? match[3] ?? "").trim();
@@ -325,7 +328,10 @@ function fenceChar(line: string): string | null {
   return match?.[2]?.[0] ?? null;
 }
 
-export function extractImageSlots(source: string): { markdown: string; slots: ImageSlot[] } {
+export function extractImageSlots(source: string): {
+  markdown: string;
+  slots: ImageSlot[];
+} {
   const slots: ImageSlot[] = [];
   const lines = source.split(/\r?\n/);
   let fence: string | null = null;
@@ -341,7 +347,7 @@ export function extractImageSlots(source: string): { markdown: string; slots: Im
     const htmlRe = new RegExp(HTML_IMAGE_RE.source, "gi");
     let next = line.replace(mdRe, (_full, alt: string, inner: string) => {
       const dest = imageDestination(inner);
-      if (!dest) return full;
+      if (!dest) return _full;
       const id = slots.length;
       slots.push({ dest, scale: null });
       return `![${alt}](wbimg-${id})`;
@@ -358,7 +364,9 @@ export function extractImageSlots(source: string): { markdown: string; slots: Im
   return { markdown: out.join("\n"), slots };
 }
 
-export function headingMeta(source: string): Array<{ level: number; label: string } | null> {
+export function headingMeta(
+  source: string,
+): Array<{ level: number; label: string } | null> {
   const lines = source.split(/\r?\n/);
   const counts = [0, 0, 0, 0, 0, 0, 0, 0];
   let fence: string | null = null;
@@ -489,7 +497,7 @@ export function highlightMarkdown(source: string): HighlightLine[] {
         numberLabel: heading.label,
         segs: [
           { text: match?.[1] ?? "", kind: "hash" },
-          { text: match?.[2] ?? "", kind: (`h${heading.level}` as HighlightKind) },
+          { text: match?.[2] ?? "", kind: `h${heading.level}` as HighlightKind },
         ],
       };
     }

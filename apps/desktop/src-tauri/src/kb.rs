@@ -8,7 +8,7 @@ const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct KbEntry {
+pub struct KbEntry {
     name: String,
     path: String,
     is_dir: bool,

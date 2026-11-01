@@ -20,7 +20,9 @@ describe("renderMarkdown", () => {
   });
 
   it("keeps html image zoom as a width style", () => {
-    const html = renderMarkdown('<img src="https://example.com/a.png" style="zoom: 50%">');
+    const html = renderMarkdown(
+      '<img src="https://example.com/a.png" style="zoom: 50%">',
+    );
     expect(html).toContain('src="https://example.com/a.png"');
     expect(html).toContain("width:50%");
   });

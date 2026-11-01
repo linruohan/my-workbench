@@ -21,10 +21,7 @@
     "allow-kb-fs",
     {
       "identifier": "fs:scope",
-      "allow": [
-        { "path": "$DATA/my-workbench" },
-        { "path": "$DATA/my-workbench/**" }
-      ]
+      "allow": [{ "path": "$DATA/my-workbench" }, { "path": "$DATA/my-workbench/**" }]
     }
   ]
 }

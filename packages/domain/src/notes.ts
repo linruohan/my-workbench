@@ -26,10 +26,7 @@ export function patchNote(
 ): Note {
   return {
     ...note,
-    title:
-      patch.title !== undefined
-        ? patch.title.trim() || "未命名笔记"
-        : note.title,
+    title: patch.title !== undefined ? patch.title.trim() || "未命名笔记" : note.title,
     bodyMd: patch.bodyMd !== undefined ? patch.bodyMd : note.bodyMd,
     projectId: patch.projectId !== undefined ? patch.projectId : note.projectId,
     updatedAt: nowMs,
