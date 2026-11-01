@@ -395,67 +395,69 @@ export function TaskEditor({
           ) : null}
 
           {canRepeat && (panel === "repeat" || draft.repeat) ? (
-            <div className="task-editor__panel" ref={repeatMenuRef}>
-              {draft.repeat ? (
-                <ScheduleRow
-                  schedule={draft.repeat}
-                  onChange={(repeat) => patch({ repeat })}
-                  onDelete={() => {
-                    patch({ repeat: null });
-                    setPanel("none");
-                  }}
-                />
-              ) : (
-                <>
-                  <p className="schedule-empty">
-                    未设置重复。完成后可按相同规则生成下一次。
-                  </p>
-                  <button
-                    type="button"
-                    className="schedule-add"
-                    aria-expanded={repeatMenuOpen}
-                    onClick={() => setRepeatMenuOpen((v) => !v)}
-                  >
-                    + 添加重复
-                  </button>
-                  {repeatMenuOpen ? (
-                    <ul
-                      className="schedule-menu"
-                      role="menu"
-                      aria-label="添加重复"
+            <div className="task-editor__panel">
+              <div className="schedule-board" ref={repeatMenuRef}>
+                {draft.repeat ? (
+                  <ScheduleRow
+                    schedule={draft.repeat}
+                    onChange={(repeat) => patch({ repeat })}
+                    onDelete={() => {
+                      patch({ repeat: null });
+                      setPanel("none");
+                    }}
+                  />
+                ) : (
+                  <>
+                    <p className="schedule-empty">
+                      未设置重复。完成后可按相同规则生成下一次。
+                    </p>
+                    <button
+                      type="button"
+                      className="schedule-add"
+                      aria-expanded={repeatMenuOpen}
+                      onClick={() => setRepeatMenuOpen((v) => !v)}
                     >
-                      {PRESETS.map((preset) => (
-                        <li key={preset}>
+                      + 添加重复
+                    </button>
+                    {repeatMenuOpen ? (
+                      <ul
+                        className="schedule-menu"
+                        role="menu"
+                        aria-label="添加重复"
+                      >
+                        {PRESETS.map((preset) => (
+                          <li key={preset}>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                patch({
+                                  repeat: makePresetSchedule(preset),
+                                });
+                                setRepeatMenuOpen(false);
+                              }}
+                            >
+                              {timedPresetLabel(preset)}
+                            </button>
+                          </li>
+                        ))}
+                        <li>
                           <button
                             type="button"
                             role="menuitem"
                             onClick={() => {
-                              patch({
-                                repeat: makePresetSchedule(preset),
-                              });
+                              patch({ repeat: defaultCustomSchedule() });
                               setRepeatMenuOpen(false);
                             }}
                           >
-                            {timedPresetLabel(preset)}
+                            自定义
                           </button>
                         </li>
-                      ))}
-                      <li>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            patch({ repeat: defaultCustomSchedule() });
-                            setRepeatMenuOpen(false);
-                          }}
-                        >
-                          自定义
-                        </button>
-                      </li>
-                    </ul>
-                  ) : null}
-                </>
-              )}
+                      </ul>
+                    ) : null}
+                  </>
+                )}
+              </div>
             </div>
           ) : null}
 
