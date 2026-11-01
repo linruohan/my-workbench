@@ -52,7 +52,7 @@ export function noteEditorModeLabel(mode: NoteEditorMode): string {
 export function inferNoteTitleFromBody(bodyMd: string, fallback = "未命名笔记"): string {
   const lines = bodyMd.split(/\r?\n/);
   for (const line of lines) {
-    const heading = /^#{1,6}\s+(.+)$/.exec(line.trim());
+    const heading = /^#{1,8}\s+(.+)$/.exec(line.trim());
     if (heading?.[1]) return heading[1].trim().slice(0, 120);
     const plain = line.trim();
     if (plain) return plain.replace(/^[*_`>\-\s]+/, "").slice(0, 120) || fallback;
