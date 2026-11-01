@@ -5,13 +5,16 @@ import {
   clearPlanFields,
   collectDueReminders,
   createId,
+  createNoteDraft,
   DomainError,
   INBOX_PROJECT_ID,
   isPlannerMember,
   isScheduleMember,
+  patchNote,
   selectTodayTasks,
   settleTimerSegment,
   sumTimeSpentOnDay,
+  type Note,
   type ProjectBucket,
   type ReminderOptionId,
   type SchedulePatch,
@@ -31,6 +34,7 @@ export class MemoryWorkbenchRepository {
   ]);
   private buckets = new Map<string, ProjectBucket>();
   private todayOrder: string[] = [];
+  private notes = new Map<string, Note>();
   private notifications: Array<{
     id: string;
     kind: string;
@@ -267,6 +271,41 @@ export class MemoryWorkbenchRepository {
     return { id, title };
   }
 
+  listNotes(): Note[] {
+    return [...this.notes.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  getNote(id: string): Note | null {
+    return this.notes.get(id) ?? null;
+  }
+
+  createNote(input: {
+    title?: string;
+    bodyMd?: string;
+    projectId?: string | null;
+    nowMs?: number;
+  }): Note {
+    const note = createNoteDraft(input);
+    this.notes.set(note.id, note);
+    return note;
+  }
+
+  updateNote(
+    id: string,
+    patch: { title?: string; bodyMd?: string; projectId?: string | null },
+    nowMs = Date.now(),
+  ): Note {
+    const current = this.notes.get(id);
+    if (!current) throw new DomainError(`note not found: ${id}`);
+    const next = patchNote(current, patch, nowMs);
+    this.notes.set(id, next);
+    return next;
+  }
+
+  deleteNote(id: string): void {
+    this.notes.delete(id);
+  }
+
   /** Persist snapshot to a local JSON string (for localStorage). */
   exportSnapshot(): string {
     return JSON.stringify({
@@ -275,6 +314,7 @@ export class MemoryWorkbenchRepository {
       buckets: [...this.buckets.entries()],
       todayOrder: this.todayOrder,
       notifications: this.notifications,
+      notes: [...this.notes.values()],
     });
   }
 
@@ -292,11 +332,13 @@ export class MemoryWorkbenchRepository {
         fireAt: number;
         refId: string | null;
       }>;
+      notes?: Note[];
     };
     this.tasks = new Map(data.tasks.map((t) => [t.id, t]));
     this.projects = new Map(data.projects.map((p) => [p.id, p]));
     this.buckets = new Map(data.buckets);
     this.todayOrder = data.todayOrder ?? [];
     this.notifications = data.notifications ?? [];
+    this.notes = new Map((data.notes ?? []).map((n) => [n.id, n]));
   }
 }

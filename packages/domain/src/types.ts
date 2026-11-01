@@ -62,6 +62,18 @@ export interface CalendarEvent {
   notes: string;
 }
 
+export interface Note {
+  id: string;
+  projectId: string | null;
+  title: string;
+  bodyMd: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Typora-like editor presentation modes. */
+export type NoteEditorMode = "live" | "source" | "preview";
+
 export interface AppNotification {
   id: string;
   kind: NotificationKind;

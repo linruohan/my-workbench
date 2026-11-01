@@ -1,20 +1,29 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   formatLocalDay,
+  inferNoteTitleFromBody,
   parseQuickCapture,
   ReminderUiCooldown,
   type Task,
 } from "@wb/domain";
 import { createPersistedStore, saveStore } from "./lib/persistence";
+import { KnowledgeView } from "./notes/KnowledgeView";
 import { ThemeToggle } from "./theme/ThemeToggle";
 
-type NavId = "today" | "planner" | "schedule" | "projects" | "notifications";
+type NavId =
+  | "today"
+  | "planner"
+  | "schedule"
+  | "projects"
+  | "knowledge"
+  | "notifications";
 
 const NAV: Array<{ id: NavId; label: string }> = [
   { id: "today", label: "今日" },
   { id: "planner", label: "计划" },
   { id: "schedule", label: "时间表" },
   { id: "projects", label: "任务" },
+  { id: "knowledge", label: "知识库" },
   { id: "notifications", label: "通知" },
 ];
 
@@ -23,6 +32,7 @@ export default function App() {
   const [nav, setNav] = useState<NavId>("today");
   const [tick, setTick] = useState(0);
   const [draft, setDraft] = useState("");
+  const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [cooldown] = useState(() => new ReminderUiCooldown());
   const [activeReminders, setActiveReminders] = useState<
     Array<{ taskId: string; title: string; remindAt: number; isDeadline: boolean }>
@@ -60,6 +70,7 @@ export default function App() {
   const scheduleTasks = store.listScheduleDay(today);
   const allTasks = store.listTasks().filter((t) => !t.isDone);
   const notifications = store.listNotifications();
+  const notes = store.listNotes();
 
   const capture = () => {
     const text = draft.trim();
@@ -114,6 +125,40 @@ export default function App() {
     );
   };
 
+  const createNote = () => {
+    const note = store.createNote({
+      title: "未命名笔记",
+      bodyMd: "# 未命名笔记\n\n",
+      nowMs: Date.now(),
+    });
+    setActiveNoteId(note.id);
+    refresh();
+  };
+
+  const updateNote = (
+    id: string,
+    patch: { title?: string; bodyMd?: string },
+  ) => {
+    const current = store.getNote(id);
+    if (!current) return;
+    const nextPatch = { ...patch };
+    if (
+      patch.bodyMd !== undefined &&
+      (current.title === "未命名笔记" ||
+        current.title === inferNoteTitleFromBody(current.bodyMd))
+    ) {
+      nextPatch.title = inferNoteTitleFromBody(patch.bodyMd);
+    }
+    store.updateNote(id, nextPatch);
+    refresh();
+  };
+
+  const deleteNote = (id: string) => {
+    store.deleteNote(id);
+    setActiveNoteId((prev) => (prev === id ? null : prev));
+    refresh();
+  };
+
   let body;
   if (nav === "today") {
     body = (
@@ -146,6 +191,17 @@ export default function App() {
         onComplete={complete}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
+      />
+    );
+  } else if (nav === "knowledge") {
+    body = (
+      <KnowledgeView
+        notes={notes}
+        activeId={activeNoteId}
+        onSelect={setActiveNoteId}
+        onCreate={createNote}
+        onChange={updateNote}
+        onDelete={deleteNote}
       />
     );
   } else if (nav === "notifications") {
@@ -245,20 +301,22 @@ export default function App() {
           </div>
         ) : null}
         {body}
-        <footer className="composer">
-          <input
-            aria-label="快速捕获"
-            placeholder="写下任务，如：明天 下午3:00 评审 提前15分钟"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") capture();
-            }}
-          />
-          <button type="button" className="primary" onClick={capture}>
-            添加
-          </button>
-        </footer>
+        {nav !== "knowledge" ? (
+          <footer className="composer">
+            <input
+              aria-label="快速捕获"
+              placeholder="写下任务，如：明天 下午3:00 评审 提前15分钟"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") capture();
+              }}
+            />
+            <button type="button" className="primary" onClick={capture}>
+              添加
+            </button>
+          </footer>
+        ) : null}
       </main>
     </div>
   );

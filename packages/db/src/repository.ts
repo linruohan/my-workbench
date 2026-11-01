@@ -6,13 +6,16 @@ import {
   clearPlanFields,
   collectDueReminders,
   createId,
+  createNoteDraft,
   DomainError,
   INBOX_PROJECT_ID,
   isPlannerMember,
   isScheduleMember,
+  patchNote,
   selectTodayTasks,
   settleTimerSegment,
   sumTimeSpentOnDay,
+  type Note,
   type ProjectBucket,
   type ReminderOptionId,
   type SchedulePatch,
@@ -402,5 +405,73 @@ export class WorkbenchRepository {
       )
       .run(id, title, nowMs, nowMs);
     return { id, title };
+  }
+
+  listNotes(): Note[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM notes ORDER BY updated_at DESC`)
+      .all() as Array<{
+      id: string;
+      project_id: string | null;
+      title: string;
+      body_md: string;
+      created_at: number;
+      updated_at: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      title: r.title,
+      bodyMd: r.body_md,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+  }
+
+  getNote(id: string): Note | null {
+    return this.listNotes().find((n) => n.id === id) ?? null;
+  }
+
+  createNote(input: {
+    title?: string;
+    bodyMd?: string;
+    projectId?: string | null;
+    nowMs?: number;
+  }): Note {
+    const note = createNoteDraft(input);
+    this.db
+      .prepare(
+        `INSERT INTO notes (id, project_id, title, body_md, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        note.id,
+        note.projectId,
+        note.title,
+        note.bodyMd,
+        note.createdAt,
+        note.updatedAt,
+      );
+    return note;
+  }
+
+  updateNote(
+    id: string,
+    patch: { title?: string; bodyMd?: string; projectId?: string | null },
+    nowMs = Date.now(),
+  ): Note {
+    const current = this.getNote(id);
+    if (!current) throw new DomainError(`note not found: ${id}`);
+    const next = patchNote(current, patch, nowMs);
+    this.db
+      .prepare(
+        `UPDATE notes SET project_id = ?, title = ?, body_md = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(next.projectId, next.title, next.bodyMd, next.updatedAt, id);
+    return next;
+  }
+
+  deleteNote(id: string): void {
+    this.db.prepare(`DELETE FROM notes WHERE id = ?`).run(id);
   }
 }

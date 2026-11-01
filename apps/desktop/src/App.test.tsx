@@ -34,4 +34,20 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "今日" }));
     expect(screen.getByText("写周报")).toBeInTheDocument();
   });
+
+  it("creates and previews a note in knowledge", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+
+    await user.click(screen.getByRole("button", { name: "知识库" }));
+    await user.click(screen.getByRole("button", { name: "新建" }));
+    expect(screen.getByLabelText("Markdown 源码")).toBeInTheDocument();
+    expect(screen.getByLabelText("预览")).toBeInTheDocument();
+
+    const source = screen.getByLabelText("Markdown 源码");
+    await user.clear(source);
+    await user.type(source, "# 架构笔记{Enter}{Enter}本地优先");
+    expect(screen.getByLabelText("预览")).toHaveTextContent("架构笔记");
+    expect(screen.getByLabelText("预览")).toHaveTextContent("本地优先");
+  });
 });
