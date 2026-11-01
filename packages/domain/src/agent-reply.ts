@@ -75,6 +75,17 @@ export function formatAgentMoment(ms: number, nowMs: number): string {
   return `${formatAgentDay(formatLocalDay(ms), nowMs)} ${hh}:${mm}`;
 }
 
+/** Empty-thread greeting from the device's local hour. 23:00–04:59 is late night. */
+export function agentEmptyGreeting(hour: number): string {
+  const h = Math.floor(hour);
+  if (h >= 5 && h < 9) return "早上好呀，新的一天开始啦";
+  if (h >= 9 && h < 12) return "上午好呀，有什么想让我帮忙的吗";
+  if (h >= 12 && h < 14) return "中午好呀，要不要先休息一下";
+  if (h >= 14 && h < 18) return "下午好呀，接下来交给我吧";
+  if (h >= 18 && h < 23) return "晚上好呀，今天辛苦啦";
+  return "夜深啦，别忘了照顾好自己哦";
+}
+
 /** Rewrite stored YYYY-MM-DD times for the current day. Stored text stays absolute. */
 export function relativizeScheduleText(text: string, nowMs: number): string {
   return text.replace(

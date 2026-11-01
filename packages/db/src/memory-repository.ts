@@ -574,6 +574,20 @@ export class MemoryWorkbenchRepository {
     return this.agentMessages.filter((message) => message.threadId === threadId);
   }
 
+  /** Drop one message and everything after it in the same thread. */
+  deleteAgentMessagesFrom(threadId: string, messageId: string, nowMs = Date.now()): void {
+    const inThread = this.agentMessages.filter(
+      (message) => message.threadId === threadId,
+    );
+    const start = inThread.findIndex((message) => message.id === messageId);
+    if (start < 0) return;
+    const drop = new Set(inThread.slice(start).map((message) => message.id));
+    this.agentMessages = this.agentMessages.filter((message) => !drop.has(message.id));
+    const thread = this.agentThreads.get(threadId);
+    if (!thread) return;
+    this.agentThreads.set(threadId, { ...thread, queueJson: null, updatedAt: nowMs });
+  }
+
   addAgentApproval(input: {
     threadId: string;
     toolCallId?: string | null;

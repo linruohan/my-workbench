@@ -108,11 +108,7 @@ md.renderer.rules.fence = (tokens, idx) => {
   return renderCodeBlock(token.content, token.info || "");
 };
 
-function addInlinePair(
-  name: string,
-  marker: string,
-  tag: string,
-): void {
+function addInlinePair(name: string, marker: string, tag: string): void {
   md.inline.ruler.before("emphasis", name, (state, silent) => {
     const start = state.pos;
     if (state.src.slice(start, start + marker.length) !== marker) return false;
@@ -134,8 +130,7 @@ function addInlinePair(
 addInlinePair("mark", "==", "mark");
 addInlinePair("underline", "++", "u");
 
-const SAFE_SPAN_OPEN =
-  /^<span\s+style="((?:color|background-color)\s*:\s*[^";]+)"\s*>/i;
+const SAFE_SPAN_OPEN = /^<span\s+style="((?:color|background-color)\s*:\s*[^";]+)"\s*>/i;
 
 /** Allow only color / background-color spans (html remains disabled otherwise). */
 md.inline.ruler.before("emphasis", "safe_style_span", (state, silent) => {
@@ -228,4 +223,15 @@ function applyImages(
 export function renderMarkdown(source: string, imageUrls?: Array<string | null>): string {
   const { markdown, slots } = extractImageSlots(source || "");
   return applyImages(md.render(markdown), slots, imageUrls);
+}
+
+/** Chat replies keep single line breaks. Note rendering stays unchanged. */
+export function renderChatMarkdown(source: string): string {
+  const previous = md.options.breaks;
+  md.options.breaks = true;
+  try {
+    return renderMarkdown(source);
+  } finally {
+    md.options.breaks = previous;
+  }
 }

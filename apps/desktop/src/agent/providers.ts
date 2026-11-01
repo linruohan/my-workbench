@@ -73,6 +73,24 @@ export function addProvider(input: {
   return provider;
 }
 
+export function updateProvider(
+  id: string,
+  patch: { name?: string; baseURL?: string; apiKeyRequired?: boolean },
+): boolean {
+  if (id === BUILTIN_PROVIDER_ID) return false;
+  const store = readProviderStore();
+  const provider = store.providers.find((item) => item.id === id);
+  if (!provider || provider.kind === "builtin") return false;
+  if (patch.name != null) {
+    const name = patch.name.trim();
+    if (name) provider.name = name;
+  }
+  if (patch.baseURL != null) provider.baseURL = patch.baseURL.trim().replace(/\/+$/, "");
+  if (patch.apiKeyRequired != null) provider.apiKeyRequired = patch.apiKeyRequired;
+  writeProviderStore(store);
+  return true;
+}
+
 export function removeProvider(id: string): void {
   if (id === BUILTIN_PROVIDER_ID) return;
   const store = readProviderStore();
@@ -81,6 +99,40 @@ export function removeProvider(id: string): void {
     store.defaultModelRef = BUILTIN_MODEL_REF;
   }
   writeProviderStore(store);
+}
+
+export function addModel(providerId: string, modelId: string): string | null {
+  const id = modelId.trim();
+  if (!id || id.includes("/") || providerId === BUILTIN_PROVIDER_ID) return null;
+  const store = readProviderStore();
+  const provider = store.providers.find((item) => item.id === providerId);
+  if (!provider || provider.kind === "builtin") return null;
+  if (!provider.models[id]) {
+    provider.models = { ...provider.models, [id]: { context: 8192, output: 2048 } };
+  }
+  writeProviderStore(store);
+  return `${provider.id}/${id}`;
+}
+
+export type ModelGroup = {
+  id: string;
+  name: string;
+  kind: ProviderKind;
+  models: Array<{ id: string; ref: string }>;
+};
+
+export function modelGroups(store: ProviderStore = readProviderStore()): ModelGroup[] {
+  return store.providers
+    .filter((provider) => provider.enabled)
+    .map((provider) => ({
+      id: provider.id,
+      name: provider.name,
+      kind: provider.kind,
+      models: Object.keys(provider.models).map((id) => ({
+        id,
+        ref: `${provider.id}/${id}`,
+      })),
+    }));
 }
 
 export function setDefaultModel(modelRef: string): void {

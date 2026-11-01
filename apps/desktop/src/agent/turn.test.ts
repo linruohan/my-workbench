@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatLocalDay } from "@wb/domain";
 import { MemoryWorkbenchRepository } from "@wb/db/memory";
 import { settleAgentApproval, startAgentTurn } from "./turn";
@@ -86,4 +86,51 @@ describe("agent turn", () => {
     expect(reply).toContain(formatLocalDay(now));
     expect(reply).not.toContain('"tasks"');
   });
+
+  it("stops a remote turn before any tool runs", async () => {
+    const store = new MemoryWorkbenchRepository();
+    const thread = store.createAgentThread({
+      modelRef: "custom:test/m",
+      nowMs: now,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.reject(new DOMException("The operation was aborted.", "AbortError")),
+      ),
+    );
+    await startAgentTurn(
+      {
+        store,
+        threadId: thread.id,
+        nowMs: now,
+        signal: controller.signal,
+        providers: [
+          {
+            id: "custom:test",
+            name: "Test",
+            kind: "openai-chat-completions",
+            baseURL: "http://127.0.0.1:9/v1",
+            apiKeyRequired: false,
+            enabled: true,
+            models: { m: { context: 1024, output: 256 } },
+          },
+        ],
+      },
+      "你好",
+    );
+    const reply = store
+      .listAgentMessages(thread.id)
+      .map((message) => message.content)
+      .join("\n");
+    expect(reply).toContain("已停止");
+    expect(reply).not.toContain("模型不可用");
+    expect(store.listTasks()).toHaveLength(0);
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });

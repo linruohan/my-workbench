@@ -44,6 +44,7 @@ export type AgentTurnEnv = {
   onStep?: () => void;
   onDelta?: (text: string) => void;
   maxRounds?: number;
+  signal?: AbortSignal;
 };
 
 export async function startAgentTurn(
@@ -129,6 +130,11 @@ async function continueFromModel(
       ? await env.plan(latestUserText(transcript), transcript)
       : await requestModel(env, transcript);
   } catch (error) {
+    if (isStopped(error)) {
+      const partial = error instanceof AgentTurnStopped ? error.partial.trim() : "";
+      say(env, partial ? `${partial}\n\n已停止。` : "已停止。", nowMs);
+      return { effects: [] };
+    }
     const raw = error instanceof Error ? error.message : "模型请求失败";
     say(
       env,
@@ -270,10 +276,12 @@ async function requestModel(
     stream && request.body && typeof request.body === "object"
       ? { ...request.body, stream: true }
       : request.body;
+  if (env.signal?.aborted) throw new AgentTurnStopped("");
   const response = await fetch(request.url, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal: env.signal,
   });
   const secrets = apiKey ? [apiKey] : [];
   if (!response.ok) {
@@ -284,7 +292,7 @@ async function requestModel(
   }
   const type = response.headers.get("content-type") ?? "";
   if (stream && type.includes("text/event-stream") && response.body) {
-    return readOpenAiStream(response.body, secrets, env.onDelta);
+    return readOpenAiStream(response.body, secrets, env.onDelta, env.signal);
   }
   const raw = await response.text();
   let payload: unknown;
@@ -296,25 +304,48 @@ async function requestModel(
   return redactPlan(parseModelResponse(found.provider.kind, payload), secrets);
 }
 
+class AgentTurnStopped extends Error {
+  partial: string;
+  constructor(partial: string) {
+    super("已停止");
+    this.name = "AgentTurnStopped";
+    this.partial = partial;
+  }
+}
+
+function isStopped(error: unknown): boolean {
+  return (
+    error instanceof AgentTurnStopped ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
 async function readOpenAiStream(
   body: ReadableStream<Uint8Array>,
   secrets: string[],
   onDelta?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<AgentTurnPlan> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let carry = "";
   let acc = emptyOpenAiStream();
-  while (true) {
-    const step = await reader.read();
-    if (step.done) break;
-    carry += decoder.decode(step.value, { stream: true });
-    const taken = takeSseData(carry);
-    carry = taken.rest;
-    for (const event of taken.data) {
-      acc = reduceOpenAiStreamEvent(acc, event);
-      if (acc.text) onDelta?.(acc.text);
+  try {
+    while (true) {
+      if (signal?.aborted) throw new AgentTurnStopped(acc.text);
+      const step = await reader.read();
+      if (step.done) break;
+      carry += decoder.decode(step.value, { stream: true });
+      const taken = takeSseData(carry);
+      carry = taken.rest;
+      for (const event of taken.data) {
+        acc = reduceOpenAiStreamEvent(acc, event);
+        if (acc.text) onDelta?.(acc.text);
+      }
     }
+  } catch (error) {
+    if (isStopped(error)) throw new AgentTurnStopped(acc.text);
+    throw error;
   }
   return redactPlan(finishOpenAiStream(acc), secrets);
 }
