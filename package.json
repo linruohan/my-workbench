@@ -1,0 +1,28 @@
+{
+  "name": "my-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first personal workbench",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm run test -w @wb/domain && npm run test -w @wb/db && npm run test -w @wb/desktop",
+    "test:domain": "npm run test -w @wb/domain",
+    "test:db": "npm run test -w @wb/db",
+    "dev": "npm run dev -w @wb/desktop",
+    "build": "npm run build -w @wb/domain && npm run build -w @wb/db && npm run build -w @wb/desktop",
+    "typecheck": "npm run typecheck -w @wb/domain && npm run typecheck -w @wb/db && npm run typecheck -w @wb/desktop",
+    "tauri:dev": "npm run tauri:dev -w @wb/desktop",
+    "pack:win": "npm run tauri:build -w @wb/desktop",
+    "pack:check": "npm test && npm run build -w @wb/desktop"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true,
+    "esbuild@0.28.2": true
+  }
+}
