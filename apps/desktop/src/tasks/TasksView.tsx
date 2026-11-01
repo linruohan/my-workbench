@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   computeTaskStats,
   filterTasks,
@@ -49,7 +49,8 @@ type Props = {
   tags: Tag[];
   taskTagMap: Record<string, Tag[]>;
   buckets: Record<string, ProjectBucket>;
-  filterProjectId: string | null;
+  /** 项目视图下必填：每个项目只看自己的任务。 */
+  filterProjectId: string;
   viewMode: TasksViewMode;
   showCompleted: boolean;
   denseMeta?: boolean;
@@ -58,7 +59,6 @@ type Props = {
   activeTimerTaskId: string | null;
   timerElapsedMs: number;
   onViewModeChange: (mode: TasksViewMode) => void;
-  onFilterProject: (projectId: string | null) => void;
   onShowCompletedChange: (show: boolean) => void;
   onToggleDone: (task: Task) => void;
   onPlanToday: (task: Task) => void;
@@ -72,7 +72,6 @@ type Props = {
   onClearCompleted: (taskIds: string[]) => void;
   onCreateTag: (title: string) => Tag | null;
   onAddSubtask: (parentId: string, title: string) => void;
-  onCreate: (title: string) => void;
 };
 
 const VIEW_MODES: Array<{ id: TasksViewMode; label: string }> = [
@@ -96,7 +95,6 @@ export function TasksView({
   activeTimerTaskId,
   timerElapsedMs,
   onViewModeChange,
-  onFilterProject,
   onShowCompletedChange,
   onToggleDone,
   onPlanToday,
@@ -110,17 +108,14 @@ export function TasksView({
   onClearCompleted,
   onCreateTag,
   onAddSubtask,
-  onCreate,
 }: Props) {
   const initialPrefs = useMemo(() => readFilterPrefs(), []);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [createTitle, setCreateTitle] = useState("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<TaskStatusFilter>(initialPrefs.status);
   const [sortKey, setSortKey] = useState<TaskSortKey>(initialPrefs.sortKey);
   const [filterTagId, setFilterTagId] = useState<string | null>(null);
   const [today] = useState(() => formatLocalDay(Date.now()));
-  const createRef = useRef<HTMLInputElement>(null);
   const isStats = viewMode === "stats";
 
   useEffect(() => {
@@ -134,21 +129,11 @@ export function TasksView({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && editingId) {
         setEditingId(null);
-        return;
-      }
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        e.key.toLowerCase() === "n" &&
-        !editingId &&
-        !isStats
-      ) {
-        e.preventDefault();
-        createRef.current?.focus();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editingId, isStats]);
+  }, [editingId]);
 
   const projectTitles = useMemo(() => {
     const map: Record<string, string> = {};
@@ -156,10 +141,10 @@ export function TasksView({
     return map;
   }, [projects]);
 
-  const scopedTasks = useMemo(() => {
-    if (!filterProjectId) return tasks;
-    return tasks.filter((t) => t.projectId === filterProjectId);
-  }, [tasks, filterProjectId]);
+  const scopedTasks = useMemo(
+    () => tasks.filter((t) => t.projectId === filterProjectId),
+    [tasks, filterProjectId],
+  );
 
   const stats = useMemo(
     () => computeTaskStats(scopedTasks, { today }),
@@ -196,9 +181,7 @@ export function TasksView({
     ? listChildTasks(tasks, editing.id)
     : [];
 
-  const title = filterProjectId
-    ? (projectTitles[filterProjectId] ?? "任务")
-    : "全部任务";
+  const title = projectTitles[filterProjectId] ?? "项目";
 
   const confirmDelete = (taskId: string) => {
     if (
@@ -211,13 +194,6 @@ export function TasksView({
     setEditingId((prev) => (prev === taskId ? null : prev));
   };
 
-  const submitCreate = () => {
-    const text = createTitle.trim();
-    if (!text) return;
-    onCreate(text);
-    setCreateTitle("");
-  };
-
   const drillFromStats = (next: Exclude<TaskStatusFilter, "all">) => {
     setStatus(next);
     onViewModeChange("list");
@@ -227,7 +203,7 @@ export function TasksView({
   const openVisible = visible.filter((t) => !t.isDone);
 
   return (
-    <section className={editing ? "tasks panel tasks--editing" : "tasks panel"}>
+    <section className="tasks panel">
       <header className="tasks__header">
         <div className="tasks__title-row">
           <h1>{title}</h1>
@@ -236,24 +212,6 @@ export function TasksView({
           </span>
         </div>
         <div className="tasks__toolbar">
-          <label className="tasks__filter">
-            <span className="sr-only">筛选项目</span>
-            <select
-              aria-label="筛选项目"
-              value={filterProjectId ?? ""}
-              onChange={(e) =>
-                onFilterProject(e.target.value ? e.target.value : null)
-              }
-            >
-              <option value="">全部项目</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.title}
-                </option>
-              ))}
-            </select>
-          </label>
-
           {!isStats ? (
             <label className="tasks__check">
               <input
@@ -384,7 +342,7 @@ export function TasksView({
                 清空筛选
               </button>
             )}
-            <span className="tasks__bulk-hint">Esc 关闭编辑 · Ctrl+N 新建</span>
+            <span className="tasks__bulk-hint">Esc 关闭编辑 · Ctrl+N 底部输入</span>
           </div>
 
           <div className="tasks__content">
@@ -392,7 +350,7 @@ export function TasksView({
               {viewMode === "list" ? (
                 visible.length === 0 ? (
                   <p className="empty">
-                    没有匹配的任务。调整筛选，或在下方新建。
+                    没有匹配的任务。调整筛选，或用底部输入添加。
                   </p>
                 ) : (
                   <ul className="list" aria-label="任务列表">
@@ -400,11 +358,6 @@ export function TasksView({
                       <TaskRow
                         key={task.id}
                         task={task}
-                        projectTitle={
-                          filterProjectId
-                            ? undefined
-                            : projectTitles[task.projectId]
-                        }
                         tags={taskTagMap[task.id] ?? []}
                         childCount={listChildTasks(tasks, task.id).length}
                         denseMeta={denseMeta}
@@ -437,55 +390,35 @@ export function TasksView({
                   onPlanToday={onPlanToday}
                 />
               )}
-
-              <div className="tasks__create">
-                <input
-                  ref={createRef}
-                  aria-label="新建任务标题"
-                  placeholder="新建任务，回车添加（Ctrl+N）"
-                  value={createTitle}
-                  onChange={(e) => setCreateTitle(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") submitCreate();
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={submitCreate}
-                >
-                  添加
-                </button>
-              </div>
             </div>
-
-            {editing ? (
-              <TaskEditor
-                key={editing.id}
-                task={editing}
-                bucket={buckets[editing.id] ?? "active"}
-                projects={projects}
-                tags={tags}
-                selectedTagIds={(taskTagMap[editing.id] ?? []).map((t) => t.id)}
-                subtasks={editingSubtasks}
-                defaultRemind={defaultRemind}
-                onClose={() => setEditingId(null)}
-                onDelete={() => confirmDelete(editing.id)}
-                onDuplicate={() => {
-                  onDuplicateTask(editing.id);
-                  setEditingId(null);
-                }}
-                onCreateTag={onCreateTag}
-                onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
-                onToggleSubtask={onToggleDone}
-                onDeleteSubtask={(id) => confirmDelete(id)}
-                onSave={(draft) => {
-                  onSaveTask(editing.id, draft);
-                  setEditingId(null);
-                }}
-              />
-            ) : null}
           </div>
+
+          {editing ? (
+            <TaskEditor
+              key={editing.id}
+              task={editing}
+              bucket={buckets[editing.id] ?? "active"}
+              projects={projects}
+              tags={tags}
+              selectedTagIds={(taskTagMap[editing.id] ?? []).map((t) => t.id)}
+              subtasks={editingSubtasks}
+              defaultRemind={defaultRemind}
+              onClose={() => setEditingId(null)}
+              onDelete={() => confirmDelete(editing.id)}
+              onDuplicate={() => {
+                onDuplicateTask(editing.id);
+                setEditingId(null);
+              }}
+              onCreateTag={onCreateTag}
+              onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
+              onToggleSubtask={onToggleDone}
+              onDeleteSubtask={(id) => confirmDelete(id)}
+              onSave={(draft) => {
+                onSaveTask(editing.id, draft);
+                setEditingId(null);
+              }}
+            />
+          ) : null}
         </>
       )}
     </section>

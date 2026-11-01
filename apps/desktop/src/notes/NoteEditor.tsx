@@ -12,6 +12,7 @@ import {
   TEXT_COLOR_PRESETS,
   applyHeadingNumbers,
   blockDocOffset,
+  countDocLines,
   cutSelectedLines,
   dedupeSelectedLines,
   extractImageSlots,
@@ -21,6 +22,7 @@ import {
   isCompleteFenceBlock,
   joinMdBlocks,
   locateInBlocks,
+  locateLineInBlocks,
   normalizeMdBlocks,
   outdentMarkdownSelection,
   replaceAllMatches,
@@ -88,6 +90,120 @@ function autosize(area: HTMLTextAreaElement | null) {
   area.style.height = `${Math.max(area.scrollHeight, 28)}px`;
 }
 
+/** Caret line metrics inside a textarea value (for leaving the block at edges). */
+function caretLineInfo(text: string, pos: number) {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
+  const nextNl = text.indexOf("\n", pos);
+  const col = pos - lineStart;
+  return {
+    col,
+    isFirstLine: lineStart === 0,
+    isLastLine: nextNl === -1,
+  };
+}
+
+function caretOnLastLine(text: string, col: number): number {
+  const lastNl = text.lastIndexOf("\n");
+  const lineStart = lastNl + 1;
+  const lineLen = text.length - lineStart;
+  return lineStart + Math.min(Math.max(0, col), lineLen);
+}
+
+function caretOnFirstLine(text: string, col: number): number {
+  const firstNl = text.indexOf("\n");
+  const lineLen = firstNl === -1 ? text.length : firstNl;
+  return Math.min(Math.max(0, col), lineLen);
+}
+
+let measureCtx: CanvasRenderingContext2D | null = null;
+
+function textWidth(text: string, font: string): number {
+  if (!measureCtx) {
+    const canvas = document.createElement("canvas");
+    measureCtx = canvas.getContext("2d");
+  }
+  if (!measureCtx) return text.length * 8;
+  measureCtx.font = font;
+  return measureCtx.measureText(text).width;
+}
+
+function caretFromDomPoint(source: string, clientX: number, clientY: number): number | null {
+  type CaretPos = { offsetNode: Node; offset: number };
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => CaretPos | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  let node: Node | null = null;
+  let offset = 0;
+  if (doc.caretPositionFromPoint) {
+    const pos = doc.caretPositionFromPoint(clientX, clientY);
+    if (!pos) return null;
+    node = pos.offsetNode;
+    offset = pos.offset;
+  } else if (doc.caretRangeFromPoint) {
+    const range = doc.caretRangeFromPoint(clientX, clientY);
+    if (!range) return null;
+    node = range.startContainer;
+    offset = range.startOffset;
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+  const piece = node.textContent ?? "";
+  if (!piece) return source.length > 0 ? null : 0;
+  const before = piece.slice(0, Math.min(offset, piece.length));
+  // Prefer the occurrence nearest the full text node content.
+  let found = source.indexOf(piece);
+  if (found < 0) found = source.indexOf(before);
+  if (found < 0) {
+    const trimmed = piece.trim();
+    if (!trimmed) return null;
+    found = source.indexOf(trimmed);
+    if (found < 0) return null;
+    return Math.min(found + Math.min(offset, trimmed.length), source.length);
+  }
+  return Math.min(found + before.length, source.length);
+}
+
+/** Map a mouse click on the preview to a caret index in the markdown source. */
+function caretIndexFromClick(
+  source: string,
+  clientX: number,
+  clientY: number,
+  el: HTMLElement,
+): number {
+  if (!source) return 0;
+  const fromDom = caretFromDomPoint(source, clientX, clientY);
+  if (fromDom != null) return fromDom;
+
+  const style = window.getComputedStyle(el);
+  const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.75;
+  const padX = Number.parseFloat(style.paddingLeft) || 0;
+  const padY = Number.parseFloat(style.paddingTop) || 0;
+  const rect = el.getBoundingClientRect();
+  const x = Math.max(0, clientX - rect.left - padX);
+  const y = Math.max(0, clientY - rect.top - padY);
+  const lines = source.split("\n");
+  const lineIndex = Math.min(Math.max(0, Math.floor(y / lineHeight)), lines.length - 1);
+  let offset = 0;
+  for (let i = 0; i < lineIndex; i += 1) offset += (lines[i] ?? "").length + 1;
+  const line = lines[lineIndex] ?? "";
+  if (!line) return offset;
+  let lo = 0;
+  let hi = line.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (textWidth(line.slice(0, mid), font) <= x) lo = mid;
+    else hi = mid - 1;
+  }
+  // Snap to nearer edge between lo and lo+1.
+  if (lo < line.length) {
+    const left = textWidth(line.slice(0, lo), font);
+    const right = textWidth(line.slice(0, lo + 1), font);
+    if (x - left > right - x) lo += 1;
+  }
+  return offset + lo;
+}
+
 export function NoteEditor({
   note,
   onChange,
@@ -105,13 +221,21 @@ export function NoteEditor({
   const [findOpen, setFindOpen] = useState(false);
   const [find, setFind] = useState<FindReplaceState>(DEFAULT_FIND);
   const [findStatus, setFindStatus] = useState<string | null>(null);
+  const [gotoOpen, setGotoOpen] = useState(false);
+  const [gotoValue, setGotoValue] = useState("1");
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const gotoRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const pendingCaret = useRef<number | null>(null);
   const pendingSelection = useRef<{ start: number; end: number } | null>(null);
   const selectionScope = useRef<{ start: number; end: number } | null>(null);
+  const suppressBlur = useRef(false);
   const findFrom = useRef(0);
-  const noteIdRef = useRef(note.id);
+  const gPending = useRef(false);
+  const gTimer = useRef<number | null>(null);
+  const noteIdRef = useRef<string | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
   const prepared = useMemo(() => extractImageSlots(note.bodyMd), [note.bodyMd]);
 
   // Keep a stable block list while editing so fence edits do not re-split into empty blocks.
@@ -119,11 +243,15 @@ export function NoteEditor({
     if (noteIdRef.current !== note.id) {
       noteIdRef.current = note.id;
       setActive(null);
-      setBlocks(splitMdBlocks(note.bodyMd));
+      const numbered = applyHeadingNumbers(note.bodyMd);
+      const next = normalizeMdBlocks(splitMdBlocks(numbered));
+      setBlocks(next);
+      const body = joinMdBlocks(next);
+      if (body !== note.bodyMd) onChangeRef.current({ bodyMd: body });
       return;
     }
     if (active == null) {
-      setBlocks(splitMdBlocks(note.bodyMd));
+      setBlocks(normalizeMdBlocks(splitMdBlocks(note.bodyMd)));
     }
   }, [note.bodyMd, note.id, active]);
 
@@ -178,7 +306,9 @@ export function NoteEditor({
     if (active == null) return;
     const area = editRef.current;
     if (!area) return;
-    if (!findOpen) area.focus();
+    autosize(area);
+    if (findOpen) return;
+    area.focus({ preventScroll: true });
     const range = pendingSelection.current;
     if (range) {
       const start = Math.min(range.start, area.value.length);
@@ -186,28 +316,35 @@ export function NoteEditor({
       area.setSelectionRange(start, end);
       pendingSelection.current = null;
       pendingCaret.current = null;
-    } else {
-      const caret = pendingCaret.current;
-      if (caret != null) {
-        const pos = Math.min(caret, area.value.length);
-        area.setSelectionRange(pos, pos);
-        pendingCaret.current = null;
-      }
+      return;
     }
-    autosize(area);
+    const caret = pendingCaret.current;
+    if (caret != null) {
+      const pos = Math.min(Math.max(0, caret), area.value.length);
+      area.setSelectionRange(pos, pos);
+      pendingCaret.current = null;
+    } else {
+      // Empty blocks still need an explicit caret so the cursor paints.
+      const pos = Math.min(area.selectionStart, area.value.length);
+      area.setSelectionRange(pos, pos);
+    }
   }, [active, blocks, note.id, findOpen]);
 
-  const commitBody = (body: string, focus: number | null, caret?: number) => {
-    const numbered = applyHeadingNumbers(body);
-    const normalized = normalizeMdBlocks(splitMdBlocks(numbered));
+  const commitBlocks = (nextBlocks: string[], focus: number | null, caret?: number) => {
+    const normalized = normalizeMdBlocks(nextBlocks);
     if (caret != null) pendingCaret.current = caret;
     setBlocks(normalized);
     setActive(focus);
     onChange({ bodyMd: joinMdBlocks(normalized) });
   };
 
-  const commitBlocks = (nextBlocks: string[], focus: number | null, caret?: number) => {
-    commitBody(joinMdBlocks(normalizeMdBlocks(nextBlocks)), focus, caret);
+  /** Sync outline numbers into source when leaving edit (keeps render free of CSS counters). */
+  const commitNumbered = (nextBlocks: string[], focus: number | null) => {
+    const numbered = applyHeadingNumbers(joinMdBlocks(normalizeMdBlocks(nextBlocks)));
+    const normalized = normalizeMdBlocks(splitMdBlocks(numbered));
+    setBlocks(normalized);
+    setActive(focus);
+    onChange({ bodyMd: joinMdBlocks(normalized) });
   };
 
   const docText = () => joinMdBlocks(blocks);
@@ -402,23 +539,78 @@ export function NoteEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, [findOpen]);
 
+  const jumpToLine = (line1Based: number) => {
+    const list = normalizeMdBlocks(blocks);
+    const located = locateLineInBlocks(list, line1Based);
+    setBlocks(list);
+    pendingCaret.current = located.offset;
+    setActive(located.index);
+    setGotoOpen(false);
+    requestAnimationFrame(() => {
+      editRef.current?.scrollIntoView({ block: "center" });
+    });
+  };
+
+  const openGoto = () => {
+    setGotoValue("1");
+    setGotoOpen(true);
+    setFindOpen(false);
+  };
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey;
-      if (!mod) return;
       const target = event.target as HTMLElement | null;
       const inEditor = rootRef.current?.contains(target ?? null);
       if (!inEditor) return;
-      if (event.key.toLowerCase() === "f") {
+
+      if (mod && event.key.toLowerCase() === "f") {
         event.preventDefault();
         openFind(true);
+        return;
+      }
+      if (mod && event.key.toLowerCase() === "g") {
+        event.preventDefault();
+        openGoto();
+        return;
+      }
+      if (mod && event.key === "Home") {
+        event.preventDefault();
+        jumpToLine(1);
+        return;
+      }
+
+      // Vim-like `gg` → top (when not typing in an input/textarea).
+      const tag = target?.tagName;
+      const typing =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        (target?.isContentEditable ?? false);
+      if (!typing && !mod && (event.key === "g" || event.key === "G")) {
+        if (gPending.current) {
+          event.preventDefault();
+          gPending.current = false;
+          if (gTimer.current != null) window.clearTimeout(gTimer.current);
+          jumpToLine(1);
+        } else {
+          gPending.current = true;
+          if (gTimer.current != null) window.clearTimeout(gTimer.current);
+          gTimer.current = window.setTimeout(() => {
+            gPending.current = false;
+          }, 600);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // openFind closes over latest active/blocks via refs/state at call time
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, blocks]);
+
+  useEffect(() => {
+    if (!gotoOpen) return;
+    const id = requestAnimationFrame(() => gotoRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [gotoOpen]);
 
   const updateActiveBlock = (text: string) => {
     if (active == null) return;
@@ -431,27 +623,55 @@ export function NoteEditor({
   const finishEditing = () => {
     if (active == null) return;
     if (findOpen) return;
-    const normalized = normalizeMdBlocks(blocks);
-    setBlocks(normalized);
-    setActive(null);
     setColorMenu(null);
-    onChange({ bodyMd: joinMdBlocks(normalized) });
+    commitNumbered(blocks, null);
   };
 
-  const activate = (index: number) => {
+  const activate = (index: number, opts?: { renumber?: boolean; caret?: number }) => {
+    const renumber = opts?.renumber === true;
     let list = blocks;
-    if (active != null) {
-      list = normalizeMdBlocks(blocks);
+    if (active != null && renumber) {
+      const numbered = applyHeadingNumbers(joinMdBlocks(normalizeMdBlocks(blocks)));
+      list = normalizeMdBlocks(splitMdBlocks(numbered));
       setBlocks(list);
       onChange({ bodyMd: joinMdBlocks(list) });
     }
-    const target = blocks[index];
-    let next = Math.min(index, Math.max(0, list.length - 1));
-    if (target !== undefined) {
-      const found = list.findIndex((block) => block === target);
-      if (found >= 0) next = found;
-    }
+    // Prefer the requested index so duplicate/empty blocks do not snap to the first match.
+    const next = Math.min(Math.max(0, index), Math.max(0, list.length - 1));
+    if (opts?.caret != null) pendingCaret.current = opts.caret;
     setActive(next);
+  };
+
+  /** Move focus across blocks without renumbering (keeps arrow navigation stable). */
+  const moveToBlock = (index: number, caret: number) => {
+    suppressBlur.current = true;
+    activate(index, { renumber: false, caret });
+    requestAnimationFrame(() => {
+      suppressBlur.current = false;
+    });
+  };
+
+  /** Enter edit mode at the clicked character (no renumber — keeps click snappy). */
+  const beginEditAt = (
+    index: number,
+    caret: number,
+    event?: { preventDefault: () => void },
+  ) => {
+    event?.preventDefault();
+    suppressBlur.current = true;
+    pendingCaret.current = caret;
+    pendingSelection.current = null;
+    setActive(index);
+    requestAnimationFrame(() => {
+      const area = editRef.current;
+      if (area) {
+        area.focus({ preventScroll: true });
+        const pos = Math.min(Math.max(0, caret), area.value.length);
+        area.setSelectionRange(pos, pos);
+        autosize(area);
+      }
+      suppressBlur.current = false;
+    });
   };
 
   const applyWrap = (prefix: string, suffix = prefix) => {
@@ -517,6 +737,16 @@ export function NoteEditor({
       openFind(true);
       return;
     }
+    if (mod && event.key.toLowerCase() === "g") {
+      event.preventDefault();
+      openGoto();
+      return;
+    }
+    if (mod && event.key === "Home") {
+      event.preventDefault();
+      jumpToLine(1);
+      return;
+    }
     if (mod && event.key.toLowerCase() === "b") {
       event.preventDefault();
       applyWrap("**");
@@ -571,33 +801,20 @@ export function NoteEditor({
     }
 
     if (event.key === "Enter" && !event.shiftKey) {
-      const atEnd = start === end && end === value.length;
-      const singleLine = !value.includes("\n");
-      const heading = /^#{1,8}(\s|$)/.test(value);
-      const image = /^(!\[[^\]]*\]\([^)]*\)|<img\b)/i.test(value.trim());
-      // Finished code fence: create the next block instead of trailing blank lines.
-      if (atEnd && isCompleteFenceBlock(value)) {
-        event.preventDefault();
-        const nextBlocks = [...blocks];
-        nextBlocks[index] = value;
-        nextBlocks.splice(index + 1, 0, "");
-        commitBlocks(nextBlocks, index + 1, 0);
+      // Unclosed fence: keep typing inside the code block.
+      const openFence = /^ {0,3}(`{3,}|~{3,})/.test(value);
+      if (openFence && !isCompleteFenceBlock(value)) {
         return;
       }
-      if (atEnd && singleLine && (heading || image || value.trim() === "")) {
-        event.preventDefault();
-        const nextBlocks = [...blocks];
-        nextBlocks.splice(index + 1, 0, "");
-        commitBlocks(nextBlocks, index + 1, 0);
-        return;
-      }
-      if (atEnd && singleLine && !/^ {0,3}(`{3,}|~{3,})/.test(value)) {
-        event.preventDefault();
-        const nextBlocks = [...blocks];
-        nextBlocks.splice(index + 1, 0, "");
-        commitBlocks(nextBlocks, index + 1, 0);
-        return;
-      }
+      // Split at caret so every line (including new blank lines) is its own editable row.
+      event.preventDefault();
+      const before = value.slice(0, start);
+      const after = value.slice(end);
+      const nextBlocks = [...blocks];
+      nextBlocks[index] = before;
+      nextBlocks.splice(index + 1, 0, after);
+      commitBlocks(nextBlocks, index + 1, 0);
+      return;
     }
 
     if (event.key === "Backspace" && start === 0 && end === 0) {
@@ -619,20 +836,30 @@ export function NoteEditor({
       }
     }
 
-    if (event.key === "ArrowUp" && start === 0 && end === 0 && index > 0) {
-      event.preventDefault();
-      activate(index - 1);
-      pendingCaret.current = (blocks[index - 1] ?? "").length;
-    }
-    if (
-      event.key === "ArrowDown" &&
-      start === value.length &&
-      end === value.length &&
-      index < blocks.length - 1
-    ) {
-      event.preventDefault();
-      activate(index + 1);
-      pendingCaret.current = 0;
+    if (start === end) {
+      const line = caretLineInfo(value, start);
+      if (event.key === "ArrowUp" && line.isFirstLine && index > 0) {
+        event.preventDefault();
+        const prev = blocks[index - 1] ?? "";
+        moveToBlock(index - 1, caretOnLastLine(prev, line.col));
+        return;
+      }
+      if (event.key === "ArrowDown" && line.isLastLine && index < blocks.length - 1) {
+        event.preventDefault();
+        const next = blocks[index + 1] ?? "";
+        moveToBlock(index + 1, caretOnFirstLine(next, line.col));
+        return;
+      }
+      if (event.key === "ArrowLeft" && start === 0 && index > 0) {
+        event.preventDefault();
+        moveToBlock(index - 1, (blocks[index - 1] ?? "").length);
+        return;
+      }
+      if (event.key === "ArrowRight" && start === value.length && index < blocks.length - 1) {
+        event.preventDefault();
+        moveToBlock(index + 1, 0);
+        return;
+      }
     }
   };
 
@@ -743,6 +970,14 @@ export function NoteEditor({
           >
             查找
           </button>
+          <button
+            type="button"
+            title="跳转到行 Ctrl+G"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => openGoto()}
+          >
+            行号
+          </button>
           <div className="note-editor__swatch">
             <button
               type="button"
@@ -848,6 +1083,43 @@ export function NoteEditor({
         onReplaceAll={runReplaceAll}
       />
 
+      {gotoOpen ? (
+        <form
+          className="goto-bar"
+          aria-label="跳转到行"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const line = Number.parseInt(gotoValue, 10);
+            if (!Number.isFinite(line) || line < 1) return;
+            jumpToLine(Math.min(line, countDocLines(blocks)));
+          }}
+        >
+          <label className="goto-bar__field">
+            <span>行号:</span>
+            <input
+              ref={gotoRef}
+              type="number"
+              min={1}
+              max={countDocLines(blocks)}
+              value={gotoValue}
+              onChange={(e) => setGotoValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setGotoOpen(false);
+                }
+              }}
+              aria-label="目标行号"
+            />
+            <span className="goto-bar__total">/ {countDocLines(blocks)}</span>
+          </label>
+          <button type="submit">跳转</button>
+          <button type="button" onClick={() => setGotoOpen(false)}>
+            取消
+          </button>
+        </form>
+      ) : null}
+
       <div
         className="note-editor__stage note-editor__stage--live-preview"
         aria-label="Markdown 编辑器"
@@ -860,7 +1132,9 @@ export function NoteEditor({
                 <div key={`edit-${index}`} className="md-live__block is-editing">
                   <textarea
                     ref={editRef}
-                    className="md-live__source"
+                    className={
+                      block ? "md-live__source" : "md-live__source is-empty"
+                    }
                     aria-label="Markdown 源码"
                     spellCheck={false}
                     value={block}
@@ -873,6 +1147,7 @@ export function NoteEditor({
                     onPaste={onPaste}
                     onBlur={() => {
                       requestAnimationFrame(() => {
+                        if (suppressBlur.current) return;
                         const root = rootRef.current;
                         if (root && root.contains(document.activeElement)) return;
                         finishEditing();
@@ -884,24 +1159,40 @@ export function NoteEditor({
             }
             return (
               <div
-                key={`view-${index}-${block.slice(0, 24)}`}
-                className="md-live__block"
+                key={`view-${index}`}
+                className={
+                  block ? "md-live__block" : "md-live__block is-blank-block"
+                }
                 role="button"
                 tabIndex={0}
-                aria-label={`编辑第 ${index + 1} 段`}
+                aria-label={
+                  block
+                    ? `编辑第 ${index + 1} 段`
+                    : `编辑空行（第 ${index + 1} 段）`
+                }
                 onMouseDown={(e) => {
-                  e.preventDefault();
-                  activate(index);
+                  if (e.button !== 0) return;
+                  const target = e.currentTarget.querySelector(
+                    ".md-live__preview",
+                  ) as HTMLElement | null;
+                  const caret = target
+                    ? caretIndexFromClick(block, e.clientX, e.clientY, target)
+                    : 0;
+                  beginEditAt(index, caret, e);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    activate(index);
+                    beginEditAt(index, 0);
                   }
                 }}
               >
                 <div
-                  className="md-live__preview md-body"
+                  className={
+                    block
+                      ? "md-live__preview md-body"
+                      : "md-live__preview md-body is-blank"
+                  }
                   dangerouslySetInnerHTML={{ __html: renderBlock(block) }}
                 />
               </div>

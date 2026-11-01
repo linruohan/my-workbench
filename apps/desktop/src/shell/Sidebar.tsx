@@ -1,13 +1,20 @@
-import { useMemo, useState } from "react";
-import type { Note } from "@wb/domain";
+import { useMemo, useState, type ReactNode } from "react";
+import { INBOX_PROJECT_ID, type Note } from "@wb/domain";
 import {
   IconBot,
   IconChat,
   IconFolder,
+  IconInbox,
+  IconKnowledge,
   IconPlus,
+  IconPlanner,
+  IconSchedule,
   IconSearch,
   IconSettings,
   IconSidebar,
+  IconTasks,
+  IconTimed,
+  IconToday,
 } from "./icons";
 
 export type AppNavId =
@@ -18,13 +25,18 @@ export type AppNavId =
   | "knowledge"
   | "timed";
 
-const NAV: Array<{ id: AppNavId; label: string }> = [
-  { id: "today", label: "今日" },
-  { id: "planner", label: "计划" },
-  { id: "schedule", label: "时间表" },
-  { id: "projects", label: "任务" },
-  { id: "timed", label: "定时任务" },
-  { id: "knowledge", label: "知识库" },
+type TaskNavItem = {
+  id: "today" | "planner" | "schedule" | "timed";
+  label: string;
+  icon: ReactNode;
+};
+
+/** 任务分组下的全局视图：覆盖全部项目的任务。 */
+const TASK_NAV: TaskNavItem[] = [
+  { id: "today", label: "今日", icon: <IconToday size={15} /> },
+  { id: "planner", label: "计划", icon: <IconPlanner size={15} /> },
+  { id: "schedule", label: "时间表", icon: <IconSchedule size={15} /> },
+  { id: "timed", label: "定时任务", icon: <IconTimed size={15} /> },
 ];
 
 type Props = {
@@ -38,7 +50,7 @@ type Props = {
   activeProjectId?: string | null;
   notes: Note[];
   onCreateProject: () => void;
-  onSelectProject?: (projectId: string | null) => void;
+  onSelectProject: (projectId: string) => void;
   onSelectNote: (id: string) => void;
   onNewChat: () => void;
   onAutomations: () => void;
@@ -64,12 +76,40 @@ export function Sidebar({
 }: Props) {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(true);
 
-  const filteredNav = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return NAV;
-    return NAV.filter((item) => item.label.toLowerCase().includes(q));
-  }, [query]);
+  const q = query.trim().toLowerCase();
+
+  const filteredTaskNav = useMemo(() => {
+    if (!q) return TASK_NAV;
+    return TASK_NAV.filter((item) => item.label.toLowerCase().includes(q));
+  }, [q]);
+
+  const filteredProjects = useMemo(() => {
+    const list = [...projects].sort((a, b) => {
+      if (a.id === INBOX_PROJECT_ID) return -1;
+      if (b.id === INBOX_PROJECT_ID) return 1;
+      return a.title.localeCompare(b.title, "zh-CN");
+    });
+    if (!q) return list;
+    return list.filter((p) => p.title.toLowerCase().includes(q));
+  }, [projects, q]);
+
+  const showKnowledge =
+    !q || "知识库".includes(q) || "knowledge".includes(q);
+  const showTaskGroup =
+    !q ||
+    "任务".includes(q) ||
+    filteredTaskNav.length > 0 ||
+    filteredProjects.length > 0;
+
+  const taskGroupActive =
+    !settingsOpen &&
+    (nav === "today" ||
+      nav === "planner" ||
+      nav === "schedule" ||
+      nav === "timed" ||
+      nav === "projects");
 
   const recentNotes = notes.slice(0, 6);
 
@@ -84,6 +124,48 @@ export function Sidebar({
         >
           <IconSidebar />
         </button>
+        <div className="sidebar__rail" role="group" aria-label="任务">
+          {TASK_NAV.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={
+                nav === item.id && !settingsOpen
+                  ? "icon-btn is-active"
+                  : "icon-btn"
+              }
+              aria-label={item.label}
+              aria-pressed={nav === item.id && !settingsOpen}
+              title={item.label}
+              onClick={() => onNav(item.id)}
+            >
+              {item.icon}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="添加项目"
+            title="添加项目"
+            onClick={onCreateProject}
+          >
+            <IconPlus size={15} />
+          </button>
+          <button
+            type="button"
+            className={
+              nav === "knowledge" && !settingsOpen
+                ? "icon-btn is-active"
+                : "icon-btn"
+            }
+            aria-label="知识库"
+            aria-pressed={nav === "knowledge" && !settingsOpen}
+            title="知识库"
+            onClick={() => onNav("knowledge")}
+          >
+            <IconKnowledge size={15} />
+          </button>
+        </div>
         <button
           type="button"
           className="icon-btn"
@@ -122,7 +204,7 @@ export function Sidebar({
           <input
             className="sidebar__search"
             aria-label="搜索视图"
-            placeholder="搜索视图…"
+            placeholder="搜索任务视图或项目…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
@@ -142,57 +224,118 @@ export function Sidebar({
       </div>
 
       <div className="sidebar__scroll">
-        <section className="sidebar__section">
-          <div className="sidebar__section-label">项目</div>
-          <button type="button" className="sidebar__row" onClick={onCreateProject}>
-            <IconPlus size={15} />
-            <span>新建项目</span>
-          </button>
-          {projects.map((p) => (
-            <button
-              key={p.id}
-              type="button"
+        {showTaskGroup ? (
+          <section className="sidebar__section" aria-label="任务分组">
+            <div
               className={
-                nav === "projects" &&
-                !settingsOpen &&
-                activeProjectId === p.id
-                  ? "sidebar__row is-active"
-                  : "sidebar__row"
+                taskGroupActive
+                  ? "sidebar__group-head is-active"
+                  : "sidebar__group-head"
               }
-              onClick={() => {
-                onSelectProject?.(p.id);
-                onNav("projects");
-              }}
             >
-              <IconFolder size={15} />
-              <span className="sidebar__row-text">{p.title}</span>
-            </button>
-          ))}
-        </section>
+              <button
+                type="button"
+                className="sidebar__group-toggle"
+                aria-expanded={tasksOpen}
+                onClick={() => setTasksOpen((v) => !v)}
+              >
+                <span className="sidebar__row-icon" aria-hidden>
+                  <IconTasks size={15} />
+                </span>
+                <span className="sidebar__row-text">任务</span>
+                <span className="sidebar__chevron" aria-hidden>
+                  {tasksOpen ? "▾" : "▸"}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="sidebar__group-add"
+                aria-label="添加项目"
+                title="添加项目"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCreateProject();
+                  setTasksOpen(true);
+                }}
+              >
+                <IconPlus size={14} />
+              </button>
+            </div>
 
-        <section className="sidebar__section">
-          <div className="sidebar__section-label">视图</div>
-          {filteredNav.map((item) => (
+            {tasksOpen ? (
+              <div className="sidebar__group-body">
+                {filteredTaskNav.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={
+                      nav === item.id && !settingsOpen
+                        ? "sidebar__row sidebar__row--nested is-active"
+                        : "sidebar__row sidebar__row--nested"
+                    }
+                    onClick={() => onNav(item.id)}
+                  >
+                    <span className="sidebar__row-icon" aria-hidden>
+                      {item.icon}
+                    </span>
+                    <span className="sidebar__row-text">{item.label}</span>
+                  </button>
+                ))}
+
+                {filteredProjects.length > 0 ? (
+                  <div className="sidebar__divider" role="separator" />
+                ) : null}
+
+                {filteredProjects.map((p) => {
+                  const active =
+                    nav === "projects" &&
+                    !settingsOpen &&
+                    activeProjectId === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={
+                        active
+                          ? "sidebar__row sidebar__row--nested is-active"
+                          : "sidebar__row sidebar__row--nested"
+                      }
+                      onClick={() => onSelectProject(p.id)}
+                    >
+                      <span className="sidebar__row-icon" aria-hidden>
+                        {p.id === INBOX_PROJECT_ID ? (
+                          <IconInbox size={15} />
+                        ) : (
+                          <IconFolder size={15} />
+                        )}
+                      </span>
+                      <span className="sidebar__row-text">{p.title}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {showKnowledge ? (
+          <section className="sidebar__section">
             <button
-              key={item.id}
               type="button"
               className={
-                nav === item.id &&
-                !settingsOpen &&
-                (item.id !== "projects" || activeProjectId == null)
+                nav === "knowledge" && !settingsOpen
                   ? "sidebar__row is-active"
                   : "sidebar__row"
               }
-              onClick={() => {
-                if (item.id === "projects") onSelectProject?.(null);
-                onNav(item.id);
-              }}
+              onClick={() => onNav("knowledge")}
             >
-              <span className="sidebar__dot" />
-              <span className="sidebar__row-text">{item.label}</span>
+              <span className="sidebar__row-icon" aria-hidden>
+                <IconKnowledge size={15} />
+              </span>
+              <span className="sidebar__row-text">知识库</span>
             </button>
-          ))}
-        </section>
+          </section>
+        ) : null}
 
         {recentNotes.length > 0 ? (
           <section className="sidebar__section">
@@ -204,7 +347,9 @@ export function Sidebar({
                 className="sidebar__row"
                 onClick={() => onSelectNote(n.id)}
               >
-                <span className="sidebar__dot" />
+                <span className="sidebar__row-icon" aria-hidden>
+                  <IconKnowledge size={15} />
+                </span>
                 <span className="sidebar__row-text">{n.title}</span>
               </button>
             ))}

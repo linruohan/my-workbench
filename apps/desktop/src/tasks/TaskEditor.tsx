@@ -1,13 +1,25 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
+  decodeTaskRepeat,
+  defaultCustomSchedule,
   formatLocalDay,
   formatTaskPlanMeta,
+  makePresetSchedule,
   millisecondsDiffToRemindOption,
+  resolveTagChipColors,
+  timedPresetLabel,
+  timedScheduleLabel,
   type ProjectBucket,
   type ReminderOptionId,
   type Tag,
   type Task,
+  type TimedSchedule,
+  type TimedSchedulePreset,
 } from "@wb/domain";
+import { ScheduleRow } from "../timed/ScheduleRow";
+import { DateField, DateTimeField } from "../ui/CalendarField";
+import { MenuSelect } from "../ui/MenuSelect";
 
 export type TaskEditorSave = {
   title: string;
@@ -22,6 +34,7 @@ export type TaskEditorSave = {
   timeEstimateMinutes: number;
   tagIds: string[];
   isDone: boolean;
+  repeat: TimedSchedule | null;
 };
 
 type Props = {
@@ -41,6 +54,36 @@ type Props = {
   onDeleteSubtask?: (subtaskId: string) => void;
   onClose: () => void;
 };
+
+const PRESETS: TimedSchedulePreset[] = [
+  "hourly",
+  "daily",
+  "weekdays",
+  "weekly",
+  "monthly",
+];
+
+const STATUS_OPTIONS = [
+  { value: "active", label: "进行中" },
+  { value: "backlog", label: "待办箱" },
+  { value: "done", label: "已完成" },
+] as const;
+
+const DUE_OPTIONS = [
+  { value: "none", label: "未排期" },
+  { value: "day", label: "全天" },
+  { value: "time", label: "时刻" },
+] as const;
+
+const REMIND_OPTIONS: Array<{ value: ReminderOptionId; label: string }> = [
+  { value: "none", label: "不提醒" },
+  { value: "at_start", label: "准时" },
+  { value: "m5", label: "提前 5 分钟" },
+  { value: "m10", label: "提前 10 分钟" },
+  { value: "m15", label: "提前 15 分钟" },
+  { value: "m30", label: "提前 30 分钟" },
+  { value: "h1", label: "提前 1 小时" },
+];
 
 function toDatetimeLocal(ms: number): string {
   const d = new Date(ms);
@@ -76,6 +119,7 @@ function fromTask(
     timeEstimateMinutes: Math.round(Math.max(0, task.timeEstimate) / 60_000),
     tagIds: [...selectedTagIds],
     isDone: task.isDone,
+    repeat: decodeTaskRepeat(task.repeatCfgId),
   };
 }
 
@@ -101,345 +145,435 @@ export function TaskEditor({
   );
   const [subtaskTitle, setSubtaskTitle] = useState("");
   const [newTagTitle, setNewTagTitle] = useState("");
+  const [repeatMenuOpen, setRepeatMenuOpen] = useState(false);
+  const repeatMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!repeatMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!repeatMenuRef.current?.contains(e.target as Node)) {
+        setRepeatMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [repeatMenuOpen]);
 
   const patch = (partial: Partial<TaskEditorSave>) =>
     setDraft((d) => ({ ...d, ...partial }));
 
   const canManageSubtasks = !task.parentId && onAddSubtask;
+  const canRepeat = !task.parentId;
+  const statusValue = draft.isDone ? "done" : draft.bucket;
 
-  return (
-    <aside className="task-editor" aria-label="编辑任务">
-      <header className="task-editor__header">
-        <h2>{task.parentId ? "编辑子任务" : "编辑任务"}</h2>
-        <button type="button" className="btn btn--ghost" onClick={onClose}>
-          关闭
-        </button>
-      </header>
+  return createPortal(
+    <div
+      className="task-editor-overlay"
+      role="presentation"
+      onClick={onClose}
+    >
+      <aside
+        className="task-editor"
+        role="dialog"
+        aria-modal="true"
+        aria-label="编辑任务"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="task-editor__header">
+          <div>
+            <h2>{task.parentId ? "编辑子任务" : "编辑任务"}</h2>
+            <p className="task-editor__summary">
+              {formatTaskPlanMeta(task)}
+              {draft.repeat ? ` · ${timedScheduleLabel(draft.repeat)}` : ""}
+            </p>
+          </div>
+          <button type="button" className="btn btn--ghost" onClick={onClose}>
+            关闭
+          </button>
+        </header>
 
-      <div className="task-editor__body">
-        <div className="field">
-          <label className="field__label" htmlFor="task-title">
-            标题
-          </label>
-          <input
-            id="task-title"
-            className="field__control"
-            value={draft.title}
-            onChange={(e) => patch({ title: e.target.value })}
-          />
-        </div>
+        <div className="task-editor__body">
+          <section className="task-editor__section task-editor__section--main">
+            <h3 className="task-editor__section-title">内容</h3>
+            <div className="field">
+              <label className="field__label" htmlFor="task-title">
+                标题
+              </label>
+              <input
+                id="task-title"
+                className="field__control"
+                value={draft.title}
+                onChange={(e) => patch({ title: e.target.value })}
+                autoFocus
+              />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="task-notes">
+                备注
+              </label>
+              <textarea
+                id="task-notes"
+                className="field__control field__control--area"
+                rows={5}
+                value={draft.notes}
+                placeholder="补充说明、清单或上下文"
+                onChange={(e) => patch({ notes: e.target.value })}
+              />
+            </div>
+          </section>
 
-        <div className="field">
-          <label className="field__label" htmlFor="task-notes">
-            备注
-          </label>
-          <textarea
-            id="task-notes"
-            className="field__control field__control--area"
-            rows={4}
-            value={draft.notes}
-            placeholder="补充说明、清单或上下文"
-            onChange={(e) => patch({ notes: e.target.value })}
-          />
-        </div>
+          <div className="task-editor__side">
+            <section className="task-editor__section">
+              <h3 className="task-editor__section-title">归属</h3>
+              <div className="task-editor__row">
+                <div className="field">
+                  <div className="field__label">项目</div>
+                  <MenuSelect
+                    label="项目"
+                    value={draft.projectId}
+                    options={projects.map((p) => ({
+                      value: p.id,
+                      label: p.title,
+                    }))}
+                    onChange={(projectId) => patch({ projectId })}
+                  />
+                </div>
+                <div className="field">
+                  <div className="field__label">状态</div>
+                  <MenuSelect
+                    label="状态"
+                    value={statusValue}
+                    options={[...STATUS_OPTIONS]}
+                    onChange={(next) => {
+                      if (next === "done") patch({ isDone: true });
+                      else
+                        patch({
+                          isDone: false,
+                          bucket: next as ProjectBucket,
+                        });
+                    }}
+                  />
+                </div>
+              </div>
 
-        <div className="field">
-          <label className="field__label" htmlFor="task-project">
-            项目
-          </label>
-          <select
-            id="task-project"
-            className="field__control"
-            value={draft.projectId}
-            onChange={(e) => patch({ projectId: e.target.value })}
-          >
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.title}
-              </option>
-            ))}
-          </select>
-        </div>
+              <div className="field">
+                <div className="field__label">标签</div>
+                <div
+                  className="task-editor__tags"
+                  role="group"
+                  aria-label="任务标签"
+                >
+                  {tags.length === 0 ? (
+                    <p className="task-editor__hint">还没有标签，可在下方新建。</p>
+                  ) : (
+                    tags.map((tag) => {
+                      const active = draft.tagIds.includes(tag.id);
+                      const colors = resolveTagChipColors(tag);
+                      return (
+                        <button
+                          key={tag.id}
+                          type="button"
+                          className={
+                            active
+                              ? "task-editor__tag is-active"
+                              : "task-editor__tag"
+                          }
+                          aria-pressed={active}
+                          style={
+                            active
+                              ? {
+                                  background: colors.background,
+                                  borderColor: colors.border,
+                                  color: colors.text,
+                                }
+                              : undefined
+                          }
+                          onClick={() =>
+                            patch({
+                              tagIds: active
+                                ? draft.tagIds.filter((id) => id !== tag.id)
+                                : [...draft.tagIds, tag.id],
+                            })
+                          }
+                        >
+                          {tag.title}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+                {onCreateTag ? (
+                  <div className="task-editor__sub-add">
+                    <input
+                      aria-label="新建标签"
+                      className="field__control"
+                      placeholder="新建标签，回车添加"
+                      value={newTagTitle}
+                      onChange={(e) => setNewTagTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        const title = newTagTitle.trim();
+                        if (!title) return;
+                        const created = onCreateTag(title);
+                        setNewTagTitle("");
+                        if (created) {
+                          patch({ tagIds: [...draft.tagIds, created.id] });
+                        }
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </section>
 
-        <div className="field">
-          <label className="field__label" htmlFor="task-estimate">
-            预计时长（分钟）
-          </label>
-          <input
-            id="task-estimate"
-            className="field__control"
-            type="number"
-            min={0}
-            step={5}
-            value={draft.timeEstimateMinutes}
-            onChange={(e) =>
-              patch({
-                timeEstimateMinutes: Math.max(
-                  0,
-                  Math.floor(Number(e.target.value) || 0),
-                ),
-              })
-            }
-          />
-        </div>
-
-        <div className="field">
-          <div className="field__label">标签</div>
-          <div className="task-editor__tags" role="group" aria-label="任务标签">
-            {tags.length === 0 ? (
-              <p className="task-editor__hint">还没有标签，可在下方新建。</p>
-            ) : (
-              tags.map((tag) => {
-                const active = draft.tagIds.includes(tag.id);
-                return (
-                  <button
-                    key={tag.id}
-                    type="button"
-                    className={
-                      active
-                        ? "task-editor__tag is-active"
-                        : "task-editor__tag"
-                    }
-                    aria-pressed={active}
-                    onClick={() =>
+            <section className="task-editor__section">
+              <h3 className="task-editor__section-title">排期与时长</h3>
+              <div className="task-editor__row">
+                <div className="field">
+                  <div className="field__label">计划方式</div>
+                  <MenuSelect
+                    label="计划方式"
+                    value={draft.dueMode}
+                    options={[...DUE_OPTIONS]}
+                    onChange={(dueMode) => patch({ dueMode })}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field__label" htmlFor="task-estimate">
+                    预计时长（分钟）
+                  </label>
+                  <input
+                    id="task-estimate"
+                    className="field__control"
+                    type="number"
+                    min={0}
+                    step={5}
+                    value={draft.timeEstimateMinutes}
+                    onChange={(e) =>
                       patch({
-                        tagIds: active
-                          ? draft.tagIds.filter((id) => id !== tag.id)
-                          : [...draft.tagIds, tag.id],
+                        timeEstimateMinutes: Math.max(
+                          0,
+                          Math.floor(Number(e.target.value) || 0),
+                        ),
                       })
                     }
-                  >
-                    {tag.title}
-                  </button>
-                );
-              })
-            )}
+                  />
+                </div>
+              </div>
+
+              {draft.dueMode === "day" ? (
+                <div className="field">
+                  <div className="field__label">计划日期</div>
+                  <DateField
+                    label="计划日期"
+                    value={draft.dueDay}
+                    onChange={(dueDay) => patch({ dueDay })}
+                  />
+                </div>
+              ) : null}
+
+              {draft.dueMode === "time" ? (
+                <div className="task-editor__row">
+                  <div className="field">
+                    <div className="field__label">计划时刻</div>
+                    <DateTimeField
+                      label="计划时刻"
+                      valueLocal={draft.dueWithTimeLocal}
+                      onChange={(dueWithTimeLocal) =>
+                        patch({ dueWithTimeLocal })
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <div className="field__label">提醒</div>
+                    <MenuSelect
+                      label="提醒"
+                      value={draft.remindOption}
+                      options={REMIND_OPTIONS}
+                      onChange={(remindOption) => patch({ remindOption })}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="field">
+                <div className="field__label">截止日期</div>
+                <DateField
+                  label="截止日期"
+                  value={draft.deadlineDay}
+                  allowEmpty
+                  emptyLabel="未设置截止日期"
+                  onChange={(deadlineDay) => patch({ deadlineDay })}
+                />
+              </div>
+            </section>
           </div>
-          {onCreateTag ? (
-            <div className="task-editor__sub-add">
-              <input
-                aria-label="新建标签"
-                className="field__control"
-                placeholder="新建标签，回车添加"
-                value={newTagTitle}
-                onChange={(e) => setNewTagTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  const title = newTagTitle.trim();
-                  if (!title) return;
-                  const created = onCreateTag(title);
-                  setNewTagTitle("");
-                  if (created) {
-                    patch({ tagIds: [...draft.tagIds, created.id] });
-                  }
-                }}
-              />
-            </div>
+
+          {canRepeat ? (
+            <section className="task-editor__section task-editor__section--full">
+              <h3 className="task-editor__section-title">重复</h3>
+              <div className="schedule-board" ref={repeatMenuRef}>
+                {draft.repeat ? (
+                  <ScheduleRow
+                    schedule={draft.repeat}
+                    onChange={(repeat) => patch({ repeat })}
+                    onDelete={() => patch({ repeat: null })}
+                  />
+                ) : (
+                  <>
+                    <p className="schedule-empty">
+                      未设置重复。完成后可按相同规则生成下一次。
+                    </p>
+                    <button
+                      type="button"
+                      className="schedule-add"
+                      aria-expanded={repeatMenuOpen}
+                      onClick={() => setRepeatMenuOpen((v) => !v)}
+                    >
+                      + 添加重复
+                    </button>
+                    {repeatMenuOpen ? (
+                      <ul
+                        className="schedule-menu"
+                        role="menu"
+                        aria-label="添加重复"
+                      >
+                        {PRESETS.map((preset) => (
+                          <li key={preset}>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                patch({
+                                  repeat: makePresetSchedule(preset),
+                                });
+                                setRepeatMenuOpen(false);
+                              }}
+                            >
+                              {timedPresetLabel(preset)}
+                            </button>
+                          </li>
+                        ))}
+                        <li>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              patch({ repeat: defaultCustomSchedule() });
+                              setRepeatMenuOpen(false);
+                            }}
+                          >
+                            自定义
+                          </button>
+                        </li>
+                      </ul>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            </section>
+          ) : null}
+
+          {canManageSubtasks ? (
+            <section className="task-editor__section task-editor__section--full">
+              <h3 className="task-editor__section-title">子任务</h3>
+              {subtasks.length > 0 ? (
+                <ul className="task-editor__subs" aria-label="子任务列表">
+                  {subtasks.map((sub) => (
+                    <li key={sub.id} className="task-editor__sub">
+                      <button
+                        type="button"
+                        className={sub.isDone ? "check is-checked" : "check"}
+                        aria-label={
+                          sub.isDone
+                            ? `取消完成 ${sub.title}`
+                            : `完成 ${sub.title}`
+                        }
+                        onClick={() => onToggleSubtask?.(sub)}
+                      />
+                      <span
+                        className={
+                          sub.isDone
+                            ? "task-editor__sub-title is-done"
+                            : "task-editor__sub-title"
+                        }
+                      >
+                        {sub.title}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={() => onDeleteSubtask?.(sub.id)}
+                      >
+                        删除
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="task-editor__hint">还没有子任务。</p>
+              )}
+              <div className="task-editor__sub-add">
+                <input
+                  aria-label="新建子任务"
+                  className="field__control"
+                  placeholder="添加子任务，回车确认"
+                  value={subtaskTitle}
+                  onChange={(e) => setSubtaskTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    const title = subtaskTitle.trim();
+                    if (!title) return;
+                    onAddSubtask?.(title);
+                    setSubtaskTitle("");
+                  }}
+                />
+              </div>
+            </section>
           ) : null}
         </div>
 
-        <div className="field">
-          <div className="field__label">状态分桶</div>
-          <div className="task-editor__seg" role="group" aria-label="状态分桶">
-            {(
-              [
-                ["active", "进行中"],
-                ["backlog", "待办箱"],
-              ] as const
-            ).map(([id, label]) => (
+        <footer className="task-editor__footer">
+          <div className="task-editor__footer-left">
+            <button type="button" className="btn btn--ghost" onClick={onDelete}>
+              删除
+            </button>
+            {onDuplicate ? (
               <button
-                key={id}
                 type="button"
-                className={
-                  draft.bucket === id
-                    ? "task-editor__seg-btn is-active"
-                    : "task-editor__seg-btn"
-                }
-                onClick={() => patch({ bucket: id, isDone: false })}
+                className="btn btn--ghost"
+                onClick={onDuplicate}
               >
-                {label}
+                复制
               </button>
-            ))}
+            ) : null}
+          </div>
+          <div className="task-editor__footer-right">
+            <button type="button" className="btn" onClick={onClose}>
+              取消
+            </button>
             <button
               type="button"
-              className={
-                draft.isDone
-                  ? "task-editor__seg-btn is-active"
-                  : "task-editor__seg-btn"
-              }
-              onClick={() => patch({ isDone: true })}
+              className="btn btn--primary"
+              onClick={() => onSave(draft)}
             >
-              已完成
+              保存
             </button>
           </div>
-        </div>
-
-        <div className="field">
-          <div className="field__label">计划时间</div>
-          <div className="task-editor__seg" role="group" aria-label="计划时间">
-            {(
-              [
-                ["none", "未排期"],
-                ["day", "全天"],
-                ["time", "时刻"],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                className={
-                  draft.dueMode === id
-                    ? "task-editor__seg-btn is-active"
-                    : "task-editor__seg-btn"
-                }
-                onClick={() => patch({ dueMode: id })}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {draft.dueMode === "day" ? (
-            <input
-              className="field__control"
-              type="date"
-              aria-label="计划日期"
-              value={draft.dueDay}
-              onChange={(e) => patch({ dueDay: e.target.value })}
-            />
-          ) : null}
-          {draft.dueMode === "time" ? (
-            <input
-              className="field__control"
-              type="datetime-local"
-              aria-label="计划时刻"
-              value={draft.dueWithTimeLocal}
-              onChange={(e) => patch({ dueWithTimeLocal: e.target.value })}
-            />
-          ) : null}
-        </div>
-
-        <div className="field">
-          <label className="field__label" htmlFor="task-deadline">
-            截止日期（可选）
-          </label>
-          <input
-            id="task-deadline"
-            className="field__control"
-            type="date"
-            value={draft.deadlineDay}
-            onChange={(e) => patch({ deadlineDay: e.target.value })}
-          />
-        </div>
-
-        {draft.dueMode === "time" ? (
-          <div className="field">
-            <label className="field__label" htmlFor="task-remind">
-              提醒
-            </label>
-            <select
-              id="task-remind"
-              className="field__control"
-              value={draft.remindOption}
-              onChange={(e) =>
-                patch({ remindOption: e.target.value as ReminderOptionId })
-              }
-            >
-              <option value="none">不提醒</option>
-              <option value="at_start">准时</option>
-              <option value="m5">提前 5 分钟</option>
-              <option value="m10">提前 10 分钟</option>
-              <option value="m15">提前 15 分钟</option>
-              <option value="m30">提前 30 分钟</option>
-              <option value="h1">提前 1 小时</option>
-            </select>
-          </div>
-        ) : null}
-
-        {canManageSubtasks ? (
-          <div className="field">
-            <div className="field__label">子任务</div>
-            {subtasks.length > 0 ? (
-              <ul className="task-editor__subs" aria-label="子任务列表">
-                {subtasks.map((sub) => (
-                  <li key={sub.id} className="task-editor__sub">
-                    <button
-                      type="button"
-                      className={sub.isDone ? "check is-checked" : "check"}
-                      aria-label={
-                        sub.isDone
-                          ? `取消完成 ${sub.title}`
-                          : `完成 ${sub.title}`
-                      }
-                      onClick={() => onToggleSubtask?.(sub)}
-                    />
-                    <span
-                      className={
-                        sub.isDone
-                          ? "task-editor__sub-title is-done"
-                          : "task-editor__sub-title"
-                      }
-                    >
-                      {sub.title}
-                    </span>
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => onDeleteSubtask?.(sub.id)}
-                    >
-                      删除
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="task-editor__hint">还没有子任务。</p>
-            )}
-            <div className="task-editor__sub-add">
-              <input
-                aria-label="新建子任务"
-                className="field__control"
-                placeholder="添加子任务，回车确认"
-                value={subtaskTitle}
-                onChange={(e) => setSubtaskTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  const title = subtaskTitle.trim();
-                  if (!title) return;
-                  onAddSubtask?.(title);
-                  setSubtaskTitle("");
-                }}
-              />
-            </div>
-          </div>
-        ) : null}
-
-        <p className="task-editor__hint">{formatTaskPlanMeta(task)}</p>
-      </div>
-
-      <footer className="task-editor__footer">
-        <div className="task-editor__footer-left">
-          <button type="button" className="btn btn--ghost" onClick={onDelete}>
-            删除
-          </button>
-          {onDuplicate ? (
-            <button type="button" className="btn btn--ghost" onClick={onDuplicate}>
-              复制
-            </button>
-          ) : null}
-        </div>
-        <div className="task-editor__footer-right">
-          <button type="button" className="btn" onClick={onClose}>
-            取消
-          </button>
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={() => onSave(draft)}
-          >
-            保存
-          </button>
-        </div>
-      </footer>
-    </aside>
+        </footer>
+      </aside>
+    </div>,
+    document.body,
   );
 }

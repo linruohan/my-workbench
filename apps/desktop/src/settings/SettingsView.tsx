@@ -218,7 +218,7 @@ function GeneralPane({
           options={[
             ["today", "今日"],
             ["planner", "计划"],
-            ["projects", "任务"],
+            ["projects", "项目"],
             ["knowledge", "知识库"],
           ]}
           onChange={(startupView) =>

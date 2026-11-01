@@ -2,12 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fileNameOf,
   isIgnoredKbName,
-  isImageFile,
-  isMarkdownFile,
   isPathUnder,
   samePath,
 } from "@wb/domain";
 import { listDirectory, type KbEntry } from "./kb-api";
+import { FileIcon, FolderIcon } from "./FileTreeIcons";
 
 type Props = {
   roots: string[];
@@ -144,6 +143,7 @@ function DirNode({
           title={path}
           onClick={toggle}
         >
+          <FolderIcon open={open} />
           <span className="knowledge__file-name">{name}</span>
         </button>
         {isRoot && onCreateIn ? (
@@ -195,7 +195,7 @@ function DirNode({
                 title={entry.path}
                 onClick={() => onOpen(entry)}
               >
-                <FileMark name={entry.name} />
+                <FileIcon name={entry.name} />
                 <span className="knowledge__file-name">{entry.name}</span>
               </button>
             ),
@@ -203,9 +203,4 @@ function DirNode({
         : null}
     </div>
   );
-}
-
-function FileMark({ name }: { name: string }) {
-  const label = isMarkdownFile(name) ? "MD" : isImageFile(name) ? "图" : "文件";
-  return <span className="knowledge__mark">{label}</span>;
 }

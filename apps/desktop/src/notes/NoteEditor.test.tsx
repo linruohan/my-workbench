@@ -25,8 +25,9 @@ describe("NoteEditor", () => {
     );
     expect(screen.getByLabelText("Markdown 编辑器")).toBeInTheDocument();
     expect(screen.queryByLabelText("Markdown 源码")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("编辑第 1 段")).toHaveTextContent("Hello");
+    expect(screen.getByLabelText("编辑第 1 段")).toHaveTextContent("1 Hello");
     expect(screen.getByLabelText("编辑第 3 段")).toHaveTextContent("世界");
+    expect(screen.getByLabelText("编辑空行（第 4 段）")).toBeInTheDocument();
   });
 
   it("switches a rendered block into source when clicked", async () => {

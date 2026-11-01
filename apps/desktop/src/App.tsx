@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActiveTimer,
+  encodeTaskRepeat,
   formatLocalDay,
+  makePresetSchedule,
   reorderIds,
   inferNoteTitleFromBody,
   parseQuickCapture,
@@ -25,6 +27,7 @@ import {
 } from "./lib/paths";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
+import { PromptModal } from "./shell/PromptModal";
 import { Sidebar, type AppNavId } from "./shell/Sidebar";
 import { TitleBar } from "./shell/TitleBar";
 import {
@@ -47,6 +50,27 @@ function readTasksViewMode(): TasksViewMode {
 
 function readShowCompleted(): boolean {
   return localStorage.getItem(TASKS_SHOW_DONE_KEY) === "1";
+}
+
+function composerPlaceholder(
+  nav: AppNavId,
+  projectTitle: string | undefined,
+): string {
+  if (nav === "knowledge") return "写下笔记标题，回车创建（Ctrl+N）";
+  if (nav === "timed") return "写下定时任务标题，回车创建每天 09:00（Ctrl+N）";
+  if (nav === "today") {
+    return "添加到今日，如：下午3:00 评审 提前15分钟（Ctrl+N）";
+  }
+  if (nav === "planner") {
+    return "添加到计划，如：明天 写周报（Ctrl+N）";
+  }
+  if (nav === "schedule") {
+    return "添加到时间表，如：下午3:00 评审（Ctrl+N）";
+  }
+  if (nav === "projects") {
+    return `添加到「${projectTitle ?? "项目"}」，如：明天 回访客户（Ctrl+N）`;
+  }
+  return "写下任务或命令（Ctrl+N）";
 }
 
 export default function App() {
@@ -74,7 +98,9 @@ export default function App() {
     command: "",
     schedule: null,
   });
-  const [filterProjectId, setFilterProjectId] = useState<string | null>(null);
+  const [filterProjectId, setFilterProjectId] = useState("inbox");
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const composerRef = useRef<HTMLInputElement>(null);
   const [tasksViewMode, setTasksViewMode] = useState<TasksViewMode>(() =>
     readTasksViewMode(),
   );
@@ -140,6 +166,18 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [activeTimerTaskId]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (settingsOpen) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        composerRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settingsOpen]);
+
   void tick;
   const todayTasks = store.listToday(now);
   const plannerTasks = store.listPlannerDay(today);
@@ -151,6 +189,11 @@ export default function App() {
   const projects = store.listProjects();
   const timedTasks = store.listTimedTasks();
   const allTags = store.listTags();
+  const projectTitles = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const p of projects) map[p.id] = p.title;
+    return map;
+  }, [projects]);
   const taskBuckets = useMemo(() => {
     const map: Record<string, ProjectBucket> = {};
     for (const t of allTasks) {
@@ -173,32 +216,6 @@ export default function App() {
     activeTimerTaskId && timerStartedAt != null
       ? Math.max(0, now - timerStartedAt)
       : 0;
-
-  const capture = () => {
-    const text = draft.trim();
-    if (!text) return;
-    const parsed = parseQuickCapture(text, { nowMs: Date.now() });
-    let projectId = parsed.projectId ?? "inbox";
-    if (parsed.projectTitle) {
-      const created = store.createProject(parsed.projectTitle);
-      projectId = created.id;
-    }
-    const task = store.createTask({
-      title: parsed.title,
-      projectId,
-      nowMs: Date.now(),
-    });
-    if (parsed.dueDay || parsed.dueWithTime || parsed.deadlineDay) {
-      store.scheduleTask(task.id, {
-        dueDay: parsed.dueDay,
-        dueWithTime: parsed.dueWithTime,
-        deadlineDay: parsed.deadlineDay,
-        remindAt: parsed.remindAt,
-      });
-    }
-    setDraft("");
-    refresh();
-  };
 
   const scheduleToday = (task: Task) => {
     store.scheduleTask(task.id, { dueDay: today });
@@ -373,6 +390,13 @@ export default function App() {
       deadlineDay: draft.deadlineDay ? draft.deadlineDay : null,
       deadlineWithTime: null,
     });
+
+    if (!task.parentId) {
+      store.setRepeatCfg(
+        taskId,
+        draft.repeat ? encodeTaskRepeat(draft.repeat) : null,
+      );
+    }
     refresh();
   };
 
@@ -399,12 +423,129 @@ export default function App() {
     refresh();
   };
 
-  const createNamedTask = (title: string) => {
-    store.createTask({
-      title,
-      projectId: filterProjectId ?? "inbox",
-      nowMs: Date.now(),
+  const goNav = (id: AppNavId) => {
+    setSettingsOpen(false);
+    setTimedEditing(false);
+    setTimedEditId(null);
+    setEditingTaskId(null);
+    setNav(id);
+  };
+
+  const openProject = (projectId: string) => {
+    setFilterProjectId(projectId);
+    goNav("projects");
+  };
+
+  const capture = () => {
+    const text = draft.trim();
+    if (!text || settingsOpen) return;
+    const nowMs = Date.now();
+
+    if (text.startsWith("/")) {
+      const [cmd, ...rest] = text.slice(1).split(/\s+/);
+      const arg = rest.join(" ").trim();
+      if (cmd === "项目" || cmd === "project") {
+        if (!arg) setCreateProjectOpen(true);
+        else {
+          const created = store.createProject(arg);
+          refresh();
+          openProject(created.id);
+        }
+        setDraft("");
+        return;
+      }
+      if (cmd === "笔记" || cmd === "note") {
+        const note = store.createNote({
+          title: arg || "未命名笔记",
+          bodyMd: arg ? `# ${arg}\n\n` : "# 未命名笔记\n\n",
+          nowMs,
+        });
+        setActiveNoteId(note.id);
+        goNav("knowledge");
+        setDraft("");
+        refresh();
+        return;
+      }
+      if (cmd === "定时" || cmd === "timed") {
+        store.createTimedTask({
+          title: arg || "未命名定时任务",
+          command: "",
+          schedule: makePresetSchedule("daily"),
+          nowMs,
+        });
+        goNav("timed");
+        setDraft("");
+        refresh();
+        return;
+      }
+    }
+
+    if (nav === "knowledge") {
+      const note = store.createNote({
+        title: text,
+        bodyMd: `# ${text}\n\n`,
+        nowMs,
+      });
+      setActiveNoteId(note.id);
+      setDraft("");
+      refresh();
+      return;
+    }
+
+    if (nav === "timed") {
+      store.createTimedTask({
+        title: text,
+        command: "",
+        schedule: makePresetSchedule("daily"),
+        nowMs,
+      });
+      setDraft("");
+      refresh();
+      return;
+    }
+
+    const parsed = parseQuickCapture(text, { nowMs });
+    let projectId = "inbox";
+    if (parsed.projectTitle) {
+      const existing = projects.find((p) => p.title === parsed.projectTitle);
+      projectId = existing?.id ?? store.createProject(parsed.projectTitle).id;
+    } else if (nav === "projects") {
+      projectId = filterProjectId;
+    }
+
+    let dueDay = parsed.dueDay;
+    let dueWithTime = parsed.dueWithTime;
+    if (!dueDay && !dueWithTime) {
+      if (nav === "today" || nav === "planner") dueDay = today;
+      else if (nav === "schedule") {
+        const at = new Date();
+        at.setHours(15, 0, 0, 0);
+        dueWithTime = at.getTime();
+      }
+    }
+
+    const remindOption =
+      parsed.remindOption !== "none"
+        ? parsed.remindOption
+        : dueWithTime && prefs.defaultRemind !== "none"
+          ? prefs.defaultRemind
+          : undefined;
+
+    const task = store.createTask({
+      title: parsed.title,
+      projectId,
+      nowMs,
     });
+    if (dueDay || dueWithTime || parsed.deadlineDay) {
+      store.scheduleTask(task.id, {
+        dueDay,
+        dueWithTime,
+        deadlineDay: parsed.deadlineDay,
+        remindAt: parsed.remindAt,
+        ...(remindOption ? { remindOption } : {}),
+      });
+    }
+    setDraft("");
     refresh();
   };
 
@@ -453,14 +594,6 @@ export default function App() {
     store.deleteNote(id);
     setActiveNoteId((prev) => (prev === id ? null : prev));
     refresh();
-  };
-
-  const goNav = (id: AppNavId) => {
-    setSettingsOpen(false);
-    setTimedEditing(false);
-    setTimedEditId(null);
-    setEditingTaskId(null);
-    setNav(id);
   };
 
   const openTimedCreate = () => {
@@ -549,7 +682,7 @@ export default function App() {
   } else if (nav === "today") {
     const todayEmpty =
       prefs.showTips
-        ? "从任务里拖进来，或按下方输入写下今天要做的事。"
+        ? "从各项目里拖进来，或按下方输入写下今天要做的事。"
         : "今天还没有任务。";
     const suggest =
       prefs.proactiveSuggest &&
@@ -563,9 +696,10 @@ export default function App() {
         title="今日"
         empty={suggest ?? todayEmpty}
         tasks={todayTasks}
+        projectTitles={projectTitles}
         denseMeta={prefs.workMode === "office"}
         reorderable
-        hint="拖拽任务可调整今日顺序"
+        hint="汇总全部项目 · 拖拽可调整今日顺序"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
@@ -583,6 +717,8 @@ export default function App() {
         title={`计划 · ${today}`}
         empty="这一天还没有全天计划任务。"
         tasks={plannerTasks}
+        projectTitles={projectTitles}
+        hint="汇总全部项目的计划日任务"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
@@ -599,6 +735,8 @@ export default function App() {
         title={`时间表 · ${today}`}
         empty="没有排到具体时刻的任务。"
         tasks={scheduleTasks}
+        projectTitles={projectTitles}
+        hint="汇总全部项目的时刻安排"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
@@ -659,7 +797,6 @@ export default function App() {
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onViewModeChange={changeTasksViewMode}
-        onFilterProject={setFilterProjectId}
         onShowCompletedChange={changeShowCompleted}
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
@@ -673,7 +810,6 @@ export default function App() {
         onClearCompleted={clearCompletedTasks}
         onCreateTag={createTag}
         onAddSubtask={addSubtask}
-        onCreate={createNamedTask}
       />
     );
   }
@@ -723,15 +859,8 @@ export default function App() {
           projects={projects}
           activeProjectId={filterProjectId}
           notes={notes}
-          onCreateProject={() => {
-            const title = window.prompt("项目名称", "新项目");
-            if (!title?.trim()) return;
-            const created = store.createProject(title.trim());
-            setFilterProjectId(created.id);
-            goNav("projects");
-            refresh();
-          }}
-          onSelectProject={setFilterProjectId}
+          onCreateProject={() => setCreateProjectOpen(true)}
+          onSelectProject={openProject}
           onSelectNote={(id) => {
             setActiveNoteId(id);
             goNav("knowledge");
@@ -746,56 +875,58 @@ export default function App() {
         <main className="main">
           {body}
           {editingTask && nav !== "projects" ? (
-            <div className="task-editor-overlay">
-              <TaskEditor
-                key={editingTask.id}
-                task={editingTask}
-                bucket={taskBuckets[editingTask.id] ?? "active"}
-                projects={projects}
-                tags={allTags}
-                selectedTagIds={(taskTagMap[editingTask.id] ?? []).map(
-                  (t) => t.id,
-                )}
-                subtasks={store.listSubtasks(editingTask.id)}
-                defaultRemind={prefs.defaultRemind}
-                onClose={() => setEditingTaskId(null)}
-                onDelete={() => {
-                  if (
-                    prefs.confirmBeforeDelete &&
-                    !window.confirm("确定删除该任务？此操作不可撤销。")
-                  ) {
-                    return;
-                  }
-                  deleteTask(editingTask.id);
-                }}
-                onDuplicate={() => {
-                  duplicateTask(editingTask.id);
-                  setEditingTaskId(null);
-                }}
-                onCreateTag={createTag}
-                onAddSubtask={(title) => addSubtask(editingTask.id, title)}
-                onToggleSubtask={toggleDone}
-                onDeleteSubtask={(id) => {
-                  if (
-                    prefs.confirmBeforeDelete &&
-                    !window.confirm("确定删除该子任务？此操作不可撤销。")
-                  ) {
-                    return;
-                  }
-                  deleteTask(id);
-                }}
-                onSave={(draft) => {
-                  saveEditedTask(editingTask.id, draft);
-                  setEditingTaskId(null);
-                }}
-              />
-            </div>
+            <TaskEditor
+              key={editingTask.id}
+              task={editingTask}
+              bucket={taskBuckets[editingTask.id] ?? "active"}
+              projects={projects}
+              tags={allTags}
+              selectedTagIds={(taskTagMap[editingTask.id] ?? []).map(
+                (t) => t.id,
+              )}
+              subtasks={store.listSubtasks(editingTask.id)}
+              defaultRemind={prefs.defaultRemind}
+              onClose={() => setEditingTaskId(null)}
+              onDelete={() => {
+                if (
+                  prefs.confirmBeforeDelete &&
+                  !window.confirm("确定删除该任务？此操作不可撤销。")
+                ) {
+                  return;
+                }
+                deleteTask(editingTask.id);
+              }}
+              onDuplicate={() => {
+                duplicateTask(editingTask.id);
+                setEditingTaskId(null);
+              }}
+              onCreateTag={createTag}
+              onAddSubtask={(title) => addSubtask(editingTask.id, title)}
+              onToggleSubtask={toggleDone}
+              onDeleteSubtask={(id) => {
+                if (
+                  prefs.confirmBeforeDelete &&
+                  !window.confirm("确定删除该子任务？此操作不可撤销。")
+                ) {
+                  return;
+                }
+                deleteTask(id);
+              }}
+              onSave={(draft) => {
+                saveEditedTask(editingTask.id, draft);
+                setEditingTaskId(null);
+              }}
+            />
           ) : null}
-          {!settingsOpen && nav !== "knowledge" && nav !== "timed" ? (
+          {!settingsOpen ? (
             <footer className="composer">
               <input
+                ref={composerRef}
                 aria-label="快速捕获"
-                placeholder="写下任务，如：明天 下午3:00 评审 提前15分钟"
+                placeholder={composerPlaceholder(
+                  nav,
+                  projectTitles[filterProjectId],
+                )}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -809,6 +940,20 @@ export default function App() {
           ) : null}
         </main>
       </div>
+      <PromptModal
+        open={createProjectOpen}
+        title="新建项目"
+        label="项目名称"
+        initialValue="新项目"
+        confirmLabel="创建"
+        onCancel={() => setCreateProjectOpen(false)}
+        onConfirm={(title) => {
+          const created = store.createProject(title);
+          setCreateProjectOpen(false);
+          refresh();
+          openProject(created.id);
+        }}
+      />
     </div>
   );
 }
@@ -817,6 +962,7 @@ function TaskList(props: {
   title: string;
   empty: string;
   tasks: Task[];
+  projectTitles?: Record<string, string>;
   denseMeta?: boolean;
   reorderable?: boolean;
   hint?: string;
@@ -839,9 +985,7 @@ function TaskList(props: {
         <h1>{props.title}</h1>
         <span className="panel__count">{props.tasks.length}</span>
       </header>
-      {props.hint && props.tasks.length > 0 ? (
-        <p className="panel__hint">{props.hint}</p>
-      ) : null}
+      {props.hint ? <p className="panel__hint">{props.hint}</p> : null}
       {props.tasks.length === 0 ? (
         <p className="empty">{props.empty}</p>
       ) : (
@@ -850,6 +994,7 @@ function TaskList(props: {
             <TaskRow
               key={task.id}
               task={task}
+              projectTitle={props.projectTitles?.[task.projectId]}
               denseMeta={props.denseMeta}
               timerRunning={props.activeTimerTaskId === task.id}
               timerElapsedMs={

@@ -12,3 +12,5 @@ export * from "./kb.js";
 export * from "./timed-task.js";
 export * from "./task.js";
 export * from "./task-stats.js";
+export * from "./tag-color.js";
+export * from "./task-repeat.js";

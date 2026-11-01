@@ -66,33 +66,16 @@ export function CustomRepeatModal({ initial, onCancel, onConfirm }: Props) {
           <div className="field">
             <label className="field__label">重复频率</label>
             <div className="custom-freq">
-              <div className="stepper">
-                <input
-                  type="number"
-                  min={1}
-                  aria-label="重复间隔"
-                  value={every}
-                  onChange={(e) =>
-                    setEvery(Math.max(1, Number(e.target.value) || 1))
-                  }
-                />
-                <div className="stepper__btns">
-                  <button
-                    type="button"
-                    aria-label="增加"
-                    onClick={() => setEvery((n) => n + 1)}
-                  >
-                    ▴
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="减少"
-                    onClick={() => setEvery((n) => Math.max(1, n - 1))}
-                  >
-                    ▾
-                  </button>
-                </div>
-              </div>
+              <input
+                className="stepper"
+                type="number"
+                min={1}
+                aria-label="重复间隔"
+                value={every}
+                onChange={(e) =>
+                  setEvery(Math.max(1, Number(e.target.value) || 1))
+                }
+              />
               <div className="unit-menu">
                 <button
                   type="button"

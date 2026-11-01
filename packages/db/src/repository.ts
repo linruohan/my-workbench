@@ -12,6 +12,7 @@ import {
   isPlannerMember,
   isScheduleMember,
   patchNote,
+  pickTagColor,
   selectTodayTasks,
   settleTimerSegment,
   sumTimeSpentOnDay,
@@ -434,10 +435,11 @@ export class WorkbenchRepository {
     if (!trimmed) throw new DomainError("tag title is required");
     const tagId = id ?? createId();
     assertTagIdAllowed(tagId);
+    const color = pickTagColor(trimmed);
     this.db
-      .prepare(`INSERT INTO tags (id, title, color) VALUES (?, ?, NULL)`)
-      .run(tagId, trimmed);
-    return { id: tagId, title: trimmed, color: null };
+      .prepare(`INSERT INTO tags (id, title, color) VALUES (?, ?, ?)`)
+      .run(tagId, trimmed, color);
+    return { id: tagId, title: trimmed, color };
   }
 
   listTags(): Tag[] {

@@ -124,7 +124,7 @@ export function workModeLabel(v: WorkMode): string {
 
 export function startupViewLabel(v: StartupView): string {
   if (v === "planner") return "计划";
-  if (v === "projects") return "任务";
+  if (v === "projects") return "项目";
   if (v === "knowledge") return "知识库";
   return "今日";
 }

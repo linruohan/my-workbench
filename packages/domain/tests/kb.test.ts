@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyHeadingNumbers,
   extractImageSlots,
   fileStem,
   headingMeta,
@@ -18,11 +19,14 @@ import {
   pastedImageRel,
   resolveImageTarget,
   splitMdBlocks,
+  stripHeadingNumber,
   cutSelectedLines,
   dedupeSelectedLines,
   findAllMatches,
   findNextMatch,
   locateInBlocks,
+  locateLineInBlocks,
+  countDocLines,
   replaceAllMatches,
   replaceMatchWithQuery,
   sortSelectedLines,
@@ -120,6 +124,13 @@ describe("knowledge headings", () => {
     ]);
   });
 
+  it("writes outline numbers into source and strips duplicates", () => {
+    expect(stripHeadingNumber("2.3 标题")).toBe("标题");
+    const applied = applyHeadingNumbers("# A\n## B\n### 9.9 旧编号");
+    expect(applied).toBe("# 1 A\n## 1.1 B\n### 1.1.1 旧编号");
+    expect(applyHeadingNumbers(applied)).toBe(applied);
+  });
+
   it("highlights headings without numbering inside fences", () => {
     const lines = highlightMarkdown("# 标题\n\n**粗** 与 `code`\n```\n# 不是标题\n```");
     expect(lines[0]?.numberLabel).toBe("1");
@@ -172,7 +183,7 @@ describe("knowledge headings", () => {
     expect(joinMdBlocks(blocks)).toBe(source);
   });
 
-  it("trims trailing blanks after closed fences when normalizing", () => {
+  it("keeps blank lines editable and trims fence tails when normalizing", () => {
     const blocks = [
       "```bash\necho hi\n```\n",
       "",
@@ -180,7 +191,13 @@ describe("knowledge headings", () => {
       "正文",
       "",
     ];
-    expect(normalizeMdBlocks(blocks)).toEqual(["```bash\necho hi\n```", "", "正文"]);
+    expect(normalizeMdBlocks(blocks)).toEqual([
+      "```bash\necho hi\n```",
+      "",
+      "",
+      "正文",
+      "",
+    ]);
   });
 
   it("wraps multi-line selections for bold and highlight", () => {
@@ -272,5 +289,13 @@ describe("knowledge headings", () => {
     expect(regex.text).toBe("b1 b2");
 
     expect(locateInBlocks(["hi", "there"], 4)).toEqual({ index: 1, offset: 1 });
+  });
+
+  it("maps document line numbers across blocks", () => {
+    const blocks = ["# A", "", "hello\nworld", ""];
+    expect(countDocLines(blocks)).toBe(5);
+    expect(locateLineInBlocks(blocks, 1)).toEqual({ index: 0, offset: 0 });
+    expect(locateLineInBlocks(blocks, 2)).toEqual({ index: 1, offset: 0 });
+    expect(locateLineInBlocks(blocks, 4)).toEqual({ index: 2, offset: 6 });
   });
 });

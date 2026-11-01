@@ -1152,16 +1152,64 @@ export function trimFenceBlock(text: string): string {
   return lines.slice(0, closeIdx + 1).join("\n");
 }
 
-/** Collapse duplicate blank blocks and tidy closed fences. */
+/**
+ * Tidy closed fences and keep blank lines editable.
+ * Preserves mid-document blank lines; keeps a single trailing blank so the
+ * caret can always move below the last content line.
+ */
 export function normalizeMdBlocks(blocks: string[]): string[] {
   const cleaned: string[] = [];
   for (const raw of blocks) {
     const block = isCompleteFenceBlock(raw) ? trimFenceBlock(raw) : raw;
-    if (block === "" && cleaned[cleaned.length - 1] === "") continue;
     cleaned.push(block);
   }
-  while (cleaned.length > 1 && cleaned[cleaned.length - 1] === "") cleaned.pop();
-  return cleaned.length > 0 ? cleaned : [""];
+  while (
+    cleaned.length > 1 &&
+    cleaned[cleaned.length - 1] === "" &&
+    cleaned[cleaned.length - 2] === ""
+  ) {
+    cleaned.pop();
+  }
+  if (cleaned.length === 0) return [""];
+  if (cleaned[cleaned.length - 1] !== "") cleaned.push("");
+  return cleaned;
+}
+
+export function blockLineCount(block: string): number {
+  if (block === "") return 1;
+  return block.split("\n").length;
+}
+
+export function countDocLines(blocks: string[]): number {
+  if (blocks.length === 0) return 1;
+  return blocks.reduce((sum, block) => sum + blockLineCount(block), 0);
+}
+
+/** Map a 1-based document line number to block index + caret offset. */
+export function locateLineInBlocks(
+  blocks: string[],
+  line1Based: number,
+): { index: number; offset: number } {
+  if (blocks.length === 0) return { index: 0, offset: 0 };
+  const target = Math.max(1, Math.floor(line1Based));
+  let line = 1;
+  for (let i = 0; i < blocks.length; i += 1) {
+    const text = blocks[i] ?? "";
+    const count = blockLineCount(text);
+    if (target < line + count) {
+      const local = target - line;
+      if (text === "") return { index: i, offset: 0 };
+      const parts = text.split("\n");
+      let offset = 0;
+      for (let j = 0; j < local; j += 1) {
+        offset += (parts[j] ?? "").length + 1;
+      }
+      return { index: i, offset };
+    }
+    line += count;
+  }
+  const last = blocks.length - 1;
+  return { index: last, offset: (blocks[last] ?? "").length };
 }
 
 export function highlightMarkdown(source: string): HighlightLine[] {

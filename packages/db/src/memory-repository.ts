@@ -17,6 +17,7 @@ import {
   patchNote,
   patchTaskContent,
   patchTimedTask,
+  pickTagColor,
   selectTodayTasks,
   settleTimerSegment,
   sumTimeSpentOnDay,
@@ -331,7 +332,11 @@ export class MemoryWorkbenchRepository {
     const tagId = id ?? createId();
     assertTagIdAllowed(tagId);
     if (this.tags.has(tagId)) throw new DomainError(`tag exists: ${tagId}`);
-    const tag: Tag = { id: tagId, title: trimmed, color: null };
+    const tag: Tag = {
+      id: tagId,
+      title: trimmed,
+      color: pickTagColor(trimmed),
+    };
     this.tags.set(tagId, tag);
     return tag;
   }

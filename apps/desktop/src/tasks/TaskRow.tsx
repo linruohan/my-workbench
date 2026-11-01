@@ -2,6 +2,7 @@ import {
   formatDurationMs,
   formatTaskPlanMeta,
   isTaskOverdue,
+  resolveTagChipColors,
   type Tag,
   type Task,
 } from "@wb/domain";
@@ -109,7 +110,27 @@ export function TaskRow({
         onClick={() => onOpen(task)}
       >
         <div className="list__title">
-          {task.title}
+          <span className="list__title-text">{task.title}</span>
+          {tags.length > 0 ? (
+            <span className="list__tags" aria-label="标签">
+              {tags.map((tag) => {
+                const colors = resolveTagChipColors(tag);
+                return (
+                  <span
+                    key={tag.id}
+                    className="list__tag"
+                    style={{
+                      background: colors.background,
+                      borderColor: colors.border,
+                      color: colors.text,
+                    }}
+                  >
+                    {tag.title}
+                  </span>
+                );
+              })}
+            </span>
+          ) : null}
           {childCount > 0 ? (
             <span className="list__badge">{childCount} 子任务</span>
           ) : null}
@@ -131,9 +152,6 @@ export function TaskRow({
               : ""}
             {task.timeEstimate > 0
               ? ` · 预计 ${Math.round(task.timeEstimate / 60_000)} 分`
-              : ""}
-            {tags.length > 0
-              ? ` · ${tags.map((t) => t.title).join(" / ")}`
               : ""}
           </div>
         )}

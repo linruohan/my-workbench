@@ -16,28 +16,65 @@ async function readyApp() {
 }
 
 describe("App shell", () => {
-  it("captures undated task into projects, not today", async () => {
+  it("captures into today when current view is today", async () => {
     const user = userEvent.setup();
     await readyApp();
 
-    await user.type(screen.getByLabelText("快速捕获"), "回复邮件{Enter}");
+    await user.type(screen.getByLabelText("快速捕获"), "今日事项{Enter}");
+    expect(screen.getByText("今日事项")).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: "任务" }));
+  it("captures into the active project without planning when in project view", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    await user.click(screen.getByRole("button", { name: "收件箱" }));
+    await user.type(screen.getByLabelText("快速捕获"), "回复邮件{Enter}");
     expect(screen.getByText("回复邮件")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "今日" }));
     expect(screen.queryByText("回复邮件")).not.toBeInTheDocument();
   });
 
-  it("schedules task onto today from projects", async () => {
+  it("schedules task onto today from a project action", async () => {
     const user = userEvent.setup();
     await readyApp();
 
+    await user.click(screen.getByRole("button", { name: "收件箱" }));
     await user.type(screen.getByLabelText("快速捕获"), "写周报{Enter}");
-    await user.click(screen.getByRole("button", { name: "任务" }));
     await user.click(screen.getByRole("button", { name: "今天" }));
     await user.click(screen.getByRole("button", { name: "今日" }));
     expect(screen.getByText("写周报")).toBeInTheDocument();
+  });
+
+  it("creates timed task from composer while on timed view", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    await user.click(screen.getByRole("button", { name: "定时任务" }));
+    await user.type(screen.getByLabelText("快速捕获"), "晨间巡检{Enter}");
+    expect(screen.getByText("晨间巡检")).toBeInTheDocument();
+    expect(screen.getByText(/每天 · 09:00/)).toBeInTheDocument();
+  });
+
+  it("groups task views and lists projects under 任务", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    expect(screen.getByRole("region", { name: "任务分组" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "今日" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "计划" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "时间表" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "定时任务" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收件箱" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加项目" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "收件箱" }));
+    await user.type(screen.getByLabelText("快速捕获"), "跨项目事项{Enter}");
+    await user.click(screen.getByRole("button", { name: "今天" }));
+    await user.click(screen.getByRole("button", { name: "今日" }));
+    expect(screen.getByText("汇总全部项目 · 拖拽可调整今日顺序")).toBeInTheDocument();
+    expect(screen.getByText("跨项目事项")).toBeInTheDocument();
   });
 
   it("creates and previews a note in knowledge", async () => {
@@ -102,7 +139,7 @@ describe("App shell", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
-  it("creates a timed task with daily schedule", async () => {
+  it("creates a timed task with daily schedule via editor", async () => {
     const user = userEvent.setup();
     await readyApp();
 
@@ -112,7 +149,7 @@ describe("App shell", () => {
 
     const title = screen.getByLabelText("任务标题");
     await user.clear(title);
-    await user.type(title, "晨间巡检");
+    await user.type(title, "深度巡检");
     await user.click(screen.getByRole("button", { name: "+ 添加计划" }));
     await user.click(screen.getByRole("menuitem", { name: "每天" }));
     expect(
@@ -123,7 +160,7 @@ describe("App shell", () => {
       "总结昨日任务与阻塞",
     );
     await user.click(screen.getByRole("button", { name: "创建定时任务" }));
-    expect(screen.getByText("晨间巡检")).toBeInTheDocument();
+    expect(screen.getByText("深度巡检")).toBeInTheDocument();
     expect(screen.getByText(/每天 · 09:00/)).toBeInTheDocument();
   });
 });

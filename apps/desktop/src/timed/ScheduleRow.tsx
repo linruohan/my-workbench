@@ -125,43 +125,19 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
           {freqOpen && schedule.kind === "custom" ? (
             <div className="pill-menu__panel" role="dialog" aria-label="编辑频率">
               <div className="custom-freq custom-freq--compact">
-                <div className="stepper">
-                  <input
-                    type="number"
-                    min={1}
-                    aria-label="重复间隔"
-                    value={schedule.every}
-                    onChange={(e) =>
-                      onChange({
-                        ...schedule,
-                        every: Math.max(1, Number(e.target.value) || 1),
-                      })
-                    }
-                  />
-                  <div className="stepper__btns">
-                    <button
-                      type="button"
-                      aria-label="增加"
-                      onClick={() =>
-                        onChange({ ...schedule, every: schedule.every + 1 })
-                      }
-                    >
-                      ▴
-                    </button>
-                    <button
-                      type="button"
-                      aria-label="减少"
-                      onClick={() =>
-                        onChange({
-                          ...schedule,
-                          every: Math.max(1, schedule.every - 1),
-                        })
-                      }
-                    >
-                      ▾
-                    </button>
-                  </div>
-                </div>
+                <input
+                  className="stepper"
+                  type="number"
+                  min={1}
+                  aria-label="重复间隔"
+                  value={schedule.every}
+                  onChange={(e) =>
+                    onChange({
+                      ...schedule,
+                      every: Math.max(1, Number(e.target.value) || 1),
+                    })
+                  }
+                />
                 <select
                   className="pill-select"
                   aria-label="频率单位"

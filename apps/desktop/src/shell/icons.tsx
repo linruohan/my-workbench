@@ -88,6 +88,33 @@ export function IconFolder({ size, className }: IconProps) {
   );
 }
 
+export function IconFolderOpen({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M3 9.5V7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v1" />
+      <path d="M3 10h16.5a1.5 1.5 0 0 1 1.4 2l-1.6 6A2 2 0 0 1 17.4 20H5a2 2 0 0 1-2-2Z" />
+    </Svg>
+  );
+}
+
+export function IconFile({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+      <path d="M14 3v5h5" />
+    </Svg>
+  );
+}
+
+export function IconFileCode({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+      <path d="M14 3v5h5M9.5 13l-2 2 2 2M14.5 13l2 2-2 2" />
+    </Svg>
+  );
+}
+
 export function IconSettings({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>
@@ -170,6 +197,72 @@ export function IconClose({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>
       <path d="M6 6l12 12M18 6 6 18" />
+    </Svg>
+  );
+}
+
+export function IconToday({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </Svg>
+  );
+}
+
+export function IconPlanner({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M8 3v4M16 3v4M3 11h18" />
+      <path d="M8 15h3M13 15h3M8 18h3" />
+    </Svg>
+  );
+}
+
+export function IconSchedule({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3.5 2" />
+    </Svg>
+  );
+}
+
+export function IconTimed({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M12 6v6l4 2" />
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 3v2M9 3h6" />
+    </Svg>
+  );
+}
+
+export function IconKnowledge({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M4 5a2 2 0 0 1 2-2h5v16H6a2 2 0 0 0-2 2Z" />
+      <path d="M20 5a2 2 0 0 0-2-2h-5v16h5a2 2 0 0 1 2 2Z" />
+    </Svg>
+  );
+}
+
+export function IconInbox({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M3 12h5l2 3h4l2-3h5" />
+      <path d="M3 12v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6" />
+      <path d="M5 12 8 5h8l3 7" />
+    </Svg>
+  );
+}
+
+export function IconTasks({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M9 7h11M9 12h11M9 17h11" />
+      <path d="m4 7 1.5 1.5L8 6M4 12l1.5 1.5L8 11M4 17l1.5 1.5L8 16" />
     </Svg>
   );
 }

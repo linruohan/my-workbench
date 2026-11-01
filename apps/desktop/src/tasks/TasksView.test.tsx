@@ -40,7 +40,7 @@ const baseProps = {
   tags: [],
   taskTagMap: {},
   buckets: { t1: "active" as const, t2: "backlog" as const },
-  filterProjectId: null as string | null,
+  filterProjectId: "inbox",
   viewMode: "list" as const,
   showCompleted: false,
   defaultRemind: "m15" as const,
@@ -48,7 +48,6 @@ const baseProps = {
   activeTimerTaskId: null as string | null,
   timerElapsedMs: 0,
   onViewModeChange: vi.fn(),
-  onFilterProject: vi.fn(),
   onShowCompletedChange: vi.fn(),
   onToggleDone: vi.fn(),
   onPlanToday: vi.fn(),
@@ -62,7 +61,6 @@ const baseProps = {
   onClearCompleted: vi.fn(),
   onCreateTag: vi.fn(),
   onAddSubtask: vi.fn(),
-  onCreate: vi.fn(),
 };
 
 describe("TasksView", () => {
@@ -81,6 +79,7 @@ describe("TasksView", () => {
 
     expect(screen.getByText("写周报")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("新建任务标题")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开 写周报" }));
     expect(screen.getByRole("heading", { name: "编辑任务" })).toBeInTheDocument();
 
@@ -140,26 +139,21 @@ describe("TasksView", () => {
     expect(screen.getByLabelText("任务统计")).toBeInTheDocument();
     expect(screen.getByText("范围内任务总数")).toBeInTheDocument();
     expect(screen.queryByLabelText("搜索任务")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("新建任务标题")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /未完成/ }));
     expect(onViewModeChange).toHaveBeenCalledWith("list");
   });
 
-  it("creates a task and can delete from the list", async () => {
+  it("can delete a task from the list", async () => {
     const user = userEvent.setup();
-    const onCreate = vi.fn();
     const onDeleteTask = vi.fn();
     renderWithProviders(
       <TasksView
         {...baseProps}
-        onCreate={onCreate}
         onDeleteTask={onDeleteTask}
         tasks={[makeTask({ id: "t1", title: "待删" })]}
       />,
     );
-    await user.type(screen.getByLabelText("新建任务标题"), "新任务{Enter}");
-    expect(onCreate).toHaveBeenCalledWith("新任务");
 
     await user.click(screen.getByRole("button", { name: "删除" }));
     expect(onDeleteTask).toHaveBeenCalledWith("t1");

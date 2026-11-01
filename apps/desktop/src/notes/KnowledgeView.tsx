@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Note } from "@wb/domain";
 import {
   fileStem,
@@ -11,10 +11,12 @@ import {
   samePath,
 } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
+import { PromptModal } from "../shell/PromptModal";
 import { FileTree } from "./FileTree";
 import {
   ensureNoteAssetDir,
   kbExists,
+  listFilesRecursive,
   loadKnowledgeRoots,
   pickDirectory,
   readImageDataUrl,
@@ -24,6 +26,7 @@ import {
   type KbEntry,
 } from "./kb-api";
 import { NoteEditor } from "./NoteEditor";
+import { QuickOpen } from "./QuickOpen";
 
 type Props = {
   notes: Note[];
@@ -57,8 +60,11 @@ export function KnowledgeView({
   const [filter, setFilter] = useState("");
   const [asset, setAsset] = useState<{ id: string; dir: string } | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [createFileRoot, setCreateFileRoot] = useState<string | null>(null);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickFiles, setQuickFiles] = useState<KbEntry[]>([]);
+  const [quickLoading, setQuickLoading] = useState(false);
   const pendingSave = useRef<{ path: string; body: string } | null>(null);
-  const saveTimer = useRef<number | null>(null);
 
   const selected = activeId ? notes.find((n) => n.id === activeId) : null;
   const active = openFile
@@ -79,14 +85,15 @@ export function KnowledgeView({
     };
   }, [activeNoteId]);
 
-  const flushSave = async () => {
-    if (saveTimer.current) {
-      window.clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
+  const flushSave = useCallback(async () => {
     const item = pendingSave.current;
+    if (!item) return;
+    if (!isTauriRuntime()) {
+      pendingSave.current = null;
+      setSaveState("saved");
+      return;
+    }
     pendingSave.current = null;
-    if (!item || !isTauriRuntime()) return;
     setSaveState("saving");
     try {
       await writeTextFile(item.path, item.body);
@@ -96,13 +103,27 @@ export function KnowledgeView({
       setSaveState("error");
       window.alert(err instanceof Error ? err.message : "保存失败");
     }
-  };
+  }, []);
 
+  // Save pending edits when hiding/closing the app or leaving this view.
   useEffect(() => {
+    const onLeave = () => {
+      const item = pendingSave.current;
+      if (!item || !isTauriRuntime()) return;
+      void writeTextFile(item.path, item.body);
+      pendingSave.current = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") onLeave();
+    };
+    window.addEventListener("beforeunload", onLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      window.removeEventListener("beforeunload", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       void flushSave();
     };
-  }, []);
+  }, [flushSave]);
 
   const updateFileBody = (path: string, body: string) => {
     setOpenFile((current) =>
@@ -114,11 +135,39 @@ export function KnowledgeView({
     );
     pendingSave.current = { path, body };
     setSaveState("dirty");
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      void flushSave();
-    }, 400);
   };
+
+  const openQuickOpen = useCallback(() => {
+    setQuickOpen(true);
+    if (!isTauriRuntime() || roots.length === 0) {
+      setQuickFiles([]);
+      return;
+    }
+    setQuickLoading(true);
+    void listFilesRecursive(roots)
+      .then((files) => setQuickFiles(files))
+      .catch(() => setQuickFiles([]))
+      .finally(() => setQuickLoading(false));
+  }, [roots]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) return;
+      const key = event.key.toLowerCase();
+      if (key === "s") {
+        event.preventDefault();
+        void flushSave();
+        return;
+      }
+      if (key === "p") {
+        event.preventDefault();
+        openQuickOpen();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [flushSave, openQuickOpen]);
 
   const importDirectory = async () => {
     if (!isTauriRuntime()) {
@@ -152,13 +201,9 @@ export function KnowledgeView({
     });
   };
 
-  const createMarkdownIn = async (rootPath: string) => {
+  const createMarkdownIn = async (rootPath: string, name: string) => {
     if (!isTauriRuntime()) return;
-    const name = window.prompt("新建 Markdown 文件名", "未命名笔记.md");
-    if (!name?.trim()) return;
-    const fileName = name.trim().toLowerCase().endsWith(".md")
-      ? name.trim()
-      : `${name.trim()}.md`;
+    const fileName = name.toLowerCase().endsWith(".md") ? name : `${name}.md`;
     const path = joinPath(rootPath, fileName);
     try {
       if (await kbExists(path)) {
@@ -236,6 +281,13 @@ export function KnowledgeView({
             >
               刷新
             </button>
+            <button
+              type="button"
+              title="搜索打开文件 Ctrl+P"
+              onClick={() => openQuickOpen()}
+            >
+              打开
+            </button>
             <button type="button" className="primary" onClick={onCreate}>
               新建
             </button>
@@ -259,7 +311,10 @@ export function KnowledgeView({
             filter={filter}
             onOpen={(entry) => void openEntry(entry)}
             onRemoveRoot={removeRoot}
-            onCreateIn={(root) => void createMarkdownIn(root)}
+            onCreateIn={(root) => {
+              if (!isTauriRuntime()) return;
+              setCreateFileRoot(root);
+            }}
           />
           {roots.length > 0 ? <p className="knowledge__section">笔记</p> : null}
           {notes.length === 0 && roots.length === 0 ? (
@@ -360,6 +415,28 @@ export function KnowledgeView({
           </p>
         )}
       </div>
+      <PromptModal
+        open={createFileRoot !== null}
+        title="新建 Markdown"
+        label="文件名"
+        initialValue="未命名笔记.md"
+        confirmLabel="创建"
+        onCancel={() => setCreateFileRoot(null)}
+        onConfirm={(name) => {
+          const root = createFileRoot;
+          setCreateFileRoot(null);
+          if (!root) return;
+          void createMarkdownIn(root, name);
+        }}
+      />
+      <QuickOpen
+        open={quickOpen}
+        files={quickFiles}
+        loading={quickLoading}
+        activePath={openFile?.path ?? null}
+        onClose={() => setQuickOpen(false)}
+        onOpen={(entry) => void openEntry(entry)}
+      />
     </section>
   );
 }

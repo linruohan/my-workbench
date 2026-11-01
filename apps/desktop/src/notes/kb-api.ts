@@ -1,6 +1,7 @@
 import {
   fileNameOf,
   imageMime,
+  isIgnoredKbName,
   joinPath,
   nestedImageDirs,
   parentDir,
@@ -47,6 +48,38 @@ export async function pickDirectory(): Promise<string | null> {
 
 export async function listDirectory(path: string): Promise<KbEntry[]> {
   return call<KbEntry[]>("kb_list_dir", { path });
+}
+
+/** Recursively list files under imported knowledge roots (skips ignored dirs). */
+export async function listFilesRecursive(
+  roots: string[],
+  maxFiles = 8000,
+): Promise<KbEntry[]> {
+  const out: KbEntry[] = [];
+  const walk = async (dir: string) => {
+    if (out.length >= maxFiles) return;
+    let entries: KbEntry[] = [];
+    try {
+      entries = await listDirectory(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= maxFiles) return;
+      if (entry.isDir) {
+        if (isIgnoredKbName(entry.name)) continue;
+        await walk(entry.path);
+        continue;
+      }
+      if (isIgnoredKbName(entry.name)) continue;
+      out.push(entry);
+    }
+  };
+  for (const root of roots) {
+    if (out.length >= maxFiles) break;
+    await walk(root);
+  }
+  return out;
 }
 
 export async function readTextFile(path: string): Promise<string> {
