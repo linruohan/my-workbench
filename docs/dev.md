@@ -19,10 +19,31 @@
 | `npm run check` | 发版门禁：format + lint + typecheck + test |
 | `npm run format` | Prettier 格式化 |
 | `npm run lint` | Oxlint（desktop） |
-| `npm run dev` | Vite 开发服务器 |
-| `npm run tauri:dev` | Tauri 开发窗口 |
+| `npm run dev` | Vite 热更新（浏览器模拟桌面 UI） |
+| `npm run tauri:dev` | Tauri 热启动（原生窗口 + 前端 HMR） |
+
+### 热启动桌面端
+
+推荐日常改 UI / 领域代码时用 Tauri 热启动（改前端会 HMR，不必重编 Rust）：
+
+```bash
+npm run tauri:dev
+```
+
+仅预览界面、不需要原生能力时：
+
+```bash
+npm run dev
+# 浏览器打开 http://localhost:5173
+```
+
+Cursor / VS Code：运行与调试里可选「桌面端 · Tauri 热启动」或「桌面端 · Vite 热更新（模拟）」；也可 `任务: 运行任务` → 同名任务。
+
+`apps/desktop/vite.config.ts` 已把 `packages/domain|db|theme` 纳入监视与 `fs.allow`，改领域代码也会热更新进桌面壳。
+
 | `npm run build` | 构建前端 |
 | `npm run pack:win` | Windows 桌面生产包 |
+| `npm run dev:desktop` | 同 `tauri:dev` 的快捷别名 |
 
 ## 目录职责
 

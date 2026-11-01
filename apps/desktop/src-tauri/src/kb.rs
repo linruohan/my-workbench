@@ -29,7 +29,7 @@ pub fn kb_list_dir(path: String) -> Result<Vec<KbEntry>, String> {
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.is_empty() || name == "." || name == ".." {
+        if should_skip_entry(&name) {
             continue;
         }
         let file_path = entry.path();
@@ -100,4 +100,29 @@ fn read_limited(path: &str) -> Result<Vec<u8>, String> {
         return Err("文件过大".into());
     }
     fs::read(path).map_err(|err| format!("无法读取文件：{err}"))
+}
+
+fn should_skip_entry(name: &str) -> bool {
+    matches!(
+        name,
+        "" | "."
+            | ".."
+            | ".git"
+            | ".svn"
+            | ".hg"
+            | ".obsidian"
+            | ".trash"
+            | ".DS_Store"
+            | "Thumbs.db"
+            | "desktop.ini"
+            | "node_modules"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "target"
+            | "dist"
+            | "build"
+            | ".idea"
+            | ".vscode"
+    )
 }

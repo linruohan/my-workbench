@@ -54,4 +54,19 @@ describe("NoteEditor", () => {
       expect.objectContaining({ bodyMd: expect.stringContaining("!") }),
     );
   });
+
+  it("indents the current line with Tab", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    renderWithProviders(
+      <NoteEditor note={note} onChange={onChange} onDelete={() => undefined} />,
+    );
+    const source = screen.getByLabelText("Markdown 源码");
+    source.focus();
+    await user.keyboard("{Tab}");
+    expect(onChange).toHaveBeenCalled();
+    expect(onChange.mock.calls.at(-1)?.[0]).toEqual(
+      expect.objectContaining({ bodyMd: expect.stringMatching(/^ {2}/) }),
+    );
+  });
 });

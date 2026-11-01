@@ -209,10 +209,95 @@ export function isAbsolutePath(path: string): boolean {
   );
 }
 
+export function pathKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
 export function samePath(a: string, b: string): boolean {
-  const norm = (value: string) =>
-    value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  return norm(a) === norm(b);
+  return pathKey(a) === pathKey(b);
+}
+
+/** True when `child` is inside `parent` or equal to it. */
+export function isPathUnder(parent: string, child: string): boolean {
+  const root = pathKey(parent);
+  const target = pathKey(child);
+  return target === root || target.startsWith(root + "/");
+}
+
+const IGNORED_KB_NAMES = new Set([
+  ".git",
+  ".svn",
+  ".hg",
+  ".obsidian",
+  ".trash",
+  ".DS_Store",
+  "Thumbs.db",
+  "desktop.ini",
+  "node_modules",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "target",
+  "dist",
+  "build",
+  ".idea",
+  ".vscode",
+]);
+
+/** Skip noisy VCS/tooling folders in the knowledge tree. */
+export function isIgnoredKbName(name: string): boolean {
+  if (!name || name === "." || name === "..") return true;
+  if (IGNORED_KB_NAMES.has(name)) return true;
+  return false;
+}
+
+export function indentMarkdownSelection(
+  text: string,
+  start: number,
+  end: number,
+  indent = "  ",
+): { text: string; start: number; end: number } {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const lineEnd = (() => {
+    const next = text.indexOf("\n", end);
+    return next === -1 ? text.length : next;
+  })();
+  const block = text.slice(lineStart, lineEnd);
+  const lines = block.split("\n");
+  const nextBlock = lines.map((line) => indent + line).join("\n");
+  return {
+    text: text.slice(0, lineStart) + nextBlock + text.slice(lineEnd),
+    start: start + indent.length,
+    end: end + indent.length * lines.length,
+  };
+}
+
+export function outdentMarkdownSelection(
+  text: string,
+  start: number,
+  end: number,
+): { text: string; start: number; end: number } {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const lineEnd = (() => {
+    const next = text.indexOf("\n", end);
+    return next === -1 ? text.length : next;
+  })();
+  const block = text.slice(lineStart, lineEnd);
+  const lines = block.split("\n");
+  let removedBefore = 0;
+  let removedTotal = 0;
+  const nextLines = lines.map((line, index) => {
+    const match = /^( {1,2}|\t)/.exec(line);
+    const drop = match?.[1]?.length ?? 0;
+    if (index === 0) removedBefore = drop;
+    removedTotal += drop;
+    return drop > 0 ? line.slice(drop) : line;
+  });
+  return {
+    text: text.slice(0, lineStart) + nextLines.join("\n") + text.slice(lineEnd),
+    start: Math.max(lineStart, start - removedBefore),
+    end: Math.max(lineStart, end - removedTotal),
+  };
 }
 
 /** ImagePaste: `{stem}/{stem}{index}.png` beside the markdown file. */

@@ -13,6 +13,7 @@
     "test:db": "npm run test -w @wb/db",
     "test:theme": "npm run test -w @wb/theme",
     "dev": "npm run dev -w @wb/desktop",
+    "dev:desktop": "npm run tauri:dev -w @wb/desktop",
     "build": "npm run build -w @wb/desktop",
     "typecheck": "npm run typecheck -w @wb/domain && npm run typecheck -w @wb/db && npm run typecheck -w @wb/theme && npm run typecheck -w @wb/desktop",
     "lint": "npm run lint -w @wb/desktop",

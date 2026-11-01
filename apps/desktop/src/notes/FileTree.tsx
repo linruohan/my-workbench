@@ -1,23 +1,35 @@
-import { useEffect, useState } from "react";
-import { fileNameOf, isImageFile, isMarkdownFile } from "@wb/domain";
+import { useEffect, useMemo, useState } from "react";
+import {
+  fileNameOf,
+  isIgnoredKbName,
+  isImageFile,
+  isMarkdownFile,
+  isPathUnder,
+  samePath,
+} from "@wb/domain";
 import { listDirectory, type KbEntry } from "./kb-api";
 
 type Props = {
   roots: string[];
   activePath: string | null;
   refreshToken: number;
+  filter?: string;
   onOpen: (entry: KbEntry) => void;
   onRemoveRoot: (path: string) => void;
+  onCreateIn?: (rootPath: string) => void;
 };
 
 export function FileTree({
   roots,
   activePath,
   refreshToken,
+  filter = "",
   onOpen,
   onRemoveRoot,
+  onCreateIn,
 }: Props) {
   if (roots.length === 0) return null;
+  const query = filter.trim().toLowerCase();
   return (
     <div className="knowledge__tree" aria-label="导入的目录">
       {roots.map((root) => (
@@ -29,8 +41,10 @@ export function FileTree({
           isRoot
           activePath={activePath}
           refreshToken={refreshToken}
+          filter={query}
           onOpen={onOpen}
           onRemoveRoot={onRemoveRoot}
+          onCreateIn={onCreateIn}
         />
       ))}
     </div>
@@ -44,8 +58,10 @@ function DirNode({
   isRoot,
   activePath,
   refreshToken,
+  filter,
   onOpen,
   onRemoveRoot,
+  onCreateIn,
 }: {
   path: string;
   name: string;
@@ -53,21 +69,28 @@ function DirNode({
   isRoot?: boolean;
   activePath: string | null;
   refreshToken: number;
+  filter: string;
   onOpen: (entry: KbEntry) => void;
   onRemoveRoot: (path: string) => void;
+  onCreateIn?: (rootPath: string) => void;
 }) {
-  const [open, setOpen] = useState(depth === 0);
+  const underActive = Boolean(activePath && isPathUnder(path, activePath));
+  const [userOpen, setUserOpen] = useState(depth === 0);
+  const open = userOpen || underActive || Boolean(filter);
   const [entries, setEntries] = useState<KbEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     let cancel = false;
+    const token = `${path}:${refreshToken}`;
     listDirectory(path)
       .then((rows) => {
         if (cancel) return;
-        setEntries(rows);
+        setEntries(rows.filter((entry) => !isIgnoredKbName(entry.name)));
         setError(null);
+        setLoadedFor(token);
       })
       .catch((err: unknown) => {
         if (!cancel) setError(err instanceof Error ? err.message : "无法读取目录");
@@ -77,6 +100,16 @@ function DirNode({
     };
   }, [open, path, refreshToken]);
 
+  const visible = useMemo(() => {
+    if (!entries) return null;
+    if (!filter) return entries;
+    return entries.filter(
+      (entry) => entry.isDir || entry.name.toLowerCase().includes(filter),
+    );
+  }, [entries, filter]);
+
+  const loading = open && !error && loadedFor !== `${path}:${refreshToken}`;
+
   return (
     <div className="knowledge__branch">
       <div className="knowledge__row" style={{ paddingLeft: 8 + depth * 14 }}>
@@ -85,7 +118,7 @@ function DirNode({
           className="knowledge__twist"
           aria-label={open ? `折叠 ${name}` : `展开 ${name}`}
           aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => setUserOpen((value) => !value)}
         >
           {open ? "▾" : "▸"}
         </button>
@@ -93,10 +126,20 @@ function DirNode({
           type="button"
           className="knowledge__file"
           title={path}
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => setUserOpen((value) => !value)}
         >
           <span className="knowledge__file-name">{name}</span>
         </button>
+        {isRoot && onCreateIn ? (
+          <button
+            type="button"
+            className="knowledge__remove"
+            title="在此目录新建 Markdown"
+            onClick={() => onCreateIn(path)}
+          >
+            新建
+          </button>
+        ) : null}
         {isRoot ? (
           <button
             type="button"
@@ -108,8 +151,9 @@ function DirNode({
         ) : null}
       </div>
       {open && error ? <p className="knowledge__tree-error">{error}</p> : null}
-      {open && entries
-        ? entries.map((entry) =>
+      {open && loading ? <p className="knowledge__tree-hint">加载中…</p> : null}
+      {open && visible
+        ? visible.map((entry) =>
             entry.isDir ? (
               <DirNode
                 key={entry.path}
@@ -118,6 +162,7 @@ function DirNode({
                 depth={depth + 1}
                 activePath={activePath}
                 refreshToken={refreshToken}
+                filter={filter}
                 onOpen={onOpen}
                 onRemoveRoot={onRemoveRoot}
               />
@@ -126,7 +171,7 @@ function DirNode({
                 key={entry.path}
                 type="button"
                 className={
-                  activePath === entry.path
+                  activePath && samePath(activePath, entry.path)
                     ? "knowledge__file is-active"
                     : "knowledge__file"
                 }

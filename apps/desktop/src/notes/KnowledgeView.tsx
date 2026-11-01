@@ -4,7 +4,9 @@ import {
   fileStem,
   isImageFile,
   isMarkdownFile,
+  isPathUnder,
   isTextFile,
+  joinPath,
   parentDir,
   samePath,
 } from "@wb/domain";
@@ -12,6 +14,7 @@ import { isTauriRuntime } from "../lib/paths";
 import { FileTree } from "./FileTree";
 import {
   ensureNoteAssetDir,
+  kbExists,
   loadKnowledgeRoots,
   pickDirectory,
   readImageDataUrl,
@@ -38,6 +41,8 @@ type OpenFile =
   | { kind: "image"; path: string; title: string }
   | { kind: "other"; path: string; title: string; message?: string };
 
+type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
+
 export function KnowledgeView({
   notes,
   activeId,
@@ -51,7 +56,9 @@ export function KnowledgeView({
   const [roots, setRoots] = useState<string[]>(() => loadKnowledgeRoots());
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [filter, setFilter] = useState("");
   const [asset, setAsset] = useState<{ id: string; dir: string } | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const pendingSave = useRef<{ path: string; body: string } | null>(null);
   const saveTimer = useRef<number | null>(null);
 
@@ -60,7 +67,6 @@ export function KnowledgeView({
     ? null
     : (selected ?? (preferLastNote ? (notes[0] ?? null) : null));
   const activeNoteId = active?.id ?? null;
-
   const noteAssetDir = asset?.id === activeNoteId ? asset.dir : null;
 
   useEffect(() => {
@@ -75,7 +81,7 @@ export function KnowledgeView({
     };
   }, [activeNoteId]);
 
-  const flushSave = () => {
+  const flushSave = async () => {
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -83,10 +89,22 @@ export function KnowledgeView({
     const item = pendingSave.current;
     pendingSave.current = null;
     if (!item || !isTauriRuntime()) return;
-    void writeTextFile(item.path, item.body);
+    setSaveState("saving");
+    try {
+      await writeTextFile(item.path, item.body);
+      setSaveState("saved");
+    } catch (err) {
+      pendingSave.current = item;
+      setSaveState("error");
+      window.alert(err instanceof Error ? err.message : "保存失败");
+    }
   };
 
-  useEffect(() => () => flushSave(), []);
+  useEffect(() => {
+    return () => {
+      void flushSave();
+    };
+  }, []);
 
   const updateFileBody = (path: string, body: string) => {
     setOpenFile((current) =>
@@ -97,8 +115,11 @@ export function KnowledgeView({
         : current,
     );
     pendingSave.current = { path, body };
+    setSaveState("dirty");
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(flushSave, 400);
+    saveTimer.current = window.setTimeout(() => {
+      void flushSave();
+    }, 400);
   };
 
   const importDirectory = async () => {
@@ -121,6 +142,7 @@ export function KnowledgeView({
   };
 
   const removeRoot = (path: string) => {
+    if (!window.confirm(`从知识库移除目录？\n${path}\n（不会删除磁盘文件）`)) return;
     setRoots((current) => {
       const next = current.filter((item) => !samePath(item, path));
       saveKnowledgeRoots(next);
@@ -128,17 +150,38 @@ export function KnowledgeView({
     });
     setOpenFile((current) => {
       if (!current) return current;
-      const prefix = path.replace(/[\\/]+$/, "").toLowerCase();
-      const file = current.path.replace(/\\/g, "/").toLowerCase();
-      const root = prefix.replace(/\\/g, "/");
-      if (file === root || file.startsWith(root + "/")) return null;
-      return current;
+      return isPathUnder(path, current.path) ? null : current;
     });
   };
 
+  const createMarkdownIn = async (rootPath: string) => {
+    if (!isTauriRuntime()) return;
+    const name = window.prompt("新建 Markdown 文件名", "未命名笔记.md");
+    if (!name?.trim()) return;
+    const fileName = name.trim().toLowerCase().endsWith(".md")
+      ? name.trim()
+      : `${name.trim()}.md`;
+    const path = joinPath(rootPath, fileName);
+    try {
+      if (await kbExists(path)) {
+        window.alert("同名文件已存在。");
+        return;
+      }
+      const title = fileStem(fileName);
+      const body = `# ${title}\n\n`;
+      await writeTextFile(path, body);
+      setRefreshToken((value) => value + 1);
+      setOpenFile({ kind: "md", path, title: fileName, body });
+      setSaveState("saved");
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "无法创建文件");
+    }
+  };
+
   const openEntry = async (entry: KbEntry) => {
-    flushSave();
+    await flushSave();
     if (entry.isDir) return;
+    setSaveState("idle");
     if (isImageFile(entry.name)) {
       setOpenFile({ kind: "image", path: entry.path, title: entry.name });
       return;
@@ -152,6 +195,7 @@ export function KnowledgeView({
           title: entry.name,
           body,
         });
+        setSaveState("saved");
       } catch (err) {
         setOpenFile({
           kind: "other",
@@ -165,6 +209,19 @@ export function KnowledgeView({
     setOpenFile({ kind: "other", path: entry.path, title: entry.name });
   };
 
+  const saveLabel =
+    openFile && (openFile.kind === "md" || openFile.kind === "text")
+      ? saveState === "saving"
+        ? "保存中…"
+        : saveState === "dirty"
+          ? "未保存"
+          : saveState === "error"
+            ? "保存失败"
+            : saveState === "saved"
+              ? "已保存"
+              : null
+      : null;
+
   return (
     <section className="knowledge">
       <aside className="knowledge__list" aria-label="笔记列表">
@@ -174,18 +231,37 @@ export function KnowledgeView({
             <button type="button" onClick={() => void importDirectory()}>
               导入目录
             </button>
+            <button
+              type="button"
+              title="刷新目录树"
+              onClick={() => setRefreshToken((value) => value + 1)}
+            >
+              刷新
+            </button>
             <button type="button" className="primary" onClick={onCreate}>
               新建
             </button>
           </div>
         </header>
+        {roots.length > 0 ? (
+          <div className="knowledge__filter">
+            <input
+              aria-label="筛选文件"
+              placeholder="筛选目录中的文件…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          </div>
+        ) : null}
         <div className="knowledge__scroll">
           <FileTree
             roots={roots}
             activePath={openFile?.path ?? null}
             refreshToken={refreshToken}
+            filter={filter}
             onOpen={(entry) => void openEntry(entry)}
             onRemoveRoot={removeRoot}
+            onCreateIn={(root) => void createMarkdownIn(root)}
           />
           {roots.length > 0 ? <p className="knowledge__section">笔记</p> : null}
           {notes.length === 0 && roots.length === 0 ? (
@@ -206,9 +282,11 @@ export function KnowledgeView({
                         : "knowledge__item"
                     }
                     onClick={() => {
-                      flushSave();
-                      setOpenFile(null);
-                      onSelect(n.id);
+                      void flushSave().then(() => {
+                        setOpenFile(null);
+                        setSaveState("idle");
+                        onSelect(n.id);
+                      });
                     }}
                   >
                     <span className="knowledge__item-title">{n.title}</span>
@@ -240,9 +318,11 @@ export function KnowledgeView({
               }}
               defaultMode={defaultEditorMode}
               titleReadOnly
+              saveLabel={saveLabel}
               imageBaseDir={parentDir(openFile.path)}
               imageStem={fileStem(openFile.path)}
               onAssetSaved={() => setRefreshToken((value) => value + 1)}
+              onSave={() => void flushSave()}
               onChange={(patch) => {
                 if (patch.bodyMd !== undefined)
                   updateFileBody(openFile.path, patch.bodyMd);
@@ -254,6 +334,8 @@ export function KnowledgeView({
             path={openFile.path}
             title={openFile.title}
             body={openFile.body}
+            saveLabel={saveLabel}
+            onSave={() => void flushSave()}
             onChange={(body) => updateFileBody(openFile.path, body)}
           />
         ) : openFile?.kind === "image" ? (
@@ -290,12 +372,16 @@ function PlainTextFile({
   path,
   title,
   body,
+  saveLabel,
   onChange,
+  onSave,
 }: {
   path: string;
   title: string;
   body: string;
+  saveLabel: string | null;
   onChange: (body: string) => void;
+  onSave: () => void;
 }) {
   return (
     <div className="note-editor">
@@ -306,6 +392,7 @@ function PlainTextFile({
           value={title}
           readOnly
         />
+        {saveLabel ? <span className="note-editor__save">{saveLabel}</span> : null}
       </header>
       <p className="knowledge__path" title={path}>
         {path}
@@ -316,34 +403,49 @@ function PlainTextFile({
         spellCheck={false}
         value={body}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+            e.preventDefault();
+            onSave();
+          }
+        }}
       />
     </div>
   );
 }
 
 function ImageFile({ path, title }: { path: string; title: string }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ path: string; url?: string; error?: string }>({
+    path,
+  });
   useEffect(() => {
     let cancel = false;
     void readImageDataUrl(path)
-      .then((next) => {
-        if (!cancel) setUrl(next);
+      .then((url) => {
+        if (!cancel) setResult({ path, url });
       })
       .catch((err: unknown) => {
-        if (!cancel) setError(err instanceof Error ? err.message : "无法显示图片");
+        if (!cancel) {
+          setResult({
+            path,
+            error: err instanceof Error ? err.message : "无法显示图片",
+          });
+        }
       });
     return () => {
       cancel = true;
     };
   }, [path]);
+  const current = result.path === path ? result : { path };
   return (
     <div className="knowledge__file-view">
       <h2>{title}</h2>
       <p className="knowledge__path">{path}</p>
-      {error ? <p className="empty">{error}</p> : null}
-      {url ? <img className="knowledge__photo" src={url} alt={title} /> : null}
-      {!url && !error ? <p className="empty">正在加载图片…</p> : null}
+      {current.error ? <p className="empty">{current.error}</p> : null}
+      {current.url ? (
+        <img className="knowledge__photo" src={current.url} alt={title} />
+      ) : null}
+      {!current.url && !current.error ? <p className="empty">正在加载图片…</p> : null}
     </div>
   );
 }

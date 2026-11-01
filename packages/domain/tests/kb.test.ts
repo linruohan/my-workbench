@@ -5,8 +5,12 @@ import {
   headingMeta,
   highlightMarkdown,
   imageDestination,
+  indentMarkdownSelection,
+  isIgnoredKbName,
   isImageFile,
   isMarkdownFile,
+  isPathUnder,
+  outdentMarkdownSelection,
   parseHtmlImage,
   pastedImageAbs,
   pastedImageRel,
@@ -118,5 +122,17 @@ describe("knowledge headings", () => {
     expect(isMarkdownFile("a.MD")).toBe(true);
     expect(isImageFile("图.webp")).toBe(true);
     expect(isMarkdownFile("a.png")).toBe(false);
+    expect(isIgnoredKbName(".git")).toBe(true);
+    expect(isIgnoredKbName("node_modules")).toBe(true);
+    expect(isIgnoredKbName("notes")).toBe(false);
+  });
+
+  it("checks path containment and indent helpers", () => {
+    expect(isPathUnder("D:\\notes", "D:\\notes\\a.md")).toBe(true);
+    expect(isPathUnder("D:\\notes", "D:\\other\\a.md")).toBe(false);
+    const indented = indentMarkdownSelection("a\nb", 0, 3);
+    expect(indented.text).toBe("  a\n  b");
+    const out = outdentMarkdownSelection("  a\n  b", 2, 6);
+    expect(out.text).toBe("a\nb");
   });
 });

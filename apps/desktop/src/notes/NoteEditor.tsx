@@ -1,9 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from "react";
 import {
   cycleNoteEditorMode,
   extractImageSlots,
   highlightMarkdown,
+  indentMarkdownSelection,
   noteEditorModeLabel,
+  outdentMarkdownSelection,
   resolveImageTarget,
   safeStem,
   type Note,
@@ -23,11 +32,13 @@ type Props = {
   defaultMode?: NoteEditorMode;
   onChange: (patch: { title?: string; bodyMd?: string }) => void;
   onDelete?: () => void;
+  onSave?: () => void;
   titleReadOnly?: boolean;
   /** Directory used to resolve and save images. */
   imageBaseDir?: string | null;
   imageStem?: string | null;
   onAssetSaved?: () => void;
+  saveLabel?: string | null;
 };
 
 function clipboardImage(data: DataTransfer | null): File | null {
@@ -51,16 +62,19 @@ export function NoteEditor({
   defaultMode = "live",
   onChange,
   onDelete,
+  onSave,
   titleReadOnly = false,
   imageBaseDir = null,
   imageStem = null,
   onAssetSaved,
+  saveLabel = null,
 }: Props) {
   const [mode, setMode] = useState<NoteEditorMode>(defaultMode);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const syncing = useRef(false);
+  const pendingCaret = useRef<number | null>(null);
   const prepared = useMemo(() => extractImageSlots(note.bodyMd), [note.bodyMd]);
   const highlighted = useMemo(() => highlightMarkdown(note.bodyMd), [note.bodyMd]);
   const remoteUrls = useMemo(
@@ -102,8 +116,22 @@ export function NoteEditor({
     };
   }, [prepared, imageBaseDir, remoteUrls, slotKey]);
 
+  useEffect(() => {
+    const caret = pendingCaret.current;
+    const area = sourceRef.current;
+    if (caret == null || !area) return;
+    area.setSelectionRange(caret, caret);
+    pendingCaret.current = null;
+  }, [note.bodyMd]);
+
   const html = useMemo(() => renderMarkdown(note.bodyMd, urls), [note.bodyMd, urls]);
-  const inlineImages = urls.filter((url): url is string => Boolean(url));
+  const inlineImages = prepared.slots
+    .map((slot, index) => ({
+      dest: slot.dest,
+      url: urls[index] ?? null,
+      scale: slot.scale,
+    }))
+    .filter((item) => item.url);
 
   const syncScroll = (from: "source" | "preview") => {
     if (mode !== "live" || syncing.current) return;
@@ -134,6 +162,28 @@ export function NoteEditor({
     syncScroll("source");
   };
 
+  const applyBody = (next: string, caret: number) => {
+    pendingCaret.current = caret;
+    onChange({ bodyMd: next });
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      onSave?.();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    const area = event.currentTarget;
+    const start = area.selectionStart;
+    const end = area.selectionEnd;
+    const next = event.shiftKey
+      ? outdentMarkdownSelection(note.bodyMd, start, end)
+      : indentMarkdownSelection(note.bodyMd, start, end);
+    applyBody(next.text, next.end);
+  };
+
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const file = clipboardImage(event.clipboardData);
     if (!file) return;
@@ -157,7 +207,10 @@ export function NoteEditor({
         } else {
           inserted = `![](data:image/png;base64,${bytesToBase64(bytes)})`;
         }
-        onChange({ bodyMd: current.slice(0, start) + inserted + current.slice(end) });
+        applyBody(
+          current.slice(0, start) + inserted + current.slice(end),
+          start + inserted.length,
+        );
       } catch (err) {
         window.alert(err instanceof Error ? err.message : "粘贴图片失败");
       }
@@ -174,6 +227,7 @@ export function NoteEditor({
           readOnly={titleReadOnly}
           onChange={(e) => onChange({ title: e.target.value })}
         />
+        {saveLabel ? <span className="note-editor__save">{saveLabel}</span> : null}
         <div className="note-editor__modes" role="group" aria-label="编辑模式">
           {(["live", "source", "preview"] as const).map((m) => (
             <button
@@ -242,16 +296,31 @@ export function NoteEditor({
                 aria-label="Markdown 源码"
                 spellCheck={false}
                 value={note.bodyMd}
-                placeholder="用 Markdown 书写… 支持标题、图片和粘贴截图"
+                placeholder="用 Markdown 书写… Tab 缩进，粘贴可插入图片，Ctrl+S 保存"
                 onChange={(e) => onChange({ bodyMd: e.target.value })}
                 onScroll={onSourceScroll}
                 onPaste={onPaste}
+                onKeyDown={onKeyDown}
               />
             </div>
             {mode === "source" && inlineImages.length > 0 ? (
               <div className="md-inline-images" aria-label="文中图片">
-                {inlineImages.map((url, index) => (
-                  <img key={index} src={url} alt="" />
+                {inlineImages.map((item, index) => (
+                  <figure
+                    key={`${item.dest}-${index}`}
+                    className="md-inline-images__item"
+                  >
+                    <img
+                      src={item.url!}
+                      alt=""
+                      style={
+                        item.scale != null
+                          ? { width: `${Math.round(item.scale * 100)}%`, height: "auto" }
+                          : undefined
+                      }
+                    />
+                    <figcaption title={item.dest}>{item.dest}</figcaption>
+                  </figure>
                 ))}
               </div>
             ) : null}
