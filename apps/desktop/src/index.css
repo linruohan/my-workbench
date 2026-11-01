@@ -1,0 +1,6 @@
+/* Global reset lives mostly in App.css; keep html fill here. */
+html,
+body,
+#root {
+  height: 100%;
+}
