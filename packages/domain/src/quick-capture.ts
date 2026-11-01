@@ -101,9 +101,8 @@ export function parseQuickCapture(
 
   let deadlineDay: string | null = null;
   let deadlineWithTime: number | null = null;
-  const deadlineMatch = /截止\s*(今天|明天|周五|周[一二三四五六日天]|(\d{1,2})月(\d{1,2})日)/.exec(
-    text,
-  );
+  const deadlineMatch =
+    /截止\s*(今天|明天|周五|周[一二三四五六日天]|(\d{1,2})月(\d{1,2})日)/.exec(text);
   if (deadlineMatch) {
     const token = deadlineMatch[1]!;
     if (token === "今天") deadlineDay = today;
@@ -156,7 +155,9 @@ export function parseQuickCapture(
     dueWithTime = time.ms;
     dueDay = null;
     text = text.replace(time.consumed, " ").trim();
-    summary.push(`时刻 ${formatLocalDay(time.ms)} ${new Date(time.ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`);
+    summary.push(
+      `时刻 ${formatLocalDay(time.ms)} ${new Date(time.ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`,
+    );
   }
 
   let remindAt: number | null = null;

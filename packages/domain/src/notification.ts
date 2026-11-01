@@ -31,10 +31,7 @@ export class ReminderUiCooldown {
   }
 }
 
-export function shouldFireReminder(
-  remindAt: number | null,
-  nowMs: number,
-): boolean {
+export function shouldFireReminder(remindAt: number | null, nowMs: number): boolean {
   return remindAt != null && remindAt <= nowMs;
 }
 

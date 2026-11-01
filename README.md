@@ -5,43 +5,40 @@
 | 文档 | 说明 |
 | --- | --- |
 | [`docs/design.md`](docs/design.md) | 产品与架构设计 |
-| [`docs/packaging.md`](docs/packaging.md) | 打包与发版 |
+| [`docs/standards.md`](docs/standards.md) | 代码规范 |
+| [`docs/release.md`](docs/release.md) | 发布标准 |
+| [`docs/packaging.md`](docs/packaging.md) | 打包与发版操作 |
 | [`docs/dev.md`](docs/dev.md) | 日常开发约定 |
-| [`开发报告.md`](开发报告.md) | 完整开发日志与阶段报告 |
+| [`开发报告.md`](开发报告.md) | 完整开发日志 |
 
 ## 结构
 
 ```
 apps/desktop     Tauri 2 + React 界面
-packages/domain  纯 TypeScript 领域规则
-packages/db      SQLite 与内存仓储（数据仅本机）
+packages/domain  领域规则
+packages/db      SQLite / 内存仓储
+packages/theme   统一设计令牌与主题解析
 ```
 
 ## 开发
 
 ```bash
 npm install
-npm test
-npm run dev          # Vite 界面（localStorage 持久化）
-npm run tauri:dev    # Tauri 开发窗口（需 Rust）
+npm run check        # 格式 + lint + 类型 + 测试（发版门禁）
+npm run dev          # Vite
+npm run tauri:dev    # Tauri 窗口
 ```
+
+侧栏「主题」可在跟随系统 / 浅色 / 深色间切换，偏好保存在本机。
 
 ## 打包
 
 ```bash
-npm run pack:win     # Windows 桌面生产包（Tauri build）
+npm run pack:win
 ```
 
-细节见 [`docs/packaging.md`](docs/packaging.md)。
-
-## 测试
-
-```bash
-npm test                 # domain + db + desktop（当前 29 项）
-```
-
-覆盖：计划日/时刻互斥、今日成员、提醒与通知冷却、计时、快速捕获、SQLite/Memory 仓储、界面捕获与排期。
+见 [`docs/packaging.md`](docs/packaging.md) 与 [`docs/release.md`](docs/release.md)。
 
 ## 数据
 
-全部业务数据保存在本机。无云端账号、无业务库上传。详见设计文档「本地数据边界」。
+全部业务数据保存在本机。无云端账号、无业务库上传。

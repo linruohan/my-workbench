@@ -450,7 +450,7 @@ workbench/
 | --- | --- | --- |
 | 桌面壳 | Tauri 2 | Windows 使用系统 WebView2；安装包和空闲内存小于 Electron；利于「轻 + 快」 |
 | 界面 | React + TypeScript | 六大能力 UI 集中；配合虚拟列表与细粒度订阅 |
-| 样式 | Tailwind CSS + 少量 CSS 变量 | 设计令牌统一；避免运行时 CSS-in-JS 开销 |
+| 样式 | `@wb/theme` 设计令牌（CSS 变量）+ 组件 CSS | 统一浅/深色主题；避免运行时 CSS-in-JS；密度与强调色单一 |
 | 动效 | CSS transform / opacity；必要时 `waapi` | 合成层动画，避开布局抖动 |
 | 列表 | 虚拟滚动（今日、项目、知识树、通知、Agent 消息） | 千级条目仍保持滚动流畅 |
 | 图标 | lucide | 线框、一种尺寸，SVG 可树摇 |

@@ -22,8 +22,7 @@ export function applySchedulePatch<T extends SchedulePatch>(
     Object.prototype.hasOwnProperty.call(patch, "dueWithTime") &&
     patch.dueWithTime != null;
   const settingDueDay =
-    Object.prototype.hasOwnProperty.call(patch, "dueDay") &&
-    patch.dueDay != null;
+    Object.prototype.hasOwnProperty.call(patch, "dueDay") && patch.dueDay != null;
   const clearingDueWithTime =
     Object.prototype.hasOwnProperty.call(patch, "dueWithTime") &&
     patch.dueWithTime == null;
@@ -53,9 +52,7 @@ export function applySchedulePatch<T extends SchedulePatch>(
     patch.deadlineDay != null;
 
   if (settingDeadlineWithTime && settingDeadlineDay) {
-    throw new DomainError(
-      "deadline_day and deadline_with_time are mutually exclusive",
-    );
+    throw new DomainError("deadline_day and deadline_with_time are mutually exclusive");
   }
 
   if (settingDeadlineWithTime) {

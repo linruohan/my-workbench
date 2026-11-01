@@ -3,32 +3,17 @@ export const FORBIDDEN_TODAY_TAG_ID = "TODAY";
 
 export type ProjectBucket = "active" | "backlog";
 
-export type ReminderOptionId =
-  | "none"
-  | "at_start"
-  | "m5"
-  | "m10"
-  | "m15"
-  | "m30"
-  | "h1";
+export type ReminderOptionId = "none" | "at_start" | "m5" | "m10" | "m15" | "m30" | "h1";
 
 export type RepeatCycle = "day" | "week" | "month";
 export type RepeatScheduleType = "fixed" | "after_completion";
 export type OverduePolicy = "keep_latest" | "keep_all";
 
 export type NotificationKind =
-  | "task_remind"
-  | "deadline_remind"
-  | "event_remind"
-  | "agent"
-  | "system";
+  "task_remind" | "deadline_remind" | "event_remind" | "agent" | "system";
 
 export type NotificationStatus =
-  | "pending"
-  | "delivered"
-  | "snoozed"
-  | "dismissed"
-  | "acted";
+  "pending" | "delivered" | "snoozed" | "dismissed" | "acted";
 
 export interface Project {
   id: string;

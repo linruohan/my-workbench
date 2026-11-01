@@ -31,6 +31,8 @@ npm run dev
 npm run tauri:dev
 ```
 
+发版门禁与版本规范见 [`release.md`](release.md)。代码规范见 [`standards.md`](standards.md)。
+
 ## 生产构建
 
 ### 1. 仅前端静态资源

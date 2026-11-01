@@ -35,9 +35,7 @@ export function selectTodayTasks(
   const members = tasks.filter((t) => isTodayMember(t, opts));
   const byId = new Map(members.map((t) => [t.id, t]));
   const parentAlsoToday = new Set(
-    members
-      .filter((t) => t.parentId && byId.has(t.parentId))
-      .map((t) => t.id),
+    members.filter((t) => t.parentId && byId.has(t.parentId)).map((t) => t.id),
   );
 
   const flat = members.filter((t) => !parentAlsoToday.has(t.id));

@@ -79,8 +79,7 @@ export class WorkbenchRepository {
 
   getTask(id: string): Task | null {
     const row = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as
-      | TaskRow
-      | undefined;
+      TaskRow | undefined;
     return row ? mapTask(row) : null;
   }
 
@@ -237,11 +236,7 @@ export class WorkbenchRepository {
         throw new DomainError("parent with subtasks cannot be timed directly");
       }
     }
-    const { map, added } = settleTimerSegment(
-      task.timeSpentOnDay,
-      startedAt,
-      endedAt,
-    );
+    const { map, added } = settleTimerSegment(task.timeSpentOnDay, startedAt, endedAt);
     const timeSpent = sumTimeSpentOnDay(map);
     this.db
       .prepare(

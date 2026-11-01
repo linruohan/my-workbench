@@ -70,11 +70,7 @@ describe("WorkbenchRepository", () => {
 
     const timed = ctx.repo.createTask({ title: "评审", nowMs: now });
     const at = now + 60_000;
-    ctx.repo.scheduleTask(
-      timed.id,
-      { dueWithTime: at, remindAt: now - 1 },
-      now,
-    );
+    ctx.repo.scheduleTask(timed.id, { dueWithTime: at, remindAt: now - 1 }, now);
     const delivered = ctx.repo.deliverDueReminders(now);
     expect(delivered.some((d) => d.taskId === timed.id)).toBe(true);
 
@@ -97,9 +93,7 @@ describe("WorkbenchRepository", () => {
     expect(() => ctx.repo.setRepeatCfg(child.id, "cfg1")).toThrow(DomainError);
 
     ctx.repo.addTimeSpent(child.id, 1000, 2000);
-    expect(() => ctx.repo.addTimeSpent(parent.id, 1000, 2000)).toThrow(
-      DomainError,
-    );
+    expect(() => ctx.repo.addTimeSpent(parent.id, 1000, 2000)).toThrow(DomainError);
   });
 
   it("persists only locally in the opened database file path", () => {

@@ -5,15 +5,14 @@ import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.js";
 export function migrate(db: Database.Database): void {
   db.exec(SCHEMA_SQL);
 
-  const row = db
-    .prepare("SELECT value FROM meta WHERE key = 'schema_version'")
-    .get() as { value: string } | undefined;
+  const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
+    { value: string } | undefined;
 
   if (!row) {
     const now = Date.now();
-    db.prepare(
-      `INSERT INTO meta (key, value) VALUES ('schema_version', ?)`,
-    ).run(SCHEMA_VERSION);
+    db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`).run(
+      SCHEMA_VERSION,
+    );
     db.prepare(
       `INSERT INTO projects (id, title, is_archived, is_done, done_on, created_at, updated_at)
        VALUES (?, '收件箱', 0, 0, NULL, ?, ?)`,

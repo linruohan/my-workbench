@@ -1,9 +1,7 @@
 import { formatLocalDay } from "./date.js";
 import type { Task } from "./types.js";
 
-export function sumTimeSpentOnDay(
-  map: Record<string, number>,
-): number {
+export function sumTimeSpentOnDay(map: Record<string, number>): number {
   return Object.values(map).reduce((a, b) => a + b, 0);
 }
 
@@ -73,8 +71,7 @@ export class ActiveTimer {
     taskId: string,
     nowMs: number,
   ): { previous: { taskId: string; startedAt: number; endedAt: number } | null } {
-    let previous: { taskId: string; startedAt: number; endedAt: number } | null =
-      null;
+    let previous: { taskId: string; startedAt: number; endedAt: number } | null = null;
     if (this.taskId && this.startedAt != null && this.taskId !== taskId) {
       previous = {
         taskId: this.taskId,

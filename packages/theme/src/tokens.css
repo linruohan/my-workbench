@@ -1,0 +1,71 @@
+/**
+ * Unified design tokens for My Workbench.
+ * Prefer semantic variables; do not hardcode hex in feature CSS.
+ */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --wb-bg: #f4f5f7;
+  --wb-panel: #ffffff;
+  --wb-sidebar: #eceef2;
+  --wb-text: #1c1f26;
+  --wb-muted: #5c6573;
+  --wb-line: #d7dbe3;
+  --wb-accent: #2563eb;
+  --wb-accent-soft: #dbe7ff;
+  --wb-on-accent: #ffffff;
+  --wb-success: #15803d;
+  --wb-warning: #a16207;
+  --wb-danger: #c2410c;
+  --wb-shadow: 0 1px 2px rgb(16 24 40 / 6%);
+
+  --wb-font-ui: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --wb-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --wb-text-xs: 12px;
+  --wb-text-sm: 13px;
+  --wb-text-md: 14px;
+  --wb-text-lg: 20px;
+
+  --wb-space-1: 4px;
+  --wb-space-2: 8px;
+  --wb-space-3: 12px;
+  --wb-space-4: 16px;
+  --wb-space-5: 24px;
+  --wb-space-6: 32px;
+
+  --wb-sidebar-width: 220px;
+  --wb-schedule-width: 320px;
+  --wb-row: 36px;
+  --wb-radius-control: 6px;
+  --wb-radius-panel: 10px;
+
+  --wb-motion-fast: 120ms;
+  --wb-motion-normal: 180ms;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --wb-bg: #12141a;
+  --wb-panel: #1a1d26;
+  --wb-sidebar: #151821;
+  --wb-text: #e8eaef;
+  --wb-muted: #9aa3b2;
+  --wb-line: #2a303c;
+  --wb-accent: #6b9cff;
+  --wb-accent-soft: #243352;
+  --wb-on-accent: #0b1220;
+  --wb-success: #4ade80;
+  --wb-warning: #fbbf24;
+  --wb-danger: #fb7185;
+  --wb-shadow: 0 1px 2px rgb(0 0 0 / 35%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --wb-motion-fast: 0ms;
+    --wb-motion-normal: 0ms;
+  }
+}

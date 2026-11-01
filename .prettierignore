@@ -1,0 +1,8 @@
+node_modules
+dist
+build
+coverage
+target
+package-lock.json
+apps/desktop/src-tauri/target
+*.md

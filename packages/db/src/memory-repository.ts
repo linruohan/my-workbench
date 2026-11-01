@@ -284,7 +284,14 @@ export class MemoryWorkbenchRepository {
       projects: Array<{ id: string; title: string }>;
       buckets: Array<[string, ProjectBucket]>;
       todayOrder: string[];
-      notifications: typeof this.notifications;
+      notifications: Array<{
+        id: string;
+        kind: string;
+        title: string;
+        status: string;
+        fireAt: number;
+        refId: string | null;
+      }>;
     };
     this.tasks = new Map(data.tasks.map((t) => [t.id, t]));
     this.projects = new Map(data.projects.map((p) => [p.id, p]));

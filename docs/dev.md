@@ -15,23 +15,28 @@
 | 命令 | 说明 |
 | --- | --- |
 | `npm install` | 安装全部 workspace 依赖 |
-| `npm test` | 跑 domain + db + desktop 测试 |
+| `npm test` | domain + db + theme + desktop 测试 |
+| `npm run check` | 发版门禁：format + lint + typecheck + test |
+| `npm run format` | Prettier 格式化 |
+| `npm run lint` | Oxlint（desktop） |
 | `npm run dev` | Vite 开发服务器 |
 | `npm run tauri:dev` | Tauri 开发窗口 |
-| `npm run build` | 构建前端（及可编译的包） |
+| `npm run build` | 构建前端 |
 | `npm run pack:win` | Windows 桌面生产包 |
-| `npm run typecheck` | 各包类型检查 |
 
 ## 目录职责
 
 | 路径 | 职责 |
 | --- | --- |
 | `docs/design.md` | 产品与架构设计（权威） |
-| `docs/packaging.md` | 打包与发版 |
+| `docs/standards.md` | 代码规范 |
+| `docs/release.md` | 发布标准 |
+| `docs/packaging.md` | 打包操作 |
 | `docs/dev.md` | 本文：日常开发 |
 | `开发报告.md` | 阶段总结与决策日志 |
 | `packages/domain` | 无 IO 的领域规则 |
 | `packages/db` | SQLite / 内存仓储 |
+| `packages/theme` | 设计令牌与主题解析 |
 | `apps/desktop` | UI + Tauri |
 
 ## 开发顺序建议

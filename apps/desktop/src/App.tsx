@@ -5,9 +5,8 @@ import {
   ReminderUiCooldown,
   type Task,
 } from "@wb/domain";
-import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import { createPersistedStore, saveStore } from "./lib/persistence";
-import "./App.css";
+import { ThemeToggle } from "./theme/ThemeToggle";
 
 type NavId = "today" | "planner" | "schedule" | "projects" | "notifications";
 
@@ -28,20 +27,23 @@ export default function App() {
   const [activeReminders, setActiveReminders] = useState<
     Array<{ taskId: string; title: string; remindAt: number; isDeadline: boolean }>
   >([]);
+  const [now, setNow] = useState(() => Date.now());
 
-  const now = Date.now();
   const today = formatLocalDay(now);
 
   const refresh = useCallback(() => {
     saveStore(store);
+    setNow(Date.now());
     setTick((n) => n + 1);
   }, [store]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      const delivered = store.deliverDueReminders(Date.now());
+      const at = Date.now();
+      setNow(at);
+      const delivered = store.deliverDueReminders(at);
       const visible = delivered.filter(
-        (d) => !cooldown.isSuppressed(d.taskId, d.remindAt, Date.now()),
+        (d) => !cooldown.isSuppressed(d.taskId, d.remindAt, at),
       );
       if (visible.length) {
         setActiveReminders((prev) => [...visible, ...prev].slice(0, 5));
@@ -202,6 +204,7 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <ThemeToggle />
         <p className="sidebar__hint">数据仅保存在本机浏览器存储 / 本地库</p>
       </aside>
       <main className="main">
@@ -312,11 +315,4 @@ function TaskList(props: {
       )}
     </section>
   );
-}
-
-/** Exported for tests */
-export function seedDemo(store: MemoryWorkbenchRepository, nowMs: number) {
-  const t = store.createTask({ title: "演示任务", nowMs });
-  store.scheduleTask(t.id, { dueDay: formatLocalDay(nowMs) }, nowMs);
-  return t;
 }

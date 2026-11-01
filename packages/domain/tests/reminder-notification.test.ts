@@ -46,9 +46,9 @@ describe("reminders", () => {
     const now = 1_000_000;
     cool.dismiss("1", due, now);
     expect(cool.isSuppressed("1", due, now + 1000)).toBe(true);
-    expect(
-      cool.isSuppressed("1", due, now + REMINDER_DISMISS_UI_COOLDOWN_MS + 1),
-    ).toBe(false);
+    expect(cool.isSuppressed("1", due, now + REMINDER_DISMISS_UI_COOLDOWN_MS + 1)).toBe(
+      false,
+    );
     // reschedule (new remindAt) is not suppressed
     expect(cool.isSuppressed("1", due + 1, now + 1000)).toBe(false);
   });

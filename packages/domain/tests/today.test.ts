@@ -49,17 +49,14 @@ describe("today membership", () => {
         nowMs: now,
       }),
     ).toBe(false);
-    expect(
-      isTodayMember(task({ id: "d", title: "d" }), { nowMs: now }),
-    ).toBe(false);
+    expect(isTodayMember(task({ id: "d", title: "d" }), { nowMs: now })).toBe(false);
   });
 
   it("deadline alone does not put task in today", () => {
     expect(
-      isTodayMember(
-        task({ id: "e", title: "e", deadlineDay: "2026-11-01" }),
-        { nowMs: now },
-      ),
+      isTodayMember(task({ id: "e", title: "e", deadlineDay: "2026-11-01" }), {
+        nowMs: now,
+      }),
     ).toBe(false);
   });
 
