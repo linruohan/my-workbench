@@ -1,3 +1,4 @@
+import { IconMoon, IconSun } from "../shell/icons";
 import { useTheme } from "./ThemeProvider";
 
 export function ThemeToggle() {
@@ -5,13 +6,13 @@ export function ThemeToggle() {
   return (
     <button
       type="button"
-      className="theme-toggle"
+      className="titlebar__btn"
       onClick={cycleMode}
       aria-label={`主题：${label}，点击切换`}
       title={`主题：${label}`}
       data-resolved={resolved}
     >
-      主题 · {label}
+      {resolved === "dark" ? <IconMoon size={15} /> : <IconSun size={15} />}
     </button>
   );
 }

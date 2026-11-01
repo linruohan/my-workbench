@@ -7,32 +7,24 @@ import {
   type Task,
 } from "@wb/domain";
 import { createPersistedStore, saveStore } from "./lib/persistence";
+import { readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
 import { KnowledgeView } from "./notes/KnowledgeView";
-import { ThemeToggle } from "./theme/ThemeToggle";
-
-type NavId =
-  | "today"
-  | "planner"
-  | "schedule"
-  | "projects"
-  | "knowledge"
-  | "notifications";
-
-const NAV: Array<{ id: NavId; label: string }> = [
-  { id: "today", label: "今日" },
-  { id: "planner", label: "计划" },
-  { id: "schedule", label: "时间表" },
-  { id: "projects", label: "任务" },
-  { id: "knowledge", label: "知识库" },
-  { id: "notifications", label: "通知" },
-];
+import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
+import { Sidebar, type AppNavId } from "./shell/Sidebar";
+import { TitleBar } from "./shell/TitleBar";
 
 export default function App() {
   const [store] = useState(() => createPersistedStore());
-  const [nav, setNav] = useState<NavId>("today");
+  const [nav, setNav] = useState<AppNavId>("today");
   const [tick, setTick] = useState(0);
   const [draft, setDraft] = useState("");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] =
+    useState<SettingsSectionId>("general");
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [prefs, setPrefs] = useState<AppPrefs>(() => readPrefs());
   const [cooldown] = useState(() => new ReminderUiCooldown());
   const [activeReminders, setActiveReminders] = useState<
     Array<{ taskId: string; title: string; remindAt: number; isDeadline: boolean }>
@@ -57,13 +49,13 @@ export default function App() {
       );
       if (visible.length) {
         setActiveReminders((prev) => [...visible, ...prev].slice(0, 5));
+        setNotificationsOpen(true);
         refresh();
       }
     }, 15_000);
     return () => window.clearInterval(id);
   }, [store, cooldown, refresh]);
 
-  // tick forces re-read
   void tick;
   const todayTasks = store.listToday(now);
   const plannerTasks = store.listPlannerDay(today);
@@ -71,6 +63,7 @@ export default function App() {
   const allTasks = store.listTasks().filter((t) => !t.isDone);
   const notifications = store.listNotifications();
   const notes = store.listNotes();
+  const projects = store.listProjects();
 
   const capture = () => {
     const text = draft.trim();
@@ -159,12 +152,41 @@ export default function App() {
     refresh();
   };
 
+  const goNav = (id: AppNavId) => {
+    setSettingsOpen(false);
+    setNav(id);
+  };
+
+  const openSettings = (section: SettingsSectionId = "general") => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+  };
+
+  const updatePrefs = (next: AppPrefs) => {
+    setPrefs(next);
+    writePrefs(next);
+  };
+
   let body;
-  if (nav === "today") {
+  if (settingsOpen) {
+    body = (
+      <SettingsView
+        key={settingsSection}
+        prefs={prefs}
+        onPrefsChange={updatePrefs}
+        onBack={() => setSettingsOpen(false)}
+        initialSection={settingsSection}
+      />
+    );
+  } else if (nav === "today") {
     body = (
       <TaskList
         title="今日"
-        empty="从任务里拖进来，或按下方输入写下今天要做的事。"
+        empty={
+          prefs.showTips
+            ? "从任务里拖进来，或按下方输入写下今天要做的事。"
+            : "今天还没有任务。"
+        }
         tasks={todayTasks}
         onComplete={complete}
         onPlanToday={scheduleToday}
@@ -204,35 +226,15 @@ export default function App() {
         onDelete={deleteNote}
       />
     );
-  } else if (nav === "notifications") {
-    body = (
-      <section className="panel">
-        <header className="panel__header">
-          <h1>通知</h1>
-        </header>
-        {notifications.length === 0 ? (
-          <p className="empty">暂无通知。提醒到期后会出现在这里。</p>
-        ) : (
-          <ul className="list">
-            {notifications.map((n) => (
-              <li key={n.id} className="list__row">
-                <div>
-                  <div className="list__title">{n.title}</div>
-                  <div className="list__meta">
-                    {n.kind} · {n.status}
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    );
   } else {
     body = (
       <TaskList
         title="任务"
-        empty="收件箱是空的。输入一句话开始捕获。"
+        empty={
+          prefs.showTips
+            ? "收件箱是空的。输入一句话开始捕获。"
+            : "暂无任务。"
+        }
         tasks={allTasks}
         onComplete={complete}
         onPlanToday={scheduleToday}
@@ -243,81 +245,71 @@ export default function App() {
 
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">个人工作台</div>
-        <nav className="nav">
-          {NAV.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={nav === item.id ? "nav__item is-active" : "nav__item"}
-              onClick={() => setNav(item.id)}
-            >
-              {item.label}
-              {item.id === "notifications" && notifications.length > 0
-                ? ` (${notifications.length})`
-                : ""}
-            </button>
-          ))}
-        </nav>
-        <ThemeToggle />
-        <p className="sidebar__hint">数据仅保存在本机浏览器存储 / 本地库</p>
-      </aside>
-      <main className="main">
-        {activeReminders[0] ? (
-          <div className="toast" role="alertdialog" aria-label="提醒">
-            <div>
-              <strong>{activeReminders[0].title}</strong>
-              <div className="toast__meta">
-                {activeReminders[0].isDeadline ? "截止提醒" : "计划提醒"}
-              </div>
-            </div>
-            <div className="toast__actions">
-              <button
-                type="button"
-                onClick={() => {
-                  const t = store.getTask(activeReminders[0]!.taskId);
-                  if (t) complete(t);
-                  dismissReminder(
-                    activeReminders[0]!.taskId,
-                    activeReminders[0]!.remindAt,
-                  );
+      <TitleBar
+        notificationsOpen={notificationsOpen}
+        onNotificationsOpenChange={setNotificationsOpen}
+        notifications={notifications}
+        activeReminders={activeReminders}
+        onCompleteReminder={(taskId, remindAt) => {
+          const t = store.getTask(taskId);
+          if (t) complete(t);
+          dismissReminder(taskId, remindAt);
+        }}
+        onDismissReminder={dismissReminder}
+      />
+      <div
+        className={
+          sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"
+        }
+      >
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+          nav={nav}
+          onNav={goNav}
+          settingsOpen={settingsOpen}
+          onOpenSettings={() => openSettings("general")}
+          projects={projects}
+          notes={notes}
+          onCreateProject={() => {
+            const title = window.prompt("项目名称", "新项目");
+            if (!title?.trim()) return;
+            store.createProject(title.trim());
+            goNav("projects");
+            refresh();
+          }}
+          onSelectNote={(id) => {
+            setActiveNoteId(id);
+            goNav("knowledge");
+          }}
+          onNewChat={() => {
+            goNav("today");
+            window.alert("Agent 会话将在后续版本接入，当前可先用快速捕获。");
+          }}
+          onAutomations={() => setNotificationsOpen(true)}
+          onCustomize={() => openSettings("appearance")}
+          displayName={prefs.displayName || "本地用户"}
+        />
+        <main className="main">
+          {body}
+          {!settingsOpen && nav !== "knowledge" ? (
+            <footer className="composer">
+              <input
+                aria-label="快速捕获"
+                placeholder="写下任务，如：明天 下午3:00 评审 提前15分钟"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") capture();
                 }}
-              >
-                完成
+              />
+              <button type="button" className="primary" onClick={capture}>
+                添加
               </button>
-              <button
-                type="button"
-                onClick={() =>
-                  dismissReminder(
-                    activeReminders[0]!.taskId,
-                    activeReminders[0]!.remindAt,
-                  )
-                }
-              >
-                稍后
-              </button>
-            </div>
-          </div>
-        ) : null}
-        {body}
-        {nav !== "knowledge" ? (
-          <footer className="composer">
-            <input
-              aria-label="快速捕获"
-              placeholder="写下任务，如：明天 下午3:00 评审 提前15分钟"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") capture();
-              }}
-            />
-            <button type="button" className="primary" onClick={capture}>
-              添加
-            </button>
-          </footer>
-        ) : null}
-      </main>
+            </footer>
+          ) : null}
+        </main>
+      </div>
     </div>
   );
 }

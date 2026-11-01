@@ -35,11 +35,13 @@
   --wb-space-5: 24px;
   --wb-space-6: 32px;
 
-  --wb-sidebar-width: 220px;
+  --wb-sidebar-width: 260px;
+  --wb-sidebar-collapsed: 52px;
+  --wb-titlebar-height: 36px;
   --wb-schedule-width: 320px;
   --wb-row: 36px;
-  --wb-radius-control: 6px;
-  --wb-radius-panel: 10px;
+  --wb-radius-control: 8px;
+  --wb-radius-panel: 12px;
 
   --wb-motion-fast: 120ms;
   --wb-motion-normal: 180ms;
@@ -48,16 +50,16 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --wb-bg: #12141a;
-  --wb-panel: #1a1d26;
-  --wb-sidebar: #151821;
-  --wb-text: #e8eaef;
-  --wb-muted: #9aa3b2;
-  --wb-line: #2a303c;
+  --wb-bg: #0b0b0b;
+  --wb-panel: #1a1a1a;
+  --wb-sidebar: #141414;
+  --wb-text: #ececec;
+  --wb-muted: #9b9b9b;
+  --wb-line: #2a2a2a;
   --wb-accent: #6b9cff;
-  --wb-accent-soft: #243352;
+  --wb-accent-soft: #2a2a2a;
   --wb-on-accent: #0b1220;
-  --wb-success: #4ade80;
+  --wb-success: #22c55e;
   --wb-warning: #fbbf24;
   --wb-danger: #fb7185;
   --wb-shadow: 0 1px 2px rgb(0 0 0 / 35%);

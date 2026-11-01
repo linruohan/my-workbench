@@ -20,12 +20,12 @@ describe("ThemeProvider", () => {
       </ThemeProvider>,
     );
 
-    const btn = screen.getByRole("button", { name: /主题/ });
-    expect(btn).toHaveTextContent("跟随系统");
+    const btn = screen.getByRole("button", { name: /主题：跟随系统/ });
     await user.click(btn);
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
-    await user.click(btn);
+    expect(screen.getByRole("button", { name: /主题：浅色/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /主题：浅色/ }));
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
   });

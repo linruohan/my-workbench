@@ -396,6 +396,15 @@ export class WorkbenchRepository {
     }));
   }
 
+  listProjects(): Array<{ id: string; title: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, title FROM projects WHERE is_archived = 0 ORDER BY created_at ASC`,
+      )
+      .all() as Array<{ id: string; title: string }>;
+    return rows;
+  }
+
   createProject(title: string, nowMs = Date.now()): { id: string; title: string } {
     const id = createId(nowMs);
     this.db

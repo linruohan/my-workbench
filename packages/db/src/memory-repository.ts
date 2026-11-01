@@ -265,6 +265,10 @@ export class MemoryWorkbenchRepository {
     return [...this.notifications].sort((a, b) => b.fireAt - a.fireAt);
   }
 
+  listProjects(): Array<{ id: string; title: string }> {
+    return [...this.projects.values()];
+  }
+
   createProject(title: string, nowMs = Date.now()) {
     const id = createId(nowMs);
     this.projects.set(id, { id, title });
