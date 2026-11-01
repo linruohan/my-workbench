@@ -40,7 +40,9 @@ const TASKS_VIEW_KEY = "wb.tasks.viewMode";
 const TASKS_SHOW_DONE_KEY = "wb.tasks.showCompleted";
 
 function readTasksViewMode(): TasksViewMode {
-  return localStorage.getItem(TASKS_VIEW_KEY) === "board" ? "board" : "list";
+  const raw = localStorage.getItem(TASKS_VIEW_KEY);
+  if (raw === "board" || raw === "stats") return raw;
+  return "list";
 }
 
 function readShowCompleted(): boolean {
@@ -613,7 +615,6 @@ export default function App() {
         notes={notes}
         activeId={activeNoteId}
         preferLastNote={prefs.openLastNote}
-        defaultEditorMode={prefs.noteEditorDefault}
         onSelect={setActiveNoteId}
         onCreate={createNote}
         onChange={updateNote}

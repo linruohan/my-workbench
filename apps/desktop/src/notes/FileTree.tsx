@@ -74,12 +74,27 @@ function DirNode({
   onRemoveRoot: (path: string) => void;
   onCreateIn?: (rootPath: string) => void;
 }) {
-  const underActive = Boolean(activePath && isPathUnder(path, activePath));
-  const [userOpen, setUserOpen] = useState(depth === 0);
-  const open = userOpen || underActive || Boolean(filter);
+  const [open, setOpen] = useState(
+    () =>
+      depth === 0 ||
+      Boolean(filter) ||
+      Boolean(activePath && isPathUnder(path, activePath)),
+  );
+  const [trackedActive, setTrackedActive] = useState(activePath);
+  const [trackedFilter, setTrackedFilter] = useState(filter);
   const [entries, setEntries] = useState<KbEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
+
+  // Reveal the active file when selection changes; user can still collapse afterward.
+  if (activePath !== trackedActive) {
+    setTrackedActive(activePath);
+    if (activePath && isPathUnder(path, activePath)) setOpen(true);
+  }
+  if (filter !== trackedFilter) {
+    setTrackedFilter(filter);
+    if (filter) setOpen(true);
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -109,6 +124,7 @@ function DirNode({
   }, [entries, filter]);
 
   const loading = open && !error && loadedFor !== `${path}:${refreshToken}`;
+  const toggle = () => setOpen((value) => !value);
 
   return (
     <div className="knowledge__branch">
@@ -118,7 +134,7 @@ function DirNode({
           className="knowledge__twist"
           aria-label={open ? `折叠 ${name}` : `展开 ${name}`}
           aria-expanded={open}
-          onClick={() => setUserOpen((value) => !value)}
+          onClick={toggle}
         >
           {open ? "▾" : "▸"}
         </button>
@@ -126,7 +142,7 @@ function DirNode({
           type="button"
           className="knowledge__file"
           title={path}
-          onClick={() => setUserOpen((value) => !value)}
+          onClick={toggle}
         >
           <span className="knowledge__file-name">{name}</span>
         </button>

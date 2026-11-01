@@ -10,11 +10,13 @@ import {
   isImageFile,
   isMarkdownFile,
   isPathUnder,
+  joinMdBlocks,
   outdentMarkdownSelection,
   parseHtmlImage,
   pastedImageAbs,
   pastedImageRel,
   resolveImageTarget,
+  splitMdBlocks,
 } from "../src/index.js";
 
 describe("knowledge images", () => {
@@ -134,5 +136,28 @@ describe("knowledge headings", () => {
     expect(indented.text).toBe("  a\n  b");
     const out = outdentMarkdownSelection("  a\n  b", 2, 6);
     expect(out.text).toBe("a\nb");
+  });
+
+  it("splits typora-like markdown blocks and round-trips", () => {
+    const source = [
+      "# 标题",
+      "",
+      "一段文字",
+      "继续",
+      "",
+      "![图](./a.png)",
+      "",
+      "```js",
+      "const a = 1;",
+      "```",
+      "",
+      "- a",
+      "- b",
+    ].join("\n");
+    const blocks = splitMdBlocks(source);
+    expect(blocks[0]).toBe("# 标题");
+    expect(blocks).toContain("![图](./a.png)");
+    expect(blocks.some((block) => block.startsWith("```js"))).toBe(true);
+    expect(joinMdBlocks(blocks)).toBe(source);
   });
 });

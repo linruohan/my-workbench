@@ -18,30 +18,28 @@ import { TaskEditor, type TaskEditorSave } from "./TaskEditor";
 import { TaskRow } from "./TaskRow";
 import { TaskStatsPanel } from "./TaskStatsPanel";
 
-export type TasksViewMode = "list" | "board";
+export type TasksViewMode = "list" | "board" | "stats";
 
 const FILTER_KEY = "wb.tasks.filterPrefs";
 
 type FilterPrefs = {
   status: TaskStatusFilter;
   sortKey: TaskSortKey;
-  statsExpanded: boolean;
 };
 
 function readFilterPrefs(): FilterPrefs {
   try {
     const raw = localStorage.getItem(FILTER_KEY);
     if (!raw) {
-      return { status: "all", sortKey: "updated", statsExpanded: false };
+      return { status: "all", sortKey: "updated" };
     }
     const parsed = JSON.parse(raw) as Partial<FilterPrefs>;
     return {
       status: parsed.status ?? "all",
       sortKey: parsed.sortKey ?? "updated",
-      statsExpanded: Boolean(parsed.statsExpanded),
     };
   } catch {
-    return { status: "all", sortKey: "updated", statsExpanded: false };
+    return { status: "all", sortKey: "updated" };
   }
 }
 
@@ -76,6 +74,12 @@ type Props = {
   onAddSubtask: (parentId: string, title: string) => void;
   onCreate: (title: string) => void;
 };
+
+const VIEW_MODES: Array<{ id: TasksViewMode; label: string }> = [
+  { id: "list", label: "列表" },
+  { id: "board", label: "看板" },
+  { id: "stats", label: "统计" },
+];
 
 export function TasksView({
   tasks,
@@ -115,18 +119,16 @@ export function TasksView({
   const [status, setStatus] = useState<TaskStatusFilter>(initialPrefs.status);
   const [sortKey, setSortKey] = useState<TaskSortKey>(initialPrefs.sortKey);
   const [filterTagId, setFilterTagId] = useState<string | null>(null);
-  const [statsExpanded, setStatsExpanded] = useState(
-    initialPrefs.statsExpanded,
-  );
   const [today] = useState(() => formatLocalDay(Date.now()));
   const createRef = useRef<HTMLInputElement>(null);
+  const isStats = viewMode === "stats";
 
   useEffect(() => {
     localStorage.setItem(
       FILTER_KEY,
-      JSON.stringify({ status, sortKey, statsExpanded } satisfies FilterPrefs),
+      JSON.stringify({ status, sortKey } satisfies FilterPrefs),
     );
-  }, [status, sortKey, statsExpanded]);
+  }, [status, sortKey]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -137,7 +139,8 @@ export function TasksView({
       if (
         (e.ctrlKey || e.metaKey) &&
         e.key.toLowerCase() === "n" &&
-        !editingId
+        !editingId &&
+        !isStats
       ) {
         e.preventDefault();
         createRef.current?.focus();
@@ -145,7 +148,7 @@ export function TasksView({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editingId]);
+  }, [editingId, isStats]);
 
   const projectTitles = useMemo(() => {
     const map: Record<string, string> = {};
@@ -215,6 +218,11 @@ export function TasksView({
     setCreateTitle("");
   };
 
+  const drillFromStats = (next: Exclude<TaskStatusFilter, "all">) => {
+    setStatus(next);
+    onViewModeChange("list");
+  };
+
   const doneInScope = scopedTasks.filter((t) => t.isDone && !t.parentId);
   const openVisible = visible.filter((t) => !t.isDone);
 
@@ -223,7 +231,9 @@ export function TasksView({
       <header className="tasks__header">
         <div className="tasks__title-row">
           <h1>{title}</h1>
-          <span className="panel__count">{visible.length}</span>
+          <span className="panel__count">
+            {isStats ? stats.total : visible.length}
+          </span>
         </div>
         <div className="tasks__toolbar">
           <label className="tasks__filter">
@@ -244,241 +254,240 @@ export function TasksView({
             </select>
           </label>
 
-          <label className="tasks__check">
-            <input
-              type="checkbox"
-              checked={showCompleted}
-              onChange={(e) => onShowCompletedChange(e.target.checked)}
-              disabled={status !== "all"}
-            />
-            显示已完成
-          </label>
+          {!isStats ? (
+            <label className="tasks__check">
+              <input
+                type="checkbox"
+                checked={showCompleted}
+                onChange={(e) => onShowCompletedChange(e.target.checked)}
+                disabled={status !== "all"}
+              />
+              显示已完成
+            </label>
+          ) : null}
 
           <div className="tasks__view-toggle" role="group" aria-label="视图切换">
-            <button
-              type="button"
-              className={
-                viewMode === "list"
-                  ? "tasks__view-btn is-active"
-                  : "tasks__view-btn"
-              }
-              aria-pressed={viewMode === "list"}
-              onClick={() => onViewModeChange("list")}
-            >
-              列表
-            </button>
-            <button
-              type="button"
-              className={
-                viewMode === "board"
-                  ? "tasks__view-btn is-active"
-                  : "tasks__view-btn"
-              }
-              aria-pressed={viewMode === "board"}
-              onClick={() => onViewModeChange("board")}
-            >
-              看板
-            </button>
+            {VIEW_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                className={
+                  viewMode === mode.id
+                    ? "tasks__view-btn is-active"
+                    : "tasks__view-btn"
+                }
+                aria-pressed={viewMode === mode.id}
+                onClick={() => onViewModeChange(mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
           </div>
         </div>
       </header>
 
-      <TaskStatsPanel
-        stats={stats}
-        projectTitles={projectTitles}
-        expanded={statsExpanded}
-        onToggle={() => setStatsExpanded((v) => !v)}
-        onSelectStatus={(next) =>
-          setStatus(next === "done" ? "done" : next)
-        }
-      />
-
-      <div className="tasks__filters">
-        <input
-          className="tasks__search"
-          aria-label="搜索任务"
-          placeholder="搜索标题或备注…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <select
-          aria-label="状态筛选"
-          value={status}
-          onChange={(e) => setStatus(e.target.value as TaskStatusFilter)}
-        >
-          <option value="all">全部状态</option>
-          <option value="open">未完成</option>
-          <option value="today">今日到期</option>
-          <option value="overdue">已逾期</option>
-          <option value="unplanned">未排期</option>
-          <option value="done">已完成</option>
-        </select>
-        <select
-          aria-label="标签筛选"
-          value={filterTagId ?? ""}
-          onChange={(e) =>
-            setFilterTagId(e.target.value ? e.target.value : null)
-          }
-        >
-          <option value="">全部标签</option>
-          {tags.map((tag) => (
-            <option key={tag.id} value={tag.id}>
-              {tag.title}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="排序"
-          value={sortKey}
-          onChange={(e) => setSortKey(e.target.value as TaskSortKey)}
-        >
-          <option value="updated">最近更新</option>
-          <option value="created">最近创建</option>
-          <option value="due">计划日期</option>
-          <option value="title">标题</option>
-        </select>
-      </div>
-
-      <div className="tasks__bulk" role="toolbar" aria-label="批量操作">
-        <button
-          type="button"
-          className="btn btn--ghost"
-          disabled={openVisible.length === 0}
-          onClick={() => openVisible.forEach(onPlanToday)}
-        >
-          可见项排到今天 ({openVisible.length})
-        </button>
-        <button
-          type="button"
-          className="btn btn--ghost"
-          disabled={doneInScope.length === 0}
-          onClick={() => {
-            if (
-              confirmBeforeDelete &&
-              !window.confirm(
-                `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
-              )
-            ) {
-              return;
-            }
-            onClearCompleted(doneInScope.map((t) => t.id));
-          }}
-        >
-          清理已完成 ({doneInScope.length})
-        </button>
-        {(query || filterTagId || status !== "all") && (
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={() => {
-              setQuery("");
-              setFilterTagId(null);
-              setStatus("all");
-            }}
-          >
-            清空筛选
-          </button>
-        )}
-        <span className="tasks__bulk-hint">Esc 关闭编辑 · Ctrl+N 新建</span>
-      </div>
-
-      <div className="tasks__content">
-        <div className="tasks__main">
-          {viewMode === "list" ? (
-            visible.length === 0 ? (
-              <p className="empty">没有匹配的任务。调整筛选，或在下方新建。</p>
-            ) : (
-              <ul className="list" aria-label="任务列表">
-                {visible.map((task) => (
-                  <TaskRow
-                    key={task.id}
-                    task={task}
-                    projectTitle={
-                      filterProjectId
-                        ? undefined
-                        : projectTitles[task.projectId]
-                    }
-                    tags={taskTagMap[task.id] ?? []}
-                    childCount={listChildTasks(tasks, task.id).length}
-                    denseMeta={denseMeta}
-                    showDoneStyle
-                    timerRunning={activeTimerTaskId === task.id}
-                    timerElapsedMs={
-                      activeTimerTaskId === task.id ? timerElapsedMs : 0
-                    }
-                    canTime={listChildTasks(tasks, task.id).length === 0}
-                    onToggleDone={onToggleDone}
-                    onOpen={(t) => setEditingId(t.id)}
-                    onPlanToday={onPlanToday}
-                    onPlanTime={onPlanTime}
-                    onClearPlan={onClearPlan}
-                    onToggleTimer={onToggleTimer}
-                    onDuplicate={(t) => onDuplicateTask(t.id)}
-                    onDelete={(t) => confirmDelete(t.id)}
-                  />
-                ))}
-              </ul>
-            )
-          ) : (
-            <TaskBoard
-              tasks={visible}
-              buckets={buckets}
+      {isStats ? (
+        <div className="tasks__content">
+          <div className="tasks__main">
+            <TaskStatsPanel
+              stats={stats}
               projectTitles={projectTitles}
-              onOpen={(t) => setEditingId(t.id)}
-              onToggleDone={onToggleDone}
-              onMoveColumn={onMoveColumn}
-              onPlanToday={onPlanToday}
+              onDrill={drillFromStats}
             />
-          )}
-
-          <div className="tasks__create">
-            <input
-              ref={createRef}
-              aria-label="新建任务标题"
-              placeholder="新建任务，回车添加（Ctrl+N）"
-              value={createTitle}
-              onChange={(e) => setCreateTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitCreate();
-              }}
-            />
-            <button
-              type="button"
-              className="btn btn--primary"
-              onClick={submitCreate}
-            >
-              添加
-            </button>
           </div>
         </div>
+      ) : (
+        <>
+          <div className="tasks__filters">
+            <input
+              className="tasks__search"
+              aria-label="搜索任务"
+              placeholder="搜索标题或备注…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <select
+              aria-label="状态筛选"
+              value={status}
+              onChange={(e) => setStatus(e.target.value as TaskStatusFilter)}
+            >
+              <option value="all">全部状态</option>
+              <option value="open">未完成</option>
+              <option value="today">今日到期</option>
+              <option value="overdue">已逾期</option>
+              <option value="unplanned">未排期</option>
+              <option value="done">已完成</option>
+            </select>
+            <select
+              aria-label="标签筛选"
+              value={filterTagId ?? ""}
+              onChange={(e) =>
+                setFilterTagId(e.target.value ? e.target.value : null)
+              }
+            >
+              <option value="">全部标签</option>
+              {tags.map((tag) => (
+                <option key={tag.id} value={tag.id}>
+                  {tag.title}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="排序"
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as TaskSortKey)}
+            >
+              <option value="updated">最近更新</option>
+              <option value="created">最近创建</option>
+              <option value="due">计划日期</option>
+              <option value="title">标题</option>
+            </select>
+          </div>
 
-        {editing ? (
-          <TaskEditor
-            key={editing.id}
-            task={editing}
-            bucket={buckets[editing.id] ?? "active"}
-            projects={projects}
-            tags={tags}
-            selectedTagIds={(taskTagMap[editing.id] ?? []).map((t) => t.id)}
-            subtasks={editingSubtasks}
-            defaultRemind={defaultRemind}
-            onClose={() => setEditingId(null)}
-            onDelete={() => confirmDelete(editing.id)}
-            onDuplicate={() => {
-              onDuplicateTask(editing.id);
-              setEditingId(null);
-            }}
-            onCreateTag={onCreateTag}
-            onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
-            onToggleSubtask={onToggleDone}
-            onDeleteSubtask={(id) => confirmDelete(id)}
-            onSave={(draft) => {
-              onSaveTask(editing.id, draft);
-              setEditingId(null);
-            }}
-          />
-        ) : null}
-      </div>
+          <div className="tasks__bulk" role="toolbar" aria-label="批量操作">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={openVisible.length === 0}
+              onClick={() => openVisible.forEach(onPlanToday)}
+            >
+              可见项排到今天 ({openVisible.length})
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={doneInScope.length === 0}
+              onClick={() => {
+                if (
+                  confirmBeforeDelete &&
+                  !window.confirm(
+                    `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
+                  )
+                ) {
+                  return;
+                }
+                onClearCompleted(doneInScope.map((t) => t.id));
+              }}
+            >
+              清理已完成 ({doneInScope.length})
+            </button>
+            {(query || filterTagId || status !== "all") && (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => {
+                  setQuery("");
+                  setFilterTagId(null);
+                  setStatus("all");
+                }}
+              >
+                清空筛选
+              </button>
+            )}
+            <span className="tasks__bulk-hint">Esc 关闭编辑 · Ctrl+N 新建</span>
+          </div>
+
+          <div className="tasks__content">
+            <div className="tasks__main">
+              {viewMode === "list" ? (
+                visible.length === 0 ? (
+                  <p className="empty">
+                    没有匹配的任务。调整筛选，或在下方新建。
+                  </p>
+                ) : (
+                  <ul className="list" aria-label="任务列表">
+                    {visible.map((task) => (
+                      <TaskRow
+                        key={task.id}
+                        task={task}
+                        projectTitle={
+                          filterProjectId
+                            ? undefined
+                            : projectTitles[task.projectId]
+                        }
+                        tags={taskTagMap[task.id] ?? []}
+                        childCount={listChildTasks(tasks, task.id).length}
+                        denseMeta={denseMeta}
+                        showDoneStyle
+                        timerRunning={activeTimerTaskId === task.id}
+                        timerElapsedMs={
+                          activeTimerTaskId === task.id ? timerElapsedMs : 0
+                        }
+                        canTime={listChildTasks(tasks, task.id).length === 0}
+                        onToggleDone={onToggleDone}
+                        onOpen={(t) => setEditingId(t.id)}
+                        onPlanToday={onPlanToday}
+                        onPlanTime={onPlanTime}
+                        onClearPlan={onClearPlan}
+                        onToggleTimer={onToggleTimer}
+                        onDuplicate={(t) => onDuplicateTask(t.id)}
+                        onDelete={(t) => confirmDelete(t.id)}
+                      />
+                    ))}
+                  </ul>
+                )
+              ) : (
+                <TaskBoard
+                  tasks={visible}
+                  buckets={buckets}
+                  projectTitles={projectTitles}
+                  onOpen={(t) => setEditingId(t.id)}
+                  onToggleDone={onToggleDone}
+                  onMoveColumn={onMoveColumn}
+                  onPlanToday={onPlanToday}
+                />
+              )}
+
+              <div className="tasks__create">
+                <input
+                  ref={createRef}
+                  aria-label="新建任务标题"
+                  placeholder="新建任务，回车添加（Ctrl+N）"
+                  value={createTitle}
+                  onChange={(e) => setCreateTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitCreate();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={submitCreate}
+                >
+                  添加
+                </button>
+              </div>
+            </div>
+
+            {editing ? (
+              <TaskEditor
+                key={editing.id}
+                task={editing}
+                bucket={buckets[editing.id] ?? "active"}
+                projects={projects}
+                tags={tags}
+                selectedTagIds={(taskTagMap[editing.id] ?? []).map((t) => t.id)}
+                subtasks={editingSubtasks}
+                defaultRemind={defaultRemind}
+                onClose={() => setEditingId(null)}
+                onDelete={() => confirmDelete(editing.id)}
+                onDuplicate={() => {
+                  onDuplicateTask(editing.id);
+                  setEditingId(null);
+                }}
+                onCreateTag={onCreateTag}
+                onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
+                onToggleSubtask={onToggleDone}
+                onDeleteSubtask={(id) => confirmDelete(id)}
+                onSave={(draft) => {
+                  onSaveTask(editing.id, draft);
+                  setEditingId(null);
+                }}
+              />
+            ) : null}
+          </div>
+        </>
+      )}
     </section>
   );
 }

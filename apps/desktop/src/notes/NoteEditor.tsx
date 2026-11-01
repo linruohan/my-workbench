@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -7,16 +8,14 @@ import {
   type KeyboardEvent,
 } from "react";
 import {
-  cycleNoteEditorMode,
   extractImageSlots,
-  highlightMarkdown,
   indentMarkdownSelection,
-  noteEditorModeLabel,
+  joinMdBlocks,
   outdentMarkdownSelection,
   resolveImageTarget,
   safeStem,
+  splitMdBlocks,
   type Note,
-  type NoteEditorMode,
 } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
 import { renderMarkdown } from "../lib/markdown";
@@ -29,12 +28,10 @@ import {
 
 type Props = {
   note: Note;
-  defaultMode?: NoteEditorMode;
   onChange: (patch: { title?: string; bodyMd?: string }) => void;
   onDelete?: () => void;
   onSave?: () => void;
   titleReadOnly?: boolean;
-  /** Directory used to resolve and save images. */
   imageBaseDir?: string | null;
   imageStem?: string | null;
   onAssetSaved?: () => void;
@@ -57,9 +54,14 @@ function clipboardImage(data: DataTransfer | null): File | null {
   return null;
 }
 
+function autosize(area: HTMLTextAreaElement | null) {
+  if (!area) return;
+  area.style.height = "0px";
+  area.style.height = `${Math.max(area.scrollHeight, 28)}px`;
+}
+
 export function NoteEditor({
   note,
-  defaultMode = "live",
   onChange,
   onDelete,
   onSave,
@@ -69,14 +71,12 @@ export function NoteEditor({
   onAssetSaved,
   saveLabel = null,
 }: Props) {
-  const [mode, setMode] = useState<NoteEditorMode>(defaultMode);
-  const sourceRef = useRef<HTMLTextAreaElement>(null);
-  const highlightRef = useRef<HTMLPreElement>(null);
-  const previewRef = useRef<HTMLDivElement>(null);
-  const syncing = useRef(false);
+  const blocks = useMemo(() => splitMdBlocks(note.bodyMd), [note.bodyMd]);
+  const [active, setActive] = useState<number | null>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
   const pendingCaret = useRef<number | null>(null);
   const prepared = useMemo(() => extractImageSlots(note.bodyMd), [note.bodyMd]);
-  const highlighted = useMemo(() => highlightMarkdown(note.bodyMd), [note.bodyMd]);
+
   const remoteUrls = useMemo(
     () =>
       prepared.slots.map((slot) => {
@@ -95,6 +95,14 @@ export function NoteEditor({
   const urls = remoteUrls.map(
     (url, index) => url ?? (local.key === slotKey ? (local.urls[index] ?? null) : null),
   );
+  const urlByDest = useMemo(() => {
+    const map = new Map<string, string>();
+    prepared.slots.forEach((slot, index) => {
+      const url = urls[index];
+      if (url) map.set(slot.dest, url);
+    });
+    return map;
+  }, [prepared, urls]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -116,82 +124,130 @@ export function NoteEditor({
     };
   }, [prepared, imageBaseDir, remoteUrls, slotKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (active == null) return;
+    const area = editRef.current;
+    if (!area) return;
+    area.focus();
     const caret = pendingCaret.current;
-    const area = sourceRef.current;
-    if (caret == null || !area) return;
-    area.setSelectionRange(caret, caret);
-    pendingCaret.current = null;
-  }, [note.bodyMd]);
-
-  const html = useMemo(() => renderMarkdown(note.bodyMd, urls), [note.bodyMd, urls]);
-  const inlineImages = prepared.slots
-    .map((slot, index) => ({
-      dest: slot.dest,
-      url: urls[index] ?? null,
-      scale: slot.scale,
-    }))
-    .filter((item) => item.url);
-
-  const syncScroll = (from: "source" | "preview") => {
-    if (mode !== "live" || syncing.current) return;
-    const source = sourceRef.current;
-    const preview = previewRef.current;
-    if (!source || !preview) return;
-    const srcMax = source.scrollHeight - source.clientHeight;
-    const prevMax = preview.scrollHeight - preview.clientHeight;
-    if (srcMax <= 0 || prevMax <= 0) return;
-    syncing.current = true;
-    if (from === "source") {
-      preview.scrollTop = (source.scrollTop / srcMax) * prevMax;
+    if (caret != null) {
+      const pos = Math.min(caret, area.value.length);
+      area.setSelectionRange(pos, pos);
+      pendingCaret.current = null;
     } else {
-      source.scrollTop = (preview.scrollTop / prevMax) * srcMax;
+      const end = area.value.length;
+      area.setSelectionRange(end, end);
     }
-    requestAnimationFrame(() => {
-      syncing.current = false;
-    });
+    autosize(area);
+  }, [active, note.bodyMd, note.id]);
+
+  const commitBlocks = (nextBlocks: string[], focus: number | null, caret?: number) => {
+    if (caret != null) pendingCaret.current = caret;
+    setActive(focus);
+    onChange({ bodyMd: joinMdBlocks(nextBlocks) });
   };
 
-  const onSourceScroll = () => {
-    const source = sourceRef.current;
-    const highlight = highlightRef.current;
-    if (source && highlight) {
-      highlight.scrollTop = source.scrollTop;
-      highlight.scrollLeft = source.scrollLeft;
-    }
-    syncScroll("source");
+  const updateActiveBlock = (text: string) => {
+    if (active == null) return;
+    const next = [...blocks];
+    next[active] = text;
+    onChange({ bodyMd: joinMdBlocks(next) });
   };
 
-  const applyBody = (next: string, caret: number) => {
-    pendingCaret.current = caret;
-    onChange({ bodyMd: next });
+  const activate = (index: number) => {
+    setActive(index);
   };
 
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const onEditKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
       onSave?.();
       return;
     }
-    if (event.key !== "Tab") return;
-    event.preventDefault();
+
     const area = event.currentTarget;
+    const value = area.value;
     const start = area.selectionStart;
     const end = area.selectionEnd;
-    const next = event.shiftKey
-      ? outdentMarkdownSelection(note.bodyMd, start, end)
-      : indentMarkdownSelection(note.bodyMd, start, end);
-    applyBody(next.text, next.end);
+    const index = active ?? 0;
+
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const next = event.shiftKey
+        ? outdentMarkdownSelection(value, start, end)
+        : indentMarkdownSelection(value, start, end);
+      const nextBlocks = [...blocks];
+      nextBlocks[index] = next.text;
+      commitBlocks(nextBlocks, index, next.end);
+      return;
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      const atEnd = start === end && end === value.length;
+      const singleLine = !value.includes("\n");
+      const heading = /^#{1,8}(\s|$)/.test(value);
+      const image = /^(!\[[^\]]*\]\([^)]*\)|<img\b)/i.test(value.trim());
+      if (atEnd && singleLine && (heading || image || value.trim() === "")) {
+        event.preventDefault();
+        const nextBlocks = [...blocks];
+        nextBlocks.splice(index + 1, 0, "");
+        commitBlocks(nextBlocks, index + 1, 0);
+        return;
+      }
+      if (atEnd && singleLine && !/^ {0,3}(`{3,}|~{3,})/.test(value)) {
+        event.preventDefault();
+        const nextBlocks = [...blocks];
+        nextBlocks.splice(index + 1, 0, "");
+        commitBlocks(nextBlocks, index + 1, 0);
+        return;
+      }
+    }
+
+    if (event.key === "Backspace" && start === 0 && end === 0) {
+      if (value === "" && blocks.length > 1) {
+        event.preventDefault();
+        const nextBlocks = blocks.filter((_, i) => i !== index);
+        const focus = Math.max(0, index - 1);
+        const caret = (nextBlocks[focus] ?? "").length;
+        commitBlocks(nextBlocks, focus, caret);
+        return;
+      }
+      if (index > 0) {
+        event.preventDefault();
+        const prev = blocks[index - 1] ?? "";
+        const nextBlocks = [...blocks];
+        nextBlocks[index - 1] = prev + (prev && value ? "\n" : "") + value;
+        nextBlocks.splice(index, 1);
+        commitBlocks(nextBlocks, index - 1, prev.length);
+      }
+    }
+
+    if (event.key === "ArrowUp" && start === 0 && end === 0 && index > 0) {
+      event.preventDefault();
+      setActive(index - 1);
+      pendingCaret.current = (blocks[index - 1] ?? "").length;
+    }
+    if (
+      event.key === "ArrowDown" &&
+      start === value.length &&
+      end === value.length &&
+      index < blocks.length - 1
+    ) {
+      event.preventDefault();
+      setActive(index + 1);
+      pendingCaret.current = 0;
+    }
   };
 
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const file = clipboardImage(event.clipboardData);
-    if (!file) return;
+    if (!file || active == null) return;
     event.preventDefault();
     const area = event.currentTarget;
-    const start = area.selectionStart ?? note.bodyMd.length;
+    const start = area.selectionStart ?? area.value.length;
     const end = area.selectionEnd ?? start;
-    const current = note.bodyMd;
+    const current = area.value;
+    const index = active;
     void (async () => {
       try {
         const bytes = await clipboardFileToPngBytes(file);
@@ -207,14 +263,21 @@ export function NoteEditor({
         } else {
           inserted = `![](data:image/png;base64,${bytesToBase64(bytes)})`;
         }
-        applyBody(
-          current.slice(0, start) + inserted + current.slice(end),
-          start + inserted.length,
-        );
+        const text = current.slice(0, start) + inserted + current.slice(end);
+        const nextBlocks = [...blocks];
+        nextBlocks[index] = text;
+        commitBlocks(nextBlocks, index, start + inserted.length);
       } catch (err) {
         window.alert(err instanceof Error ? err.message : "粘贴图片失败");
       }
     })();
+  };
+
+  const renderBlock = (text: string) => {
+    if (!text) return '<p class="md-live__blank">&nbsp;</p>';
+    const { slots } = extractImageSlots(text);
+    const blockUrls = slots.map((slot) => urlByDest.get(slot.dest) ?? null);
+    return renderMarkdown(text, blockUrls);
   };
 
   return (
@@ -228,27 +291,6 @@ export function NoteEditor({
           onChange={(e) => onChange({ title: e.target.value })}
         />
         {saveLabel ? <span className="note-editor__save">{saveLabel}</span> : null}
-        <div className="note-editor__modes" role="group" aria-label="编辑模式">
-          {(["live", "source", "preview"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={mode === m ? "note-editor__mode is-active" : "note-editor__mode"}
-              aria-pressed={mode === m}
-              onClick={() => setMode(m)}
-            >
-              {noteEditorModeLabel(m)}
-            </button>
-          ))}
-          <button
-            type="button"
-            className="note-editor__mode"
-            title="循环切换模式 (Ctrl+/)"
-            onClick={() => setMode((m) => cycleNoteEditorMode(m))}
-          >
-            切换
-          </button>
-        </div>
         {onDelete ? (
           <button type="button" className="note-editor__danger" onClick={onDelete}>
             删除
@@ -257,84 +299,77 @@ export function NoteEditor({
       </header>
 
       <div
-        className={`note-editor__stage note-editor__stage--${mode}`}
-        onKeyDown={(e) => {
-          if (e.ctrlKey && e.key === "/") {
-            e.preventDefault();
-            setMode((m) => cycleNoteEditorMode(m));
-          }
-        }}
+        className="note-editor__stage note-editor__stage--live-preview"
+        aria-label="Markdown 编辑器"
       >
-        {mode !== "preview" ? (
-          <div className="md-editor">
-            <div className="md-editor__pane">
-              <pre ref={highlightRef} className="md-editor__hl" aria-hidden="true">
-                {highlighted.map((line, index) => (
-                  <span
-                    key={index}
-                    className={line.level ? `md-line is-h${line.level}` : "md-line"}
-                  >
-                    {line.numberLabel ? (
-                      <span className="md-num">{line.numberLabel}</span>
-                    ) : null}
-                    {line.segs.map((seg, segIndex) =>
-                      seg.kind === "text" ? (
-                        <span key={segIndex}>{seg.text}</span>
-                      ) : (
-                        <span key={segIndex} className={`md-k-${seg.kind}`}>
-                          {seg.text}
-                        </span>
-                      ),
-                    )}
-                    {line.segs.length === 0 ? " " : null}
-                  </span>
-                ))}
-              </pre>
-              <textarea
-                ref={sourceRef}
-                className="note-editor__source md-editor__input"
-                aria-label="Markdown 源码"
-                spellCheck={false}
-                value={note.bodyMd}
-                placeholder="用 Markdown 书写… Tab 缩进，粘贴可插入图片，Ctrl+S 保存"
-                onChange={(e) => onChange({ bodyMd: e.target.value })}
-                onScroll={onSourceScroll}
-                onPaste={onPaste}
-                onKeyDown={onKeyDown}
-              />
-            </div>
-            {mode === "source" && inlineImages.length > 0 ? (
-              <div className="md-inline-images" aria-label="文中图片">
-                {inlineImages.map((item, index) => (
-                  <figure
-                    key={`${item.dest}-${index}`}
-                    className="md-inline-images__item"
-                  >
-                    <img
-                      src={item.url!}
-                      alt=""
-                      style={
-                        item.scale != null
-                          ? { width: `${Math.round(item.scale * 100)}%`, height: "auto" }
-                          : undefined
-                      }
-                    />
-                    <figcaption title={item.dest}>{item.dest}</figcaption>
-                  </figure>
-                ))}
+        <div className="md-live">
+          {blocks.map((block, index) => {
+            const isActive = active === index;
+            if (isActive) {
+              return (
+                <div key={`edit-${index}`} className="md-live__block is-editing">
+                  <textarea
+                    ref={editRef}
+                    className="md-live__source"
+                    aria-label="Markdown 源码"
+                    spellCheck={false}
+                    value={block}
+                    rows={1}
+                    onChange={(e) => {
+                      updateActiveBlock(e.target.value);
+                      autosize(e.currentTarget);
+                    }}
+                    onKeyDown={onEditKeyDown}
+                    onPaste={onPaste}
+                    onBlur={() => {
+                      // Keep editing if focus stays inside this editor.
+                      requestAnimationFrame(() => {
+                        const root = editRef.current?.closest(".md-live");
+                        if (root && root.contains(document.activeElement)) return;
+                        setActive(null);
+                      });
+                    }}
+                  />
+                </div>
+              );
+            }
+            return (
+              <div
+                key={`view-${index}-${block.slice(0, 24)}`}
+                className="md-live__block"
+                role="button"
+                tabIndex={0}
+                aria-label={`编辑第 ${index + 1} 段`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  activate(index);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    activate(index);
+                  }
+                }}
+              >
+                <div
+                  className="md-live__preview md-body"
+                  dangerouslySetInnerHTML={{ __html: renderBlock(block) }}
+                />
               </div>
-            ) : null}
-          </div>
-        ) : null}
-        {mode !== "source" ? (
-          <div
-            ref={previewRef}
-            className="note-editor__preview md-body"
-            aria-label="预览"
-            dangerouslySetInnerHTML={{ __html: html }}
-            onScroll={() => syncScroll("preview")}
-          />
-        ) : null}
+            );
+          })}
+          <button
+            type="button"
+            className="md-live__trailer"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const nextBlocks = [...blocks, ""];
+              commitBlocks(nextBlocks, nextBlocks.length - 1, 0);
+            }}
+          >
+            继续书写…
+          </button>
+        </div>
       </div>
     </div>
   );

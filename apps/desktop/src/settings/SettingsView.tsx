@@ -2,7 +2,6 @@ import { useMemo, useState, type ReactNode } from "react";
 import { useTheme } from "../theme/ThemeProvider";
 import {
   defaultRemindLabel,
-  noteEditorDefaultLabel,
   startupViewLabel,
   uiLanguageLabel,
   weekStartLabel,
@@ -10,7 +9,6 @@ import {
   workModeLabel,
   type AppPrefs,
   type DefaultRemind,
-  type NoteEditorDefault,
   type StartupView,
   type UiLanguage,
   type WeekStart,
@@ -290,20 +288,6 @@ function GeneralPane({
 
       <h2 className="settings__subtitle">知识库</h2>
       <div className="settings__card">
-        <SelectRow
-          title="默认编辑模式"
-          desc="打开笔记时的默认模式：实时 / 源码 / 预览"
-          ariaLabel="默认编辑模式"
-          value={prefs.noteEditorDefault}
-          options={[
-            ["live", "实时"],
-            ["source", "源码"],
-            ["preview", "预览"],
-          ]}
-          onChange={(noteEditorDefault) =>
-            onPatch({ noteEditorDefault: noteEditorDefault as NoteEditorDefault })
-          }
-        />
         <ToggleRow
           title="记住上次笔记"
           desc="进入知识库时优先打开最近编辑的笔记"
@@ -352,8 +336,7 @@ function GeneralPane({
         当前模式：{workModeLabel(prefs.workMode)} · 启动：
         {startupViewLabel(prefs.startupView)} · 提醒：
         {defaultRemindLabel(prefs.defaultRemind)} · 周起始：
-        {weekStartLabel(prefs.weekStartsOn)} · 编辑：
-        {noteEditorDefaultLabel(prefs.noteEditorDefault)}
+        {weekStartLabel(prefs.weekStartsOn)} · 知识库：Typora 实时预览
       </p>
     </section>
   );

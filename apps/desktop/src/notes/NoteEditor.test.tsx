@@ -19,54 +19,36 @@ afterEach(() => {
 });
 
 describe("NoteEditor", () => {
-  it("renders live mode with source and preview", () => {
+  it("renders typora-like preview blocks by default", () => {
     renderWithProviders(
       <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
     );
-    expect(screen.getByLabelText("Markdown 源码")).toBeInTheDocument();
-    expect(screen.getByLabelText("预览")).toHaveTextContent("Hello");
-    expect(screen.getByLabelText("预览")).toHaveTextContent("世界");
+    expect(screen.getByLabelText("Markdown 编辑器")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Markdown 源码")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("编辑第 1 段")).toHaveTextContent("Hello");
+    expect(screen.getByLabelText("编辑第 3 段")).toHaveTextContent("世界");
   });
 
-  it("switches to source-only and preview-only", async () => {
+  it("switches a rendered block into source when clicked", async () => {
     const user = userEvent.setup();
     renderWithProviders(
       <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
     );
-    await user.click(screen.getByRole("button", { name: "源码" }));
-    expect(screen.getByLabelText("Markdown 源码")).toBeInTheDocument();
-    expect(screen.queryByLabelText("预览")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "预览" }));
-    expect(screen.queryByLabelText("Markdown 源码")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("预览")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("编辑第 3 段"));
+    expect(screen.getByLabelText("Markdown 源码")).toHaveValue("世界");
   });
 
-  it("emits body changes while typing", async () => {
+  it("emits body changes while typing in the active block", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     renderWithProviders(
       <NoteEditor note={note} onChange={onChange} onDelete={() => undefined} />,
     );
+    await user.click(screen.getByLabelText("编辑第 1 段"));
     await user.type(screen.getByLabelText("Markdown 源码"), "!");
     expect(onChange).toHaveBeenCalled();
     expect(onChange.mock.calls.at(-1)?.[0]).toEqual(
       expect.objectContaining({ bodyMd: expect.stringContaining("!") }),
-    );
-  });
-
-  it("indents the current line with Tab", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    renderWithProviders(
-      <NoteEditor note={note} onChange={onChange} onDelete={() => undefined} />,
-    );
-    const source = screen.getByLabelText("Markdown 源码");
-    source.focus();
-    await user.keyboard("{Tab}");
-    expect(onChange).toHaveBeenCalled();
-    expect(onChange.mock.calls.at(-1)?.[0]).toEqual(
-      expect.objectContaining({ bodyMd: expect.stringMatching(/^ {2}/) }),
     );
   });
 });

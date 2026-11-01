@@ -26,4 +26,14 @@ describe("renderMarkdown", () => {
     expect(html).toContain('src="https://example.com/a.png"');
     expect(html).toContain("width:50%");
   });
+
+  it("renders fenced code with mac chrome, language, and line numbers", () => {
+    const html = renderMarkdown("```bash\necho hello\nls\n```");
+    expect(html).toContain('class="md-code"');
+    expect(html).toContain("md-code__dots");
+    expect(html).toContain("Shell");
+    expect(html).toContain('class="md-code__num">1<');
+    expect(html).toContain('class="md-code__num">2<');
+    expect(html).toContain("hljs");
+  });
 });

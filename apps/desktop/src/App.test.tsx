@@ -46,14 +46,12 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "知识库" }));
     await user.click(screen.getByRole("button", { name: "新建" }));
-    expect(screen.getByLabelText("Markdown 源码")).toBeInTheDocument();
-    expect(screen.getByLabelText("预览")).toBeInTheDocument();
-
+    expect(screen.getByLabelText("Markdown 编辑器")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("编辑第 1 段"));
     const source = screen.getByLabelText("Markdown 源码");
     await user.clear(source);
-    await user.type(source, "# 架构笔记{Enter}{Enter}本地优先");
-    expect(screen.getByLabelText("预览")).toHaveTextContent("架构笔记");
-    expect(screen.getByLabelText("预览")).toHaveTextContent("本地优先");
+    await user.type(source, "# 架构笔记");
+    expect(screen.getByLabelText("Markdown 源码")).toHaveValue("# 架构笔记");
   });
 
   it("opens settings from sidebar gear and can go back", async () => {

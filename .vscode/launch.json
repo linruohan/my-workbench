@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "桌面端 · Vite 热更新（模拟）",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "-w", "@wb/desktop"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "serverReadyAction": {
+        "pattern": "Local:\\s+http://localhost:([0-9]+)",
+        "uriFormat": "http://localhost:%s",
+        "action": "debugWithChrome"
+      }
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "桌面端 · Tauri 热启动",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "tauri:dev", "-w", "@wb/desktop"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "TAURI_DEBUG": "1"
+      }
+    }
+  ]
+}

@@ -557,6 +557,106 @@ function highlightInline(line: string): HighlightSeg[] {
   return segs.length > 0 ? segs : [{ text: line, kind: "text" }];
 }
 
+function isFenceOpen(line: string): string | null {
+  return fenceChar(line);
+}
+
+function isHeadingLine(line: string): boolean {
+  return ATX_RE.test(line);
+}
+
+function isHrLine(line: string): boolean {
+  return /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line);
+}
+
+function isImageLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /^!\[[^\]]*\]\((<[^>\n]+>|[^)\n]+)\)\s*$/.test(trimmed) ||
+    /^<img\b[^>]*>\s*$/i.test(trimmed)
+  );
+}
+
+function isListLine(line: string): boolean {
+  return /^\s*([-*+]|\d+[.)])\s+/.test(line);
+}
+
+function isBlockBoundaryLine(line: string): boolean {
+  return (
+    isHeadingLine(line) ||
+    isHrLine(line) ||
+    isImageLine(line) ||
+    isFenceOpen(line) != null ||
+    isListLine(line)
+  );
+}
+
+/**
+ * Split Markdown into Typora-like blocks. Joining with `\n` reconstructs the source.
+ */
+export function splitMdBlocks(source: string): string[] {
+  const lines = (source ?? "").split(/\r?\n/);
+  if (lines.length === 0) return [""];
+  const blocks: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] ?? "";
+    const fence = isFenceOpen(line);
+    if (fence) {
+      let j = i + 1;
+      while (j < lines.length) {
+        const close = isFenceOpen(lines[j] ?? "");
+        if (close === fence) {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      blocks.push(lines.slice(i, j).join("\n"));
+      i = j;
+      continue;
+    }
+    if (line.trim() === "") {
+      blocks.push("");
+      i += 1;
+      continue;
+    }
+    if (isHeadingLine(line) || isHrLine(line) || isImageLine(line)) {
+      blocks.push(line);
+      i += 1;
+      continue;
+    }
+    if (isListLine(line)) {
+      let j = i + 1;
+      while (j < lines.length) {
+        const next = lines[j] ?? "";
+        if (next.trim() === "") break;
+        if (isListLine(next) || /^\s{2,}\S/.test(next)) {
+          j += 1;
+          continue;
+        }
+        break;
+      }
+      blocks.push(lines.slice(i, j).join("\n"));
+      i = j;
+      continue;
+    }
+    let j = i + 1;
+    while (j < lines.length) {
+      const next = lines[j] ?? "";
+      if (next.trim() === "" || isBlockBoundaryLine(next)) break;
+      j += 1;
+    }
+    blocks.push(lines.slice(i, j).join("\n"));
+    i = j;
+  }
+  return blocks.length > 0 ? blocks : [""];
+}
+
+export function joinMdBlocks(blocks: string[]): string {
+  return blocks.join("\n");
+}
+
 export function highlightMarkdown(source: string): HighlightLine[] {
   const lines = source.split(/\r?\n/);
   const meta = headingMeta(source);

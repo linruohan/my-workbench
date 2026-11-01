@@ -21,6 +21,7 @@
     "@wb/db": "0.1.0",
     "@wb/domain": "0.1.0",
     "@wb/theme": "0.1.0",
+    "highlight.js": "^11.12.0",
     "markdown-it": "^15.0.3",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"

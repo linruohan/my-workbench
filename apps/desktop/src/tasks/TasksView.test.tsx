@@ -80,7 +80,7 @@ describe("TasksView", () => {
     );
 
     expect(screen.getByText("写周报")).toBeInTheDocument();
-    expect(screen.getByLabelText("任务统计")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "统计" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开 写周报" }));
     expect(screen.getByRole("heading", { name: "编辑任务" })).toBeInTheDocument();
 
@@ -120,6 +120,30 @@ describe("TasksView", () => {
     await user.type(screen.getByLabelText("搜索任务"), "积压");
     expect(screen.queryByText("进行中任务")).not.toBeInTheDocument();
     expect(screen.getByText("积压任务")).toBeInTheDocument();
+  });
+
+  it("switches to stats view as a peer mode", async () => {
+    const user = userEvent.setup();
+    const onViewModeChange = vi.fn();
+    renderWithProviders(
+      <TasksView
+        {...baseProps}
+        viewMode="stats"
+        onViewModeChange={onViewModeChange}
+        tasks={[
+          makeTask({ id: "t1", title: "写周报", dueDay: "2026-11-01" }),
+          makeTask({ id: "t2", title: "已完成", isDone: true }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByLabelText("任务统计")).toBeInTheDocument();
+    expect(screen.getByText("范围内任务总数")).toBeInTheDocument();
+    expect(screen.queryByLabelText("搜索任务")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("新建任务标题")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /未完成/ }));
+    expect(onViewModeChange).toHaveBeenCalledWith("list");
   });
 
   it("creates a task and can delete from the list", async () => {

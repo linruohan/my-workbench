@@ -1,5 +1,6 @@
 import MarkdownIt from "markdown-it";
 import { extractImageSlots, type ImageSlot } from "@wb/domain";
+import { renderCodeBlock } from "./code-block";
 
 type BlockState = {
   src: string;
@@ -100,6 +101,12 @@ md.block.ruler.at(
     silent: boolean,
   ) => boolean,
 );
+
+md.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx];
+  if (!token) return "";
+  return renderCodeBlock(token.content, token.info || "");
+};
 
 function escapeAttr(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");

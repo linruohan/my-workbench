@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Note, NoteEditorMode } from "@wb/domain";
+import type { Note } from "@wb/domain";
 import {
   fileStem,
   isImageFile,
@@ -29,7 +29,6 @@ type Props = {
   notes: Note[];
   activeId: string | null;
   preferLastNote?: boolean;
-  defaultEditorMode?: NoteEditorMode;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onChange: (id: string, patch: { title?: string; bodyMd?: string }) => void;
@@ -47,7 +46,6 @@ export function KnowledgeView({
   notes,
   activeId,
   preferLastNote = true,
-  defaultEditorMode = "live",
   onSelect,
   onCreate,
   onChange,
@@ -307,7 +305,7 @@ export function KnowledgeView({
               {openFile.path}
             </p>
             <NoteEditor
-              key={`${openFile.path}:${defaultEditorMode}`}
+              key={openFile.path}
               note={{
                 id: openFile.path,
                 projectId: null,
@@ -316,7 +314,6 @@ export function KnowledgeView({
                 createdAt: 0,
                 updatedAt: 0,
               }}
-              defaultMode={defaultEditorMode}
               titleReadOnly
               saveLabel={saveLabel}
               imageBaseDir={parentDir(openFile.path)}
@@ -350,9 +347,8 @@ export function KnowledgeView({
           </div>
         ) : active ? (
           <NoteEditor
-            key={`${active.id}:${defaultEditorMode}`}
+            key={active.id}
             note={active}
-            defaultMode={defaultEditorMode}
             imageBaseDir={noteAssetDir}
             imageStem={active.title}
             onChange={(patch) => onChange(active.id, patch)}
