@@ -288,11 +288,12 @@ export function TaskEditor({
                           : undefined
                       }
                       onClick={() =>
-                        patch({
-                          tagIds: active
-                            ? draft.tagIds.filter((id) => id !== tag.id)
-                            : [...draft.tagIds, tag.id],
-                        })
+                        setDraft((d) => ({
+                          ...d,
+                          tagIds: d.tagIds.includes(tag.id)
+                            ? d.tagIds.filter((id) => id !== tag.id)
+                            : [...d.tagIds, tag.id],
+                        }))
                       }
                     >
                       {tag.title}
@@ -315,7 +316,12 @@ export function TaskEditor({
                   const created = onCreateTag(title);
                   setNewTagTitle("");
                   if (created) {
-                    patch({ tagIds: [...draft.tagIds, created.id] });
+                    setDraft((d) => ({
+                      ...d,
+                      tagIds: d.tagIds.includes(created.id)
+                        ? d.tagIds
+                        : [...d.tagIds, created.id],
+                    }));
                   }
                 }}
               />

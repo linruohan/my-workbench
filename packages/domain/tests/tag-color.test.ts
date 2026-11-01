@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ensureTagColor,
   pickTagColor,
   resolveTagChipColors,
   TAG_PALETTE,
@@ -19,5 +20,15 @@ describe("tag-color", () => {
     const stored = pickTagColor("工作");
     const fromStored = resolveTagChipColors({ title: "工作", color: stored });
     expect(fromStored.background).toBe(stored);
+  });
+
+  it("backfills legacy null/invalid colors", () => {
+    expect(ensureTagColor({ title: "历史", color: null })).toBe(
+      pickTagColor("历史"),
+    );
+    expect(ensureTagColor({ title: "历史", color: "not-a-color" })).toBe(
+      pickTagColor("历史"),
+    );
+    expect(ensureTagColor({ title: "历史", color: "#f5e6d3" })).toBe("#f5e6d3");
   });
 });

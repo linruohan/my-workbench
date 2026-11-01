@@ -12,6 +12,7 @@ import {
   isPlannerMember,
   isScheduleMember,
   patchNote,
+  ensureTagColor,
   pickTagColor,
   selectTodayTasks,
   settleTimerSegment,
@@ -446,7 +447,7 @@ export class WorkbenchRepository {
     const rows = this.db
       .prepare(`SELECT id, title, color FROM tags ORDER BY title ASC`)
       .all() as Array<{ id: string; title: string; color: string | null }>;
-    return rows.map((r) => ({ id: r.id, title: r.title, color: r.color }));
+    return rows.map((r) => this.hydrateTag(r));
   }
 
   deleteTag(tagId: string): void {
@@ -487,7 +488,21 @@ export class WorkbenchRepository {
          ORDER BY t.title ASC`,
       )
       .all(taskId) as Array<{ id: string; title: string; color: string | null }>;
-    return rows.map((r) => ({ id: r.id, title: r.title, color: r.color }));
+    return rows.map((r) => this.hydrateTag(r));
+  }
+
+  private hydrateTag(row: {
+    id: string;
+    title: string;
+    color: string | null;
+  }): Tag {
+    const color = ensureTagColor({ title: row.title, color: row.color });
+    if (row.color !== color) {
+      this.db
+        .prepare(`UPDATE tags SET color = ? WHERE id = ?`)
+        .run(color, row.id);
+    }
+    return { id: row.id, title: row.title, color };
   }
 
   setTodayOrder(taskIds: string[]): void {

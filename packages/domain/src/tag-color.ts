@@ -48,14 +48,26 @@ export function resolveTagChipColors(
         text: fromPalette.text,
       };
     }
-    // Custom hex: soft fill from the color itself.
-    return {
-      background: tag.color,
-      border: tag.color,
-      text: "var(--wb-text)",
-    };
+    if (/^#[0-9a-fA-F]{3,8}$/.test(tag.color.trim())) {
+      return {
+        background: tag.color,
+        border: tag.color,
+        text: "var(--wb-text)",
+      };
+    }
   }
   const idx = hashSeed(tag.title) % TAG_PALETTE.length;
   const p = TAG_PALETTE[idx]!;
   return { background: p.bg, border: p.border, text: p.text };
+}
+
+/** Ensure legacy tags without color get a stable palette color. */
+export function ensureTagColor(
+  tag: { title: string; color: string | null },
+): string {
+  if (tag.color && findPaletteByBg(tag.color)) return tag.color;
+  if (tag.color && /^#[0-9a-fA-F]{3,8}$/.test(tag.color.trim())) {
+    return tag.color.trim();
+  }
+  return pickTagColor(tag.title);
 }

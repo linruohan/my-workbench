@@ -64,6 +64,32 @@ const baseProps = {
 };
 
 describe("TasksView", () => {
+  it("shows colored tags after the task title in list mode", () => {
+    renderWithProviders(
+      <TasksView
+        {...baseProps}
+        tags={[
+          { id: "tag-a", title: "历史", color: "#f5e6d3" },
+          { id: "tag-b", title: "卡哇伊", color: "#e4e9f7" },
+        ]}
+        taskTagMap={{
+          t1: [
+            { id: "tag-a", title: "历史", color: "#f5e6d3" },
+            { id: "tag-b", title: "卡哇伊", color: "#e4e9f7" },
+          ],
+        }}
+        tasks={[
+          makeTask({ id: "t1", title: "写周报", dueDay: "2026-11-01" }),
+        ]}
+      />,
+    );
+
+    const tags = screen.getByLabelText("标签");
+    expect(tags).toHaveTextContent("历史");
+    expect(tags).toHaveTextContent("卡哇伊");
+    expect(tags.querySelectorAll(".list__tag")).toHaveLength(2);
+  });
+
   it("lists tasks and opens editor for save", async () => {
     const user = userEvent.setup();
     const onSaveTask = vi.fn();

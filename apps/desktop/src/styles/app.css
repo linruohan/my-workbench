@@ -576,18 +576,22 @@ input {
 
 .list__title-text {
   min-width: 0;
+  flex: 0 1 auto;
 }
 
 .list__tags {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 .list__tag {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2917,10 +2921,14 @@ input {
   padding: 0;
 }
 
-.list__row.is-done .list__title,
+.list__row.is-done .list__title-text,
 .task-card.is-done .task-card__title {
   text-decoration: line-through;
   color: var(--wb-muted);
+}
+
+.list__row.is-done .list__tag {
+  opacity: 0.85;
 }
 
 .check.is-checked {
@@ -3243,6 +3251,7 @@ input {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  flex: none;
 }
 
 .task-editor__title-input {
@@ -3273,7 +3282,13 @@ input {
   align-items: center;
   gap: 4px;
   min-width: 0;
+  flex: 0 1 auto;
+  width: 100%;
+}
+
+.task-editor__inline-row > .task-editor__inline {
   flex: 1 1 180px;
+  width: auto;
 }
 
 .task-editor__inline-label {
@@ -3372,7 +3387,7 @@ input {
     grid-template-columns: 1fr;
   }
 
-  .task-editor__inline {
+  .task-editor__inline-row > .task-editor__inline {
     flex: 1 1 100%;
   }
 }
@@ -3691,7 +3706,7 @@ input {
   color: var(--wb-danger);
 }
 
-.list__row.is-overdue .list__title {
+.list__row.is-overdue .list__title-text {
   color: color-mix(in srgb, var(--wb-danger) 70%, var(--wb-text));
 }
 

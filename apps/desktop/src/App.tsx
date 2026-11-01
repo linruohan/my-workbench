@@ -202,12 +202,13 @@ export default function App() {
     return map;
   }, [allTasks, store]);
   const taskTagMap = useMemo(() => {
+    void tick;
     const map: Record<string, Tag[]> = {};
     for (const t of allTasks) {
       map[t.id] = store.listTagsForTask(t.id);
     }
     return map;
-  }, [allTasks, store]);
+  }, [allTasks, store, tick]);
 
   const editingTask = editingTaskId
     ? (store.getTask(editingTaskId) ?? null)
@@ -697,6 +698,7 @@ export default function App() {
         empty={suggest ?? todayEmpty}
         tasks={todayTasks}
         projectTitles={projectTitles}
+        taskTagMap={taskTagMap}
         denseMeta={prefs.workMode === "office"}
         reorderable
         hint="汇总全部项目 · 拖拽可调整今日顺序"
@@ -718,6 +720,7 @@ export default function App() {
         empty="这一天还没有全天计划任务。"
         tasks={plannerTasks}
         projectTitles={projectTitles}
+        taskTagMap={taskTagMap}
         hint="汇总全部项目的计划日任务"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
@@ -736,6 +739,7 @@ export default function App() {
         empty="没有排到具体时刻的任务。"
         tasks={scheduleTasks}
         projectTitles={projectTitles}
+        taskTagMap={taskTagMap}
         hint="汇总全部项目的时刻安排"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
@@ -963,6 +967,7 @@ function TaskList(props: {
   empty: string;
   tasks: Task[];
   projectTitles?: Record<string, string>;
+  taskTagMap?: Record<string, Tag[]>;
   denseMeta?: boolean;
   reorderable?: boolean;
   hint?: string;
@@ -995,6 +1000,7 @@ function TaskList(props: {
               key={task.id}
               task={task}
               projectTitle={props.projectTitles?.[task.projectId]}
+              tags={props.taskTagMap?.[task.id] ?? []}
               denseMeta={props.denseMeta}
               timerRunning={props.activeTimerTaskId === task.id}
               timerElapsedMs={

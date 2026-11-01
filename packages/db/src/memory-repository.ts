@@ -17,6 +17,7 @@ import {
   patchNote,
   patchTaskContent,
   patchTimedTask,
+  ensureTagColor,
   pickTagColor,
   selectTodayTasks,
   settleTimerSegment,
@@ -342,9 +343,9 @@ export class MemoryWorkbenchRepository {
   }
 
   listTags(): Tag[] {
-    return [...this.tags.values()].sort((a, b) =>
-      a.title.localeCompare(b.title, "zh-CN"),
-    );
+    return [...this.tags.values()]
+      .map((tag) => this.withTagColor(tag))
+      .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
   }
 
   deleteTag(tagId: string): void {
@@ -378,7 +379,16 @@ export class MemoryWorkbenchRepository {
     return [...ids]
       .map((id) => this.tags.get(id))
       .filter((t): t is Tag => t != null)
+      .map((tag) => this.withTagColor(tag))
       .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+  }
+
+  private withTagColor(tag: Tag): Tag {
+    const color = ensureTagColor(tag);
+    if (tag.color === color) return tag;
+    const next = { ...tag, color };
+    this.tags.set(tag.id, next);
+    return next;
   }
 
   setTodayOrder(taskIds: string[]): void {
@@ -576,7 +586,15 @@ export class MemoryWorkbenchRepository {
         return [next.id, next];
       }),
     );
-    this.tags = new Map((data.tags ?? []).map((t) => [t.id, t]));
+    this.tags = new Map(
+      (data.tags ?? []).map((t) => {
+        const color = ensureTagColor({
+          title: t.title,
+          color: t.color ?? null,
+        });
+        return [t.id, { id: t.id, title: t.title, color }];
+      }),
+    );
     this.taskTags = new Map(
       (data.taskTags ?? []).map(([taskId, ids]) => [taskId, new Set(ids)]),
     );
