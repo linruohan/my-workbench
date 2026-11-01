@@ -1,13 +1,21 @@
 import { useMemo, useState } from "react";
 import {
+  computeTaskStats,
+  filterTasks,
+  formatLocalDay,
+  listChildTasks,
+  sortTasks,
   type ProjectBucket,
   type ReminderOptionId,
   type Task,
   type TaskBoardColumnId,
+  type TaskSortKey,
+  type TaskStatusFilter,
 } from "@wb/domain";
 import { TaskBoard } from "./TaskBoard";
 import { TaskEditor, type TaskEditorSave } from "./TaskEditor";
 import { TaskRow } from "./TaskRow";
+import { TaskStatsPanel } from "./TaskStatsPanel";
 
 export type TasksViewMode = "list" | "board";
 
@@ -30,6 +38,8 @@ type Props = {
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
   onSaveTask: (taskId: string, draft: TaskEditorSave) => void;
   onDeleteTask: (taskId: string) => void;
+  onDuplicateTask: (taskId: string) => void;
+  onAddSubtask: (parentId: string, title: string) => void;
   onCreate: (title: string) => void;
 };
 
@@ -52,10 +62,17 @@ export function TasksView({
   onMoveColumn,
   onSaveTask,
   onDeleteTask,
+  onDuplicateTask,
+  onAddSubtask,
   onCreate,
 }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [createTitle, setCreateTitle] = useState("");
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<TaskStatusFilter>("all");
+  const [sortKey, setSortKey] = useState<TaskSortKey>("updated");
+  const [statsExpanded, setStatsExpanded] = useState(false);
+  const [today] = useState(() => formatLocalDay(Date.now()));
 
   const projectTitles = useMemo(() => {
     const map: Record<string, string> = {};
@@ -63,21 +80,48 @@ export function TasksView({
     return map;
   }, [projects]);
 
+  const scopedTasks = useMemo(() => {
+    if (!filterProjectId) return tasks;
+    return tasks.filter((t) => t.projectId === filterProjectId);
+  }, [tasks, filterProjectId]);
+
+  const stats = useMemo(
+    () => computeTaskStats(scopedTasks, { today }),
+    [scopedTasks, today],
+  );
+
   const visible = useMemo(() => {
-    return tasks.filter((t) => {
-      if (filterProjectId && t.projectId !== filterProjectId) return false;
-      if (!showCompleted && t.isDone) return false;
-      return true;
+    const filtered = filterTasks(scopedTasks, {
+      query,
+      status,
+      showCompleted: status === "all" ? showCompleted : true,
+      today,
+      rootsOnly: true,
     });
-  }, [tasks, filterProjectId, showCompleted]);
+    return sortTasks(filtered, sortKey);
+  }, [scopedTasks, query, status, showCompleted, today, sortKey]);
 
   const editing = editingId
     ? (tasks.find((t) => t.id === editingId) ?? null)
     : null;
+  const editingSubtasks = editing
+    ? listChildTasks(tasks, editing.id)
+    : [];
 
   const title = filterProjectId
     ? (projectTitles[filterProjectId] ?? "任务")
     : "全部任务";
+
+  const confirmDelete = (taskId: string) => {
+    if (
+      confirmBeforeDelete &&
+      !window.confirm("确定删除该任务？此操作不可撤销。")
+    ) {
+      return;
+    }
+    onDeleteTask(taskId);
+    setEditingId((prev) => (prev === taskId ? null : prev));
+  };
 
   const submitCreate = () => {
     const text = createTitle.trim();
@@ -117,6 +161,7 @@ export function TasksView({
               type="checkbox"
               checked={showCompleted}
               onChange={(e) => onShowCompletedChange(e.target.checked)}
+              disabled={status !== "all"}
             />
             显示已完成
           </label>
@@ -150,11 +195,53 @@ export function TasksView({
         </div>
       </header>
 
+      <TaskStatsPanel
+        stats={stats}
+        projectTitles={projectTitles}
+        expanded={statsExpanded}
+        onToggle={() => setStatsExpanded((v) => !v)}
+        onSelectStatus={(next) =>
+          setStatus(next === "done" ? "done" : next)
+        }
+      />
+
+      <div className="tasks__filters">
+        <input
+          className="tasks__search"
+          aria-label="搜索任务"
+          placeholder="搜索标题或备注…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <select
+          aria-label="状态筛选"
+          value={status}
+          onChange={(e) => setStatus(e.target.value as TaskStatusFilter)}
+        >
+          <option value="all">全部状态</option>
+          <option value="open">未完成</option>
+          <option value="today">今日到期</option>
+          <option value="overdue">已逾期</option>
+          <option value="unplanned">未排期</option>
+          <option value="done">已完成</option>
+        </select>
+        <select
+          aria-label="排序"
+          value={sortKey}
+          onChange={(e) => setSortKey(e.target.value as TaskSortKey)}
+        >
+          <option value="updated">最近更新</option>
+          <option value="created">最近创建</option>
+          <option value="due">计划日期</option>
+          <option value="title">标题</option>
+        </select>
+      </div>
+
       <div className="tasks__content">
         <div className="tasks__main">
           {viewMode === "list" ? (
             visible.length === 0 ? (
-              <p className="empty">还没有任务。用下方输入框新建，或用快速捕获。</p>
+              <p className="empty">没有匹配的任务。调整筛选，或在下方新建。</p>
             ) : (
               <ul className="list" aria-label="任务列表">
                 {visible.map((task) => (
@@ -166,12 +253,15 @@ export function TasksView({
                         ? undefined
                         : projectTitles[task.projectId]
                     }
+                    childCount={listChildTasks(tasks, task.id).length}
                     denseMeta={denseMeta}
                     showDoneStyle
                     onToggleDone={onToggleDone}
                     onOpen={(t) => setEditingId(t.id)}
                     onPlanToday={onPlanToday}
                     onPlanTime={onPlanTime}
+                    onDuplicate={(t) => onDuplicateTask(t.id)}
+                    onDelete={(t) => confirmDelete(t.id)}
                   />
                 ))}
               </ul>
@@ -197,7 +287,11 @@ export function TasksView({
                 if (e.key === "Enter") submitCreate();
               }}
             />
-            <button type="button" className="btn btn--primary" onClick={submitCreate}>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={submitCreate}
+            >
               添加
             </button>
           </div>
@@ -209,18 +303,17 @@ export function TasksView({
             task={editing}
             bucket={buckets[editing.id] ?? "active"}
             projects={projects}
+            subtasks={editingSubtasks}
             defaultRemind={defaultRemind}
             onClose={() => setEditingId(null)}
-            onDelete={() => {
-              if (
-                confirmBeforeDelete &&
-                !window.confirm("确定删除该任务？此操作不可撤销。")
-              ) {
-                return;
-              }
-              onDeleteTask(editing.id);
+            onDelete={() => confirmDelete(editing.id)}
+            onDuplicate={() => {
+              onDuplicateTask(editing.id);
               setEditingId(null);
             }}
+            onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
+            onToggleSubtask={onToggleDone}
+            onDeleteSubtask={(id) => confirmDelete(id)}
             onSave={(draft) => {
               onSaveTask(editing.id, draft);
               setEditingId(null);

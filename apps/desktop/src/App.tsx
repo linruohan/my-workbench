@@ -229,6 +229,7 @@ export default function App() {
       title: draft.title,
       notes: draft.notes,
       projectId: draft.projectId,
+      timeEstimate: draft.timeEstimateMinutes * 60_000,
     });
 
     if (draft.isDone && !task.isDone) store.completeTask(taskId);
@@ -267,6 +268,23 @@ export default function App() {
   const deleteTask = (taskId: string) => {
     store.deleteTask(taskId);
     setEditingTaskId((prev) => (prev === taskId ? null : prev));
+    refresh();
+  };
+
+  const duplicateTask = (taskId: string) => {
+    store.duplicateTask(taskId);
+    refresh();
+  };
+
+  const addSubtask = (parentId: string, title: string) => {
+    const parent = store.getTask(parentId);
+    if (!parent) return;
+    store.createTask({
+      title,
+      projectId: parent.projectId,
+      parentId,
+      nowMs: Date.now(),
+    });
     refresh();
   };
 
@@ -520,6 +538,8 @@ export default function App() {
         onMoveColumn={moveTaskColumn}
         onSaveTask={saveEditedTask}
         onDeleteTask={deleteTask}
+        onDuplicateTask={duplicateTask}
+        onAddSubtask={addSubtask}
         onCreate={createNamedTask}
       />
     );
@@ -599,6 +619,7 @@ export default function App() {
                 task={editingTask}
                 bucket={taskBuckets[editingTask.id] ?? "active"}
                 projects={projects}
+                subtasks={store.listSubtasks(editingTask.id)}
                 defaultRemind={prefs.defaultRemind}
                 onClose={() => setEditingTaskId(null)}
                 onDelete={() => {
@@ -609,6 +630,21 @@ export default function App() {
                     return;
                   }
                   deleteTask(editingTask.id);
+                }}
+                onDuplicate={() => {
+                  duplicateTask(editingTask.id);
+                  setEditingTaskId(null);
+                }}
+                onAddSubtask={(title) => addSubtask(editingTask.id, title)}
+                onToggleSubtask={toggleDone}
+                onDeleteSubtask={(id) => {
+                  if (
+                    prefs.confirmBeforeDelete &&
+                    !window.confirm("确定删除该子任务？此操作不可撤销。")
+                  ) {
+                    return;
+                  }
+                  deleteTask(id);
                 }}
                 onSave={(draft) => {
                   saveEditedTask(editingTask.id, draft);

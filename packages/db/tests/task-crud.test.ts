@@ -26,4 +26,22 @@ describe("task CRUD on memory repository", () => {
     store.deleteTask(task.id);
     expect(store.getTask(task.id)).toBeNull();
   });
+
+  it("duplicates tasks and manages one-level subtasks", () => {
+    const store = new MemoryWorkbenchRepository();
+    const parent = store.createTask({ title: "父任务", nowMs: 1000 });
+    store.updateTask(parent.id, { timeEstimate: 25 * 60_000 }, 1100);
+    const copy = store.duplicateTask(parent.id, 1200);
+    expect(copy.title).toBe("父任务（副本）");
+    expect(copy.timeEstimate).toBe(25 * 60_000);
+
+    const child = store.createTask({
+      title: "子项",
+      parentId: parent.id,
+      nowMs: 1300,
+    });
+    expect(store.listSubtasks(parent.id).map((t) => t.id)).toEqual([child.id]);
+    store.setTaskParent(child.id, null, 1400);
+    expect(store.listSubtasks(parent.id)).toEqual([]);
+  });
 });

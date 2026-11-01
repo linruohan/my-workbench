@@ -349,6 +349,55 @@ export class WorkbenchRepository {
     return this.getTask(taskId)!;
   }
 
+  setTaskParent(
+    taskId: string,
+    parentId: string | null,
+    nowMs = Date.now(),
+  ): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    if (parentId === taskId) {
+      throw new DomainError("task cannot be its own parent");
+    }
+    if (parentId != null) {
+      const parent = this.getTask(parentId);
+      if (!parent) throw new DomainError(`parent not found: ${parentId}`);
+      if (parent.parentId) {
+        throw new DomainError(
+          "nested subtasks deeper than one level are not supported",
+        );
+      }
+    }
+    this.db
+      .prepare(`UPDATE tasks SET parent_id = ?, updated_at = ? WHERE id = ?`)
+      .run(parentId, nowMs, taskId);
+    return this.getTask(taskId)!;
+  }
+
+  listSubtasks(parentId: string): Task[] {
+    return this.listTasks()
+      .filter((t) => t.parentId === parentId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  duplicateTask(taskId: string, nowMs = Date.now()): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    const copy = this.createTask({
+      title: `${task.title}（副本）`,
+      projectId: task.projectId,
+      parentId: task.parentId,
+      notes: task.notes,
+      bucket: this.getTaskBucket(taskId),
+      nowMs,
+    });
+    return this.updateTask(
+      copy.id,
+      { timeEstimate: task.timeEstimate },
+      nowMs,
+    );
+  }
+
   addTimeSpent(taskId: string, startedAt: number, endedAt: number): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);

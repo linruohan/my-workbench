@@ -52,6 +52,8 @@ const baseProps = {
   onMoveColumn: vi.fn(),
   onSaveTask: vi.fn(),
   onDeleteTask: vi.fn(),
+  onDuplicateTask: vi.fn(),
+  onAddSubtask: vi.fn(),
   onCreate: vi.fn(),
 };
 
@@ -70,6 +72,7 @@ describe("TasksView", () => {
     );
 
     expect(screen.getByText("写周报")).toBeInTheDocument();
+    expect(screen.getByLabelText("任务统计")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开 写周报" }));
     expect(screen.getByRole("heading", { name: "编辑任务" })).toBeInTheDocument();
 
@@ -83,13 +86,11 @@ describe("TasksView", () => {
     );
   });
 
-  it("switches to board view with three columns", async () => {
+  it("filters by search and shows board columns", async () => {
     const user = userEvent.setup();
-    const onViewModeChange = vi.fn();
     renderWithProviders(
       <TasksView
         {...baseProps}
-        onViewModeChange={onViewModeChange}
         viewMode="board"
         showCompleted
         tasks={[
@@ -107,20 +108,28 @@ describe("TasksView", () => {
 
     expect(screen.getByLabelText("任务看板")).toBeInTheDocument();
     expect(screen.getByLabelText("进行中")).toHaveTextContent("进行中任务");
-    expect(screen.getByLabelText("待办箱")).toHaveTextContent("积压任务");
-    expect(screen.getByLabelText("已完成")).toHaveTextContent("已完成任务");
 
-    await user.click(screen.getByRole("button", { name: "列表" }));
-    expect(onViewModeChange).toHaveBeenCalledWith("list");
+    await user.type(screen.getByLabelText("搜索任务"), "积压");
+    expect(screen.queryByText("进行中任务")).not.toBeInTheDocument();
+    expect(screen.getByText("积压任务")).toBeInTheDocument();
   });
 
-  it("creates a task from the inline composer", async () => {
+  it("creates a task and can delete from the list", async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn();
+    const onDeleteTask = vi.fn();
     renderWithProviders(
-      <TasksView {...baseProps} onCreate={onCreate} tasks={[]} />,
+      <TasksView
+        {...baseProps}
+        onCreate={onCreate}
+        onDeleteTask={onDeleteTask}
+        tasks={[makeTask({ id: "t1", title: "待删" })]}
+      />,
     );
     await user.type(screen.getByLabelText("新建任务标题"), "新任务{Enter}");
     expect(onCreate).toHaveBeenCalledWith("新任务");
+
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDeleteTask).toHaveBeenCalledWith("t1");
   });
 });

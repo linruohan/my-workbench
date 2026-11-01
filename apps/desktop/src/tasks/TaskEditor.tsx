@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   formatLocalDay,
   formatTaskPlanMeta,
+  millisecondsDiffToRemindOption,
   type ProjectBucket,
   type ReminderOptionId,
   type Task,
@@ -17,6 +18,7 @@ export type TaskEditorSave = {
   dueWithTimeLocal: string;
   deadlineDay: string;
   remindOption: ReminderOptionId;
+  timeEstimateMinutes: number;
   isDone: boolean;
 };
 
@@ -24,9 +26,14 @@ type Props = {
   task: Task;
   bucket: ProjectBucket;
   projects: Array<{ id: string; title: string }>;
+  subtasks?: Task[];
   defaultRemind: ReminderOptionId;
   onSave: (patch: TaskEditorSave) => void;
   onDelete: () => void;
+  onDuplicate?: () => void;
+  onAddSubtask?: (title: string) => void;
+  onToggleSubtask?: (subtask: Task) => void;
+  onDeleteSubtask?: (subtaskId: string) => void;
   onClose: () => void;
 };
 
@@ -41,6 +48,12 @@ function fromTask(
   bucket: ProjectBucket,
   defaultRemind: ReminderOptionId,
 ): TaskEditorSave {
+  const remindOption =
+    task.dueWithTime != null
+      ? millisecondsDiffToRemindOption(task.dueWithTime, task.remindAt)
+      : task.remindAt != null
+        ? defaultRemind
+        : "none";
   return {
     title: task.title,
     notes: task.notes,
@@ -53,7 +66,8 @@ function fromTask(
         ? toDatetimeLocal(task.dueWithTime)
         : toDatetimeLocal(Date.now()),
     deadlineDay: task.deadlineDay ?? "",
-    remindOption: task.remindAt != null ? defaultRemind : "none",
+    remindOption,
+    timeEstimateMinutes: Math.round(Math.max(0, task.timeEstimate) / 60_000),
     isDone: task.isDone,
   };
 }
@@ -62,22 +76,30 @@ export function TaskEditor({
   task,
   bucket,
   projects,
+  subtasks = [],
   defaultRemind,
   onSave,
   onDelete,
+  onDuplicate,
+  onAddSubtask,
+  onToggleSubtask,
+  onDeleteSubtask,
   onClose,
 }: Props) {
   const [draft, setDraft] = useState(() =>
     fromTask(task, bucket, defaultRemind),
   );
+  const [subtaskTitle, setSubtaskTitle] = useState("");
 
   const patch = (partial: Partial<TaskEditorSave>) =>
     setDraft((d) => ({ ...d, ...partial }));
 
+  const canManageSubtasks = !task.parentId && onAddSubtask;
+
   return (
     <aside className="task-editor" aria-label="编辑任务">
       <header className="task-editor__header">
-        <h2>编辑任务</h2>
+        <h2>{task.parentId ? "编辑子任务" : "编辑任务"}</h2>
         <button type="button" className="btn btn--ghost" onClick={onClose}>
           关闭
         </button>
@@ -103,7 +125,7 @@ export function TaskEditor({
           <textarea
             id="task-notes"
             className="field__control field__control--area"
-            rows={5}
+            rows={4}
             value={draft.notes}
             placeholder="补充说明、清单或上下文"
             onChange={(e) => patch({ notes: e.target.value })}
@@ -126,6 +148,28 @@ export function TaskEditor({
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="field">
+          <label className="field__label" htmlFor="task-estimate">
+            预计时长（分钟）
+          </label>
+          <input
+            id="task-estimate"
+            className="field__control"
+            type="number"
+            min={0}
+            step={5}
+            value={draft.timeEstimateMinutes}
+            onChange={(e) =>
+              patch({
+                timeEstimateMinutes: Math.max(
+                  0,
+                  Math.floor(Number(e.target.value) || 0),
+                ),
+              })
+            }
+          />
         </div>
 
         <div className="field">
@@ -245,13 +289,78 @@ export function TaskEditor({
           </div>
         ) : null}
 
+        {canManageSubtasks ? (
+          <div className="field">
+            <div className="field__label">子任务</div>
+            {subtasks.length > 0 ? (
+              <ul className="task-editor__subs" aria-label="子任务列表">
+                {subtasks.map((sub) => (
+                  <li key={sub.id} className="task-editor__sub">
+                    <button
+                      type="button"
+                      className={sub.isDone ? "check is-checked" : "check"}
+                      aria-label={
+                        sub.isDone
+                          ? `取消完成 ${sub.title}`
+                          : `完成 ${sub.title}`
+                      }
+                      onClick={() => onToggleSubtask?.(sub)}
+                    />
+                    <span
+                      className={
+                        sub.isDone
+                          ? "task-editor__sub-title is-done"
+                          : "task-editor__sub-title"
+                      }
+                    >
+                      {sub.title}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => onDeleteSubtask?.(sub.id)}
+                    >
+                      删除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="task-editor__hint">还没有子任务。</p>
+            )}
+            <div className="task-editor__sub-add">
+              <input
+                aria-label="新建子任务"
+                className="field__control"
+                placeholder="添加子任务，回车确认"
+                value={subtaskTitle}
+                onChange={(e) => setSubtaskTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const title = subtaskTitle.trim();
+                  if (!title) return;
+                  onAddSubtask?.(title);
+                  setSubtaskTitle("");
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
+
         <p className="task-editor__hint">{formatTaskPlanMeta(task)}</p>
       </div>
 
       <footer className="task-editor__footer">
-        <button type="button" className="btn btn--ghost" onClick={onDelete}>
-          删除
-        </button>
+        <div className="task-editor__footer-left">
+          <button type="button" className="btn btn--ghost" onClick={onDelete}>
+            删除
+          </button>
+          {onDuplicate ? (
+            <button type="button" className="btn btn--ghost" onClick={onDuplicate}>
+              复制
+            </button>
+          ) : null}
+        </div>
         <div className="task-editor__footer-right">
           <button type="button" className="btn" onClick={onClose}>
             取消

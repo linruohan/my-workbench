@@ -248,6 +248,52 @@ export class MemoryWorkbenchRepository {
     return next;
   }
 
+  setTaskParent(
+    taskId: string,
+    parentId: string | null,
+    nowMs = Date.now(),
+  ): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    if (parentId === taskId) {
+      throw new DomainError("task cannot be its own parent");
+    }
+    if (parentId != null) {
+      const parent = this.getTask(parentId);
+      if (!parent) throw new DomainError(`parent not found: ${parentId}`);
+      if (parent.parentId) {
+        throw new DomainError("nested subtasks deeper than one level are not supported");
+      }
+    }
+    const next = { ...task, parentId, updatedAt: nowMs };
+    this.tasks.set(taskId, next);
+    return next;
+  }
+
+  listSubtasks(parentId: string): Task[] {
+    return this.listTasks()
+      .filter((t) => t.parentId === parentId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  duplicateTask(taskId: string, nowMs = Date.now()): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    const copy = this.createTask({
+      title: `${task.title}（副本）`,
+      projectId: task.projectId,
+      parentId: task.parentId,
+      notes: task.notes,
+      bucket: this.getTaskBucket(taskId),
+      nowMs,
+    });
+    return this.updateTask(
+      copy.id,
+      { timeEstimate: task.timeEstimate },
+      nowMs,
+    );
+  }
+
   addTimeSpent(taskId: string, startedAt: number, endedAt: number): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
