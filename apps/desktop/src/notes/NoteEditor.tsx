@@ -84,13 +84,29 @@ function clipboardImage(data: DataTransfer | null): File | null {
   return null;
 }
 
+function rowMinHeightPx(area: HTMLTextAreaElement): number {
+  const styles = window.getComputedStyle(area.parentElement?.closest(".md-live") ?? area);
+  const size = Number.parseFloat(styles.getPropertyValue("--md-live-size")) || 16;
+  const line = Number.parseFloat(styles.getPropertyValue("--md-live-line")) || 1.75;
+  const padY = Number.parseFloat(styles.getPropertyValue("--md-live-pad-y")) || 4;
+  return Math.ceil(size * line + 2 * padY);
+}
+
 function autosize(area: HTMLTextAreaElement | null, opts?: { force?: boolean }) {
   if (!area) return;
-  const min = 28;
-  // Prefer growing from current height so typing does not collapse the layout.
+  const row = rowMinHeightPx(area);
+  // Empty line: lock to one shared row height (edit == preview gap).
+  // Always clear a prior editMinHeight lock — min-height can defeat max-height.
+  if (!area.value) {
+    area.style.height = `${row}px`;
+    area.style.minHeight = `${row}px`;
+    area.style.maxHeight = `${row}px`;
+    return;
+  }
+  area.style.maxHeight = "";
   const current = area.offsetHeight;
   area.style.height = "auto";
-  const needed = Math.max(area.scrollHeight, min);
+  const needed = Math.max(area.scrollHeight, row);
   if (!opts?.force && Math.abs(needed - current) <= 1) {
     area.style.height = `${current}px`;
     return;
@@ -321,10 +337,11 @@ export function NoteEditor({
     if (active == null) return;
     const area = editRef.current;
     if (!area) return;
-    if (editMinHeight.current != null) {
+    // Empty rows always use the shared --md-live-row; never inherit a taller lock.
+    if (editMinHeight.current != null && area.value) {
       area.style.minHeight = `${editMinHeight.current}px`;
-      editMinHeight.current = null;
     }
+    editMinHeight.current = null;
     autosize(area, { force: true });
     if (findOpen) return;
     area.focus({ preventScroll: true });
@@ -642,7 +659,11 @@ export function NoteEditor({
     if (active == null) return;
     if (findOpen) return;
     setColorMenu(null);
-    if (editRef.current) editRef.current.style.minHeight = "";
+    if (editRef.current) {
+      editRef.current.style.minHeight = "";
+      editRef.current.style.height = "";
+      editRef.current.style.maxHeight = "";
+    }
     editMinHeight.current = null;
     commitNumbered(blocks, null);
   };
@@ -682,8 +703,14 @@ export function NoteEditor({
     pendingCaret.current = caret;
     pendingSelection.current = null;
     // Lock min-height to the preview box so code/images/headings do not jump on enter.
+    // Skip for blank gaps — those must stay exactly one --md-live-row.
     const host = event?.currentTarget as HTMLElement | null | undefined;
-    if (host && typeof host.getBoundingClientRect === "function") {
+    const enteringEmpty = !(blocks[index] ?? "");
+    if (
+      !enteringEmpty &&
+      host &&
+      typeof host.getBoundingClientRect === "function"
+    ) {
       editMinHeight.current = Math.ceil(host.getBoundingClientRect().height);
     } else {
       editMinHeight.current = null;
@@ -692,10 +719,10 @@ export function NoteEditor({
     requestAnimationFrame(() => {
       const area = editRef.current;
       if (area) {
-        if (editMinHeight.current != null) {
+        if (editMinHeight.current != null && area.value) {
           area.style.minHeight = `${editMinHeight.current}px`;
-          editMinHeight.current = null;
         }
+        editMinHeight.current = null;
         area.focus({ preventScroll: true });
         const pos = Math.min(Math.max(0, caret), area.value.length);
         area.setSelectionRange(pos, pos);
