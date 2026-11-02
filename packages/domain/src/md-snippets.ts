@@ -35,7 +35,10 @@ export const GITHUB_MD_SNIPPETS: MdSnippetDefinition[] = [
   { trigger: "pre", template: "```${1:language}\n${2:Multi-line Code}\n```\n${0}" },
   { trigger: "a", template: "[${1:Link Title}](${2:Link Source}) ${0}" },
   { trigger: "img", template: "![${1:Image Title}](${2:Image Source}) ${0}" },
-  { trigger: "ol", template: "1. ${1:First Item}\n2. ${2:Second Item}\n3. ${3:Third Item}\n${0}" },
+  {
+    trigger: "ol",
+    template: "1. ${1:First Item}\n2. ${2:Second Item}\n3. ${3:Third Item}\n${0}",
+  },
   { trigger: "ul", template: "- ${1:I}\n- ${2:Love}\n- ${3:Markdown}\n${0}" },
   {
     trigger: "table",
@@ -116,8 +119,7 @@ export function expandGithubMdSnippet(
   const def = SNIPPETS_BY_LENGTH.find((s) => s.trigger === hit.trigger);
   if (!def) return null;
   const materialized = materializeSnippetTemplate(def.template);
-  const next =
-    text.slice(0, hit.start) + materialized.text + text.slice(hit.end);
+  const next = text.slice(0, hit.start) + materialized.text + text.slice(hit.end);
   const shift = hit.start;
   return {
     text: next,

@@ -723,6 +723,10 @@ export function NoteEditor({
     // Prefer the requested index so duplicate/empty blocks do not snap to the first match.
     const next = Math.min(Math.max(0, index), Math.max(0, list.length - 1));
     if (opts?.caret != null) pendingCaret.current = opts.caret;
+    if (next !== active) {
+      snippetStops.current = null;
+      snippetStopIndex.current = 0;
+    }
     setActive(next);
   };
 

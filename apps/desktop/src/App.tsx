@@ -147,6 +147,32 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [store, cooldown, refresh]);
 
+  // Refresh wall clock at next local midnight so 明天 → 今天 flips promptly.
+  useEffect(() => {
+    const schedule = () => {
+      const at = Date.now();
+      const next = new Date(at);
+      next.setHours(24, 0, 0, 50);
+      return window.setTimeout(() => {
+        setNow(Date.now());
+      }, Math.max(50, next.getTime() - at));
+    };
+    let id = schedule();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setNow(Date.now());
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const tick = window.setInterval(() => {
+      window.clearTimeout(id);
+      id = schedule();
+    }, 60_000);
+    return () => {
+      window.clearTimeout(id);
+      window.clearInterval(tick);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
   useEffect(() => {
     if (!activeTimerTaskId) return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -1031,6 +1057,7 @@ function TaskList(props: {
               projectTitle={props.projectTitles?.[task.projectId]}
               tags={props.taskTagMap?.[task.id] ?? []}
               denseMeta={props.denseMeta}
+              nowMs={props.nowMs}
               timerRunning={props.activeTimerTaskId === task.id}
               timerElapsedMs={
                 props.activeTimerTaskId === task.id ? (props.timerElapsedMs ?? 0) : 0

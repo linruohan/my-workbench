@@ -1071,8 +1071,10 @@ export function isTableLine(line: string): boolean {
 
 /** Typora-style TOC markers: [toc], [TOC], [[toc]], @[toc]. */
 export function isTocSource(text: string): boolean {
-  return /^\s*(?:@\s*)?\[\[\s*toc\s*\]\]\s*$/i.test(text.trim())
-    || /^\s*(?:@\s*)?\[\s*toc\s*\]\s*$/i.test(text.trim());
+  return (
+    /^\s*(?:@\s*)?\[\[\s*toc\s*\]\]\s*$/i.test(text.trim()) ||
+    /^\s*(?:@\s*)?\[\s*toc\s*\]\s*$/i.test(text.trim())
+  );
 }
 
 export type MdHeading = { level: number; text: string; id: string };

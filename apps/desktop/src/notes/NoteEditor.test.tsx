@@ -28,7 +28,10 @@ describe("NoteEditor", () => {
     expect(screen.getByLabelText("编辑第 1 行")).toHaveTextContent("Hello");
     expect(screen.getByLabelText("编辑第 3 行")).toHaveTextContent("世界");
     expect(screen.getByLabelText("编辑空行（第 4 行）")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "#" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "#" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("toggles the line-number gutter from the toolbar", async () => {
@@ -38,7 +41,10 @@ describe("NoteEditor", () => {
     );
     expect(document.querySelector(".md-live__gutter")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "#" }));
-    expect(screen.getByRole("button", { name: "#" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "#" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
     expect(document.querySelector(".md-live__gutter")).toBeNull();
   });
 

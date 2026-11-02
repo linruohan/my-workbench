@@ -213,11 +213,9 @@ describe("knowledge headings", () => {
       "| a | b |\n| --- | --- |\n| 1 | 2 |",
       "",
     ]);
-    expect(extractMdHeadings("# 一\n## 二\n```\n# skip\n```\n### 三").map((h) => h.text)).toEqual([
-      "一",
-      "二",
-      "三",
-    ]);
+    expect(
+      extractMdHeadings("# 一\n## 二\n```\n# skip\n```\n### 三").map((h) => h.text),
+    ).toEqual(["一", "二", "三"]);
   });
 
   it("wraps multi-line selections for bold and highlight", () => {

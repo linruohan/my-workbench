@@ -71,7 +71,12 @@ describe("agent edit plan", () => {
     expect(
       agentEditPlan([
         message({ id: "u", role: "user", content: "创建任务 写周报" }),
-        message({ id: "a", role: "assistant", content: "正在创建任务。", toolCallsJson: "[]" }),
+        message({
+          id: "a",
+          role: "assistant",
+          content: "正在创建任务。",
+          toolCallsJson: "[]",
+        }),
       ]),
     ).toBeNull();
   });

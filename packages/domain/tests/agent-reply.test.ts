@@ -34,7 +34,9 @@ describe("agent thread filter", () => {
   });
 
   it("matches without caring about letter case", () => {
-    expect(filterAgentThreads([{ title: "Hello" }], "hello")).toEqual([{ title: "Hello" }]);
+    expect(filterAgentThreads([{ title: "Hello" }], "hello")).toEqual([
+      { title: "Hello" },
+    ]);
   });
 });
 
@@ -61,12 +63,12 @@ describe("model switch marker", () => {
     ref.startsWith("builtin:") ? "本机工作台" : "切换验证 · ping";
 
   it("names both sides and ignores a repeated choice", () => {
-    expect(
-      modelSwitchText("builtin:workbench/local", "custom:x/ping", label),
-    ).toBe("模型已切换 本机工作台 → 切换验证 · ping");
-    expect(modelSwitchText("builtin:workbench/local", "builtin:workbench/local", label)).toBe(
-      null,
+    expect(modelSwitchText("builtin:workbench/local", "custom:x/ping", label)).toBe(
+      "模型已切换 本机工作台 → 切换验证 · ping",
     );
+    expect(
+      modelSwitchText("builtin:workbench/local", "builtin:workbench/local", label),
+    ).toBe(null);
   });
 });
 

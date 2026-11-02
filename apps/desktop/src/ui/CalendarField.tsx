@@ -195,9 +195,7 @@ export function DateField({
   emptyLabel = "未设置",
 }: DateProps) {
   const [open, setOpen] = useState(false);
-  const [viewMonth, setViewMonth] = useState(
-    () => value || formatLocalDay(Date.now()),
-  );
+  const [viewMonth, setViewMonth] = useState(() => value || formatLocalDay(Date.now()));
   const { triggerRef, popoverRef, rootRef, pos } = useCalPopover(open, 248);
 
   useEffect(() => {
@@ -382,9 +380,7 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
                   type="time"
                   aria-label="时间"
                   value={parts.time}
-                  onChange={(e) =>
-                    onChange(`${parts.day}T${e.target.value || "00:00"}`)
-                  }
+                  onChange={(e) => onChange(`${parts.day}T${e.target.value || "00:00"}`)}
                 />
                 <button
                   type="button"

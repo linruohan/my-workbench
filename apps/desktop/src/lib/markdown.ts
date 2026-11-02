@@ -304,9 +304,7 @@ export function renderMarkdown(
     const docHeads = extractMdHeadings(doc);
     const local = extractMdHeadings(markdown);
     env.headingQueue = local.map((h) => {
-      const idx = docHeads.findIndex(
-        (d) => d.level === h.level && d.text === h.text,
-      );
+      const idx = docHeads.findIndex((d) => d.level === h.level && d.text === h.text);
       if (idx >= 0) {
         const hit = docHeads[idx]!;
         docHeads.splice(idx, 1);

@@ -37,8 +37,8 @@ export function TagPicker({
 
   const canCreate = Boolean(
     onCreateTag &&
-      query.trim() &&
-      !tags.some((t) => t.title.toLowerCase() === query.trim().toLowerCase()),
+    query.trim() &&
+    !tags.some((t) => t.title.toLowerCase() === query.trim().toLowerCase()),
   );
 
   useEffect(() => {
@@ -72,17 +72,13 @@ export function TagPicker({
   };
 
   const summary =
-    selected.length === 0
-      ? placeholder
-      : selected.map((t) => t.title).join("、");
+    selected.length === 0 ? placeholder : selected.map((t) => t.title).join("、");
 
   return (
     <div className="tag-picker" ref={rootRef}>
       <button
         type="button"
-        className={
-          open ? "tag-picker__trigger is-open" : "tag-picker__trigger"
-        }
+        className={open ? "tag-picker__trigger is-open" : "tag-picker__trigger"}
         aria-label={label}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -132,9 +128,7 @@ export function TagPicker({
             ref={inputRef}
             className="field__control tag-picker__search"
             aria-label="筛选或新建标签"
-            placeholder={
-              onCreateTag ? "搜索标签，回车新建" : "搜索标签"
-            }
+            placeholder={onCreateTag ? "搜索标签，回车新建" : "搜索标签"}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -165,9 +159,7 @@ export function TagPicker({
                 <li key={tag.id} role="presentation">
                   <label
                     className={
-                      checked
-                        ? "tag-picker__option is-checked"
-                        : "tag-picker__option"
+                      checked ? "tag-picker__option is-checked" : "tag-picker__option"
                     }
                   >
                     <input

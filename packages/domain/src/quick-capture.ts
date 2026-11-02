@@ -36,11 +36,7 @@ function nextWeekday(fromDay: string, weekday: number): string {
   return addLocalDays(fromDay, delta);
 }
 
-function atLocalTime(
-  day: string,
-  hour: number,
-  minute: number,
-): number {
+function atLocalTime(day: string, hour: number, minute: number): number {
   const dt = new Date(parseLocalDay(day));
   dt.setHours(hour, minute, 0, 0);
   return dt.getTime();
@@ -59,8 +55,7 @@ function parseTimeToken(
     if (hour > 23 || minute > 59) return null;
     return { ms: atLocalTime(day, hour, minute), consumed: hm[0] };
   }
-  const cn =
-    /(上午|下午)?\s*(\d{1,2})\s*点(半|(\d{1,2})\s*分?)?/.exec(text);
+  const cn = /(上午|下午)?\s*(\d{1,2})\s*点(半|(\d{1,2})\s*分?)?/.exec(text);
   if (cn) {
     let hour = Number(cn[2]);
     if (cn[1] === "下午" && hour < 12) hour += 12;
