@@ -3,12 +3,7 @@ import { plannedDayOf } from "./scheduling.js";
 import type { Task } from "./types.js";
 
 export type TaskStatusFilter =
-  | "all"
-  | "open"
-  | "done"
-  | "overdue"
-  | "unplanned"
-  | "today";
+  "all" | "open" | "done" | "overdue" | "unplanned" | "today";
 
 export type TaskSortKey = "updated" | "created" | "due" | "title";
 
@@ -61,10 +56,7 @@ export function matchTaskQuery(
 ): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return (
-    task.title.toLowerCase().includes(q) ||
-    task.notes.toLowerCase().includes(q)
-  );
+  return task.title.toLowerCase().includes(q) || task.notes.toLowerCase().includes(q);
 }
 
 export function computeTaskStats(
@@ -73,10 +65,7 @@ export function computeTaskStats(
 ): TaskStats {
   const nowMs = opts.nowMs ?? Date.now();
   const today = opts.today ?? formatLocalDay(nowMs);
-  const byProject = new Map<
-    string,
-    { open: number; done: number; overdue: number }
-  >();
+  const byProject = new Map<string, { open: number; done: number; overdue: number }>();
 
   let open = 0;
   let done = 0;
@@ -160,10 +149,7 @@ export function filterTasks(
   });
 }
 
-export function sortTasks(
-  tasks: Task[],
-  sortKey: TaskSortKey = "updated",
-): Task[] {
+export function sortTasks(tasks: Task[], sortKey: TaskSortKey = "updated"): Task[] {
   const list = [...tasks];
   list.sort((a, b) => {
     if (sortKey === "title") {

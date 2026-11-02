@@ -20,14 +20,7 @@ const PRESETS: TimedSchedulePreset[] = [
   "monthly",
 ];
 
-const UNITS: TimedIntervalUnit[] = [
-  "minute",
-  "hour",
-  "day",
-  "week",
-  "month",
-  "year",
-];
+const UNITS: TimedIntervalUnit[] = ["minute", "hour", "day", "week", "month", "year"];
 
 type Props = {
   schedule: TimedSchedule;
@@ -39,9 +32,12 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
   const [kindOpen, setKindOpen] = useState(false);
   const [freqOpen, setFreqOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const showTime = !(
-    schedule.kind === "preset" && schedule.preset === "hourly"
-  ) && !(schedule.kind === "custom" && (schedule.unit === "minute" || schedule.unit === "hour"));
+  const showTime =
+    !(schedule.kind === "preset" && schedule.preset === "hourly") &&
+    !(
+      schedule.kind === "custom" &&
+      (schedule.unit === "minute" || schedule.unit === "hour")
+    );
 
   useEffect(() => {
     if (!kindOpen && !freqOpen) return;
@@ -177,9 +173,7 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
           </>
         ) : null}
 
-        <span className="schedule-row__summary">
-          {timedScheduleSummary(schedule)}
-        </span>
+        <span className="schedule-row__summary">{timedScheduleSummary(schedule)}</span>
       </div>
 
       <button

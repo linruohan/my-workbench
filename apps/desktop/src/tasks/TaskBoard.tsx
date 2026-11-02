@@ -36,10 +36,7 @@ export function TaskBoard({
     done: [],
   };
   for (const task of tasks) {
-    const col = resolveTaskBoardColumn(
-      task,
-      buckets[task.id] ?? "active",
-    );
+    const col = resolveTaskBoardColumn(task, buckets[task.id] ?? "active");
     grouped[col].push(task);
   }
 
@@ -49,22 +46,17 @@ export function TaskBoard({
         <section
           key={col.id}
           className={
-            overColumn === col.id
-              ? "task-board__col is-over"
-              : "task-board__col"
+            overColumn === col.id ? "task-board__col is-over" : "task-board__col"
           }
           aria-label={col.label}
           onDragOver={(e) => {
             e.preventDefault();
             setOverColumn(col.id);
           }}
-          onDragLeave={() =>
-            setOverColumn((cur) => (cur === col.id ? null : cur))
-          }
+          onDragLeave={() => setOverColumn((cur) => (cur === col.id ? null : cur))}
           onDrop={(e) => {
             e.preventDefault();
-            const id =
-              e.dataTransfer.getData("text/task-id") || draggingId || "";
+            const id = e.dataTransfer.getData("text/task-id") || draggingId || "";
             setOverColumn(null);
             setDraggingId(null);
             if (id) onMoveColumn(id, col.id);
@@ -81,11 +73,7 @@ export function TaskBoard({
               grouped[col.id].map((task) => (
                 <li key={task.id}>
                   <article
-                    className={
-                      task.isDone
-                        ? "task-card is-done"
-                        : "task-card"
-                    }
+                    className={task.isDone ? "task-card is-done" : "task-card"}
                     draggable
                     onDragStart={(e) => {
                       e.dataTransfer.setData("text/task-id", task.id);
@@ -100,13 +88,9 @@ export function TaskBoard({
                     <div className="task-card__top">
                       <button
                         type="button"
-                        className={
-                          task.isDone ? "check is-checked" : "check"
-                        }
+                        className={task.isDone ? "check is-checked" : "check"}
                         aria-label={
-                          task.isDone
-                            ? `取消完成 ${task.title}`
-                            : `完成 ${task.title}`
+                          task.isDone ? `取消完成 ${task.title}` : `完成 ${task.title}`
                         }
                         onClick={() => onToggleDone(task)}
                       />
@@ -126,10 +110,7 @@ export function TaskBoard({
                     </div>
                     {!task.isDone && onPlanToday ? (
                       <div className="task-card__actions">
-                        <button
-                          type="button"
-                          onClick={() => onPlanToday(task)}
-                        >
+                        <button type="button" onClick={() => onPlanToday(task)}>
                           今天
                         </button>
                       </div>

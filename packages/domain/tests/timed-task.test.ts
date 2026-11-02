@@ -32,10 +32,7 @@ describe("timed tasks", () => {
     const fromLegacy = coerceTimedTask({
       ...task,
       schedule: null,
-      schedules: [
-        makePresetSchedule("weekly"),
-        makePresetSchedule("hourly"),
-      ],
+      schedules: [makePresetSchedule("weekly"), makePresetSchedule("hourly")],
     } as typeof task & { schedules: ReturnType<typeof makePresetSchedule>[] });
     expect(fromLegacy.schedule).toEqual(makePresetSchedule("weekly"));
   });
@@ -75,8 +72,6 @@ describe("timed tasks", () => {
       1_700_000_100_000,
     );
     expect(next.schedule).toEqual(makePresetSchedule("hourly"));
-    expect(next.nextRunAt).toBe(
-      computeNextRunAt(next.schedule!, 1_700_000_100_000),
-    );
+    expect(next.nextRunAt).toBe(computeNextRunAt(next.schedule!, 1_700_000_100_000));
   });
 });

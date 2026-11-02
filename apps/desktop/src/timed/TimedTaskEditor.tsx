@@ -140,19 +140,13 @@ export function TimedTaskEditor({
                     + 添加计划
                   </button>
                   {menuOpen ? (
-                    <ul
-                      className="schedule-menu"
-                      role="menu"
-                      aria-label="添加计划"
-                    >
+                    <ul className="schedule-menu" role="menu" aria-label="添加计划">
                       {PRESETS.map((preset) => (
                         <li key={preset}>
                           <button
                             type="button"
                             role="menuitem"
-                            onClick={() =>
-                              setSchedule(makePresetSchedule(preset))
-                            }
+                            onClick={() => setSchedule(makePresetSchedule(preset))}
                           >
                             {timedPresetLabel(preset)}
                           </button>

@@ -174,20 +174,13 @@ export function TasksView({
     taskTagMap,
   ]);
 
-  const editing = editingId
-    ? (tasks.find((t) => t.id === editingId) ?? null)
-    : null;
-  const editingSubtasks = editing
-    ? listChildTasks(tasks, editing.id)
-    : [];
+  const editing = editingId ? (tasks.find((t) => t.id === editingId) ?? null) : null;
+  const editingSubtasks = editing ? listChildTasks(tasks, editing.id) : [];
 
   const title = projectTitles[filterProjectId] ?? "项目";
 
   const confirmDelete = (taskId: string) => {
-    if (
-      confirmBeforeDelete &&
-      !window.confirm("确定删除该任务？此操作不可撤销。")
-    ) {
+    if (confirmBeforeDelete && !window.confirm("确定删除该任务？此操作不可撤销。")) {
       return;
     }
     onDeleteTask(taskId);
@@ -207,9 +200,7 @@ export function TasksView({
       <header className="tasks__header">
         <div className="tasks__title-row">
           <h1>{title}</h1>
-          <span className="panel__count">
-            {isStats ? stats.total : visible.length}
-          </span>
+          <span className="panel__count">{isStats ? stats.total : visible.length}</span>
         </div>
         <div className="tasks__toolbar">
           {!isStats ? (
@@ -230,9 +221,7 @@ export function TasksView({
                 key={mode.id}
                 type="button"
                 className={
-                  viewMode === mode.id
-                    ? "tasks__view-btn is-active"
-                    : "tasks__view-btn"
+                  viewMode === mode.id ? "tasks__view-btn is-active" : "tasks__view-btn"
                 }
                 aria-pressed={viewMode === mode.id}
                 onClick={() => onViewModeChange(mode.id)}
@@ -279,9 +268,7 @@ export function TasksView({
             <select
               aria-label="标签筛选"
               value={filterTagId ?? ""}
-              onChange={(e) =>
-                setFilterTagId(e.target.value ? e.target.value : null)
-              }
+              onChange={(e) => setFilterTagId(e.target.value ? e.target.value : null)}
             >
               <option value="">全部标签</option>
               {tags.map((tag) => (
@@ -349,9 +336,7 @@ export function TasksView({
             <div className="tasks__main">
               {viewMode === "list" ? (
                 visible.length === 0 ? (
-                  <p className="empty">
-                    没有匹配的任务。调整筛选，或用底部输入添加。
-                  </p>
+                  <p className="empty">没有匹配的任务。调整筛选，或用底部输入添加。</p>
                 ) : (
                   <ul className="list" aria-label="任务列表">
                     {visible.map((task) => (

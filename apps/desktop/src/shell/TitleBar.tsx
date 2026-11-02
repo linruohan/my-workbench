@@ -1,9 +1,5 @@
 import { ThemeToggle } from "../theme/ThemeToggle";
-import {
-  IconClose,
-  IconMaximize,
-  IconMinimize,
-} from "./icons";
+import { IconClose, IconMaximize, IconMinimize } from "./icons";
 import {
   NotificationBell,
   type ActiveReminder,

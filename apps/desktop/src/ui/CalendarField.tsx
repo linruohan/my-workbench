@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  addLocalDays,
-  formatLocalDay,
-  parseLocalDay,
-} from "@wb/domain";
+import { addLocalDays, formatLocalDay, parseLocalDay } from "@wb/domain";
 
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
@@ -82,9 +78,7 @@ function CalendarMonth(props: {
         >
           ‹
         </button>
-        <div className="cal-popover__title">
-          {formatMonthTitle(props.viewMonth)}
-        </div>
+        <div className="cal-popover__title">{formatMonthTitle(props.viewMonth)}</div>
         <button
           type="button"
           className="cal-popover__nav"
@@ -135,9 +129,7 @@ export function DateField({
   emptyLabel = "未设置",
 }: DateProps) {
   const [open, setOpen] = useState(false);
-  const [viewMonth, setViewMonth] = useState(
-    () => value || formatLocalDay(Date.now()),
-  );
+  const [viewMonth, setViewMonth] = useState(() => value || formatLocalDay(Date.now()));
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -288,9 +280,7 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
               className="field__control cal-popover__time-input"
               type="time"
               value={parts.time}
-              onChange={(e) =>
-                onChange(`${parts.day}T${e.target.value || "00:00"}`)
-              }
+              onChange={(e) => onChange(`${parts.day}T${e.target.value || "00:00"}`)}
             />
             <button
               type="button"

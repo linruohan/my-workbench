@@ -78,9 +78,7 @@ describe("TasksView", () => {
             { id: "tag-b", title: "卡哇伊", color: "#e4e9f7" },
           ],
         }}
-        tasks={[
-          makeTask({ id: "t1", title: "写周报", dueDay: "2026-11-01" }),
-        ]}
+        tasks={[makeTask({ id: "t1", title: "写周报", dueDay: "2026-11-01" })]}
       />,
     );
 
@@ -97,9 +95,7 @@ describe("TasksView", () => {
       <TasksView
         {...baseProps}
         onSaveTask={onSaveTask}
-        tasks={[
-          makeTask({ id: "t1", title: "写周报", dueDay: "2026-11-01" }),
-        ]}
+        tasks={[makeTask({ id: "t1", title: "写周报", dueDay: "2026-11-01" })]}
       />,
     );
 

@@ -87,7 +87,12 @@ export function QuickOpen({
 
   return (
     <div className="quick-open" role="dialog" aria-label="搜索打开文件">
-      <button type="button" className="quick-open__backdrop" aria-label="关闭" onClick={onClose} />
+      <button
+        type="button"
+        className="quick-open__backdrop"
+        aria-label="关闭"
+        onClick={onClose}
+      />
       <div className="quick-open__panel">
         <input
           ref={inputRef}

@@ -8,14 +8,7 @@ import {
 } from "@wb/domain";
 import { IconClose } from "../shell/icons";
 
-const UNITS: TimedIntervalUnit[] = [
-  "minute",
-  "hour",
-  "day",
-  "week",
-  "month",
-  "year",
-];
+const UNITS: TimedIntervalUnit[] = ["minute", "hour", "day", "week", "month", "year"];
 
 type Props = {
   initial?: TimedSchedule;
@@ -52,12 +45,7 @@ export function CustomRepeatModal({ initial, onCancel, onConfirm }: Props) {
       >
         <header className="modal__header">
           <h2>自定义重复</h2>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="关闭"
-            onClick={onCancel}
-          >
+          <button type="button" className="icon-btn" aria-label="关闭" onClick={onCancel}>
             <IconClose size={16} />
           </button>
         </header>
@@ -72,9 +60,7 @@ export function CustomRepeatModal({ initial, onCancel, onConfirm }: Props) {
                 min={1}
                 aria-label="重复间隔"
                 value={every}
-                onChange={(e) =>
-                  setEvery(Math.max(1, Number(e.target.value) || 1))
-                }
+                onChange={(e) => setEvery(Math.max(1, Number(e.target.value) || 1))}
               />
               <div className="unit-menu">
                 <button
@@ -92,9 +78,7 @@ export function CustomRepeatModal({ initial, onCancel, onConfirm }: Props) {
                         <button
                           type="button"
                           className={
-                            u === unit
-                              ? "unit-menu__item is-active"
-                              : "unit-menu__item"
+                            u === unit ? "unit-menu__item is-active" : "unit-menu__item"
                           }
                           onClick={() => {
                             setUnit(u);

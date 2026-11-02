@@ -134,9 +134,7 @@ export function TaskRow({
           {childCount > 0 ? (
             <span className="list__badge">{childCount} 子任务</span>
           ) : null}
-          {overdue ? (
-            <span className="list__badge list__badge--warn">逾期</span>
-          ) : null}
+          {overdue ? <span className="list__badge list__badge--warn">逾期</span> : null}
           {timerRunning ? (
             <span className="list__badge list__badge--accent">
               计时 {formatDurationMs(timerElapsedMs)}
@@ -147,9 +145,7 @@ export function TaskRow({
           <div className="list__meta">
             {formatTaskPlanMeta(task)}
             {projectTitle ? ` · ${projectTitle}` : ""}
-            {task.timeSpent > 0
-              ? ` · 已用 ${formatDurationMs(task.timeSpent)}`
-              : ""}
+            {task.timeSpent > 0 ? ` · 已用 ${formatDurationMs(task.timeSpent)}` : ""}
             {task.timeEstimate > 0
               ? ` · 预计 ${Math.round(task.timeEstimate / 60_000)} 分`
               : ""}

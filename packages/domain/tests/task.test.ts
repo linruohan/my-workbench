@@ -38,9 +38,7 @@ describe("task helpers", () => {
   it("resolves board columns from done and bucket", () => {
     expect(resolveTaskBoardColumn(sample(), "active")).toBe("active");
     expect(resolveTaskBoardColumn(sample(), "backlog")).toBe("backlog");
-    expect(resolveTaskBoardColumn(sample({ isDone: true }), "active")).toBe(
-      "done",
-    );
+    expect(resolveTaskBoardColumn(sample({ isDone: true }), "active")).toBe("done");
   });
 
   it("patches content and toggles completion", () => {

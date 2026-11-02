@@ -31,10 +31,7 @@ export function patchTaskContent(
 ): Task {
   return {
     ...task,
-    title:
-      patch.title !== undefined
-        ? patch.title.trim() || "未命名任务"
-        : task.title,
+    title: patch.title !== undefined ? patch.title.trim() || "未命名任务" : task.title,
     notes: patch.notes !== undefined ? patch.notes : task.notes,
     projectId: patch.projectId !== undefined ? patch.projectId : task.projectId,
     timeEstimate:
@@ -66,11 +63,7 @@ export function markTaskIncomplete(task: Task, nowMs = Date.now()): Task {
 }
 
 /** Move `fromId` to the position of `toId` within an ordered id list. */
-export function reorderIds(
-  ids: string[],
-  fromId: string,
-  toId: string,
-): string[] {
+export function reorderIds(ids: string[], fromId: string, toId: string): string[] {
   if (fromId === toId) return [...ids];
   const from = ids.indexOf(fromId);
   const to = ids.indexOf(toId);

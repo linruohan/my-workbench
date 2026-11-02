@@ -23,9 +23,7 @@ describe("tag-color", () => {
   });
 
   it("backfills legacy null/invalid colors", () => {
-    expect(ensureTagColor({ title: "历史", color: null })).toBe(
-      pickTagColor("历史"),
-    );
+    expect(ensureTagColor({ title: "历史", color: null })).toBe(pickTagColor("历史"));
     expect(ensureTagColor({ title: "历史", color: "not-a-color" })).toBe(
       pickTagColor("历史"),
     );

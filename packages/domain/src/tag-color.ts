@@ -36,9 +36,10 @@ function findPaletteByBg(color: string): (typeof TAG_PALETTE)[number] | null {
 }
 
 /** Resolve chip colors from stored tag.color or title seed. */
-export function resolveTagChipColors(
-  tag: { title: string; color: string | null },
-): TagChipColors {
+export function resolveTagChipColors(tag: {
+  title: string;
+  color: string | null;
+}): TagChipColors {
   if (tag.color) {
     const fromPalette = findPaletteByBg(tag.color);
     if (fromPalette) {
@@ -62,9 +63,7 @@ export function resolveTagChipColors(
 }
 
 /** Ensure legacy tags without color get a stable palette color. */
-export function ensureTagColor(
-  tag: { title: string; color: string | null },
-): string {
+export function ensureTagColor(tag: { title: string; color: string | null }): string {
   if (tag.color && findPaletteByBg(tag.color)) return tag.color;
   if (tag.color && /^#[0-9a-fA-F]{3,8}$/.test(tag.color.trim())) {
     return tag.color.trim();

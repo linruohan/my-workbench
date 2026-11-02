@@ -37,10 +37,7 @@ export function MenuSelect<T extends string>({
   }, [open]);
 
   return (
-    <div
-      className={className ? `menu-select ${className}` : "menu-select"}
-      ref={rootRef}
-    >
+    <div className={className ? `menu-select ${className}` : "menu-select"} ref={rootRef}>
       <button
         type="button"
         className="menu-select__trigger"
@@ -57,12 +54,7 @@ export function MenuSelect<T extends string>({
         </span>
       </button>
       {open ? (
-        <ul
-          id={listId}
-          className="menu-select__list"
-          role="listbox"
-          aria-label={label}
-        >
+        <ul id={listId} className="menu-select__list" role="listbox" aria-label={label}>
           {options.map((opt) => (
             <li key={opt.value} role="presentation">
               <button

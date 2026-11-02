@@ -47,9 +47,7 @@ describe("TimedTaskEditor", () => {
 
     expect(screen.getByLabelText("计划类型")).toHaveTextContent("每天");
     expect(screen.getByText("GMT+8 每天，09:02")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "+ 添加计划" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "+ 添加计划" })).not.toBeInTheDocument();
 
     await user.click(screen.getByLabelText("计划类型"));
     await user.click(screen.getByRole("button", { name: "自定义" }));

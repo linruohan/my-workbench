@@ -120,9 +120,7 @@ export function TaskStatsPanel({ stats, projectTitles, onDrill }: Props) {
             key={metric.key}
             type="button"
             className={
-              metric.tone
-                ? `task-stats__metric is-${metric.tone}`
-                : "task-stats__metric"
+              metric.tone ? `task-stats__metric is-${metric.tone}` : "task-stats__metric"
             }
             onClick={() => onDrill?.(metric.status)}
           >
@@ -147,9 +145,7 @@ export function TaskStatsPanel({ stats, projectTitles, onDrill }: Props) {
               return (
                 <li key={row.projectId} className="task-stats__project">
                   <div className="task-stats__project-top">
-                    <strong>
-                      {projectTitles[row.projectId] ?? row.projectId}
-                    </strong>
+                    <strong>{projectTitles[row.projectId] ?? row.projectId}</strong>
                     <span>{total} 项</span>
                   </div>
                   <div
@@ -161,18 +157,14 @@ export function TaskStatsPanel({ stats, projectTitles, onDrill }: Props) {
                       className="task-stats__bar-open"
                       style={{
                         width:
-                          total === 0
-                            ? "0%"
-                            : `${Math.round((row.open / total) * 100)}%`,
+                          total === 0 ? "0%" : `${Math.round((row.open / total) * 100)}%`,
                       }}
                     />
                     <span
                       className="task-stats__bar-done"
                       style={{
                         width:
-                          total === 0
-                            ? "0%"
-                            : `${Math.round((row.done / total) * 100)}%`,
+                          total === 0 ? "0%" : `${Math.round((row.done / total) * 100)}%`,
                       }}
                     />
                   </div>

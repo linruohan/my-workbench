@@ -66,7 +66,9 @@ export function NotificationBell({
       >
         <span className="notif__icon">
           <IconBell size={15} />
-          {count > 0 ? <span className="notif__badge">{count > 9 ? "9+" : count}</span> : null}
+          {count > 0 ? (
+            <span className="notif__badge">{count > 9 ? "9+" : count}</span>
+          ) : null}
         </span>
       </button>
       {open ? (
@@ -108,8 +110,7 @@ export function NotificationBell({
                   <div className="notif__item-body">
                     <div className="notif__item-title">{n.title}</div>
                     <div className="notif__item-meta">
-                      {n.kind} · {n.status} ·{" "}
-                      {new Date(n.fireAt).toLocaleString("zh-CN")}
+                      {n.kind} · {n.status} · {new Date(n.fireAt).toLocaleString("zh-CN")}
                     </div>
                   </div>
                 </li>

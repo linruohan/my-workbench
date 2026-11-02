@@ -63,9 +63,7 @@ export function createTimedTaskDraft(input: {
   nowMs?: number;
 }): TimedTask {
   const now = input.nowMs ?? Date.now();
-  const schedule = resolveTimedSchedule(
-    input.schedule ?? input.schedules ?? null,
-  );
+  const schedule = resolveTimedSchedule(input.schedule ?? input.schedules ?? null);
   return {
     id: createId(now),
     title: (input.title ?? "未命名定时任务").trim() || "未命名定时任务",
@@ -100,9 +98,7 @@ export function patchTimedTask(
   return {
     ...task,
     title:
-      patch.title !== undefined
-        ? patch.title.trim() || "未命名定时任务"
-        : task.title,
+      patch.title !== undefined ? patch.title.trim() || "未命名定时任务" : task.title,
     command: patch.command !== undefined ? patch.command : task.command,
     schedule,
     enabled: patch.enabled !== undefined ? patch.enabled : task.enabled,
@@ -311,8 +307,6 @@ export function coerceTimedTask(
   return {
     ...rest,
     schedule,
-    nextRunAt: schedule
-      ? computeNextRunAt(schedule, raw.updatedAt ?? Date.now())
-      : null,
+    nextRunAt: schedule ? computeNextRunAt(schedule, raw.updatedAt ?? Date.now()) : null,
   };
 }

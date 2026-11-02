@@ -75,20 +75,9 @@ export interface Note {
 export type NoteEditorMode = "live" | "source" | "preview";
 
 /** Preset cadences for timed / automation jobs. */
-export type TimedSchedulePreset =
-  | "hourly"
-  | "daily"
-  | "weekdays"
-  | "weekly"
-  | "monthly";
+export type TimedSchedulePreset = "hourly" | "daily" | "weekdays" | "weekly" | "monthly";
 
-export type TimedIntervalUnit =
-  | "minute"
-  | "hour"
-  | "day"
-  | "week"
-  | "month"
-  | "year";
+export type TimedIntervalUnit = "minute" | "hour" | "day" | "week" | "month" | "year";
 
 export type TimedSchedule =
   | { kind: "preset"; preset: TimedSchedulePreset; atTime: string }

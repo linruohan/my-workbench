@@ -207,22 +207,14 @@ export class WorkbenchRepository {
     return row?.bucket ?? "active";
   }
 
-  setTaskBucket(
-    taskId: string,
-    bucket: ProjectBucket,
-    nowMs = Date.now(),
-  ): Task {
+  setTaskBucket(taskId: string, bucket: ProjectBucket, nowMs = Date.now()): Task {
     if (bucket === "backlog") return this.moveToBacklog(taskId, nowMs);
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
     this.db
-      .prepare(
-        `UPDATE project_tasks SET bucket = 'active' WHERE task_id = ?`,
-      )
+      .prepare(`UPDATE project_tasks SET bucket = 'active' WHERE task_id = ?`)
       .run(taskId);
-    this.db
-      .prepare(`UPDATE tasks SET updated_at = ? WHERE id = ?`)
-      .run(nowMs, taskId);
+    this.db.prepare(`UPDATE tasks SET updated_at = ? WHERE id = ?`).run(nowMs, taskId);
     return this.getTask(taskId)!;
   }
 
@@ -268,12 +260,9 @@ export class WorkbenchRepository {
     if (!task) throw new DomainError(`task not found: ${taskId}`);
 
     const title =
-      patch.title !== undefined
-        ? patch.title.trim() || "未命名任务"
-        : task.title;
+      patch.title !== undefined ? patch.title.trim() || "未命名任务" : task.title;
     const notes = patch.notes !== undefined ? patch.notes : task.notes;
-    const projectId =
-      patch.projectId !== undefined ? patch.projectId : task.projectId;
+    const projectId = patch.projectId !== undefined ? patch.projectId : task.projectId;
     const timeEstimate =
       patch.timeEstimate !== undefined
         ? Math.max(0, Math.floor(patch.timeEstimate))
@@ -295,9 +284,7 @@ export class WorkbenchRepository {
 
       if (patch.projectId !== undefined && patch.projectId !== task.projectId) {
         const bucket = this.getTaskBucket(taskId);
-        this.db
-          .prepare(`DELETE FROM project_tasks WHERE task_id = ?`)
-          .run(taskId);
+        this.db.prepare(`DELETE FROM project_tasks WHERE task_id = ?`).run(taskId);
         const pos = (
           this.db
             .prepare(
@@ -322,9 +309,7 @@ export class WorkbenchRepository {
     }
     const tx = this.db.transaction(() => {
       this.db
-        .prepare(
-          `UPDATE tasks SET parent_id = NULL, updated_at = ? WHERE parent_id = ?`,
-        )
+        .prepare(`UPDATE tasks SET parent_id = NULL, updated_at = ? WHERE parent_id = ?`)
         .run(Date.now(), taskId);
       this.db.prepare(`DELETE FROM today_order WHERE task_id = ?`).run(taskId);
       this.db.prepare(`DELETE FROM project_tasks WHERE task_id = ?`).run(taskId);
@@ -352,11 +337,7 @@ export class WorkbenchRepository {
     return this.getTask(taskId)!;
   }
 
-  setTaskParent(
-    taskId: string,
-    parentId: string | null,
-    nowMs = Date.now(),
-  ): Task {
+  setTaskParent(taskId: string, parentId: string | null, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
     if (parentId === taskId) {
@@ -366,9 +347,7 @@ export class WorkbenchRepository {
       const parent = this.getTask(parentId);
       if (!parent) throw new DomainError(`parent not found: ${parentId}`);
       if (parent.parentId) {
-        throw new DomainError(
-          "nested subtasks deeper than one level are not supported",
-        );
+        throw new DomainError("nested subtasks deeper than one level are not supported");
       }
     }
     this.db
@@ -394,11 +373,7 @@ export class WorkbenchRepository {
       bucket: this.getTaskBucket(taskId),
       nowMs,
     });
-    return this.updateTask(
-      copy.id,
-      { timeEstimate: task.timeEstimate },
-      nowMs,
-    );
+    return this.updateTask(copy.id, { timeEstimate: task.timeEstimate }, nowMs);
   }
 
   addTimeSpent(taskId: string, startedAt: number, endedAt: number): Task {
@@ -491,16 +466,10 @@ export class WorkbenchRepository {
     return rows.map((r) => this.hydrateTag(r));
   }
 
-  private hydrateTag(row: {
-    id: string;
-    title: string;
-    color: string | null;
-  }): Tag {
+  private hydrateTag(row: { id: string; title: string; color: string | null }): Tag {
     const color = ensureTagColor({ title: row.title, color: row.color });
     if (row.color !== color) {
-      this.db
-        .prepare(`UPDATE tags SET color = ? WHERE id = ?`)
-        .run(color, row.id);
+      this.db.prepare(`UPDATE tags SET color = ? WHERE id = ?`).run(color, row.id);
     }
     return { id: row.id, title: row.title, color };
   }

@@ -178,11 +178,7 @@ export function TaskEditor({
   const statusValue = draft.isDone ? "done" : draft.bucket;
 
   return createPortal(
-    <div
-      className="task-editor-overlay"
-      role="presentation"
-      onClick={onClose}
-    >
+    <div className="task-editor-overlay" role="presentation" onClick={onClose}>
       <aside
         className="task-editor"
         role="dialog"
@@ -257,11 +253,7 @@ export function TaskEditor({
               </div>
             </div>
 
-            <div
-              className="task-editor__tags"
-              role="group"
-              aria-label="任务标签"
-            >
+            <div className="task-editor__tags" role="group" aria-label="任务标签">
               {tags.length === 0 ? (
                 <p className="task-editor__hint">还没有标签，可在下方新建。</p>
               ) : (
@@ -273,9 +265,7 @@ export function TaskEditor({
                       key={tag.id}
                       type="button"
                       className={
-                        active
-                          ? "task-editor__tag is-active"
-                          : "task-editor__tag"
+                        active ? "task-editor__tag is-active" : "task-editor__tag"
                       }
                       aria-pressed={active}
                       style={
@@ -380,9 +370,7 @@ export function TaskEditor({
                   <DateTimeField
                     label="计划时刻"
                     valueLocal={draft.dueWithTimeLocal}
-                    onChange={(dueWithTimeLocal) =>
-                      patch({ dueWithTimeLocal })
-                    }
+                    onChange={(dueWithTimeLocal) => patch({ dueWithTimeLocal })}
                   />
                 </div>
                 <div className="task-editor__inline">
@@ -427,11 +415,7 @@ export function TaskEditor({
                       + 添加重复
                     </button>
                     {repeatMenuOpen ? (
-                      <ul
-                        className="schedule-menu"
-                        role="menu"
-                        aria-label="添加重复"
-                      >
+                      <ul className="schedule-menu" role="menu" aria-label="添加重复">
                         {PRESETS.map((preset) => (
                           <li key={preset}>
                             <button
@@ -478,9 +462,7 @@ export function TaskEditor({
                         type="button"
                         className={sub.isDone ? "check is-checked" : "check"}
                         aria-label={
-                          sub.isDone
-                            ? `取消完成 ${sub.title}`
-                            : `完成 ${sub.title}`
+                          sub.isDone ? `取消完成 ${sub.title}` : `完成 ${sub.title}`
                         }
                         onClick={() => onToggleSubtask?.(sub)}
                       />
@@ -528,11 +510,7 @@ export function TaskEditor({
               删除
             </button>
             {onDuplicate ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={onDuplicate}
-              >
+              <button type="button" className="btn btn--ghost" onClick={onDuplicate}>
                 复制
               </button>
             ) : null}

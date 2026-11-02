@@ -184,13 +184,7 @@ describe("knowledge headings", () => {
   });
 
   it("keeps blank lines editable and trims fence tails when normalizing", () => {
-    const blocks = [
-      "```bash\necho hi\n```\n",
-      "",
-      "",
-      "正文",
-      "",
-    ];
+    const blocks = ["```bash\necho hi\n```\n", "", "", "正文", ""];
     expect(normalizeMdBlocks(blocks)).toEqual([
       "```bash\necho hi\n```",
       "",
@@ -215,7 +209,13 @@ describe("knowledge headings", () => {
     expect(colored.start).toBe('<span style="color: #e11d48">'.length);
     expect(colored.end).toBe(colored.start + "hello".length);
 
-    const cleared = styleMarkdownSelection(colored.text, 0, colored.text.length, "color", null);
+    const cleared = styleMarkdownSelection(
+      colored.text,
+      0,
+      colored.text.length,
+      "color",
+      null,
+    );
     expect(cleared.text).toBe("hello");
 
     const bg = styleMarkdownSelection("a\nb", 0, 3, "background", "#fef08a");
@@ -262,13 +262,9 @@ describe("knowledge headings", () => {
     const next = findNextMatch(text, { query: "foo", matchCase: true }, 1);
     expect(next).toEqual({ start: 12, end: 15 });
 
-    const replaced = replaceMatchWithQuery(
-      text,
-      { start: 0, end: 3 },
-      "foo",
-      "bar",
-      { preserveCase: true },
-    );
+    const replaced = replaceMatchWithQuery(text, { start: 0, end: 3 }, "foo", "bar", {
+      preserveCase: true,
+    });
     expect(replaced.text.startsWith("bar")).toBe(true);
 
     const scoped = replaceAllMatches("aa bb aa", {

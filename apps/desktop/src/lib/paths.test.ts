@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  APP_DATA_DIR_NAME,
-  DEFAULT_DATA_DIR_DISPLAY,
-  isTauriRuntime,
-} from "./paths";
+import { APP_DATA_DIR_NAME, DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime } from "./paths";
 
 describe("paths", () => {
   it("documents the Windows AppData default folder", () => {

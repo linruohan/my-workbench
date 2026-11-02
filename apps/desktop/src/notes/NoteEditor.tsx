@@ -155,7 +155,11 @@ function textWidth(text: string, font: string): number {
   return measureCtx.measureText(text).width;
 }
 
-function caretFromDomPoint(source: string, clientX: number, clientY: number): number | null {
+function caretFromDomPoint(
+  source: string,
+  clientX: number,
+  clientY: number,
+): number | null {
   type CaretPos = { offsetNode: Node; offset: number };
   const doc = document as Document & {
     caretPositionFromPoint?: (x: number, y: number) => CaretPos | null;
@@ -204,7 +208,8 @@ function caretIndexFromClick(
 
   const style = window.getComputedStyle(el);
   const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.75;
+  const lineHeight =
+    Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.75;
   const padX = Number.parseFloat(style.paddingLeft) || 0;
   const padY = Number.parseFloat(style.paddingTop) || 0;
   const rect = el.getBoundingClientRect();
@@ -618,9 +623,7 @@ export function NoteEditor({
       // Vim-like `gg` → top (when not typing in an input/textarea).
       const tag = target?.tagName;
       const typing =
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        (target?.isContentEditable ?? false);
+        tag === "INPUT" || tag === "TEXTAREA" || (target?.isContentEditable ?? false);
       if (!typing && !mod && (event.key === "g" || event.key === "G")) {
         if (gPending.current) {
           event.preventDefault();
@@ -706,11 +709,7 @@ export function NoteEditor({
     // Skip for blank gaps — those must stay exactly one --md-live-row.
     const host = event?.currentTarget as HTMLElement | null | undefined;
     const enteringEmpty = !(blocks[index] ?? "");
-    if (
-      !enteringEmpty &&
-      host &&
-      typeof host.getBoundingClientRect === "function"
-    ) {
+    if (!enteringEmpty && host && typeof host.getBoundingClientRect === "function") {
       editMinHeight.current = Math.ceil(host.getBoundingClientRect().height);
     } else {
       editMinHeight.current = null;
@@ -762,13 +761,7 @@ export function NoteEditor({
       setColorMenu(null);
       return;
     }
-    const next = styleMarkdownSelection(
-      blocks[active] ?? "",
-      start,
-      end,
-      kind,
-      color,
-    );
+    const next = styleMarkdownSelection(blocks[active] ?? "", start, end, kind, color);
     const nextBlocks = [...blocks];
     nextBlocks[active] = next.text;
     commitBlocks(nextBlocks, active, undefined);
@@ -861,10 +854,7 @@ export function NoteEditor({
     if (event.key === "Enter" && !event.shiftKey) {
       // Inside a fenced code block (open or closed): keep Enter as a real newline.
       // Splitting would insert blank preview gaps and break the fence.
-      if (
-        /^ {0,3}(`{3,}|~{3,})/.test(value) ||
-        isCompleteFenceBlock(value)
-      ) {
+      if (/^ {0,3}(`{3,}|~{3,})/.test(value) || isCompleteFenceBlock(value)) {
         return;
       }
       // Split at caret so every line (including new blank lines) is its own editable row.
@@ -916,7 +906,11 @@ export function NoteEditor({
         moveToBlock(index - 1, (blocks[index - 1] ?? "").length);
         return;
       }
-      if (event.key === "ArrowRight" && start === value.length && index < blocks.length - 1) {
+      if (
+        event.key === "ArrowRight" &&
+        start === value.length &&
+        index < blocks.length - 1
+      ) {
         event.preventDefault();
         moveToBlock(index + 1, 0);
         return;
@@ -1046,14 +1040,15 @@ export function NoteEditor({
               title="文字颜色"
               aria-expanded={colorMenu === "color"}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() =>
-                setColorMenu((open) => (open === "color" ? null : "color"))
-              }
+              onClick={() => setColorMenu((open) => (open === "color" ? null : "color"))}
             >
               <span className="note-editor__swatch-letter" style={{ color: "#e11d48" }}>
                 A
               </span>
-              <span className="note-editor__swatch-bar" style={{ background: "#e11d48" }} />
+              <span
+                className="note-editor__swatch-bar"
+                style={{ background: "#e11d48" }}
+              />
             </button>
             {colorMenu === "color" ? (
               <div className="note-editor__palette" role="listbox" aria-label="文字颜色">
@@ -1095,10 +1090,17 @@ export function NoteEditor({
               >
                 A
               </span>
-              <span className="note-editor__swatch-bar" style={{ background: "#fef08a" }} />
+              <span
+                className="note-editor__swatch-bar"
+                style={{ background: "#fef08a" }}
+              />
             </button>
             {colorMenu === "background" ? (
-              <div className="note-editor__palette" role="listbox" aria-label="文字背景色">
+              <div
+                className="note-editor__palette"
+                role="listbox"
+                aria-label="文字背景色"
+              >
                 {BG_COLOR_PRESETS.map((preset) => (
                   <button
                     key={preset.id}

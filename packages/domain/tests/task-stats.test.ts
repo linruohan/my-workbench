@@ -65,14 +65,11 @@ describe("task stats and filters", () => {
       task({ id: "c", title: "周会", isDone: true, updatedAt: 1 }),
     ];
     expect(matchTaskQuery(tasks[0]!, "团队")).toBe(true);
-    expect(filterTasks(tasks, { query: "周" }).map((t) => t.id)).toEqual([
-      "a",
-      "c",
-    ]);
+    expect(filterTasks(tasks, { query: "周" }).map((t) => t.id)).toEqual(["a", "c"]);
     expect(filterTasks(tasks, { status: "open" })).toHaveLength(2);
-    expect(filterTasks(tasks, { status: "overdue", today: "2026-11-01" }).map((t) => t.id)).toEqual([
-      "a",
-    ]);
+    expect(
+      filterTasks(tasks, { status: "overdue", today: "2026-11-01" }).map((t) => t.id),
+    ).toEqual(["a"]);
     const byTitle = sortTasks(tasks, "title").map((t) => t.title);
     expect(byTitle).toEqual([...byTitle].sort((a, b) => a.localeCompare(b, "zh-CN")));
     expect(sortTasks(tasks, "updated").map((t) => t.id)).toEqual(["b", "a", "c"]);

@@ -1,10 +1,5 @@
 import { MemoryWorkbenchRepository } from "@wb/db/memory";
-import {
-  dataFilePath,
-  ensureDataDir,
-  isTauriRuntime,
-  STORE_FILE,
-} from "./paths";
+import { dataFilePath, ensureDataDir, isTauriRuntime, STORE_FILE } from "./paths";
 
 const STORAGE_KEY = "wb.local.v1";
 
@@ -35,9 +30,7 @@ export function createPersistedStore(): MemoryWorkbenchRepository {
 }
 
 /** Prefer AppData file when running in Tauri; keep localStorage as browser fallback. */
-export async function hydrateStore(
-  store: MemoryWorkbenchRepository,
-): Promise<void> {
+export async function hydrateStore(store: MemoryWorkbenchRepository): Promise<void> {
   if (!isTauriRuntime()) return;
   try {
     await ensureDataDir();

@@ -52,9 +52,7 @@ export function ThemeProvider(props: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     void hydrateThemeMode(
-      readStoredThemeMode(
-        typeof localStorage === "undefined" ? null : localStorage,
-      ),
+      readStoredThemeMode(typeof localStorage === "undefined" ? null : localStorage),
     ).then((next) => {
       if (cancelled) return;
       setModeState(next);

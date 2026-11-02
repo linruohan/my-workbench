@@ -402,10 +402,7 @@ function stripStyleSpan(selected: string, kind: InlineStyleKind): string {
     const core = result.slice(0, result.length - trail.length);
     if (!core.toLowerCase().endsWith("</span>")) break;
     const lead = match[1] ?? "";
-    result =
-      lead +
-      core.slice(match[0].length, core.length - "</span>".length) +
-      trail;
+    result = lead + core.slice(match[0].length, core.length - "</span>".length) + trail;
   }
   return result;
 }
@@ -448,7 +445,9 @@ export function styleMarkdownSelection(
   return {
     text: text.slice(0, start) + next + text.slice(end),
     start: color ? start + openLen : start,
-    end: color ? start + openLen + stripStyleSpan(selected, kind).length : start + next.length,
+    end: color
+      ? start + openLen + stripStyleSpan(selected, kind).length
+      : start + next.length,
   };
 }
 
@@ -524,7 +523,9 @@ export function sortSelectedLines(
   direction: "asc" | "desc" = "asc",
 ): { text: string; start: number; end: number } {
   return mapSelectedLines(text, start, end, (lines) => {
-    const sorted = [...lines].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    const sorted = [...lines].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" }),
+    );
     return direction === "desc" ? sorted.reverse() : sorted;
   });
 }
@@ -620,7 +621,10 @@ export function findAllMatches(text: string, options: FindReplaceOptions): TextM
       re.lastIndex += 1;
       continue;
     }
-    matches.push({ start: offset + match.index, end: offset + match.index + match[0].length });
+    matches.push({
+      start: offset + match.index,
+      end: offset + match.index + match[0].length,
+    });
     if (matches.length > 10000) break;
   }
   return matches;
@@ -651,7 +655,10 @@ function applyPreserveCase(sample: string, replacement: string): string {
   if (!sample || !replacement) return replacement;
   if (sample === sample.toUpperCase()) return replacement.toUpperCase();
   if (sample === sample.toLowerCase()) return replacement.toLowerCase();
-  if (sample[0] === sample[0]?.toUpperCase() && sample.slice(1) === sample.slice(1).toLowerCase()) {
+  if (
+    sample[0] === sample[0]?.toUpperCase() &&
+    sample.slice(1) === sample.slice(1).toLowerCase()
+  ) {
     return replacement.charAt(0).toUpperCase() + replacement.slice(1).toLowerCase();
   }
   return replacement;

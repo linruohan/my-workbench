@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  fileNameOf,
-  isIgnoredKbName,
-  isPathUnder,
-  samePath,
-} from "@wb/domain";
+import { fileNameOf, isIgnoredKbName, isPathUnder, samePath } from "@wb/domain";
 import { listDirectory, type KbEntry } from "./kb-api";
 import { FileIcon, FolderIcon } from "./FileTreeIcons";
 
@@ -137,12 +132,7 @@ function DirNode({
         >
           {open ? "▾" : "▸"}
         </button>
-        <button
-          type="button"
-          className="knowledge__file"
-          title={path}
-          onClick={toggle}
-        >
+        <button type="button" className="knowledge__file" title={path} onClick={toggle}>
           <FolderIcon open={open} />
           <span className="knowledge__file-name">{name}</span>
         </button>

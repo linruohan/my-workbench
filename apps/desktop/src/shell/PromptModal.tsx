@@ -67,12 +67,7 @@ export function PromptModal({
       >
         <header className="modal__header">
           <h2>{title}</h2>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="关闭"
-            onClick={onCancel}
-          >
+          <button type="button" className="icon-btn" aria-label="关闭" onClick={onCancel}>
             <IconClose size={16} />
           </button>
         </header>

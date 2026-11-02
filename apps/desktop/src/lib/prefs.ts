@@ -1,9 +1,4 @@
-import {
-  dataFilePath,
-  ensureDataDir,
-  isTauriRuntime,
-  PREFS_FILE,
-} from "./paths";
+import { dataFilePath, ensureDataDir, isTauriRuntime, PREFS_FILE } from "./paths";
 
 const PREFS_KEY = "wb.prefs.v1";
 
@@ -94,9 +89,7 @@ export async function hydratePrefs(): Promise<AppPrefs> {
   if (!isTauriRuntime()) return readPrefs();
   try {
     await ensureDataDir();
-    const { exists, readTextFile, writeTextFile } = await import(
-      "@tauri-apps/plugin-fs"
-    );
+    const { exists, readTextFile, writeTextFile } = await import("@tauri-apps/plugin-fs");
     const path = await dataFilePath(PREFS_FILE);
     if (await exists(path)) {
       const raw = await readTextFile(path);
