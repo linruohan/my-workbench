@@ -47,6 +47,7 @@ const baseProps = {
   confirmBeforeDelete: false,
   activeTimerTaskId: null as string | null,
   timerElapsedMs: 0,
+  nowMs: Date.parse("2026-11-01T12:00:00"),
   onViewModeChange: vi.fn(),
   onShowCompletedChange: vi.fn(),
   onToggleDone: vi.fn(),
@@ -166,17 +167,19 @@ describe("TasksView", () => {
     expect(onViewModeChange).toHaveBeenCalledWith("list");
   });
 
-  it("can delete a task from the list", async () => {
+  it("can delete a task from the editor", async () => {
     const user = userEvent.setup();
     const onDeleteTask = vi.fn();
     renderWithProviders(
       <TasksView
         {...baseProps}
+        confirmBeforeDelete={false}
         onDeleteTask={onDeleteTask}
         tasks={[makeTask({ id: "t1", title: "待删" })]}
       />,
     );
 
+    await user.click(screen.getByRole("button", { name: "打开 待删" }));
     await user.click(screen.getByRole("button", { name: "删除" }));
     expect(onDeleteTask).toHaveBeenCalledWith("t1");
   });

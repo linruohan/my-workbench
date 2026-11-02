@@ -26,11 +26,17 @@ export type TaskStats = {
 };
 
 export function isTaskOverdue(
-  task: Pick<Task, "isDone" | "dueDay" | "dueWithTime" | "deadlineDay">,
+  task: Pick<
+    Task,
+    "isDone" | "dueDay" | "dueWithTime" | "deadlineDay" | "deadlineWithTime"
+  >,
   today = formatLocalDay(Date.now()),
+  nowMs = Date.now(),
 ): boolean {
   if (task.isDone) return false;
+  if (task.deadlineWithTime != null) return task.deadlineWithTime < nowMs;
   if (task.deadlineDay && compareDay(task.deadlineDay, today) < 0) return true;
+  if (task.dueWithTime != null) return task.dueWithTime < nowMs;
   const planned = plannedDayOf(task);
   if (planned && compareDay(planned, today) < 0) return true;
   return false;

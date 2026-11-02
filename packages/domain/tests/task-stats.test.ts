@@ -48,6 +48,21 @@ describe("task stats and filters", () => {
       }),
     ];
     expect(isTaskOverdue(tasks[0]!, today)).toBe(true);
+    const noon = Date.parse("2026-11-01T12:00:00");
+    expect(
+      isTaskOverdue(
+        task({ id: "t", title: "过点", dueWithTime: Date.parse("2026-11-01T09:00:00") }),
+        today,
+        noon,
+      ),
+    ).toBe(true);
+    expect(
+      isTaskOverdue(
+        task({ id: "t2", title: "未到", dueWithTime: Date.parse("2026-11-01T15:00:00") }),
+        today,
+        noon,
+      ),
+    ).toBe(false);
     const stats = computeTaskStats(tasks, { today });
     expect(stats.open).toBe(3);
     expect(stats.overdue).toBe(1);

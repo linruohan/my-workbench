@@ -354,15 +354,8 @@ export function TasksView({
                         timerElapsedMs={
                           activeTimerTaskId === task.id ? timerElapsedMs : 0
                         }
-                        canTime={listChildTasks(tasks, task.id).length === 0}
                         onToggleDone={onToggleDone}
                         onOpen={(t) => setEditingId(t.id)}
-                        onPlanToday={onPlanToday}
-                        onPlanTime={onPlanTime}
-                        onClearPlan={onClearPlan}
-                        onToggleTimer={onToggleTimer}
-                        onDuplicate={(t) => onDuplicateTask(t.id)}
-                        onDelete={(t) => confirmDelete(t.id)}
                       />
                     ))}
                   </ul>
@@ -376,7 +369,6 @@ export function TasksView({
                   onOpen={(t) => setEditingId(t.id)}
                   onToggleDone={onToggleDone}
                   onMoveColumn={onMoveColumn}
-                  onPlanToday={onPlanToday}
                 />
               )}
             </div>

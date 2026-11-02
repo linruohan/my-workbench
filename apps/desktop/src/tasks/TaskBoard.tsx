@@ -1,7 +1,9 @@
 import { useState } from "react";
 import {
   TASK_BOARD_COLUMNS,
-  formatTaskPlanMeta,
+  formatLocalDay,
+  formatTaskPlanSchedule,
+  isTaskOverdue,
   resolveTaskBoardColumn,
   type ProjectBucket,
   type Task,
@@ -16,21 +18,20 @@ type Props = {
   onOpen: (task: Task) => void;
   onToggleDone: (task: Task) => void;
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
-  onPlanToday?: (task: Task) => void;
 };
 
 export function TaskBoard({
   tasks,
   buckets,
   projectTitles,
-  nowMs,
+  nowMs = Date.now(),
   onOpen,
   onToggleDone,
   onMoveColumn,
-  onPlanToday,
 }: Props) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overColumn, setOverColumn] = useState<TaskBoardColumnId | null>(null);
+  const today = formatLocalDay(nowMs);
 
   const grouped: Record<TaskBoardColumnId, Task[]> = {
     active: [],
@@ -72,54 +73,54 @@ export function TaskBoard({
             {grouped[col.id].length === 0 ? (
               <li className="task-board__empty">拖拽任务到此处</li>
             ) : (
-              grouped[col.id].map((task) => (
-                <li key={task.id}>
-                  <article
-                    className={task.isDone ? "task-card is-done" : "task-card"}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData("text/task-id", task.id);
-                      e.dataTransfer.effectAllowed = "move";
-                      setDraggingId(task.id);
-                    }}
-                    onDragEnd={() => {
-                      setDraggingId(null);
-                      setOverColumn(null);
-                    }}
-                  >
-                    <div className="task-card__top">
-                      <button
-                        type="button"
-                        className={task.isDone ? "check is-checked" : "check"}
-                        aria-label={
-                          task.isDone ? `取消完成 ${task.title}` : `完成 ${task.title}`
-                        }
-                        onClick={() => onToggleDone(task)}
-                      />
-                      <button
-                        type="button"
-                        className="task-card__title"
-                        onClick={() => onOpen(task)}
-                      >
-                        {task.title}
-                      </button>
-                    </div>
-                    <div className="task-card__meta">
-                      {formatTaskPlanMeta(task, nowMs)}
-                      {projectTitles[task.projectId]
-                        ? ` · ${projectTitles[task.projectId]}`
-                        : ""}
-                    </div>
-                    {!task.isDone && onPlanToday ? (
-                      <div className="task-card__actions">
-                        <button type="button" onClick={() => onPlanToday(task)}>
-                          今天
+              grouped[col.id].map((task) => {
+                const plan = formatTaskPlanSchedule(task, nowMs);
+                const overdue = isTaskOverdue(task, today, nowMs);
+                return (
+                  <li key={task.id}>
+                    <article
+                      className={task.isDone ? "task-card is-done" : "task-card"}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData("text/task-id", task.id);
+                        e.dataTransfer.effectAllowed = "move";
+                        setDraggingId(task.id);
+                      }}
+                      onDragEnd={() => {
+                        setDraggingId(null);
+                        setOverColumn(null);
+                      }}
+                    >
+                      <div className="task-card__top">
+                        <button
+                          type="button"
+                          className={task.isDone ? "check is-checked" : "check"}
+                          aria-label={
+                            task.isDone ? `取消完成 ${task.title}` : `完成 ${task.title}`
+                          }
+                          onClick={() => onToggleDone(task)}
+                        />
+                        <button
+                          type="button"
+                          className="task-card__title"
+                          onClick={() => onOpen(task)}
+                        >
+                          {task.title}
                         </button>
                       </div>
-                    ) : null}
-                  </article>
-                </li>
-              ))
+                      <div className="task-card__meta">
+                        {plan ? (
+                          <span className={overdue ? "list__plan is-overdue" : "list__plan"}>
+                            {plan}
+                          </span>
+                        ) : null}
+                        {plan && projectTitles[task.projectId] ? " · " : ""}
+                        {projectTitles[task.projectId] ?? ""}
+                      </div>
+                    </article>
+                  </li>
+                );
+              })
             )}
           </ul>
         </section>

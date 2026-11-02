@@ -76,19 +76,31 @@ export function reorderIds(ids: string[], fromId: string, toId: string): string[
   return next;
 }
 
+/** Planned day/time only (今天 / 明天 09:00). Null when unscheduled. */
+export function formatTaskPlanSchedule(
+  task: Pick<Task, "dueDay" | "dueWithTime">,
+  nowMs = Date.now(),
+): string | null {
+  if (task.dueWithTime != null) return formatRelativeMoment(task.dueWithTime, nowMs);
+  if (task.dueDay) return formatRelativeDay(task.dueDay, nowMs);
+  return null;
+}
+
 export function formatTaskPlanMeta(
-  task: Pick<Task, "dueDay" | "dueWithTime" | "remindAt" | "deadlineDay">,
+  task: Pick<
+    Task,
+    "dueDay" | "dueWithTime" | "remindAt" | "deadlineDay" | "deadlineWithTime"
+  >,
   nowMs = Date.now(),
 ): string {
   const parts: string[] = [];
-  if (task.dueWithTime != null) {
-    parts.push(formatRelativeMoment(task.dueWithTime, nowMs));
-  } else if (task.dueDay) {
-    parts.push(formatRelativeDay(task.dueDay, nowMs));
-  } else {
-    parts.push("未排期");
+  const schedule = formatTaskPlanSchedule(task, nowMs);
+  parts.push(schedule ?? "未排期");
+  if (task.deadlineWithTime != null) {
+    parts.push(`截止 ${formatRelativeMoment(task.deadlineWithTime, nowMs)}`);
+  } else if (task.deadlineDay) {
+    parts.push(`截止 ${formatRelativeDay(task.deadlineDay, nowMs)}`);
   }
-  if (task.deadlineDay) parts.push(`截止 ${formatRelativeDay(task.deadlineDay, nowMs)}`);
   if (task.remindAt) parts.push("有提醒");
   return parts.join(" · ");
 }

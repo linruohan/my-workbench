@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActiveTimer,
+  agentWorkspaceTitleFromPath,
   encodeTaskRepeat,
   formatLocalDay,
   makePresetSchedule,
@@ -19,6 +20,7 @@ import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs"
 import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
 import { AgentView } from "./agent/AgentView";
 import type { AgentUiEffect } from "./agent/execute";
+import { pickAgentWorkspaceFolder } from "./agent/pick-workspace";
 import { readProviderStore } from "./agent/providers";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
@@ -153,9 +155,12 @@ export default function App() {
       const at = Date.now();
       const next = new Date(at);
       next.setHours(24, 0, 0, 50);
-      return window.setTimeout(() => {
-        setNow(Date.now());
-      }, Math.max(50, next.getTime() - at));
+      return window.setTimeout(
+        () => {
+          setNow(Date.now());
+        },
+        Math.max(50, next.getTime() - at),
+      );
     };
     let id = schedule();
     const onVisible = () => {
@@ -372,15 +377,9 @@ export default function App() {
     if (!draft.isDone && task.isDone) store.uncompleteTask(taskId);
     if (!draft.isDone) store.setTaskBucket(taskId, draft.bucket);
 
-    if (draft.dueMode === "none") {
+    if (!draft.dueWithTimeLocal) {
       store.scheduleTask(taskId, {
         dueDay: null,
-        dueWithTime: null,
-        remindAt: null,
-      });
-    } else if (draft.dueMode === "day") {
-      store.scheduleTask(taskId, {
-        dueDay: draft.dueDay,
         dueWithTime: null,
         remindAt: null,
       });
@@ -394,10 +393,18 @@ export default function App() {
       });
     }
 
-    store.scheduleTask(taskId, {
-      deadlineDay: draft.deadlineDay ? draft.deadlineDay : null,
-      deadlineWithTime: null,
-    });
+    if (!draft.deadlineWithTimeLocal) {
+      store.scheduleTask(taskId, {
+        deadlineDay: null,
+        deadlineWithTime: null,
+      });
+    } else {
+      const deadlineMs = Date.parse(draft.deadlineWithTimeLocal);
+      const safeDeadline = Number.isNaN(deadlineMs) ? Date.now() : deadlineMs;
+      store.scheduleTask(taskId, {
+        deadlineWithTime: safeDeadline,
+      });
+    }
 
     if (!task.parentId) {
       store.setRepeatCfg(taskId, draft.repeat ? encodeTaskRepeat(draft.repeat) : null);
@@ -667,31 +674,42 @@ export default function App() {
   };
 
   const openAgent = () => {
-    store.ensureAgentWorkspace();
     const threads = store.listAgentThreads();
     const current = threads.find((item) => item.id === agentThreadId) ?? threads[0];
-    if (current) {
-      setAgentThreadId(current.id);
-    } else {
-      const created = store.createAgentThread({
-        nowMs: Date.now(),
-        modelRef: readProviderStore().defaultModelRef,
-      });
-      setAgentThreadId(created.id);
-    }
+    if (current) setAgentThreadId(current.id);
+    else setAgentThreadId(null);
     refresh();
     goNav("agent");
   };
 
-  const newAgentChat = (workspaceId?: string) => {
+  const newAgentChat = (opts: { workspaceId?: string; rootPath?: string }) => {
+    const nowMs = Date.now();
+    let workspaceId = opts.workspaceId;
+    if (opts.rootPath) {
+      const existing = store.findAgentWorkspaceByRootPath(opts.rootPath);
+      const workspace =
+        existing ??
+        store.createAgentWorkspace({
+          title: agentWorkspaceTitleFromPath(opts.rootPath),
+          rootPath: opts.rootPath,
+          nowMs,
+        });
+      workspaceId = workspace.id;
+    }
     const created = store.createAgentThread({
-      nowMs: Date.now(),
+      nowMs,
       workspaceId,
       modelRef: readProviderStore().defaultModelRef,
     });
     setAgentThreadId(created.id);
     refresh();
     goNav("agent");
+  };
+
+  const newAgentChatFromFolder = async () => {
+    const rootPath = await pickAgentWorkspaceFolder();
+    if (!rootPath) return;
+    newAgentChat({ rootPath });
   };
 
   const applyAgentEffects = (effects: AgentUiEffect[]) => {
@@ -755,10 +773,6 @@ export default function App() {
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
-        onPlanToday={scheduleToday}
-        onPlanTime={scheduleAfternoon}
-        onClearPlan={clearPlan}
-        onToggleTimer={toggleTimer}
         onReorder={reorderToday}
       />
     );
@@ -776,10 +790,6 @@ export default function App() {
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
-        onPlanToday={scheduleToday}
-        onPlanTime={scheduleAfternoon}
-        onClearPlan={clearPlan}
-        onToggleTimer={toggleTimer}
       />
     );
   } else if (nav === "schedule") {
@@ -796,10 +806,6 @@ export default function App() {
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
-        onPlanToday={scheduleToday}
-        onPlanTime={scheduleAfternoon}
-        onClearPlan={clearPlan}
-        onToggleTimer={toggleTimer}
       />
     );
   } else if (nav === "knowledge") {
@@ -844,7 +850,8 @@ export default function App() {
         activeTimerTaskId={activeTimerTaskId}
         timerStartedAt={timerStartedAt}
         onSelectThread={setAgentThreadId}
-        onCreateThread={newAgentChat}
+        onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
+        onCreateFromFolder={() => void newAgentChatFromFolder()}
         onOpenModels={() => openSettings("models")}
         onEffects={applyAgentEffects}
         onRefresh={refresh}
@@ -866,6 +873,7 @@ export default function App() {
         confirmBeforeDelete={prefs.confirmBeforeDelete}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
+        nowMs={now}
         onViewModeChange={changeTasksViewMode}
         onShowCompletedChange={changeShowCompleted}
         onToggleDone={toggleDone}
@@ -931,9 +939,7 @@ export default function App() {
             setActiveNoteId(id);
             goNav("knowledge");
           }}
-          onNewChat={newAgentChat}
           onOpenAgent={openAgent}
-          onAutomations={openTimedCreate}
           displayName={prefs.displayName || "本地用户"}
         />
         <main className="main">
@@ -948,6 +954,7 @@ export default function App() {
               selectedTagIds={(taskTagMap[editingTask.id] ?? []).map((t) => t.id)}
               subtasks={store.listSubtasks(editingTask.id)}
               defaultRemind={prefs.defaultRemind}
+              nowMs={now}
               onClose={() => setEditingTaskId(null)}
               onDelete={() => {
                 if (
@@ -1026,14 +1033,11 @@ function TaskList(props: {
   denseMeta?: boolean;
   reorderable?: boolean;
   hint?: string;
+  nowMs?: number;
   activeTimerTaskId?: string | null;
   timerElapsedMs?: number;
   onToggleDone: (t: Task) => void;
   onOpen: (t: Task) => void;
-  onPlanToday: (t: Task) => void;
-  onPlanTime: (t: Task) => void;
-  onClearPlan?: (t: Task) => void;
-  onToggleTimer?: (t: Task) => void;
   onReorder?: (fromId: string, toId: string) => void;
 }) {
   const [dragId, setDragId] = useState<string | null>(null);
@@ -1086,10 +1090,6 @@ function TaskList(props: {
               }
               onToggleDone={props.onToggleDone}
               onOpen={props.onOpen}
-              onPlanToday={props.onPlanToday}
-              onPlanTime={props.onPlanTime}
-              onClearPlan={props.onClearPlan}
-              onToggleTimer={props.onToggleTimer}
             />
           ))}
         </ul>

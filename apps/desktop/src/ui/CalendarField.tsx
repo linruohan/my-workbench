@@ -16,6 +16,10 @@ type DateTimeProps = {
   label: string;
   valueLocal: string;
   onChange: (local: string) => void;
+  allowEmpty?: boolean;
+  emptyLabel?: string;
+  /** Used when picking a day while value is empty. */
+  defaultTime?: string;
 };
 
 type PopoverPos = { top: number; left: number; width: number };
@@ -53,11 +57,14 @@ function formatMonthTitle(day: string): string {
   return d.toLocaleDateString("zh-CN", { year: "numeric", month: "long" });
 }
 
-function splitDateTimeLocal(value: string): { day: string; time: string } {
+function splitDateTimeLocal(
+  value: string,
+  fallbackTime = "09:00",
+): { day: string; time: string } {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(value);
   if (m) return { day: m[1]!, time: m[2]! };
   const now = Date.now();
-  return { day: formatLocalDay(now), time: "15:00" };
+  return { day: formatLocalDay(now), time: fallbackTime };
 }
 
 function placePopover(
@@ -289,11 +296,19 @@ export function DateField({
   );
 }
 
-export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
-  const parts = splitDateTimeLocal(valueLocal);
+export function DateTimeField({
+  label,
+  valueLocal,
+  onChange,
+  allowEmpty,
+  emptyLabel = "未设置",
+  defaultTime = "09:00",
+}: DateTimeProps) {
+  const parts = splitDateTimeLocal(valueLocal, defaultTime);
   const [open, setOpen] = useState(false);
   const [viewMonth, setViewMonth] = useState(parts.day);
   const { triggerRef, popoverRef, rootRef, pos } = useCalPopover(open, 280);
+  const hasValue = Boolean(valueLocal && !Number.isNaN(Date.parse(valueLocal)));
 
   useEffect(() => {
     setViewMonth(parts.day);
@@ -312,8 +327,8 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
   }, [open, rootRef, popoverRef]);
 
   const display = (() => {
+    if (!hasValue) return emptyLabel;
     const ms = Date.parse(valueLocal);
-    if (Number.isNaN(ms)) return "选择时刻";
     return new Date(ms).toLocaleString("zh-CN", {
       year: "numeric",
       month: "long",
@@ -323,6 +338,9 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
       minute: "2-digit",
     });
   })();
+
+  const activeTime = hasValue ? parts.time : defaultTime;
+  const activeDay = hasValue ? parts.day : formatLocalDay(Date.now());
 
   return (
     <div className="cal-field" ref={rootRef}>
@@ -357,10 +375,10 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
               }
             >
               <CalendarMonth
-                value={parts.day}
+                value={hasValue ? parts.day : ""}
                 viewMonth={viewMonth}
                 onViewMonth={setViewMonth}
-                onPick={(day) => onChange(`${day}T${parts.time}`)}
+                onPick={(day) => onChange(`${day}T${activeTime}`)}
               />
               <div className="cal-popover__footer cal-popover__footer--datetime">
                 <button
@@ -368,19 +386,34 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
                   className="btn btn--ghost"
                   onClick={() => {
                     const t = formatLocalDay(Date.now());
-                    onChange(`${t}T${parts.time}`);
+                    onChange(`${t}T${activeTime}`);
                     setViewMonth(t);
                   }}
                 >
                   今天
                 </button>
-                <span className="cal-popover__time-label">时间</span>
+                {allowEmpty ? (
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => {
+                      onChange("");
+                      setOpen(false);
+                    }}
+                  >
+                    清除
+                  </button>
+                ) : null}
                 <input
                   className="field__control cal-popover__time-input"
                   type="time"
                   aria-label="时间"
-                  value={parts.time}
-                  onChange={(e) => onChange(`${parts.day}T${e.target.value || "00:00"}`)}
+                  value={activeTime}
+                  onChange={(e) =>
+                    onChange(
+                      `${activeDay}T${e.target.value || defaultTime}`,
+                    )
+                  }
                 />
                 <button
                   type="button"

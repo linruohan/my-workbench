@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import {
   decodeTaskRepeat,
   defaultCustomSchedule,
-  formatLocalDay,
   formatTaskPlanMeta,
   makePresetSchedule,
   millisecondsDiffToRemindOption,
@@ -17,7 +16,7 @@ import {
   type TimedSchedulePreset,
 } from "@wb/domain";
 import { ScheduleRow } from "../timed/ScheduleRow";
-import { DateField, DateTimeField } from "../ui/CalendarField";
+import { DateTimeField } from "../ui/CalendarField";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TagPicker } from "../ui/TagPicker";
 
@@ -26,10 +25,10 @@ export type TaskEditorSave = {
   notes: string;
   projectId: string;
   bucket: ProjectBucket;
-  dueMode: "none" | "day" | "time";
-  dueDay: string;
+  /** Empty = unscheduled. Local `YYYY-MM-DDTHH:mm`. */
   dueWithTimeLocal: string;
-  deadlineDay: string;
+  /** Empty = no deadline. Local `YYYY-MM-DDTHH:mm`. */
+  deadlineWithTimeLocal: string;
   remindOption: ReminderOptionId;
   timeEstimateMinutes: number;
   tagIds: string[];
@@ -70,26 +69,17 @@ const STATUS_OPTIONS = [
   { value: "done", label: "已完成" },
 ] as const;
 
-const DUE_OPTIONS = [
-  { value: "none", label: "未排期" },
-  { value: "day", label: "全天" },
-  { value: "time", label: "时刻" },
-] as const;
-
-const REMIND_OPTIONS: Array<{ value: ReminderOptionId; label: string }> = [
-  { value: "none", label: "不提醒" },
-  { value: "at_start", label: "准时" },
-  { value: "m5", label: "提前 5 分钟" },
-  { value: "m10", label: "提前 10 分钟" },
-  { value: "m15", label: "提前 15 分钟" },
-  { value: "m30", label: "提前 30 分钟" },
-  { value: "h1", label: "提前 1 小时" },
-];
+const DEFAULT_START_TIME = "09:00";
+const DEFAULT_DEADLINE_TIME = "17:30";
 
 function toDatetimeLocal(ms: number): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function dayAtTime(day: string, time: string): string {
+  return `${day}T${time}`;
 }
 
 function fromTask(
@@ -104,18 +94,28 @@ function fromTask(
       : task.remindAt != null
         ? defaultRemind
         : "none";
+
+  let dueWithTimeLocal = "";
+  if (task.dueWithTime != null) {
+    dueWithTimeLocal = toDatetimeLocal(task.dueWithTime);
+  } else if (task.dueDay) {
+    dueWithTimeLocal = dayAtTime(task.dueDay, DEFAULT_START_TIME);
+  }
+
+  let deadlineWithTimeLocal = "";
+  if (task.deadlineWithTime != null) {
+    deadlineWithTimeLocal = toDatetimeLocal(task.deadlineWithTime);
+  } else if (task.deadlineDay) {
+    deadlineWithTimeLocal = dayAtTime(task.deadlineDay, DEFAULT_DEADLINE_TIME);
+  }
+
   return {
     title: task.title,
     notes: task.notes,
     projectId: task.projectId,
     bucket,
-    dueMode: task.dueWithTime != null ? "time" : task.dueDay ? "day" : "none",
-    dueDay: task.dueDay ?? formatLocalDay(Date.now()),
-    dueWithTimeLocal:
-      task.dueWithTime != null
-        ? toDatetimeLocal(task.dueWithTime)
-        : toDatetimeLocal(Date.now()),
-    deadlineDay: task.deadlineDay ?? "",
+    dueWithTimeLocal,
+    deadlineWithTimeLocal,
     remindOption,
     timeEstimateMinutes: Math.round(Math.max(0, task.timeEstimate) / 60_000),
     tagIds: [...selectedTagIds],
@@ -268,91 +268,29 @@ export function TaskEditor({
           <section className="task-editor__section">
             <div className="task-editor__inline-row">
               <div className="task-editor__inline">
-                <span className="task-editor__inline-label">计划：</span>
-                <MenuSelect
-                  label="计划方式"
-                  value={draft.dueMode}
-                  options={[...DUE_OPTIONS]}
-                  onChange={(dueMode) => patch({ dueMode })}
+                <span className="task-editor__inline-label">开始：</span>
+                <DateTimeField
+                  label="开始时间"
+                  valueLocal={draft.dueWithTimeLocal}
+                  allowEmpty
+                  emptyLabel="未设置开始时间"
+                  defaultTime={DEFAULT_START_TIME}
+                  onChange={(dueWithTimeLocal) => patch({ dueWithTimeLocal })}
                 />
               </div>
               <div className="task-editor__inline">
-                <span className="task-editor__inline-label">时长：</span>
-                <input
-                  id="task-estimate"
-                  className="field__control task-editor__inline-input"
-                  type="number"
-                  min={0}
-                  step={5}
-                  aria-label="预计时长（分钟）"
-                  value={draft.timeEstimateMinutes}
-                  onChange={(e) =>
-                    patch({
-                      timeEstimateMinutes: Math.max(
-                        0,
-                        Math.floor(Number(e.target.value) || 0),
-                      ),
-                    })
+                <span className="task-editor__inline-label">截止：</span>
+                <DateTimeField
+                  label="截止时间"
+                  valueLocal={draft.deadlineWithTimeLocal}
+                  allowEmpty
+                  emptyLabel="未设置截止时间"
+                  defaultTime={DEFAULT_DEADLINE_TIME}
+                  onChange={(deadlineWithTimeLocal) =>
+                    patch({ deadlineWithTimeLocal })
                   }
                 />
-                <span className="task-editor__inline-suffix">分钟</span>
               </div>
-            </div>
-
-            {draft.dueMode === "day" || draft.dueMode === "time" ? (
-              <div className="task-editor__inline-row">
-                <div className="task-editor__inline">
-                  <span className="task-editor__inline-label">
-                    {draft.dueMode === "time" ? "时刻：" : "日期："}
-                  </span>
-                  <DateTimeField
-                    label={draft.dueMode === "time" ? "计划时刻" : "计划日期"}
-                    valueLocal={
-                      draft.dueMode === "time"
-                        ? draft.dueWithTimeLocal
-                        : `${draft.dueDay || formatLocalDay(Date.now())}T09:00`
-                    }
-                    onChange={(dueWithTimeLocal) => {
-                      const time = dueWithTimeLocal.slice(11, 16) || "09:00";
-                      const dueDay = dueWithTimeLocal.slice(0, 10);
-                      // 改了时间则自动切到「时刻」；仅改日期时保留当前计划方式
-                      if (draft.dueMode === "day" && time !== "09:00") {
-                        patch({
-                          dueMode: "time",
-                          dueDay,
-                          dueWithTimeLocal,
-                        });
-                      } else if (draft.dueMode === "day") {
-                        patch({ dueDay, dueWithTimeLocal });
-                      } else {
-                        patch({ dueWithTimeLocal });
-                      }
-                    }}
-                  />
-                </div>
-                {draft.dueMode === "time" ? (
-                  <div className="task-editor__inline">
-                    <span className="task-editor__inline-label">提醒：</span>
-                    <MenuSelect
-                      label="提醒"
-                      value={draft.remindOption}
-                      options={REMIND_OPTIONS}
-                      onChange={(remindOption) => patch({ remindOption })}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div className="task-editor__inline">
-              <span className="task-editor__inline-label">截止：</span>
-              <DateField
-                label="截止日期"
-                value={draft.deadlineDay}
-                allowEmpty
-                emptyLabel="未设置截止日期"
-                onChange={(deadlineDay) => patch({ deadlineDay })}
-              />
             </div>
 
             {canRepeat ? (
