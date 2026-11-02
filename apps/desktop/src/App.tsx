@@ -724,6 +724,7 @@ export default function App() {
         denseMeta={prefs.workMode === "office"}
         reorderable
         hint="汇总全部项目 · 拖拽可调整今日顺序"
+        nowMs={now}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
@@ -744,6 +745,7 @@ export default function App() {
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
         hint="汇总当天全部项目的计划（含全天与时刻）"
+        nowMs={now}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
@@ -763,6 +765,7 @@ export default function App() {
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
         hint="汇总全部项目的时刻安排"
+        nowMs={now}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}

@@ -58,6 +58,7 @@ type Props = {
   confirmBeforeDelete: boolean;
   activeTimerTaskId: string | null;
   timerElapsedMs: number;
+  nowMs: number;
   onViewModeChange: (mode: TasksViewMode) => void;
   onShowCompletedChange: (show: boolean) => void;
   onToggleDone: (task: Task) => void;
@@ -94,6 +95,7 @@ export function TasksView({
   confirmBeforeDelete,
   activeTimerTaskId,
   timerElapsedMs,
+  nowMs,
   onViewModeChange,
   onShowCompletedChange,
   onToggleDone,
@@ -115,7 +117,7 @@ export function TasksView({
   const [status, setStatus] = useState<TaskStatusFilter>(initialPrefs.status);
   const [sortKey, setSortKey] = useState<TaskSortKey>(initialPrefs.sortKey);
   const [filterTagId, setFilterTagId] = useState<string | null>(null);
-  const [today] = useState(() => formatLocalDay(Date.now()));
+  const today = formatLocalDay(nowMs);
   const isStats = viewMode === "stats";
 
   useEffect(() => {
@@ -347,6 +349,7 @@ export function TasksView({
                         childCount={listChildTasks(tasks, task.id).length}
                         denseMeta={denseMeta}
                         showDoneStyle
+                        nowMs={nowMs}
                         timerRunning={activeTimerTaskId === task.id}
                         timerElapsedMs={
                           activeTimerTaskId === task.id ? timerElapsedMs : 0
@@ -369,6 +372,7 @@ export function TasksView({
                   tasks={visible}
                   buckets={buckets}
                   projectTitles={projectTitles}
+                  nowMs={nowMs}
                   onOpen={(t) => setEditingId(t.id)}
                   onToggleDone={onToggleDone}
                   onMoveColumn={onMoveColumn}
@@ -388,6 +392,7 @@ export function TasksView({
               selectedTagIds={(taskTagMap[editing.id] ?? []).map((t) => t.id)}
               subtasks={editingSubtasks}
               defaultRemind={defaultRemind}
+              nowMs={nowMs}
               onClose={() => setEditingId(null)}
               onDelete={() => confirmDelete(editing.id)}
               onDuplicate={() => {

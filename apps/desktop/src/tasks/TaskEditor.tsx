@@ -132,6 +132,7 @@ export function TaskEditor({
   selectedTagIds = [],
   subtasks = [],
   defaultRemind,
+  nowMs,
   onSave,
   onDelete,
   onDuplicate,
@@ -190,7 +191,7 @@ export function TaskEditor({
           <div>
             <h2>{task.parentId ? "编辑子任务" : "编辑任务"}</h2>
             <p className="task-editor__summary">
-              {formatTaskPlanMeta(task)}
+              {formatTaskPlanMeta(task, nowMs)}
               {draft.repeat ? ` · ${timedScheduleLabel(draft.repeat)}` : ""}
             </p>
           </div>
