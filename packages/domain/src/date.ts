@@ -98,3 +98,23 @@ export function formatLocalClock(ms: number): string {
 export function formatRelativeMoment(ms: number, nowMs: number): string {
   return `${formatRelativeDay(formatLocalDay(ms), nowMs)} ${formatLocalClock(ms)}`;
 }
+
+/**
+ * Timeline section header for a plan day.
+ * Nearby: 今天/明天/昨天；同年：周日, 5/3；跨年：2027-2-10。
+ */
+export function formatTimelineDayHeader(day: string, nowMs: number): string {
+  const offset = dayOffset(day, nowMs);
+  if (offset === 0) return "今天";
+  if (offset === 1) return "明天";
+  if (offset === -1) return "昨天";
+
+  const d = new Date(parseLocalDay(day));
+  const weekday = WEEKDAY_CN[d.getDay()] ?? "";
+  const m = d.getMonth() + 1;
+  const da = d.getDate();
+  const y = d.getFullYear();
+  const nowY = new Date(nowMs).getFullYear();
+  if (y === nowY) return `周${weekday}, ${m}/${da}`;
+  return `${y}-${m}-${da}`;
+}

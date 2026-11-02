@@ -5,8 +5,10 @@ import {
   type ProviderConfig,
   type ProviderKind,
 } from "@wb/domain";
+import { ModelFormDialog, type ModelFormValues } from "./ModelFormDialog";
 import { useDialog } from "../shell/Dialogs";
-import { IconMore, IconPencil, IconPlus, IconRefresh } from "../shell/icons";
+import { IconMore, IconPencil, IconPlus, IconRefresh, IconUnplug } from "../shell/icons";
+import { testModelConnectivity } from "./connectivity";
 import {
   credentialExists,
   deleteCredential,
@@ -381,10 +383,10 @@ function ProviderDetail({
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [apiKeyRequired, setApiKeyRequired] = useState(provider.apiKeyRequired);
-  const [modelDraft, setModelDraft] = useState("");
-  const [editingModel, setEditingModel] = useState<string | null>(null);
-  const [contextDraft, setContextDraft] = useState("8192");
-  const [outputDraft, setOutputDraft] = useState("2048");
+  const [modelForm, setModelForm] = useState<null | { modelId: string | null }>(null);
+  const [probes, setProbes] = useState<
+    Record<string, { pending: boolean; ok: boolean; message: string }>
+  >({});
   const hasKey = credentialExists(provider.id);
   const models = Object.entries(provider.models);
 
@@ -395,7 +397,8 @@ function ProviderDetail({
     setApiKeyRequired(provider.apiKeyRequired);
     setApiKey("");
     setShowKey(false);
-    setEditingModel(null);
+    setModelForm(null);
+    setProbes({});
   }, [provider.id, provider.baseURL, provider.kind, provider.apiKeyRequired]);
 
   useEffect(() => {
@@ -435,12 +438,55 @@ function ProviderDetail({
     onRefresh();
   };
 
-  const beginEditModel = (modelId: string) => {
-    const caps = provider.models[modelId];
-    if (!caps) return;
-    setEditingModel(modelId);
-    setContextDraft(String(caps.context));
-    setOutputDraft(String(caps.output));
+  const runProbe = (modelId: string) => {
+    if (!provider.enabled || probes[modelId]?.pending) return;
+    saveConnection();
+    setProbes((current) => ({
+      ...current,
+      [modelId]: {
+        pending: true,
+        ok: false,
+        message: `正在测试 ${provider.name} / ${modelId}`,
+      },
+    }));
+    const latest = readProviderStore().providers.find((item) => item.id === provider.id);
+    const target: ProviderConfig = {
+      ...(latest ?? provider),
+      baseURL,
+      kind,
+      apiKeyRequired,
+      enabled: provider.enabled,
+    };
+    void testModelConnectivity({
+      provider: target,
+      modelId,
+      apiKey: apiKey.trim() || readCredential(provider.id),
+    }).then((result) => {
+      setProbes((current) => ({
+        ...current,
+        [modelId]: result.success
+          ? { pending: false, ok: true, message: `${provider.name} / ${modelId} 连接成功` }
+          : {
+              pending: false,
+              ok: false,
+              message: `${provider.name} / ${modelId} 连接失败：${result.error.message}`,
+            },
+      }));
+    });
+  };
+
+  const saveModel = (values: ModelFormValues): string | null => {
+    const editing = modelForm?.modelId;
+    if (editing) {
+      if (!updateModel(provider.id, editing, values.caps)) return "没有这个模型。";
+    } else if (provider.models[values.modelId]) {
+      return "已经有这个模型。";
+    } else if (!addModel(provider.id, values.modelId, values.caps)) {
+      return "模型 ID 无效。";
+    }
+    setModelForm(null);
+    onRefresh();
+    return null;
   };
 
   return (
@@ -580,28 +626,14 @@ function ProviderDetail({
 
       <div className="agent-models__models-head">
         <h3>模型列表</h3>
-        <form
-          className="agent-models__model-add"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const ref = addModel(provider.id, modelDraft);
-            if (!ref) return;
-            setModelDraft("");
-            onRefresh();
-          }}
+        <button
+          type="button"
+          className="btn agent-models__add-btn"
+          onClick={() => setModelForm({ modelId: null })}
         >
-          <input
-            className="settings__input"
-            aria-label="新模型 ID"
-            placeholder="模型 ID"
-            value={modelDraft}
-            onChange={(event) => setModelDraft(event.target.value)}
-          />
-          <button type="submit" className="btn" disabled={!modelDraft.trim()}>
-            <IconPlus size={14} />
-            添加模型
-          </button>
-        </form>
+          <IconPlus size={14} />
+          添加模型
+        </button>
       </div>
 
       {models.length === 0 ? (
@@ -613,112 +645,99 @@ function ProviderDetail({
           {models.map(([modelId, caps]) => {
             const ref = `${provider.id}/${modelId}`;
             const isDefault = defaultModelRef === ref;
-            const editing = editingModel === modelId;
             return (
               <li key={modelId} className="agent-models__model">
-                {editing ? (
-                  <div className="agent-models__model-edit">
-                    <strong>{modelId}</strong>
-                    <label>
-                      上下文
-                      <input
-                        className="settings__input"
-                        inputMode="numeric"
-                        value={contextDraft}
-                        onChange={(event) => setContextDraft(event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      最大输出
-                      <input
-                        className="settings__input"
-                        inputMode="numeric"
-                        value={outputDraft}
-                        onChange={(event) => setOutputDraft(event.target.value)}
-                      />
-                    </label>
-                    <div className="agent-models__model-edit-actions">
-                      <button
-                        type="button"
-                        className="primary"
-                        onClick={() => {
-                          updateModel(provider.id, modelId, {
-                            context: Number(contextDraft),
-                            output: Number(outputDraft),
-                          });
-                          setEditingModel(null);
-                          onRefresh();
-                        }}
-                      >
-                        保存
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => setEditingModel(null)}
-                      >
-                        取消
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <strong>{modelId}</strong>
-                      <small>
-                        上下文 {caps.context} · 输出 {caps.output}
-                      </small>
-                    </div>
-                    <div className="agent-models__model-actions">
-                      {isDefault ? (
-                        <span className="settings__pill">默认</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn"
-                          onClick={() => {
-                            setDefaultModel(ref);
-                            onRefresh();
-                          }}
-                        >
-                          设为默认
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => beginEditModel(modelId)}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={models.length <= 1}
-                        onClick={() => {
-                          void (async () => {
-                            const ok = await dialog.confirm({
-                              title: "删除模型",
-                              message: `从「${provider.name}」删除模型 ${modelId}？`,
-                              confirmLabel: "删除",
-                              danger: true,
-                            });
-                            if (!ok) return;
-                            removeModel(provider.id, modelId);
-                            onRefresh();
-                          })();
-                        }}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </>
-                )}
+                <div className="agent-models__model-main">
+                  <strong>{modelId}</strong>
+                  <small>
+                    上下文 {caps.context} · 输出 {caps.output}
+                  </small>
+                  {probes[modelId] ? (
+                    <span
+                      className={
+                        probes[modelId].pending
+                          ? "agent-models__probe"
+                          : probes[modelId].ok
+                            ? "agent-models__probe is-ok"
+                            : "agent-models__probe is-bad"
+                      }
+                    >
+                      {probes[modelId].message}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="agent-models__model-actions">
+                  <button
+                    type="button"
+                    className="agent-models__icon-btn"
+                    aria-label={`测试模型 ${modelId}`}
+                    title={provider.enabled ? "测试模型" : "请先启用供应商"}
+                    disabled={!provider.enabled || probes[modelId]?.pending}
+                    onClick={() => runProbe(modelId)}
+                  >
+                    {probes[modelId]?.pending ? (
+                      <IconRefresh size={14} className="agent-models__spin" />
+                    ) : (
+                      <IconUnplug size={14} />
+                    )}
+                  </button>
+                  {isDefault ? (
+                    <span className="settings__pill">默认</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setDefaultModel(ref);
+                        onRefresh();
+                      }}
+                    >
+                      设为默认
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setModelForm({ modelId })}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={models.length <= 1}
+                    onClick={() => {
+                      void (async () => {
+                        const ok = await dialog.confirm({
+                          title: "删除模型",
+                          message: `从「${provider.name}」删除模型 ${modelId}？`,
+                          confirmLabel: "删除",
+                          danger: true,
+                        });
+                        if (!ok) return;
+                        removeModel(provider.id, modelId);
+                        onRefresh();
+                      })();
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
               </li>
             );
           })}
         </ul>
       )}
+      {modelForm ? (
+        <ModelFormDialog
+          title={modelForm.modelId ? "编辑模型" : "添加模型"}
+          initialModelId={modelForm.modelId ?? ""}
+          initialCaps={modelForm.modelId ? provider.models[modelForm.modelId] : undefined}
+          lockModelId={Boolean(modelForm.modelId)}
+          onCancel={() => setModelForm(null)}
+          onSave={saveModel}
+        />
+      ) : null}
     </div>
   );
 }

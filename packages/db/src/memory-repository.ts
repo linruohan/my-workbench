@@ -13,8 +13,8 @@ import {
   createTimedTaskDraft,
   DomainError,
   INBOX_PROJECT_ID,
-  isPlannerMember,
   isScheduleMember,
+  selectPlannerTasks,
   markTaskComplete,
   markTaskIncomplete,
   patchNote,
@@ -410,8 +410,8 @@ export class MemoryWorkbenchRepository {
     return selectTodayTasks(this.listTasks(), this.getTodayOrder(), { nowMs });
   }
 
-  listPlannerDay(day: string): Task[] {
-    return this.listTasks().filter((t) => isPlannerMember(t, day));
+  listPlannerDay(day?: string | null): Task[] {
+    return selectPlannerTasks(this.listTasks(), day);
   }
 
   listScheduleDay(day: string): Task[] {

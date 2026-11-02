@@ -3,6 +3,7 @@ import {
   BUILTIN_PROVIDER_ID,
   builtinProvider,
   createId,
+  type ModelCaps,
   type ProviderConfig,
   type ProviderKind,
 } from "@wb/domain";
@@ -206,7 +207,7 @@ export function removeProvider(id: string): void {
 export function addModel(
   providerId: string,
   modelId: string,
-  caps: { context?: number; output?: number } = {},
+  caps: Partial<ModelCaps> = {},
 ): string | null {
   const id = modelId.trim();
   if (!id || id.includes("/") || providerId === BUILTIN_PROVIDER_ID) return null;
@@ -216,10 +217,7 @@ export function addModel(
   if (!provider.models[id]) {
     provider.models = {
       ...provider.models,
-      [id]: {
-        context: caps.context ?? 8192,
-        output: caps.output ?? 2048,
-      },
+      [id]: modelCapsFrom(caps),
     };
   }
   writeProviderStore(store);
@@ -229,7 +227,7 @@ export function addModel(
 export function updateModel(
   providerId: string,
   modelId: string,
-  patch: { context?: number; output?: number },
+  patch: Partial<ModelCaps>,
 ): boolean {
   if (providerId === BUILTIN_PROVIDER_ID) return false;
   const store = readProviderStore();
@@ -239,19 +237,30 @@ export function updateModel(
   if (!current) return false;
   provider.models = {
     ...provider.models,
-    [modelId]: {
-      context:
-        patch.context != null && Number.isFinite(patch.context) && patch.context > 0
-          ? Math.floor(patch.context)
-          : current.context,
-      output:
-        patch.output != null && Number.isFinite(patch.output) && patch.output > 0
-          ? Math.floor(patch.output)
-          : current.output,
-    },
+    [modelId]: modelCapsFrom({ ...current, ...patch }),
   };
   writeProviderStore(store);
   return true;
+}
+
+function modelCapsFrom(caps: Partial<ModelCaps>): ModelCaps {
+  const next: ModelCaps = {
+    context: positiveInt(caps.context, 8192),
+    output: positiveInt(caps.output, 2048),
+  };
+  if (caps.smart) next.smart = true;
+  if (caps.inputs?.length) next.inputs = [...caps.inputs];
+  if (caps.abilities?.length) next.abilities = [...caps.abilities];
+  const levels = caps.reasoningLevels?.map((level) => level.trim()).filter(Boolean);
+  if (levels?.length) next.reasoningLevels = levels;
+  const map = caps.reasoningMap?.trim();
+  if (map) next.reasoningMap = map;
+  return next;
+}
+
+function positiveInt(value: number | undefined, fallback: number): number {
+  if (value == null || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.floor(value);
 }
 
 export function removeModel(providerId: string, modelId: string): boolean {

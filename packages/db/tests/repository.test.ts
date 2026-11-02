@@ -48,7 +48,7 @@ describe("WorkbenchRepository", () => {
     expect(scheduled.dueDay).toBeNull();
     expect(scheduled.dueWithTime).toBe(at);
     expect(scheduled.remindAt).toBe(at - 15 * 60_000);
-    expect(ctx.repo.listPlannerDay(today)).toHaveLength(0);
+    expect(ctx.repo.listPlannerDay(today)).toHaveLength(1);
     expect(ctx.repo.listScheduleDay(today)).toHaveLength(1);
     expect(ctx.repo.listToday(now)).toHaveLength(1);
   });

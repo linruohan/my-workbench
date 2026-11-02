@@ -296,10 +296,14 @@ export function AgentView({
   }, []);
 
   useEffect(() => {
-    if (!findOpen) return;
-    findInputRef.current?.focus();
-    findInputRef.current?.select();
-  }, [findOpen, findTick]);
+    if (findOpen) {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+      return;
+    }
+    if (!thread || pendingRef.current) return;
+    inputRef.current?.focus({ preventScroll: true });
+  }, [findOpen, findTick, thread?.id]);
 
   useEffect(() => {
     if (!findOpen || !findQuery.trim()) return;
@@ -316,6 +320,16 @@ export function AgentView({
     refocus.current = false;
     inputRef.current?.focus();
   }, [busyHere, pending, messages.length]);
+
+  // Keep the composer ready to type when entering Agent or switching sessions.
+  useEffect(() => {
+    if (!thread) return;
+    const frame = requestAnimationFrame(() => {
+      if (findOpenRef.current || pendingRef.current) return;
+      inputRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [thread?.id]);
 
   useEffect(() => {
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
@@ -1658,6 +1672,7 @@ export function AgentView({
                   >
                     <IconGitBranch size={14} />
                     <span>{gitBranch}</span>
+                    <span aria-hidden="true">▾</span>
                   </span>
                 ) : null}
                 <button
@@ -1697,7 +1712,7 @@ export function AgentView({
                     ? "这条会排在当前回答之后"
                     : pending
                       ? "请先处理待确认操作"
-                      : "向工作台提问，使用 / 选择命令"
+                      : "向工作台提问，使用 / 选择命令或能力"
                 }
                 title={
                   busyHere

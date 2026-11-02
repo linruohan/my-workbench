@@ -64,13 +64,50 @@ export function selectTodayTasks(
   return [...ordered, ...rest];
 }
 
-/** Planner shows incomplete root tasks whose planned day equals `day` (all-day or timed). */
+/**
+ * Planner shows incomplete root tasks that have a plan (all-day or timed).
+ * Pass `day` to limit to that local calendar day; omit to include any planned day.
+ */
 export function isPlannerMember(
   task: Pick<Task, "isDone" | "dueDay" | "dueWithTime" | "parentId">,
-  day: string,
+  day?: string | null,
 ): boolean {
   if (task.isDone || task.parentId) return false;
-  return plannedDayOf(task) === day;
+  const planned = plannedDayOf(task);
+  if (!planned) return false;
+  if (day == null || day === "") return true;
+  return planned === day;
+}
+
+/** Planned tasks sorted by day, then clock time, then createdAt. */
+export function selectPlannerTasks(tasks: Task[], day?: string | null): Task[] {
+  return tasks
+    .filter((t) => isPlannerMember(t, day))
+    .sort((a, b) => {
+      const da = plannedDayOf(a) ?? "9999-99-99";
+      const db = plannedDayOf(b) ?? "9999-99-99";
+      const byDay = compareDay(da, db);
+      if (byDay !== 0) return byDay;
+      const at = a.dueWithTime ?? Number.POSITIVE_INFINITY;
+      const bt = b.dueWithTime ?? Number.POSITIVE_INFINITY;
+      if (at !== bt) return at - bt;
+      return a.createdAt - b.createdAt;
+    });
+}
+
+/** Group already-sorted planner tasks into day sections. */
+export function groupPlannerByDay(
+  tasks: Task[],
+): Array<{ day: string; tasks: Task[] }> {
+  const groups: Array<{ day: string; tasks: Task[] }> = [];
+  for (const task of tasks) {
+    const day = plannedDayOf(task);
+    if (!day) continue;
+    const last = groups[groups.length - 1];
+    if (last && last.day === day) last.tasks.push(task);
+    else groups.push({ day, tasks: [task] });
+  }
+  return groups;
 }
 
 /** Schedule timeline shows tasks with a concrete time on that local day. */

@@ -4,6 +4,7 @@ import {
   type AgentMessage,
   type AgentPermissionMode,
   type AgentTurnPlan,
+  type ModelCaps,
   type PlannedCall,
   type ProviderConfig,
   type ProviderKind,
@@ -96,6 +97,124 @@ export function buildModelHttpRequest(input: {
   };
 }
 
+const CONNECTIVITY_PROBE_SYSTEM = "You are a connectivity probe.";
+const CONNECTIVITY_PROBE_USER = "hi";
+
+/**
+ * Smallest request that proves the endpoint, credential, and model id work.
+ * Fixed roles and text, one output token, no tools, streaming on.
+ * When the model lists reasoning levels, only the lowest mapped level is sent.
+ */
+export function buildConnectivityProbe(input: {
+  provider: ProviderConfig;
+  modelId: string;
+}): ModelHttpRequest {
+  const { provider, modelId } = input;
+  if (provider.kind === "builtin") {
+    throw new Error("builtin providers have no connectivity probe");
+  }
+  const reasoning = lowestReasoningField(provider.models[modelId]);
+  if (provider.kind === "anthropic-messages") {
+    const body: Record<string, unknown> = {
+      model: modelId,
+      max_tokens: 1,
+      stream: true,
+      system: [{ type: "text", text: CONNECTIVITY_PROBE_SYSTEM }],
+      messages: [{ role: "user", content: [{ type: "text", text: CONNECTIVITY_PROBE_USER }] }],
+    };
+    applyReasoningField(body, reasoning);
+    return {
+      url: endpoint(provider),
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      secretHeaderNames: ["x-api-key"],
+      body,
+    };
+  }
+  if (provider.kind === "openai-responses") {
+    const body: Record<string, unknown> = {
+      model: modelId,
+      stream: true,
+      max_output_tokens: 1,
+      input: [
+        { role: "system", content: CONNECTIVITY_PROBE_SYSTEM },
+        { role: "user", content: [{ type: "input_text", text: CONNECTIVITY_PROBE_USER }] },
+      ],
+    };
+    applyReasoningField(body, reasoning);
+    return {
+      url: endpoint(provider),
+      headers: { "content-type": "application/json" },
+      secretHeaderNames: ["authorization"],
+      body,
+    };
+  }
+  const body: Record<string, unknown> = {
+    model: modelId,
+    stream: true,
+    max_completion_tokens: 1,
+    messages: [
+      { role: "system", content: CONNECTIVITY_PROBE_SYSTEM },
+      { role: "user", content: CONNECTIVITY_PROBE_USER },
+    ],
+  };
+  applyReasoningField(body, reasoning);
+  return {
+    url: endpoint(provider),
+    headers: { "content-type": "application/json" },
+    secretHeaderNames: ["authorization"],
+    body,
+  };
+}
+
+/** One SSE `data:` payload from a connectivity probe. */
+export function readConnectivityProbeEvent(
+  kind: ProviderKind,
+  data: string,
+): "pending" | "finish" | { error: string } {
+  if (!data) return "pending";
+  if (data === "[DONE]") return "finish";
+  let json: unknown;
+  try {
+    json = JSON.parse(data);
+  } catch {
+    return "pending";
+  }
+  const record = asRecord(json);
+  if (!record) return "pending";
+  const failure = probeErrorMessage(record);
+  if (failure) return { error: failure };
+  if (kind === "anthropic-messages") {
+    if (record.type === "message_stop") return "finish";
+    const delta = asRecord(record.delta);
+    if (record.type === "message_delta" && typeof delta?.stop_reason === "string" && delta.stop_reason) {
+      return "finish";
+    }
+    return "pending";
+  }
+  if (kind === "openai-responses") {
+    if (record.type === "response.completed" || record.type === "response.incomplete") return "finish";
+    if (record.type === "response.failed") {
+      const nested = asRecord(asRecord(record.response)?.error);
+      const message = typeof nested?.message === "string" ? nested.message.trim() : "";
+      return { error: message || "连接失败" };
+    }
+    return "pending";
+  }
+  const choice = asRecord(asArray(record.choices)?.[0]);
+  if (choice && typeof choice.finish_reason === "string" && choice.finish_reason) return "finish";
+  return "pending";
+}
+
+/** Null when a non-stream JSON body is an accepted completion. */
+export function connectivityProbeJsonError(payload: unknown): string | null {
+  const record = asRecord(payload);
+  if (!record) return "模型响应不是 JSON";
+  return probeErrorMessage(record);
+}
+
 export function applyRuntimeHeaders(
   request: ModelHttpRequest,
   apiKey: string | null,
@@ -177,6 +296,47 @@ export function finishOpenAiStream(acc: OpenAiStreamAcc): AgentTurnPlan {
         args: parseArgs(call.argsText),
       })),
   };
+}
+
+function lowestReasoningField(
+  caps: ModelCaps | undefined,
+): { field: string; value: string } | null {
+  const level = caps?.reasoningLevels?.map((item) => item.trim()).find(Boolean);
+  const map = caps?.reasoningMap?.trim();
+  if (!level || !map) return null;
+  for (const line of map.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    if (trimmed.slice(0, eq).trim() !== level) continue;
+    const spec = trimmed.slice(eq + 1).trim();
+    const colon = spec.indexOf(":");
+    if (colon <= 0) continue;
+    const field = spec.slice(0, colon).trim();
+    const value = spec.slice(colon + 1).trim();
+    if (!field || !value || !/^[A-Za-z0-9_.-]+$/.test(field)) continue;
+    return { field, value };
+  }
+  return null;
+}
+
+function applyReasoningField(
+  body: Record<string, unknown>,
+  reasoning: { field: string; value: string } | null,
+): void {
+  if (!reasoning) return;
+  body[reasoning.field] = reasoning.value;
+}
+
+function probeErrorMessage(record: Record<string, unknown>): string | null {
+  if (record.type === "error" || record.error) {
+    if (typeof record.error === "string" && record.error.trim()) return record.error.trim();
+    const error = asRecord(record.error);
+    if (typeof error?.message === "string" && error.message.trim()) return error.message.trim();
+    if (record.type === "error" || error) return "连接失败";
+  }
+  return null;
 }
 
 function endpoint(provider: ProviderConfig): string {

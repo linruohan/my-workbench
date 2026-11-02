@@ -11,6 +11,7 @@ import {
   inferNoteTitleFromBody,
   parseQuickCapture,
   ReminderUiCooldown,
+  selectPlannerTasks,
   type ProjectBucket,
   type Tag,
   type Task,
@@ -30,6 +31,7 @@ import { useDialog } from "./shell/Dialogs";
 import { PromptModal } from "./shell/PromptModal";
 import { Sidebar, type AppNavId } from "./shell/Sidebar";
 import { TitleBar } from "./shell/TitleBar";
+import { PlannerView } from "./tasks/PlannerView";
 import { TaskEditor, type TaskEditorSave } from "./tasks/TaskEditor";
 import { TaskRow } from "./tasks/TaskRow";
 import { TasksView, type TasksViewMode } from "./tasks/TasksView";
@@ -199,8 +201,8 @@ export default function App() {
 
   void tick;
   const todayTasks = store.listToday(now);
-  const plannerTasks = store.listPlannerDay(today);
   const allTasks = store.listTasks();
+  const plannerTasks = selectPlannerTasks(allTasks);
   const openTasks = allTasks.filter((t) => !t.isDone);
   const notifications = store.listNotifications();
   const notes = store.listNotes();
@@ -560,7 +562,8 @@ export default function App() {
     let dueDay = parsed.dueDay;
     let dueWithTime = parsed.dueWithTime;
     if (!dueDay && !dueWithTime) {
-      if (nav === "today" || nav === "planner") dueDay = today;
+      // 今日/计划视图捕获时默认排到「现在」这一天，避免无计划进不了时间线
+      if (nav === "today" || nav === "planner") dueDay = formatLocalDay(nowMs);
     }
 
     const remindOption =
@@ -863,13 +866,10 @@ export default function App() {
     );
   } else if (nav === "planner") {
     body = (
-      <TaskList
-        title={`计划 · ${today}`}
-        empty="这一天还没有计划任务。"
+      <PlannerView
         tasks={plannerTasks}
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
-        hint="汇总当天全部项目的计划（含全天与时刻）"
         nowMs={now}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}

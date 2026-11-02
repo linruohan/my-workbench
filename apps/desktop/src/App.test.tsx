@@ -25,6 +25,20 @@ describe("App shell", () => {
     expect(screen.getByText("今日事项")).toBeInTheDocument();
   });
 
+  it("shows captured tasks on the planner timeline", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    await user.click(screen.getByRole("button", { name: "计划" }));
+    await user.type(screen.getByLabelText("快速捕获"), "计划事项甲{Enter}");
+    expect(screen.getByText("计划事项甲")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "今天" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("快速捕获"), "明天 计划事项乙{Enter}");
+    expect(screen.getByText("计划事项乙")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "明天" })).toBeInTheDocument();
+  });
+
   it("captures into the active project without planning when in project view", async () => {
     const user = userEvent.setup();
     await readyApp();

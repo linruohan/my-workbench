@@ -71,6 +71,22 @@ export interface AgentApproval {
   resolvedAt: number | null;
 }
 
+export type ModelInputKind = "image" | "video" | "pdf";
+export type ModelAbility = "structured" | "web" | "system";
+
+/** Per-model limits and optional capabilities. Text input is always available. */
+export interface ModelCaps {
+  context: number;
+  output: number;
+  /** Context and output are the local defaults, not hand-entered. */
+  smart?: boolean;
+  inputs?: ModelInputKind[];
+  abilities?: ModelAbility[];
+  /** Reasoning effort names, low to high. */
+  reasoningLevels?: string[];
+  reasoningMap?: string;
+}
+
 export interface ProviderConfig {
   id: string;
   name: string;
@@ -78,7 +94,7 @@ export interface ProviderConfig {
   baseURL: string;
   apiKeyRequired: boolean;
   enabled: boolean;
-  models: Record<string, { context: number; output: number }>;
+  models: Record<string, ModelCaps>;
 }
 
 export interface ToolSpec {

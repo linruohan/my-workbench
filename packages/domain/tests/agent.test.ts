@@ -3,7 +3,10 @@ import {
   BUILTIN_MODEL_REF,
   applyRuntimeHeaders,
   buildAgentSystemPrompt,
+  buildConnectivityProbe,
   buildModelHttpRequest,
+  connectivityProbeJsonError,
+  readConnectivityProbeEvent,
   builtinProvider,
   finishOpenAiStream,
   gateTool,
@@ -294,6 +297,94 @@ describe("model protocol", () => {
       name: "task_create",
       args: { title: "写周报" },
     });
+  });
+});
+
+describe("connectivity probe", () => {
+  const remote = {
+    ...builtinProvider(),
+    id: "custom:probe",
+    apiKeyRequired: true,
+    models: {
+      "probe-model": {
+        context: 8192,
+        output: 2048,
+        reasoningLevels: ["low", "high"],
+        reasoningMap: "high=reasoning_effort:high\nlow=reasoning_effort:minimal",
+      },
+    },
+  };
+
+  it("sends one token, no tools, and the lowest reasoning level", () => {
+    const chat = buildConnectivityProbe({
+      provider: { ...remote, kind: "openai-chat-completions", baseURL: "https://probe.invalid/v1" },
+      modelId: "probe-model",
+    });
+    expect(chat.url).toBe("https://probe.invalid/v1/chat/completions");
+    expect(chat.body).toMatchObject({
+      model: "probe-model",
+      stream: true,
+      max_completion_tokens: 1,
+      reasoning_effort: "minimal",
+      messages: [
+        { role: "system", content: "You are a connectivity probe." },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(JSON.stringify(chat.body)).not.toContain("tools");
+
+    const anthropic = buildConnectivityProbe({
+      provider: { ...remote, kind: "anthropic-messages", baseURL: "https://probe.invalid" },
+      modelId: "probe-model",
+    });
+    expect(anthropic.url).toBe("https://probe.invalid/v1/messages");
+    expect(anthropic.secretHeaderNames).toEqual(["x-api-key"]);
+    expect(anthropic.body).toMatchObject({
+      max_tokens: 1,
+      stream: true,
+      system: [{ type: "text", text: "You are a connectivity probe." }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+
+    const responses = buildConnectivityProbe({
+      provider: { ...remote, kind: "openai-responses", baseURL: "https://probe.invalid/v1" },
+      modelId: "probe-model",
+    });
+    expect(responses.url).toBe("https://probe.invalid/v1/responses");
+    expect(responses.body).toMatchObject({
+      max_output_tokens: 1,
+      stream: true,
+      input: [
+        { role: "system", content: "You are a connectivity probe." },
+        { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      ],
+    });
+  });
+
+  it("treats a finish event as success and an error payload as failure", () => {
+    expect(
+      readConnectivityProbeEvent(
+        "openai-chat-completions",
+        JSON.stringify({ choices: [{ finish_reason: "length" }] }),
+      ),
+    ).toBe("finish");
+    expect(readConnectivityProbeEvent("openai-chat-completions", "[DONE]")).toBe("finish");
+    expect(
+      readConnectivityProbeEvent(
+        "anthropic-messages",
+        JSON.stringify({ type: "message_stop" }),
+      ),
+    ).toBe("finish");
+    expect(
+      readConnectivityProbeEvent(
+        "openai-responses",
+        JSON.stringify({ type: "response.completed" }),
+      ),
+    ).toBe("finish");
+    expect(
+      connectivityProbeJsonError({ error: { message: "model not found" } }),
+    ).toBe("model not found");
+    expect(connectivityProbeJsonError({ choices: [] })).toBeNull();
   });
 });
 

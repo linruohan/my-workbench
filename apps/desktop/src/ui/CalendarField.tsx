@@ -426,7 +426,13 @@ export function DateTimeField({
                 <button
                   type="button"
                   className="btn btn--primary"
-                  onClick={() => setOpen(false)}
+                  onClick={() => {
+                    // 未选过值时，「完成」确认当前面板上的日期+时间（默认今天/默认时刻）
+                    if (!hasValue) {
+                      onChange(`${activeDay}T${activeTime}`);
+                    }
+                    setOpen(false);
+                  }}
                 >
                   完成
                 </button>

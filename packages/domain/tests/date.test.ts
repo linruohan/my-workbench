@@ -3,6 +3,7 @@ import {
   formatLocalDay,
   formatRelativeDay,
   formatRelativeMoment,
+  formatTimelineDayHeader,
   parseLocalDay,
 } from "../src/date.js";
 
@@ -43,5 +44,14 @@ describe("formatRelativeDay", () => {
     const ms = parseLocalDay("2026-11-03") + 9 * 60 * 60 * 1000 + 30 * 60 * 1000;
     expect(formatRelativeMoment(ms, now)).toBe("明天 09:30");
     expect(formatLocalDay(ms)).toBe("2026-11-03");
+  });
+
+  it("formats timeline day headers", () => {
+    expect(formatTimelineDayHeader("2026-11-02", now)).toBe("今天");
+    expect(formatTimelineDayHeader("2026-11-03", now)).toBe("明天");
+    expect(formatTimelineDayHeader("2026-11-01", now)).toBe("昨天");
+    // 2026-05-03 is Sunday
+    expect(formatTimelineDayHeader("2026-05-03", now)).toBe("周日, 5/3");
+    expect(formatTimelineDayHeader("2027-02-10", now)).toBe("2027-2-10");
   });
 });

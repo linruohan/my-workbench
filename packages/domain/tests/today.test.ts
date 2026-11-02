@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  groupPlannerByDay,
   isPlannerMember,
+  selectPlannerTasks,
   isScheduleMember,
   isTodayMember,
   selectTodayTasks,
@@ -99,5 +101,37 @@ describe("today membership", () => {
     expect(isPlannerMember(otherDay, "2026-11-01")).toBe(false);
     expect(isScheduleMember(timed, "2026-11-01")).toBe(true);
     expect(isScheduleMember(dayOnly, "2026-11-01")).toBe(false);
+  });
+
+  it("planner without day includes every planned incomplete root", () => {
+    const timed = task({
+      id: "t",
+      title: "t",
+      dueWithTime: new Date(2026, 10, 1, 15, 0).getTime(),
+      createdAt: 2,
+    });
+    const later = task({
+      id: "x",
+      title: "x",
+      dueDay: "2026-11-03",
+      createdAt: 1,
+    });
+    const undated = task({ id: "u", title: "u" });
+    expect(isPlannerMember(timed)).toBe(true);
+    expect(isPlannerMember(later)).toBe(true);
+    expect(isPlannerMember(undated)).toBe(false);
+    expect(selectPlannerTasks([later, timed, undated]).map((t) => t.id)).toEqual([
+      "t",
+      "x",
+    ]);
+    expect(
+      groupPlannerByDay(selectPlannerTasks([later, timed, undated])).map((g) => ({
+        day: g.day,
+        ids: g.tasks.map((t) => t.id),
+      })),
+    ).toEqual([
+      { day: "2026-11-01", ids: ["t"] },
+      { day: "2026-11-03", ids: ["x"] },
+    ]);
   });
 });
