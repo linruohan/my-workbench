@@ -1,4 +1,5 @@
 import {
+  agentRootsMatch,
   applySchedulePatch,
   assertNoRepeatOnSubtask,
   assertTagIdAllowed,
@@ -489,12 +490,18 @@ export class MemoryWorkbenchRepository {
     row.snoozeUntil = untilMs;
   }
 
-  createAgentWorkspace(input?: { title?: string; nowMs?: number }): AgentWorkspace {
+  createAgentWorkspace(input?: {
+    title?: string;
+    rootPath?: string | null;
+    nowMs?: number;
+  }): AgentWorkspace {
     const now = input?.nowMs ?? Date.now();
     const title = input?.title?.trim() || DEFAULT_AGENT_WORKSPACE_TITLE;
+    const rootPath = input?.rootPath?.trim() || null;
     const workspace: AgentWorkspace = {
       id: createId(now),
       title,
+      rootPath,
       createdAt: now,
       updatedAt: now,
     };
@@ -516,17 +523,32 @@ export class MemoryWorkbenchRepository {
     return this.agentWorkspaces.get(id) ?? null;
   }
 
+  findAgentWorkspaceByRootPath(rootPath: string): AgentWorkspace | null {
+    return (
+      this.listAgentWorkspaces().find((workspace) =>
+        agentRootsMatch(workspace.rootPath, rootPath),
+      ) ?? null
+    );
+  }
+
   updateAgentWorkspace(
     id: string,
-    patch: Partial<Pick<AgentWorkspace, "title">>,
+    patch: Partial<Pick<AgentWorkspace, "title" | "rootPath">>,
     nowMs = Date.now(),
   ): AgentWorkspace {
     const current = this.agentWorkspaces.get(id);
     if (!current) throw new DomainError(`agent workspace not found: ${id}`);
     const title = patch.title?.trim();
+    const rootPath =
+      patch.rootPath === undefined
+        ? undefined
+        : patch.rootPath?.trim()
+          ? patch.rootPath.trim()
+          : null;
     const next = {
       ...current,
       ...(title ? { title } : {}),
+      ...(rootPath !== undefined ? { rootPath } : {}),
       updatedAt: nowMs,
     };
     this.agentWorkspaces.set(id, next);
@@ -536,7 +558,7 @@ export class MemoryWorkbenchRepository {
   /** Removes the workspace and every session inside it. */
   deleteAgentWorkspace(id: string): void {
     if (!this.agentWorkspaces.has(id)) return;
-    for (const thread of this.listAgentThreads()) {
+    for (const thread of this.listAgentThreads({ includeArchived: true })) {
       if (thread.workspaceId === id) this.deleteAgentThread(thread.id);
     }
     this.agentWorkspaces.delete(id);
@@ -563,6 +585,7 @@ export class MemoryWorkbenchRepository {
       modelRef: input?.modelRef || BUILTIN_MODEL_REF,
       permissionMode: input?.permissionMode ?? "confirm",
       queueJson: null,
+      archivedAt: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -571,10 +594,19 @@ export class MemoryWorkbenchRepository {
     return thread;
   }
 
-  listAgentThreads(workspaceId?: string): AgentThread[] {
-    const all = [...this.agentThreads.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-    if (!workspaceId) return all;
-    return all.filter((thread) => thread.workspaceId === workspaceId);
+  listAgentThreads(opts?: {
+    workspaceId?: string;
+    includeArchived?: boolean;
+  }): AgentThread[] {
+    const workspaceId = opts?.workspaceId;
+    const includeArchived = opts?.includeArchived === true;
+    return [...this.agentThreads.values()]
+      .filter((thread) => {
+        if (workspaceId && thread.workspaceId !== workspaceId) return false;
+        if (!includeArchived && thread.archivedAt != null) return false;
+        return true;
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   getAgentThread(id: string): AgentThread | null {
@@ -592,6 +624,7 @@ export class MemoryWorkbenchRepository {
         | "projectId"
         | "workspaceId"
         | "queueJson"
+        | "archivedAt"
       >
     >,
     nowMs = Date.now(),
@@ -605,6 +638,14 @@ export class MemoryWorkbenchRepository {
     this.agentThreads.set(id, next);
     this.touchAgentWorkspace(next.workspaceId, nowMs);
     return next;
+  }
+
+  archiveAgentThread(id: string, nowMs = Date.now()): AgentThread {
+    return this.updateAgentThread(id, { archivedAt: nowMs }, nowMs);
+  }
+
+  unarchiveAgentThread(id: string, nowMs = Date.now()): AgentThread {
+    return this.updateAgentThread(id, { archivedAt: null }, nowMs);
   }
 
   deleteAgentThread(id: string): void {
@@ -825,8 +866,10 @@ export class MemoryWorkbenchRepository {
       >;
       tags?: Tag[];
       taskTags?: Array<[string, string[]]>;
-      agentWorkspaces?: AgentWorkspace[];
-      agentThreads?: Array<AgentThread & { workspaceId?: string }>;
+      agentWorkspaces?: Array<AgentWorkspace & { rootPath?: string | null }>;
+      agentThreads?: Array<
+        AgentThread & { workspaceId?: string; archivedAt?: number | null }
+      >;
       agentMessages?: AgentMessage[];
       agentApprovals?: AgentApproval[];
     };
@@ -855,7 +898,13 @@ export class MemoryWorkbenchRepository {
       (data.taskTags ?? []).map(([taskId, ids]) => [taskId, new Set(ids)]),
     );
     this.agentWorkspaces = new Map(
-      (data.agentWorkspaces ?? []).map((workspace) => [workspace.id, workspace]),
+      (data.agentWorkspaces ?? []).map((workspace) => [
+        workspace.id,
+        {
+          ...workspace,
+          rootPath: workspace.rootPath ?? null,
+        },
+      ]),
     );
     const fallbackWorkspace =
       this.listAgentWorkspaces()[0] ??
@@ -880,6 +929,7 @@ export class MemoryWorkbenchRepository {
             ...thread,
             workspaceId,
             queueJson: thread.queueJson ?? null,
+            archivedAt: thread.archivedAt ?? null,
           },
         ];
       }),

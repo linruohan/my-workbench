@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE TABLE IF NOT EXISTS agent_workspaces (
   id TEXT PRIMARY KEY NOT NULL,
   title TEXT NOT NULL,
+  root_path TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -116,6 +117,7 @@ CREATE TABLE IF NOT EXISTS agent_threads (
   model_ref TEXT NOT NULL,
   permission_mode TEXT NOT NULL,
   queue_json TEXT,
+  archived_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

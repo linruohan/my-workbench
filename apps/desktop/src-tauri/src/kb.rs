@@ -12,12 +12,14 @@ pub struct KbEntry {
     name: String,
     path: String,
     is_dir: bool,
+    /// Modified time in milliseconds since Unix epoch (best-effort).
+    mtime_ms: Option<u64>,
 }
 
 #[tauri::command]
-pub fn kb_pick_directory() -> Option<String> {
+pub fn kb_pick_directory(title: Option<String>) -> Option<String> {
     rfd::FileDialog::new()
-        .set_title("导入知识库目录")
+        .set_title(title.unwrap_or_else(|| "选择文件夹".into()))
         .pick_folder()
         .map(|path| path.to_string_lossy().into_owned())
 }
@@ -34,10 +36,17 @@ pub fn kb_list_dir(path: String) -> Result<Vec<KbEntry>, String> {
         }
         let file_path = entry.path();
         let is_dir = file_path.is_dir();
+        let mtime_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|dur| dur.as_millis() as u64);
         out.push(KbEntry {
             name,
             path: file_path.to_string_lossy().into_owned(),
             is_dir,
+            mtime_ms,
         });
     }
     out.sort_by(|a, b| {
@@ -46,6 +55,53 @@ pub fn kb_list_dir(path: String) -> Result<Vec<KbEntry>, String> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(out)
+}
+
+/// Reveal a file or folder in the OS file manager.
+#[tauri::command]
+pub fn kb_reveal_in_explorer(path: String) -> Result<(), String> {
+    let target = Path::new(&path);
+    if !target.exists() {
+        return Err("路径不存在".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("explorer");
+        if target.is_dir() {
+            cmd.arg(target);
+        } else {
+            cmd.arg(format!("/select,{}", target.to_string_lossy()));
+        }
+        cmd.spawn()
+            .map_err(|err| format!("无法打开资源管理器：{err}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|err| format!("无法在访达中显示：{err}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let folder = if target.is_dir() {
+            target.to_path_buf()
+        } else {
+            target
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| target.to_path_buf())
+        };
+        std::process::Command::new("xdg-open")
+            .arg(folder)
+            .spawn()
+            .map_err(|err| format!("无法打开文件管理器：{err}"))?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("当前平台不支持在资源管理器中显示".into())
 }
 
 #[tauri::command]
@@ -92,6 +148,27 @@ pub fn kb_exists(path: String) -> bool {
 #[tauri::command]
 pub fn kb_mkdir(path: String) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|err| format!("无法创建目录：{err}"))
+}
+
+#[tauri::command]
+pub fn kb_rename(from: String, to: String) -> Result<(), String> {
+    let src = Path::new(&from);
+    let dest = Path::new(&to);
+    if !src.exists() {
+        return Err("源文件不存在".into());
+    }
+    if src == dest {
+        return Ok(());
+    }
+    if dest.exists() {
+        return Err("目标文件已存在".into());
+    }
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent).map_err(|err| format!("无法创建目录：{err}"))?;
+        }
+    }
+    fs::rename(src, dest).map_err(|err| format!("无法重命名：{err}"))
 }
 
 fn read_limited(path: &str) -> Result<Vec<u8>, String> {

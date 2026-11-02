@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   agentEmptyGreeting,
+  agentRootsMatch,
+  agentWorkspaceTitleFromPath,
   filterAgentThreads,
   formatAgentBubbleTime,
+  formatAgentRelativeShort,
   groupAgentThreadsByWorkspace,
   modelSwitchText,
+  normalizeAgentRootPath,
 } from "../src/index.js";
 
 describe("agent empty greeting", () => {
@@ -80,5 +84,28 @@ describe("agent bubble time", () => {
     expect(formatAgentBubbleTime(new Date(2026, 10, 1, 8, 5, 0).getTime(), now)).toBe(
       "昨天 08:05",
     );
+  });
+});
+
+describe("agent relative short", () => {
+  const now = Date.parse("2026-11-02T12:00:00Z");
+
+  it("compacts minutes hours and days", () => {
+    expect(formatAgentRelativeShort(now, now)).toBe("刚刚");
+    expect(formatAgentRelativeShort(now - 3 * 60_000, now)).toBe("3m");
+    expect(formatAgentRelativeShort(now - 5 * 60 * 60_000, now)).toBe("5h");
+    expect(formatAgentRelativeShort(now - 7 * 24 * 60 * 60_000, now)).toBe("7d");
+  });
+});
+
+describe("agent workspace path", () => {
+  it("normalizes Windows roots and titles from the folder name", () => {
+    expect(normalizeAgentRootPath("D:\\codehub\\my-workbench\\")).toBe(
+      "d:\\codehub\\my-workbench",
+    );
+    expect(
+      agentRootsMatch("D:/codehub/my-workbench", "D:\\codehub\\my-workbench\\"),
+    ).toBe(true);
+    expect(agentWorkspaceTitleFromPath("D:\\codehub\\my-workbench")).toBe("my-workbench");
   });
 });

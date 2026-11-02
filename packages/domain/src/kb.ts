@@ -1116,6 +1116,25 @@ export function extractMdHeadings(source: string): MdHeading[] {
   return out;
 }
 
+/**
+ * Find the block index that owns a heading id from `extractMdHeadings(join(blocks))`.
+ * Returns -1 when not found.
+ */
+export function locateHeadingBlockIndex(blocks: string[], headingId: string): number {
+  if (!headingId) return -1;
+  const global = extractMdHeadings(joinMdBlocks(blocks));
+  let cursor = 0;
+  for (let i = 0; i < blocks.length; i += 1) {
+    const local = extractMdHeadings(blocks[i] ?? "");
+    for (let j = 0; j < local.length; j += 1) {
+      const hit = global[cursor];
+      cursor += 1;
+      if (hit && hit.id === headingId) return i;
+    }
+  }
+  return -1;
+}
+
 function isBlockBoundaryLine(line: string): boolean {
   return (
     isHeadingLine(line) ||

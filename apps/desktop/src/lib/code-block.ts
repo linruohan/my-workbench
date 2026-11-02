@@ -115,8 +115,18 @@ export function normalizeFenceContent(code: string): string {
   return code.replace(/\n$/, "");
 }
 
+/** Skip expensive highlight.js work for very large fences (keeps open snappy). */
+const HLJS_MAX_CHARS = 12_000;
+const HLJS_MAX_LINES = 400;
+
 export function highlightCode(code: string, lang: string): string {
   const source = normalizeFenceContent(code);
+  if (
+    source.length > HLJS_MAX_CHARS ||
+    lineCount(source) > HLJS_MAX_LINES
+  ) {
+    return escapeHtml(source);
+  }
   if (lang && hljs.getLanguage(lang)) {
     try {
       return hljs.highlight(source, { language: lang, ignoreIllegals: true }).value;
@@ -124,6 +134,8 @@ export function highlightCode(code: string, lang: string): string {
       // fall through
     }
   }
+  // Prefer plain escape over highlightAuto for unlabeled fences — auto-detect is costly.
+  if (!lang) return escapeHtml(source);
   try {
     return hljs.highlightAuto(source).value;
   } catch {
@@ -138,12 +150,10 @@ function lineCount(code: string): number {
 }
 
 function lineNumberHtml(count: number): string {
-  const lines: string[] = [];
-  for (let i = 1; i <= count; i += 1) {
-    lines.push(`<span class="md-code__num">${i}</span>`);
-  }
-  // Spans are already display:block — do not join with "\n" or <pre> doubles the gaps.
-  return lines.join("");
+  // One text node instead of N spans — much cheaper for large fences.
+  const parts = new Array<string>(count);
+  for (let i = 0; i < count; i += 1) parts[i] = String(i + 1);
+  return parts.join("\n");
 }
 
 /** macOS-style fenced code block with language label, line numbers, and highlight.js. */

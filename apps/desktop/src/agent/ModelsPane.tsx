@@ -1,196 +1,687 @@
-import { useState } from "react";
-import { BUILTIN_PROVIDER_ID, type ProviderKind } from "@wb/domain";
-import { credentialExists, deleteCredential, writeCredential } from "./credentials";
+import { useEffect, useMemo, useState } from "react";
 import {
+  BUILTIN_MODEL_REF,
+  BUILTIN_PROVIDER_ID,
+  type ProviderConfig,
+  type ProviderKind,
+} from "@wb/domain";
+import { useDialog } from "../shell/Dialogs";
+import { IconMore, IconPencil, IconPlus, IconRefresh } from "../shell/icons";
+import {
+  credentialExists,
+  deleteCredential,
+  readCredential,
+  writeCredential,
+} from "./credentials";
+import {
+  PROVIDER_TEMPLATES,
+  addModel,
   addProvider,
-  modelChoices,
+  addProviderFromTemplate,
+  providerKindLabel,
   readProviderStore,
+  removeModel,
   removeProvider,
   setDefaultModel,
+  setProviderEnabled,
+  updateModel,
+  updateProvider,
+  type ProviderTemplate,
 } from "./providers";
 
 export function ModelsPane() {
+  const dialog = useDialog();
   const [version, setVersion] = useState(0);
   const store = readProviderStore();
   void version;
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState<Exclude<ProviderKind, "builtin">>(
-    "openai-chat-completions",
+  const providers = store.providers;
+  const builtin = providers.find((item) => item.id === BUILTIN_PROVIDER_ID) ?? null;
+  const customs = providers.filter((item) => item.id !== BUILTIN_PROVIDER_ID);
+  const [selectedId, setSelectedId] = useState<string>(
+    customs[0]?.id ?? builtin?.id ?? BUILTIN_PROVIDER_ID,
   );
-  const [baseURL, setBaseURL] = useState("http://127.0.0.1:11434/v1");
-  const [modelId, setModelId] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyRequired, setApiKeyRequired] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const selected =
+    providers.find((item) => item.id === selectedId) ??
+    customs[0] ??
+    builtin ??
+    null;
+
+  useEffect(() => {
+    if (!selected) return;
+    if (providers.some((item) => item.id === selectedId)) return;
+    setSelectedId(customs[0]?.id ?? builtin?.id ?? BUILTIN_PROVIDER_ID);
+  }, [providers, selected, selectedId, customs, builtin]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".agent-models__more")) return;
+      setMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   const refresh = () => setVersion((value) => value + 1);
 
-  return (
-    <section className="settings__pane">
-      <header className="settings__pane-head">
-        <h1 className="settings__title">模型</h1>
-        <span className="settings__pill">密钥只在本机</span>
-      </header>
-      <p className="agent-models__lead">
-        模型配置保存在本机。API 密钥单独存放，不会写入会话、工具参数或快照。
-      </p>
+  const createFromTemplate = (template: ProviderTemplate) => {
+    const provider = addProviderFromTemplate(template.id);
+    if (!provider) return;
+    setAdding(false);
+    setSelectedId(provider.id);
+    refresh();
+  };
 
-      <div className="settings__card">
-        <label className="settings__row">
-          <div>
-            <div className="settings__row-title">默认模型</div>
-            <div className="settings__row-desc">
-              新建会话时使用。已有会话可在 Agent 面板里单独切换。
+  const createBlank = () => {
+    const provider = addProvider({
+      name: "新供应商",
+      kind: "openai-chat-completions",
+      baseURL: "https://api.example.com/v1",
+      modelId: "",
+      apiKeyRequired: true,
+    });
+    setAdding(false);
+    setSelectedId(provider.id);
+    refresh();
+  };
+
+  return (
+    <section className="settings__pane agent-models">
+      <header className="agent-models__head">
+        <div>
+          <h1 className="settings__title">模型设置</h1>
+          <p className="agent-models__lead">
+            管理自定义模型供应商，配置后可在聊天时选择使用。
+          </p>
+        </div>
+        <div className="agent-models__head-actions">
+          <button
+            type="button"
+            className="agent-models__icon-btn"
+            title="刷新"
+            aria-label="刷新模型配置"
+            onClick={refresh}
+          >
+            <IconRefresh size={15} />
+          </button>
+          <button
+            type="button"
+            className="primary agent-models__add-btn"
+            onClick={() => setAdding(true)}
+          >
+            <IconPlus size={14} />
+            添加供应商
+          </button>
+        </div>
+      </header>
+
+      <div className="agent-models__layout">
+        <aside className="agent-models__nav" aria-label="模型供应商">
+          {builtin ? (
+            <div className="agent-models__nav-group">
+              <div className="agent-models__nav-label">本机</div>
+              <ProviderNavButton
+                provider={builtin}
+                active={selected?.id === builtin.id && !adding}
+                onSelect={() => {
+                  setAdding(false);
+                  setSelectedId(builtin.id);
+                }}
+              />
             </div>
+          ) : null}
+          <div className="agent-models__nav-group">
+            <div className="agent-models__nav-label">自定义供应商</div>
+            {customs.length === 0 ? (
+              <p className="agent-models__nav-empty">还没有自定义供应商</p>
+            ) : (
+              customs.map((provider) => (
+                <ProviderNavButton
+                  key={provider.id}
+                  provider={provider}
+                  active={selected?.id === provider.id && !adding}
+                  onSelect={() => {
+                    setAdding(false);
+                    setSelectedId(provider.id);
+                  }}
+                />
+              ))
+            )}
           </div>
-          <select
-            className="settings__input"
-            aria-label="默认模型"
-            value={store.defaultModelRef}
-            onChange={(event) => {
-              setDefaultModel(event.target.value);
-              refresh();
+        </aside>
+
+        <div className="agent-models__detail">
+          {adding ? (
+            <AddProviderPanel
+              onCancel={() => setAdding(false)}
+              onPickTemplate={createFromTemplate}
+              onBlank={createBlank}
+            />
+          ) : selected?.kind === "builtin" ? (
+            <BuiltinDetail
+              defaultModelRef={store.defaultModelRef}
+              onSetDefault={() => {
+                setDefaultModel(BUILTIN_MODEL_REF);
+                refresh();
+              }}
+            />
+          ) : selected ? (
+            <ProviderDetail
+              key={selected.id}
+              provider={selected}
+              defaultModelRef={store.defaultModelRef}
+              menuOpen={menuOpen}
+              onMenuOpenChange={setMenuOpen}
+              onRefresh={refresh}
+              onRename={async () => {
+                setMenuOpen(false);
+                const next = await dialog.prompt({
+                  title: "重命名供应商",
+                  label: "名称",
+                  initialValue: selected.name,
+                });
+                if (!next?.trim()) return;
+                updateProvider(selected.id, { name: next.trim() });
+                refresh();
+              }}
+              onDelete={async () => {
+                setMenuOpen(false);
+                const ok = await dialog.confirm({
+                  title: "删除供应商",
+                  message: `删除供应商「${selected.name}」？本机密钥会一起删除。`,
+                  confirmLabel: "删除",
+                  danger: true,
+                });
+                if (!ok) return;
+                removeProvider(selected.id);
+                deleteCredential(selected.id);
+                setSelectedId(BUILTIN_PROVIDER_ID);
+                refresh();
+              }}
+            />
+          ) : (
+            <p className="agent-models__hint">选择左侧供应商，或添加一个新的。</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProviderNavButton({
+  provider,
+  active,
+  onSelect,
+}: {
+  provider: ProviderConfig;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const ready =
+    provider.kind === "builtin" ||
+    (provider.enabled &&
+      Object.keys(provider.models).length > 0 &&
+      (!provider.apiKeyRequired || credentialExists(provider.id)));
+  return (
+    <button
+      type="button"
+      className={active ? "agent-models__nav-item is-active" : "agent-models__nav-item"}
+      onClick={onSelect}
+    >
+      <span className="agent-models__nav-name">{provider.name}</span>
+      <span
+        className={
+          ready ? "agent-models__dot is-ready" : "agent-models__dot is-warn"
+        }
+        title={ready ? "可用" : "待完善"}
+        aria-hidden="true"
+      />
+    </button>
+  );
+}
+
+function AddProviderPanel({
+  onCancel,
+  onPickTemplate,
+  onBlank,
+}: {
+  onCancel: () => void;
+  onPickTemplate: (template: ProviderTemplate) => void;
+  onBlank: () => void;
+}) {
+  const groups = useMemo(() => {
+    const map = new Map<string, ProviderTemplate[]>();
+    for (const template of PROVIDER_TEMPLATES) {
+      const list = map.get(template.group) ?? [];
+      list.push(template);
+      map.set(template.group, list);
+    }
+    return [...map.entries()];
+  }, []);
+
+  return (
+    <div className="agent-models__card">
+      <div className="agent-models__card-head">
+        <div>
+          <h2 className="agent-models__card-title">添加供应商</h2>
+          <p className="agent-models__card-desc">从目录选择模板，或创建空白自定义端点。</p>
+        </div>
+        <button type="button" className="btn" onClick={onCancel}>
+          取消
+        </button>
+      </div>
+      {groups.map(([group, templates]) => (
+        <div key={group} className="agent-models__template-group">
+          <div className="agent-models__nav-label">{group}</div>
+          <div className="agent-models__template-grid">
+            {templates.map((template) => (
+              <button
+                key={template.id}
+                type="button"
+                className="agent-models__template"
+                onClick={() =>
+                  template.id === "custom" ? onBlank() : onPickTemplate(template)
+                }
+              >
+                <strong>{template.name}</strong>
+                <span>{providerKindLabel(template.kind)}</span>
+                <small>{template.baseURL}</small>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BuiltinDetail({
+  defaultModelRef,
+  onSetDefault,
+}: {
+  defaultModelRef: string;
+  onSetDefault: () => void;
+}) {
+  const isDefault = defaultModelRef === BUILTIN_MODEL_REF;
+  return (
+    <div className="agent-models__card">
+      <div className="agent-models__card-head">
+        <div>
+          <h2 className="agent-models__card-title">本机工作台</h2>
+          <p className="agent-models__card-desc">
+            离线理解常用指令，不调用外部 API，也不需要密钥。
+          </p>
+        </div>
+        <span className="settings__pill">内置</span>
+      </div>
+      <div className="agent-models__field">
+        <span>状态</span>
+        <span className="agent-models__field-value">始终可用</span>
+      </div>
+      <div className="agent-models__models-head">
+        <h3>模型列表</h3>
+      </div>
+      <ul className="agent-models__models">
+        <li className="agent-models__model">
+          <div>
+            <strong>local</strong>
+            <small>上下文 8192 · 输出 2048</small>
+          </div>
+          {isDefault ? (
+            <span className="settings__pill">默认</span>
+          ) : (
+            <button type="button" className="btn" onClick={onSetDefault}>
+              设为默认
+            </button>
+          )}
+        </li>
+      </ul>
+    </div>
+  );
+}
+
+function ProviderDetail({
+  provider,
+  defaultModelRef,
+  menuOpen,
+  onMenuOpenChange,
+  onRefresh,
+  onRename,
+  onDelete,
+}: {
+  provider: ProviderConfig;
+  defaultModelRef: string;
+  menuOpen: boolean;
+  onMenuOpenChange: (open: boolean) => void;
+  onRefresh: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const dialog = useDialog();
+  const [baseURL, setBaseURL] = useState(provider.baseURL);
+  const [kind, setKind] = useState<Exclude<ProviderKind, "builtin">>(
+    provider.kind === "anthropic-messages"
+      ? "anthropic-messages"
+      : "openai-chat-completions",
+  );
+  const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [apiKeyRequired, setApiKeyRequired] = useState(provider.apiKeyRequired);
+  const [modelDraft, setModelDraft] = useState("");
+  const [editingModel, setEditingModel] = useState<string | null>(null);
+  const [contextDraft, setContextDraft] = useState("8192");
+  const [outputDraft, setOutputDraft] = useState("2048");
+  const hasKey = credentialExists(provider.id);
+  const models = Object.entries(provider.models);
+
+  useEffect(() => {
+    setBaseURL(provider.baseURL);
+    setKind(
+      provider.kind === "anthropic-messages"
+        ? "anthropic-messages"
+        : "openai-chat-completions",
+    );
+    setApiKeyRequired(provider.apiKeyRequired);
+    setApiKey("");
+    setShowKey(false);
+    setEditingModel(null);
+  }, [provider.id, provider.baseURL, provider.kind, provider.apiKeyRequired]);
+
+  const saveConnection = () => {
+    updateProvider(provider.id, {
+      baseURL,
+      kind,
+      apiKeyRequired,
+    });
+    if (apiKey.trim() || showKey) writeCredential(provider.id, apiKey);
+    onRefresh();
+  };
+
+  const beginEditModel = (modelId: string) => {
+    const caps = provider.models[modelId];
+    if (!caps) return;
+    setEditingModel(modelId);
+    setContextDraft(String(caps.context));
+    setOutputDraft(String(caps.output));
+  };
+
+  return (
+    <div className="agent-models__card">
+      <div className="agent-models__card-head">
+        <div className="agent-models__card-title-row">
+          <h2 className="agent-models__card-title">{provider.name}</h2>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={provider.enabled}
+            aria-label="启用供应商"
+            className={provider.enabled ? "toggle is-on" : "toggle"}
+            onClick={() => {
+              setProviderEnabled(provider.id, !provider.enabled);
+              onRefresh();
             }}
           >
-            {modelChoices(store).map((choice) => (
-              <option key={choice.ref} value={choice.ref}>
-                {choice.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <h2 className="settings__subtitle">已配置</h2>
-      <div className="settings__card">
-        {store.providers.map((provider) => {
-          const modelIdLabel = Object.keys(provider.models)[0] ?? "";
-          return (
-            <div key={provider.id} className="settings__row">
-              <div>
-                <div className="settings__row-title">{provider.name}</div>
-                <div className="settings__row-desc">
-                  {provider.kind === "builtin"
-                    ? "离线理解常用指令"
-                    : `${provider.kind} · ${provider.baseURL || "未填写地址"} · ${modelIdLabel}`}
-                  {provider.kind !== "builtin" && credentialExists(provider.id)
-                    ? " · 密钥已保存"
-                    : ""}
-                </div>
-              </div>
-              {provider.id === BUILTIN_PROVIDER_ID ? (
-                <span className="settings__pill">内置</span>
-              ) : (
+            <span className="toggle__thumb" />
+          </button>
+          <div className="agent-models__more">
+            <button
+              type="button"
+              className="agent-models__icon-btn"
+              aria-label="更多"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => onMenuOpenChange(!menuOpen)}
+            >
+              <IconMore size={16} />
+            </button>
+            {menuOpen ? (
+              <div className="agent__thread-menu agent-models__menu" role="menu">
+                <button type="button" role="menuitem" onClick={onRename}>
+                  <IconPencil size={14} />
+                  重命名
+                </button>
                 <button
                   type="button"
-                  className="btn"
-                  onClick={() => {
-                    removeProvider(provider.id);
-                    deleteCredential(provider.id);
-                    refresh();
-                  }}
+                  role="menuitem"
+                  className="is-danger"
+                  onClick={onDelete}
                 >
-                  移除
+                  删除
                 </button>
-              )}
-            </div>
-          );
-        })}
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
 
-      <h2 className="settings__subtitle">添加端点</h2>
-      <form
-        className="settings__card agent-models__form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const provider = addProvider({
-            name,
-            kind,
-            baseURL,
-            modelId,
-            apiKeyRequired,
-          });
-          if (apiKey.trim()) writeCredential(provider.id, apiKey);
-          setName("");
-          setModelId("");
-          setApiKey("");
-          refresh();
-        }}
-      >
-        <label>
-          名称
+      <label className="agent-models__field">
+        <span>Base URL</span>
+        <input
+          className="settings__input"
+          aria-label="Base URL"
+          value={baseURL}
+          placeholder="https://api.example.com/v1"
+          onChange={(event) => setBaseURL(event.target.value)}
+          onBlur={saveConnection}
+        />
+      </label>
+
+      <label className="agent-models__field">
+        <span>API 格式</span>
+        <select
+          className="settings__select"
+          aria-label="API 格式"
+          value={kind}
+          onChange={(event) => {
+            const next = event.target.value as Exclude<ProviderKind, "builtin">;
+            setKind(next);
+            setApiKeyRequired(next === "anthropic-messages" ? true : apiKeyRequired);
+            updateProvider(provider.id, {
+              kind: next,
+              apiKeyRequired: next === "anthropic-messages" ? true : apiKeyRequired,
+            });
+            onRefresh();
+          }}
+        >
+          <option value="openai-chat-completions">
+            Chat Completions (/chat/completions)
+          </option>
+          <option value="anthropic-messages">Anthropic Messages</option>
+        </select>
+      </label>
+
+      <label className="agent-models__field">
+        <span>API Key</span>
+        <div className="agent-models__key-row">
           <input
-            className="settings__input"
-            aria-label="模型名称"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Ollama"
-          />
-        </label>
-        <label>
-          协议
-          <select
-            className="settings__input"
-            aria-label="模型协议"
-            value={kind}
-            onChange={(event) => {
-              const next = event.target.value as Exclude<ProviderKind, "builtin">;
-              setKind(next);
-              setApiKeyRequired(next === "anthropic-messages");
-              setBaseURL(
-                next === "anthropic-messages"
-                  ? "https://api.anthropic.com"
-                  : "http://127.0.0.1:11434/v1",
-              );
-            }}
-          >
-            <option value="openai-chat-completions">OpenAI 兼容</option>
-            <option value="anthropic-messages">Anthropic Messages</option>
-          </select>
-        </label>
-        <label>
-          Base URL
-          <input
-            className="settings__input"
-            aria-label="模型 Base URL"
-            value={baseURL}
-            onChange={(event) => setBaseURL(event.target.value)}
-          />
-        </label>
-        <label>
-          模型 ID
-          <input
-            className="settings__input"
-            aria-label="模型 ID"
-            value={modelId}
-            onChange={(event) => setModelId(event.target.value)}
-            placeholder="llama3.1"
-            required
-          />
-        </label>
-        <label>
-          API 密钥
-          <input
-            className="settings__input"
-            aria-label="模型 API 密钥"
-            type="password"
+            className="settings__input settings__input--grow"
+            aria-label="API Key"
+            type={showKey ? "text" : "password"}
             autoComplete="off"
             value={apiKey}
+            placeholder={hasKey ? "已保存，输入新密钥可覆盖" : "输入 API Key"}
             onChange={(event) => setApiKey(event.target.value)}
-            placeholder={apiKeyRequired ? "必填，仅保存在本机" : "可选"}
+            onBlur={saveConnection}
           />
-        </label>
-        <label className="agent-models__check">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              if (!showKey && hasKey && !apiKey) {
+                setApiKey(readCredential(provider.id) ?? "");
+              }
+              setShowKey((value) => !value);
+            }}
+          >
+            {showKey ? "隐藏" : "显示"}
+          </button>
+        </div>
+      </label>
+
+      <label className="agent-models__check">
+        <input
+          type="checkbox"
+          checked={apiKeyRequired}
+          onChange={(event) => {
+            setApiKeyRequired(event.target.checked);
+            updateProvider(provider.id, { apiKeyRequired: event.target.checked });
+            onRefresh();
+          }}
+        />
+        调用前必须有密钥
+      </label>
+
+      <div className="agent-models__models-head">
+        <h3>模型列表</h3>
+        <form
+          className="agent-models__model-add"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const ref = addModel(provider.id, modelDraft);
+            if (!ref) return;
+            setModelDraft("");
+            onRefresh();
+          }}
+        >
           <input
-            type="checkbox"
-            checked={apiKeyRequired}
-            onChange={(event) => setApiKeyRequired(event.target.checked)}
+            className="settings__input"
+            aria-label="新模型 ID"
+            placeholder="模型 ID"
+            value={modelDraft}
+            onChange={(event) => setModelDraft(event.target.value)}
           />
-          调用前必须有密钥
-        </label>
-        <button type="submit" className="primary">
-          添加
-        </button>
-      </form>
-    </section>
+          <button type="submit" className="btn" disabled={!modelDraft.trim()}>
+            <IconPlus size={14} />
+            添加模型
+          </button>
+        </form>
+      </div>
+
+      {models.length === 0 ? (
+        <div className="agent-models__empty">
+          当前没有配置模型，添加模型后可在聊天中使用。
+        </div>
+      ) : (
+        <ul className="agent-models__models">
+          {models.map(([modelId, caps]) => {
+            const ref = `${provider.id}/${modelId}`;
+            const isDefault = defaultModelRef === ref;
+            const editing = editingModel === modelId;
+            return (
+              <li key={modelId} className="agent-models__model">
+                {editing ? (
+                  <div className="agent-models__model-edit">
+                    <strong>{modelId}</strong>
+                    <label>
+                      上下文
+                      <input
+                        className="settings__input"
+                        inputMode="numeric"
+                        value={contextDraft}
+                        onChange={(event) => setContextDraft(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      最大输出
+                      <input
+                        className="settings__input"
+                        inputMode="numeric"
+                        value={outputDraft}
+                        onChange={(event) => setOutputDraft(event.target.value)}
+                      />
+                    </label>
+                    <div className="agent-models__model-edit-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() => {
+                          updateModel(provider.id, modelId, {
+                            context: Number(contextDraft),
+                            output: Number(outputDraft),
+                          });
+                          setEditingModel(null);
+                          onRefresh();
+                        }}
+                      >
+                        保存
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => setEditingModel(null)}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <strong>{modelId}</strong>
+                      <small>
+                        上下文 {caps.context} · 输出 {caps.output}
+                      </small>
+                    </div>
+                    <div className="agent-models__model-actions">
+                      {isDefault ? (
+                        <span className="settings__pill">默认</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => {
+                            setDefaultModel(ref);
+                            onRefresh();
+                          }}
+                        >
+                          设为默认
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => beginEditModel(modelId)}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={models.length <= 1}
+                        onClick={() => {
+                          void (async () => {
+                            const ok = await dialog.confirm({
+                              title: "删除模型",
+                              message: `从「${provider.name}」删除模型 ${modelId}？`,
+                              confirmLabel: "删除",
+                              danger: true,
+                            });
+                            if (!ok) return;
+                            removeModel(provider.id, modelId);
+                            onRefresh();
+                          })();
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }

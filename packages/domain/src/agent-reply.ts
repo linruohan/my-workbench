@@ -1,6 +1,37 @@
+import { fileNameOf } from "./kb.js";
 import { formatLocalDay, parseLocalDay } from "./date.js";
 
 const LIST_LIMIT = 12;
+
+/** Collapse trailing separators and unify slashes for workspace root matching. */
+export function normalizeAgentRootPath(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, "");
+  if (!trimmed) return "";
+  // Keep drive-letter form; compare case-insensitively on Windows-style paths.
+  const unified = trimmed.replace(/\//g, "\\");
+  return /^[a-zA-Z]:/.test(unified) ? unified.toLowerCase() : trimmed;
+}
+
+/** Display title for a newly opened folder workspace. */
+export function agentWorkspaceTitleFromPath(path: string): string {
+  const name = fileNameOf(path.trim());
+  return name || "工作区";
+}
+
+export function agentRootsMatch(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return normalizeAgentRootPath(a) === normalizeAgentRootPath(b);
+}
+
+/** Active sessions only (archivedAt is null/undefined). */
+export function isAgentThreadActive<T extends { archivedAt?: number | null }>(
+  thread: T,
+): boolean {
+  return thread.archivedAt == null;
+}
 
 /**
  * Chat marker for a real model change. The same ref is not a change.
@@ -123,6 +154,20 @@ export function formatAgentDay(day: string, nowMs: number): string {
 
 export function formatAgentMoment(ms: number, nowMs: number): string {
   return `${formatAgentDay(formatLocalDay(ms), nowMs)} ${formatAgentClock(ms)}`;
+}
+
+/** Compact sidebar age, matching ZCode-style session rows (1m / 7d). */
+export function formatAgentRelativeShort(ms: number, nowMs: number): string {
+  const diff = Math.max(0, nowMs - ms);
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  return `${months}mo`;
 }
 
 /** Clock on a bubble. Today's messages omit the day; other days keep 昨天 / 明天 / the date. */

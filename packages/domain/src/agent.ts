@@ -19,6 +19,8 @@ export type ProviderKind = "builtin" | "openai-chat-completions" | "anthropic-me
 export interface AgentWorkspace {
   id: string;
   title: string;
+  /** Absolute local directory this workspace is bound to, if any. */
+  rootPath: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -35,6 +37,8 @@ export interface AgentThread {
   permissionMode: AgentPermissionMode;
   /** JSON array of planned calls waiting to run. Null when idle. */
   queueJson: string | null;
+  /** Set when the session is archived; null while active. */
+  archivedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -301,7 +305,7 @@ export function gateTool(mode: AgentPermissionMode, name: string): ToolGate {
 }
 
 export function permissionModeLabel(mode: AgentPermissionMode): string {
-  if (mode === "confirm") return "需确认";
+  if (mode === "confirm") return "变更前确认";
   if (mode === "session_auto") return "本会话自动";
   return "只读";
 }

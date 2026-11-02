@@ -1,4 +1,5 @@
 mod kb;
+mod open_ext;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -13,6 +14,9 @@ pub fn run() {
             kb::kb_write_base64,
             kb::kb_exists,
             kb::kb_mkdir,
+            kb::kb_rename,
+            kb::kb_reveal_in_explorer,
+            open_ext::open_external,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

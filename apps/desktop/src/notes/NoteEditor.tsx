@@ -19,12 +19,15 @@ import {
   dedupeSelectedLines,
   expandGithubMdSnippet,
   extractImageSlots,
+  extractMdHeadings,
   findAllMatches,
   findNextMatch,
   indentMarkdownSelection,
   isCompleteFenceBlock,
   isTableLine,
+  isTocSource,
   joinMdBlocks,
+  locateHeadingBlockIndex,
   locateInBlocks,
   locateLineInBlocks,
   normalizeMdBlocks,
@@ -41,9 +44,15 @@ import {
   type MdSnippetRange,
   type Note,
 } from "@wb/domain";
-import { isTauriRuntime } from "../lib/paths";
 import { copyCodeBlock } from "../lib/code-copy";
+import { errorMessage } from "../lib/errors";
 import { renderMarkdown } from "../lib/markdown";
+import {
+  externalHrefFromEvent,
+  openExternalUrl,
+} from "../lib/open-external";
+import { isTauriRuntime } from "../lib/paths";
+import { useDialog } from "../shell/Dialogs";
 import {
   bytesToBase64,
   clipboardFileToPngBytes,
@@ -51,6 +60,12 @@ import {
   savePastedImage,
 } from "./kb-api";
 import { FindReplaceBar, type FindReplaceState } from "./FindReplaceBar";
+import {
+  buildRowMetrics,
+  lineNumberText,
+  mapPool,
+  visibleRange,
+} from "./md-live-virtual";
 
 const DEFAULT_FIND: FindReplaceState = {
   query: "",
@@ -68,6 +83,8 @@ type Props = {
   onDelete?: () => void;
   onSave?: () => void;
   titleReadOnly?: boolean;
+  /** Double-click the title to rename the backing file (knowledge files). */
+  onRenameFile?: (nextFileName: string) => void | Promise<void>;
   imageBaseDir?: string | null;
   imageStem?: string | null;
   onAssetSaved?: () => void;
@@ -249,11 +266,13 @@ export function NoteEditor({
   onDelete,
   onSave,
   titleReadOnly = false,
+  onRenameFile,
   imageBaseDir = null,
   imageStem = null,
   onAssetSaved,
   saveLabel = null,
 }: Props) {
+  const dialog = useDialog();
   const [blocks, setBlocks] = useState(() => splitMdBlocks(note.bodyMd));
   const [active, setActive] = useState<number | null>(null);
   const [colorMenu, setColorMenu] = useState<"color" | "background" | null>(null);
@@ -263,9 +282,20 @@ export function NoteEditor({
   const [gotoOpen, setGotoOpen] = useState(false);
   const [gotoValue, setGotoValue] = useState("1");
   const [showLineNumbers, setShowLineNumbers] = useState(true);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(note.title);
+  const titleCommitLock = useRef(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
   const gotoRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const measuredHeights = useRef(new Map<number, number>());
+  const measureRaf = useRef<number | null>(null);
+  const pinIndexRef = useRef<number | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(800);
+  const [measureTick, setMeasureTick] = useState(0);
   const pendingCaret = useRef<number | null>(null);
   const pendingSelection = useRef<{ start: number; end: number } | null>(null);
   const selectionScope = useRef<{ start: number; end: number } | null>(null);
@@ -291,17 +321,107 @@ export function NoteEditor({
     return starts;
   }, [blocks]);
 
+  const documentText = useMemo(() => joinMdBlocks(blocks), [blocks]);
+  const documentHeadings = useMemo(
+    () => extractMdHeadings(documentText),
+    [documentText],
+  );
+  const rowMetrics = useMemo(
+    () => buildRowMetrics(blocks, measuredHeights.current),
+    [blocks, measureTick],
+  );
+  const virtualRange = useMemo(() => {
+    const base = visibleRange(rowMetrics, scrollTop, viewportH, 12);
+    let start = base.start;
+    let end = base.end;
+    if (active != null) {
+      start = Math.min(start, active);
+      end = Math.max(end, active + 1);
+    }
+    const pin = pinIndexRef.current;
+    if (pin != null) {
+      start = Math.min(start, pin);
+      end = Math.max(end, pin + 1);
+    }
+    return { start, end };
+  }, [rowMetrics, scrollTop, viewportH, active, measureTick]);
+
+  useEffect(() => {
+    if (!titleEditing) setTitleDraft(note.title);
+  }, [note.title, titleEditing]);
+
+  useEffect(() => {
+    if (!titleEditing) return;
+    const el = titleRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [titleEditing]);
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const sync = () => {
+      setScrollTop(el.scrollTop);
+      setViewportH(el.clientHeight || 800);
+    };
+    sync();
+    el.addEventListener("scroll", sync, { passive: true });
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", sync);
+      ro.disconnect();
+    };
+  }, [note.id]);
+
+  const scheduleMeasure = () => {
+    if (measureRaf.current != null) return;
+    measureRaf.current = requestAnimationFrame(() => {
+      measureRaf.current = null;
+      setMeasureTick((value) => value + 1);
+    });
+  };
+
+  const bindRowMeasure = (index: number, el: HTMLDivElement | null) => {
+    if (!el) return;
+    const height = el.getBoundingClientRect().height;
+    if (!(height > 0)) return;
+    const prev = measuredHeights.current.get(index);
+    if (prev != null && Math.abs(prev - height) < 2) return;
+    measuredHeights.current.set(index, height);
+    scheduleMeasure();
+  };
+
+  const blocksLen = blocks.length;
+  useEffect(() => {
+    measuredHeights.current = new Map();
+    scheduleMeasure();
+    // Length changes shift row indices — drop stale measured heights.
+  }, [blocksLen]);
+
   // Keep a stable block list while editing so fence edits do not re-split into empty blocks.
   useEffect(() => {
     if (noteIdRef.current !== note.id) {
       noteIdRef.current = note.id;
       setActive(null);
-      const numbered = applyHeadingNumbers(note.bodyMd);
-      const next = normalizeMdBlocks(splitMdBlocks(numbered));
+      measuredHeights.current = new Map();
+      pinIndexRef.current = null;
+      setScrollTop(0);
+      // Fast first paint: split only. Defer outline numbering so open stays responsive.
+      const next = normalizeMdBlocks(splitMdBlocks(note.bodyMd));
       setBlocks(next);
-      const body = joinMdBlocks(next);
-      if (body !== note.bodyMd) onChangeRef.current({ bodyMd: body });
-      return;
+      const handle = window.setTimeout(() => {
+        if (noteIdRef.current !== note.id) return;
+        const numbered = applyHeadingNumbers(note.bodyMd);
+        const numberedBlocks = normalizeMdBlocks(splitMdBlocks(numbered));
+        const body = joinMdBlocks(numberedBlocks);
+        if (body === note.bodyMd) return;
+        measuredHeights.current = new Map();
+        setBlocks(numberedBlocks);
+        onChangeRef.current({ bodyMd: body });
+      }, 0);
+      return () => window.clearTimeout(handle);
     }
     if (active == null) {
       setBlocks(normalizeMdBlocks(splitMdBlocks(note.bodyMd)));
@@ -341,14 +461,12 @@ export function NoteEditor({
     let cancel = false;
     const key = slotKey;
     void (async () => {
-      const next: Array<string | null> = prepared.slots.map(() => null);
-      for (let index = 0; index < prepared.slots.length; index += 1) {
-        if (remoteUrls[index]) continue;
-        const dest = prepared.slots[index]?.dest;
-        if (!dest) continue;
-        next[index] = await resolveImageSrc(dest, imageBaseDir);
-      }
-      if (!cancel) setLocal({ key, urls: next });
+      const resolved = await mapPool(prepared.slots, async (slot, index) => {
+        if (remoteUrls[index]) return remoteUrls[index] ?? null;
+        if (!slot.dest) return null;
+        return resolveImageSrc(slot.dest, imageBaseDir);
+      });
+      if (!cancel) setLocal({ key, urls: resolved });
     })();
     return () => {
       cancel = true;
@@ -617,6 +735,18 @@ export function NoteEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, [findOpen]);
 
+  const scrollToBlockIndex = (index: number) => {
+    const el = stageRef.current;
+    if (!el) return;
+    pinIndexRef.current = index;
+    const top = rowMetrics.offsets[index] ?? 0;
+    el.scrollTop = Math.max(0, top - Math.min(120, el.clientHeight * 0.2));
+    scheduleMeasure();
+    requestAnimationFrame(() => {
+      pinIndexRef.current = null;
+    });
+  };
+
   const jumpToLine = (line1Based: number) => {
     const list = normalizeMdBlocks(blocks);
     const located = locateLineInBlocks(list, line1Based);
@@ -624,9 +754,39 @@ export function NoteEditor({
     pendingCaret.current = located.offset;
     setActive(located.index);
     setGotoOpen(false);
+    scrollToBlockIndex(located.index);
     requestAnimationFrame(() => {
       editRef.current?.scrollIntoView({ block: "center" });
     });
+  };
+
+  const tocLinkFromEvent = (target: EventTarget | null): string | null => {
+    if (!(target instanceof Element)) return null;
+    const link = target.closest("a.md-toc__link, .md-toc a[href^='#']");
+    if (!(link instanceof HTMLAnchorElement)) return null;
+    return (
+      link.getAttribute("data-heading-id") ||
+      link.getAttribute("href")?.replace(/^#/, "") ||
+      null
+    );
+  };
+
+  const tryOpenExternalLink = (
+    event: { ctrlKey: boolean; metaKey: boolean; preventDefault: () => void; stopPropagation: () => void },
+    target: EventTarget | null,
+  ): boolean => {
+    if (!(event.ctrlKey || event.metaKey)) return false;
+    const href = externalHrefFromEvent(target);
+    if (!href) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    void openExternalUrl(href).catch((err) => {
+      void dialog.alert({
+        title: "无法打开链接",
+        message: errorMessage(err, "无法打开链接"),
+      });
+    });
+    return true;
   };
 
   const openGoto = () => {
@@ -709,6 +869,41 @@ export function NoteEditor({
     }
     editMinHeight.current = null;
     commitNumbered(blocks, null);
+  };
+
+  /** Scroll to a heading from a [toc] link without entering edit mode. */
+  const jumpToHeadingId = (headingId: string) => {
+    const id = headingId.replace(/^#/, "").trim();
+    if (!id) return;
+    const root = rootRef.current;
+    const escapeId =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(id)
+        : id.replace(/"/g, '\\"');
+    const flash = (el: HTMLElement) => {
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      el.classList.add("is-toc-target");
+      window.setTimeout(() => el.classList.remove("is-toc-target"), 1200);
+    };
+    const byId = root?.querySelector(`#${escapeId}`);
+    if (byId instanceof HTMLElement) {
+      flash(byId);
+      return;
+    }
+    const index = locateHeadingBlockIndex(blocks, id);
+    if (index < 0) return;
+    // Leave edit mode so the heading preview (with id) can receive scroll.
+    if (active != null) finishEditing();
+    scrollToBlockIndex(index);
+    requestAnimationFrame(() => {
+      const heading = rootRef.current?.querySelector(`#${escapeId}`);
+      if (heading instanceof HTMLElement) {
+        flash(heading);
+        return;
+      }
+      const row = rootRef.current?.querySelector(`[data-block-index="${index}"]`);
+      if (row instanceof HTMLElement) flash(row);
+    });
   };
 
   const activate = (index: number, opts?: { renumber?: boolean; caret?: number }) => {
@@ -1054,7 +1249,10 @@ export function NoteEditor({
         nextBlocks[index] = text;
         commitBlocks(nextBlocks, index, start + inserted.length);
       } catch (err) {
-        window.alert(err instanceof Error ? err.message : "粘贴图片失败");
+        void dialog.alert({
+          title: "粘贴失败",
+          message: errorMessage(err, "粘贴图片失败"),
+        });
       }
     })();
   };
@@ -1063,18 +1261,74 @@ export function NoteEditor({
     if (!text) return "";
     const { slots } = extractImageSlots(text);
     const blockUrls = slots.map((slot) => urlByDest.get(slot.dest) ?? null);
-    return renderMarkdown(text, blockUrls, { document: joinMdBlocks(blocks) });
+    return renderMarkdown(text, blockUrls, {
+      document: documentText,
+      documentHeadings,
+    });
+  };
+
+  const fileTitleMode = Boolean(titleReadOnly && onRenameFile);
+  const titleLocked = titleReadOnly && !titleEditing;
+
+  const commitTitleRename = async () => {
+    if (!fileTitleMode || !titleEditing || titleCommitLock.current) return;
+    titleCommitLock.current = true;
+    const next = titleDraft.trim();
+    setTitleEditing(false);
+    try {
+      if (!next || next === note.title) {
+        setTitleDraft(note.title);
+        return;
+      }
+      await onRenameFile?.(next);
+    } catch (err) {
+      setTitleDraft(note.title);
+      await dialog.alert({
+        title: "重命名失败",
+        message: errorMessage(err, "重命名失败"),
+      });
+    } finally {
+      titleCommitLock.current = false;
+    }
   };
 
   return (
     <div className="note-editor" ref={rootRef}>
       <header className="note-editor__toolbar">
         <input
+          ref={titleRef}
           className="note-editor__title"
-          aria-label="笔记标题"
-          value={note.title}
-          readOnly={titleReadOnly}
-          onChange={(e) => onChange({ title: e.target.value })}
+          aria-label={fileTitleMode ? "文件名（双击重命名）" : "笔记标题"}
+          title={fileTitleMode ? "双击重命名文件" : undefined}
+          value={fileTitleMode ? titleDraft : note.title}
+          readOnly={titleLocked || (!fileTitleMode && titleReadOnly)}
+          onDoubleClick={() => {
+            if (!fileTitleMode) return;
+            setTitleDraft(note.title);
+            setTitleEditing(true);
+          }}
+          onChange={(e) => {
+            if (fileTitleMode && titleEditing) {
+              setTitleDraft(e.target.value);
+              return;
+            }
+            if (!titleReadOnly) onChange({ title: e.target.value });
+          }}
+          onBlur={() => {
+            if (fileTitleMode && titleEditing) void commitTitleRename();
+          }}
+          onKeyDown={(e) => {
+            if (!fileTitleMode || !titleEditing) return;
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void commitTitleRename();
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              setTitleDraft(note.title);
+              setTitleEditing(false);
+            }
+          }}
         />
         {saveLabel ? <span className="note-editor__save">{saveLabel}</span> : null}
         <div className="note-editor__shortcuts" role="group" aria-label="格式快捷">
@@ -1301,6 +1555,7 @@ export function NoteEditor({
       ) : null}
 
       <div
+        ref={stageRef}
         className="note-editor__stage note-editor__stage--live-preview"
         aria-label="Markdown 编辑器"
       >
@@ -1309,22 +1564,31 @@ export function NoteEditor({
             .filter(Boolean)
             .join(" ")}
         >
-          {blocks.map((block, index) => {
+          <div
+            className="md-live__spacer"
+            style={{ height: rowMetrics.offsets[virtualRange.start] ?? 0 }}
+            aria-hidden
+          />
+          {blocks.slice(virtualRange.start, virtualRange.end).map((block, offset) => {
+            const index = virtualRange.start + offset;
             const isActive = active === index;
             const startLine = lineStarts[index] ?? 1;
             const lineCount = blockLineCount(block);
             const gutter = showLineNumbers ? (
               <div className="md-live__gutter" aria-hidden="true">
-                {Array.from({ length: lineCount }, (_, offset) => (
-                  <span key={offset} className="md-live__line-no">
-                    {startLine + offset}
-                  </span>
-                ))}
+                <pre className="md-live__line-nos">
+                  {lineNumberText(startLine, lineCount)}
+                </pre>
               </div>
             ) : null;
             if (isActive) {
               return (
-                <div key={`edit-${index}`} className="md-live__row is-editing">
+                <div
+                  key={`edit-${index}`}
+                  ref={(el) => bindRowMeasure(index, el)}
+                  className="md-live__row is-editing"
+                  data-block-index={index}
+                >
                   {gutter}
                   <div className="md-live__block is-editing">
                     <textarea
@@ -1378,6 +1642,7 @@ export function NoteEditor({
                         }
                         updateActiveBlock(nextValue);
                         autosize(area);
+                        scheduleMeasure();
                         requestAnimationFrame(() => {
                           lastEditSel.current = {
                             start: area.selectionStart,
@@ -1403,7 +1668,12 @@ export function NoteEditor({
             if (!block) {
               // Blank source lines stay in the model, but no longer render as grey bars.
               return (
-                <div key={`view-${index}`} className="md-live__row">
+                <div
+                  key={`view-${index}`}
+                  ref={(el) => bindRowMeasure(index, el)}
+                  className="md-live__row"
+                  data-block-index={index}
+                >
                   {gutter}
                   <div
                     className="md-live__gap"
@@ -1427,16 +1697,45 @@ export function NoteEditor({
                 </div>
               );
             }
+            const tocBlock = isTocSource(block);
             return (
-              <div key={`view-${index}`} className="md-live__row">
+              <div
+                key={`view-${index}`}
+                ref={(el) => bindRowMeasure(index, el)}
+                className="md-live__row"
+                data-block-index={index}
+              >
                 {gutter}
                 <div
-                  className="md-live__block"
+                  className={tocBlock ? "md-live__block is-toc" : "md-live__block"}
                   role="button"
                   tabIndex={0}
-                  aria-label={`编辑第 ${startLine} 行`}
+                  aria-label={tocBlock ? "目录" : `编辑第 ${startLine} 行`}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
+                    // Ctrl/Cmd+link: swallow here; open once on click.
+                    if (
+                      (e.ctrlKey || e.metaKey) &&
+                      externalHrefFromEvent(e.target)
+                    ) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      return;
+                    }
+                    const tocId = tocLinkFromEvent(e.target);
+                    if (tocId) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      jumpToHeadingId(tocId);
+                      return;
+                    }
+                    // Keep TOC preview clickable; edit via keyboard / double intent on chrome.
+                    if (tocBlock && e.target instanceof Element) {
+                      if (e.target.closest(".md-toc")) {
+                        e.preventDefault();
+                        return;
+                      }
+                    }
                     const target = e.currentTarget.querySelector(
                       ".md-live__preview",
                     ) as HTMLElement | null;
@@ -1459,13 +1758,37 @@ export function NoteEditor({
                     className="md-live__preview md-body"
                     onMouseDown={(event) => {
                       if (
+                        (event.ctrlKey || event.metaKey) &&
+                        externalHrefFromEvent(event.target)
+                      ) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        return;
+                      }
+                      if (
                         event.target instanceof Element &&
-                        event.target.closest(".md-code__copy")
+                        (event.target.closest(".md-code__copy") ||
+                          event.target.closest(".md-toc a") ||
+                          event.target.closest("a[href]"))
                       ) {
                         event.stopPropagation();
                       }
                     }}
                     onClick={(event) => {
+                      if (tryOpenExternalLink(event, event.target)) return;
+                      const tocId = tocLinkFromEvent(event.target);
+                      if (tocId) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        jumpToHeadingId(tocId);
+                        return;
+                      }
+                      // Block in-app navigation; use Ctrl/Cmd+click to open externally.
+                      if (externalHrefFromEvent(event.target)) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        return;
+                      }
                       if (copyCodeBlock(event.target)) {
                         event.preventDefault();
                         event.stopPropagation();
@@ -1477,17 +1800,18 @@ export function NoteEditor({
               </div>
             );
           })}
-          <button
-            type="button"
-            className="md-live__trailer"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              const nextBlocks = [...blocks, ""];
-              commitBlocks(nextBlocks, nextBlocks.length - 1, 0);
+          <div
+            className="md-live__spacer"
+            style={{
+              height: Math.max(
+                0,
+                rowMetrics.total -
+                  ((rowMetrics.offsets[virtualRange.end] ??
+                    rowMetrics.total) as number),
+              ),
             }}
-          >
-            继续书写…
-          </button>
+            aria-hidden
+          />
         </div>
       </div>
     </div>

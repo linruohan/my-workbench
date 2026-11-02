@@ -131,6 +131,23 @@ md.renderer.rules.heading_open = (tokens, idx, options, env, self) => {
   return defaultHeadingOpen(tokens, idx, options, env, self);
 };
 
+const defaultLinkOpen =
+  md.renderer.rules.link_open ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  if (token) {
+    const rawHref = token.attrGet("href");
+    const href = typeof rawHref === "string" ? rawHref : "";
+    if (/^(https?:|mailto:)/i.test(href)) {
+      token.attrSet("title", "Ctrl+单击在浏览器中打开");
+      token.attrSet("rel", "noopener noreferrer");
+    }
+  }
+  return defaultLinkOpen(tokens, idx, options, env, self);
+};
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -160,7 +177,7 @@ export function renderTocHtml(headings: MdHeading[]): string {
     if (nodes.length === 0) return "";
     return `<ul class="md-toc__list">${nodes
       .map((n) => {
-        const link = `<a href="#${escapeAttr(n.heading.id)}">${escapeHtml(n.heading.text)}</a>`;
+        const link = `<a class="md-toc__link" href="#${escapeAttr(n.heading.id)}" data-heading-id="${escapeAttr(n.heading.id)}">${escapeHtml(n.heading.text)}</a>`;
         return `<li>${link}${renderNodes(n.children)}</li>`;
       })
       .join("")}</ul>`;
@@ -282,6 +299,11 @@ function applyImages(
 export type RenderMarkdownOptions = {
   /** Full note source — used so [toc] / heading ids stay consistent in live blocks. */
   document?: string;
+  /**
+   * Precomputed headings for `document` (or the block itself).
+   * Avoids re-scanning the full document on every live block render.
+   */
+  documentHeadings?: MdHeading[];
 };
 
 /** Render note Markdown. `imageUrls[i]` replaces the i-th image outside code fences. */
@@ -292,8 +314,9 @@ export function renderMarkdown(
 ): string {
   const raw = source || "";
   const doc = options?.document ?? raw;
+  const cachedHeads = options?.documentHeadings;
   if (isTocSource(raw)) {
-    return renderTocHtml(extractMdHeadings(doc));
+    return renderTocHtml(cachedHeads ?? extractMdHeadings(doc));
   }
   const { markdown, slots } = extractImageSlots(raw);
   const env: MdEnv = {
@@ -301,7 +324,7 @@ export function renderMarkdown(
   };
   // When rendering a single live block, align heading ids with the full document.
   if (options?.document && options.document !== raw) {
-    const docHeads = extractMdHeadings(doc);
+    const docHeads = [...(cachedHeads ?? extractMdHeadings(doc))];
     const local = extractMdHeadings(markdown);
     env.headingQueue = local.map((h) => {
       const idx = docHeads.findIndex((d) => d.level === h.level && d.text === h.text);

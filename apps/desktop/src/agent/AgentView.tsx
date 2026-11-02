@@ -6,6 +6,7 @@ import {
   agentRetryPlan,
   filterAgentThreads,
   formatAgentBubbleTime,
+  formatAgentRelativeShort,
   describeToolArgs,
   describeToolResult,
   formatAgentMoment,
@@ -15,9 +16,11 @@ import {
   parseModelRef,
   relativizeScheduleText,
   resolveSlash,
+  SLASH_COMMANDS,
   slashSuggestions,
   type AgentMessage,
   type AgentPermissionMode,
+  type AgentThread,
   type SlashAction,
 } from "@wb/domain";
 import { readCredential } from "./credentials";
@@ -27,9 +30,27 @@ import { readInputHistory, rememberInput } from "./input-history";
 import { enqueuePrompt, recallQueuedPrompt, removeQueuedPrompt } from "./prompt-queue";
 import { writeClipboard } from "../lib/clipboard";
 import { copyCodeBlock } from "../lib/code-copy";
+import { errorMessage } from "../lib/errors";
 import { renderChatMarkdown } from "../lib/markdown";
+import {
+  externalHrefFromEvent,
+  openExternalUrl,
+} from "../lib/open-external";
+import { useDialog } from "../shell/Dialogs";
+import {
+  IconArrowUp,
+  IconFilter,
+  IconFolder,
+  IconFolderOpen,
+  IconHand,
+  IconMore,
+  IconPencil,
+  IconPlus,
+  IconSearch,
+  IconStop,
+} from "../shell/icons";
 import { ModelMenu } from "./ModelMenu";
-import { modelGroups, readProviderStore } from "./providers";
+import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
 import {
   resumeAgentQueue,
   settleAgentApproval,
@@ -44,7 +65,10 @@ type Props = {
   activeTimerTaskId: string | null;
   timerStartedAt: number | null;
   onSelectThread: (id: string | null) => void;
-  onCreateThread: (workspaceId?: string) => void;
+  /** Create a session inside an existing workspace. */
+  onCreateThread: (workspaceId: string) => void;
+  /** Top-level new session: caller opens the folder picker first. */
+  onCreateFromFolder: () => void;
   onOpenModels: () => void;
   onEffects: (effects: AgentUiEffect[]) => void;
   onRefresh: () => void;
@@ -60,13 +84,21 @@ export function AgentView({
   timerStartedAt,
   onSelectThread,
   onCreateThread,
+  onCreateFromFolder,
   onOpenModels,
   onEffects,
   onRefresh,
 }: Props) {
+  const dialog = useDialog();
   const workspaces = store.listAgentWorkspaces();
-  const threads = store.listAgentThreads();
-  const thread = threads.find((item) => item.id === threadId) ?? threads[0] ?? null;
+  const [showArchived, setShowArchived] = useState(false);
+  const threads = store.listAgentThreads({ includeArchived: showArchived });
+  const activeThreads = store.listAgentThreads();
+  const thread =
+    threads.find((item) => item.id === threadId) ??
+    activeThreads.find((item) => item.id === threadId) ??
+    activeThreads[0] ??
+    null;
   const messages = thread ? store.listAgentMessages(thread.id) : [];
   const pending = thread
     ? (store.listAgentApprovals(thread.id).find((item) => item.status === "pending") ??
@@ -81,16 +113,24 @@ export function AgentView({
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [threadQuery, setThreadQuery] = useState("");
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>(
     {},
   );
   const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string | null>(null);
   const [workspaceTitleDraft, setWorkspaceTitleDraft] = useState("");
+  const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
+  const [threadTitleDraft, setThreadTitleDraft] = useState("");
+  const [workspaceMenuId, setWorkspaceMenuId] = useState<string | null>(null);
+  const [threadMenuId, setThreadMenuId] = useState<string | null>(null);
   const [findIndex, setFindIndex] = useState(0);
   const [findTick, setFindTick] = useState(0);
   const [error, setError] = useState("");
-  const [picker, setPicker] = useState<null | "mode" | "model">(null);
+  const [picker, setPicker] = useState<null | "mode" | "model" | "plus" | "workspace">(
+    null,
+  );
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
@@ -128,6 +168,37 @@ export function AgentView({
       mounted.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!threadMenuId && !workspaceMenuId && !viewMenuOpen && picker !== "workspace") {
+      return;
+    }
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".agent__thread-actions")) return;
+      if (target?.closest(".agent__workspace-actions")) return;
+      if (target?.closest(".agent__threads-tool")) return;
+      if (target?.closest(".agent__composer-chip-wrap")) return;
+      setThreadMenuId(null);
+      setWorkspaceMenuId(null);
+      setViewMenuOpen(false);
+      if (picker === "workspace") setPicker(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setThreadMenuId(null);
+        setWorkspaceMenuId(null);
+        setViewMenuOpen(false);
+        if (picker === "workspace") setPicker(null);
+      }
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [threadMenuId, workspaceMenuId, viewMenuOpen, picker]);
 
   useEffect(() => {
     const node = logRef.current;
@@ -270,7 +341,13 @@ export function AgentView({
   };
 
   const selectModel = (nextRef: string) => {
-    if (!thread || nextRef === thread.modelRef) return;
+    if (!thread) {
+      if (readProviderStore().defaultModelRef === nextRef) return;
+      setDefaultModel(nextRef);
+      onRefresh();
+      return;
+    }
+    if (nextRef === thread.modelRef) return;
     const text =
       store.listAgentMessages(thread.id).length > 0
         ? modelSwitchText(thread.modelRef, nextRef, modelRefLabel)
@@ -419,7 +496,7 @@ export function AgentView({
   const runSlash = (action: SlashAction, command: string) => {
     if (!thread) return;
     if (action.type === "new") {
-      onCreateThread();
+      onCreateFromFolder();
       return;
     }
     if (action.type === "mode") {
@@ -586,9 +663,7 @@ export function AgentView({
     onRefresh();
   };
 
-  const removeThread = (id: string, title: string) => {
-    if (!window.confirm(`删除会话「${title}」？对话会从本机移除。`)) return;
-    store.deleteAgentThread(id);
+  const forgetThreadLocal = (id: string) => {
     setQueues((current) => {
       if (!(id in current)) return current;
       const next = { ...current };
@@ -596,17 +671,62 @@ export function AgentView({
       return next;
     });
     if (wantDrain.current === id) wantDrain.current = null;
+  };
+
+  const removeThread = async (id: string, title: string) => {
+    const ok = await dialog.confirm({
+      title: "删除会话",
+      message: `删除会话「${title}」？对话会从本机移除。`,
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    store.deleteAgentThread(id);
+    forgetThreadLocal(id);
+    setThreadMenuId(null);
     if (thread?.id === id) {
       onSelectThread(store.listAgentThreads()[0]?.id ?? null);
     }
     onRefresh();
   };
 
-  const addWorkspace = () => {
-    const workspace = store.createAgentWorkspace({ title: "新工作区" });
-    setCollapsedWorkspaces((current) => ({ ...current, [workspace.id]: false }));
-    setRenamingWorkspaceId(workspace.id);
-    setWorkspaceTitleDraft(workspace.title);
+  const archiveThread = (item: AgentThread) => {
+    store.archiveAgentThread(item.id);
+    forgetThreadLocal(item.id);
+    setThreadMenuId(null);
+    if (thread?.id === item.id && !showArchived) {
+      onSelectThread(store.listAgentThreads()[0]?.id ?? null);
+    }
+    onRefresh();
+  };
+
+  const unarchiveThread = (item: AgentThread) => {
+    store.unarchiveAgentThread(item.id);
+    setThreadMenuId(null);
+    onRefresh();
+  };
+
+  const beginRenameThread = (item: AgentThread) => {
+    setThreadMenuId(null);
+    setWorkspaceMenuId(null);
+    setRenamingThreadId(item.id);
+    setThreadTitleDraft(item.title);
+  };
+
+  const beginRenameWorkspace = (id: string, title: string) => {
+    setWorkspaceMenuId(null);
+    setThreadMenuId(null);
+    setRenamingWorkspaceId(id);
+    setWorkspaceTitleDraft(title);
+  };
+
+  const commitThreadTitle = (id: string, raw: string) => {
+    const next = raw.trim();
+    const current = store.getAgentThread(id);
+    setRenamingThreadId(null);
+    if (!current) return;
+    if (!next || next === current.title) return;
+    store.updateAgentThread(id, { title: next });
     onRefresh();
   };
 
@@ -624,14 +744,21 @@ export function AgentView({
     setRenamingWorkspaceId(null);
   };
 
-  const removeWorkspace = (id: string, title: string, count: number) => {
+  const removeWorkspace = async (id: string, title: string, count: number) => {
     const hint =
       count > 0
         ? `删除工作区「${title}」？其中的 ${count} 个会话也会从本机移除。`
         : `删除工作区「${title}」？`;
-    if (!window.confirm(hint)) return;
+    const ok = await dialog.confirm({
+      title: "删除工作区",
+      message: hint,
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!ok) return;
     const selected = thread?.workspaceId === id ? thread.id : null;
     store.deleteAgentWorkspace(id);
+    setWorkspaceMenuId(null);
     setCollapsedWorkspaces((current) => {
       if (!(id in current)) return current;
       const next = { ...current };
@@ -641,7 +768,6 @@ export function AgentView({
     if (selected) {
       onSelectThread(store.listAgentThreads()[0]?.id ?? null);
     }
-    if (store.listAgentWorkspaces().length === 0) store.ensureAgentWorkspace();
     onRefresh();
   };
 
@@ -708,139 +834,289 @@ export function AgentView({
       titleHit: needle ? group.workspace.title.toLowerCase().includes(needle) : false,
     }))
     .filter((group) => !needle || group.titleHit || group.threads.length > 0);
+  const activeWorkspace = thread
+    ? (store.getAgentWorkspace(thread.workspaceId) ??
+      workspaces.find((item) => item.id === thread.workspaceId) ??
+      null)
+    : null;
+  const showComposerContext = Boolean(thread && messages.length === 0 && activeWorkspace);
+  const insertComposerText = (value: string) => {
+    setDraft(value);
+    if (thread) drafts.current.set(thread.id, value);
+    setPicker(null);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
 
   return (
     <section className="agent" aria-label="Agent">
       <aside className="agent__threads">
         <header className="agent__threads-head">
           <h1>工作区</h1>
-          <button type="button" className="btn" onClick={addWorkspace}>
-            新建
-          </button>
-        </header>
-        {workspaces.length === 0 ? (
-          <p className="agent__hint">还没有工作区。</p>
-        ) : (
-          <>
-            <label className="agent__thread-filter">
-              <input
-                aria-label="筛选会话"
-                placeholder="筛选会话或工作区"
-                value={threadQuery}
-                onChange={(event) => setThreadQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape" && threadQuery.trim()) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setThreadQuery("");
-                  }
+          <div className="agent__threads-tools">
+            <button
+              type="button"
+              className={
+                filterOpen || threadQuery.trim()
+                  ? "agent__threads-tool is-on"
+                  : "agent__threads-tool"
+              }
+              title="筛选"
+              aria-label="筛选会话或工作区"
+              aria-pressed={filterOpen}
+              onClick={() => {
+                setFilterOpen((value) => !value);
+                setViewMenuOpen(false);
+              }}
+            >
+              <IconSearch size={14} />
+            </button>
+            <div className="agent__threads-tool-wrap">
+              <button
+                type="button"
+                className={
+                  showArchived || viewMenuOpen
+                    ? "agent__threads-tool is-on"
+                    : "agent__threads-tool"
+                }
+                title="视图"
+                aria-label="视图选项"
+                aria-haspopup="menu"
+                aria-expanded={viewMenuOpen}
+                onClick={() => {
+                  setViewMenuOpen((value) => !value);
+                  setWorkspaceMenuId(null);
+                  setThreadMenuId(null);
                 }}
-              />
-            </label>
-            {workspaceGroups.length === 0 ? (
-              <p className="agent__hint">没有匹配的会话。</p>
-            ) : (
-              <div className="agent__thread-list">
-                {workspaceGroups.map(({ workspace, threads: items, titleHit }) => {
-                  const collapsed =
-                    !needle &&
-                    !titleHit &&
-                    collapsedWorkspaces[workspace.id] === true &&
-                    thread?.workspaceId !== workspace.id;
-                  return (
-                    <section
-                      key={workspace.id}
-                      className="agent__workspace"
-                      aria-label={workspace.title}
-                    >
-                      <div className="agent__workspace-head">
-                        <button
-                          type="button"
-                          className="agent__workspace-toggle"
-                          aria-expanded={!collapsed}
-                          aria-label={collapsed ? "展开工作区" : "收起工作区"}
-                          onClick={() =>
-                            setCollapsedWorkspaces((current) => ({
-                              ...current,
-                              [workspace.id]: !collapsed,
-                            }))
+              >
+                <IconFilter size={14} />
+              </button>
+              {viewMenuOpen ? (
+                <div className="agent__thread-menu" role="menu" aria-label="视图选项">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-checked={showArchived}
+                    onClick={() => {
+                      setShowArchived((value) => !value);
+                      setViewMenuOpen(false);
+                    }}
+                  >
+                    {showArchived ? "隐藏已归档" : "显示已归档"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="agent__threads-tool"
+              title="选择文件夹并新建会话"
+              aria-label="新建会话"
+              onClick={onCreateFromFolder}
+            >
+              <IconPlus size={14} />
+            </button>
+          </div>
+        </header>
+        {filterOpen || threadQuery.trim() ? (
+          <label className="agent__thread-filter">
+            <input
+              aria-label="筛选会话"
+              placeholder="筛选会话或工作区"
+              value={threadQuery}
+              autoFocus={filterOpen}
+              onChange={(event) => setThreadQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setThreadQuery("");
+                  setFilterOpen(false);
+                }
+              }}
+            />
+          </label>
+        ) : null}
+        {workspaces.length === 0 ? (
+          <p className="agent__hint">还没有工作区。点「+」选择一个文件夹。</p>
+        ) : workspaceGroups.length === 0 ? (
+          <p className="agent__hint">没有匹配的会话。</p>
+        ) : (
+          <div className="agent__thread-list">
+            {workspaceGroups.map(({ workspace, threads: items, titleHit }) => {
+              const collapsed =
+                !needle &&
+                !titleHit &&
+                collapsedWorkspaces[workspace.id] === true &&
+                thread?.workspaceId !== workspace.id;
+              const totalCount = store.listAgentThreads({
+                workspaceId: workspace.id,
+                includeArchived: true,
+              }).length;
+              const workspaceMenuOpen = workspaceMenuId === workspace.id;
+              return (
+                <section
+                  key={workspace.id}
+                  className="agent__workspace"
+                  aria-label={workspace.title}
+                >
+                  <div
+                    className={
+                      workspaceMenuOpen
+                        ? "agent__workspace-head is-open"
+                        : "agent__workspace-head"
+                    }
+                  >
+                    {renamingWorkspaceId === workspace.id ? (
+                      <input
+                        className="agent__workspace-title-input"
+                        aria-label="工作区名称"
+                        value={workspaceTitleDraft}
+                        autoFocus
+                        maxLength={40}
+                        onChange={(event) =>
+                          setWorkspaceTitleDraft(event.target.value)
+                        }
+                        onBlur={(event) =>
+                          commitWorkspaceTitle(workspace.id, event.currentTarget.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            commitWorkspaceTitle(
+                              workspace.id,
+                              event.currentTarget.value,
+                            );
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            setRenamingWorkspaceId(null);
                           }
+                        }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="agent__workspace-title"
+                        title={workspace.rootPath || workspace.title}
+                        aria-expanded={!collapsed}
+                        onClick={() =>
+                          setCollapsedWorkspaces((current) => ({
+                            ...current,
+                            [workspace.id]: !collapsed,
+                          }))
+                        }
+                      >
+                        <span className="agent__workspace-icon" aria-hidden="true">
+                          {collapsed ? (
+                            <IconFolder size={14} />
+                          ) : (
+                            <IconFolderOpen size={14} />
+                          )}
+                        </span>
+                        <span className="agent__workspace-name">{workspace.title}</span>
+                      </button>
+                    )}
+                    <div className="agent__workspace-actions">
+                      <button
+                        type="button"
+                        className="agent__workspace-action"
+                        title="更多"
+                        aria-label={`工作区操作 ${workspace.title}`}
+                        aria-haspopup="menu"
+                        aria-expanded={workspaceMenuOpen}
+                        onClick={() => {
+                          setWorkspaceMenuId(workspaceMenuOpen ? null : workspace.id);
+                          setThreadMenuId(null);
+                          setViewMenuOpen(false);
+                        }}
+                      >
+                        <IconMore size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="agent__workspace-action"
+                        title="在此工作区新建会话"
+                        aria-label={`在 ${workspace.title} 新建会话`}
+                        onClick={() => onCreateThread(workspace.id)}
+                      >
+                        <IconPlus size={14} />
+                      </button>
+                      {workspaceMenuOpen ? (
+                        <div
+                          className="agent__thread-menu"
+                          role="menu"
+                          aria-label={`工作区「${workspace.title}」`}
                         >
-                          {collapsed ? "▸" : "▾"}
-                        </button>
-                        {renamingWorkspaceId === workspace.id ? (
-                          <input
-                            className="agent__workspace-title-input"
-                            aria-label="工作区名称"
-                            value={workspaceTitleDraft}
-                            autoFocus
-                            maxLength={40}
-                            onChange={(event) =>
-                              setWorkspaceTitleDraft(event.target.value)
-                            }
-                            onBlur={(event) =>
-                              commitWorkspaceTitle(
-                                workspace.id,
-                                event.currentTarget.value,
-                              )
-                            }
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") {
-                                event.preventDefault();
-                                commitWorkspaceTitle(
-                                  workspace.id,
-                                  event.currentTarget.value,
-                                );
-                              } else if (event.key === "Escape") {
-                                event.preventDefault();
-                                setRenamingWorkspaceId(null);
-                              }
-                            }}
-                          />
-                        ) : (
                           <button
                             type="button"
-                            className="agent__workspace-title"
-                            title="重命名工作区"
-                            onClick={() => {
-                              setRenamingWorkspaceId(workspace.id);
-                              setWorkspaceTitleDraft(workspace.title);
-                            }}
+                            role="menuitem"
+                            onClick={() =>
+                              beginRenameWorkspace(workspace.id, workspace.title)
+                            }
                           >
-                            {workspace.title}
+                            重命名
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          className="agent__workspace-add"
-                          title="在此工作区新建会话"
-                          aria-label={`在 ${workspace.title} 新建会话`}
-                          onClick={() => onCreateThread(workspace.id)}
-                        >
-                          +
-                        </button>
-                        <button
-                          type="button"
-                          className="agent__thread-delete"
-                          title="删除工作区"
-                          aria-label={`删除工作区 ${workspace.title}`}
-                          onClick={() =>
-                            removeWorkspace(
-                              workspace.id,
-                              workspace.title,
-                              store.listAgentThreads(workspace.id).length,
-                            )
-                          }
-                        >
-                          ×
-                        </button>
-                      </div>
-                      {collapsed ? null : items.length === 0 ? (
-                        <p className="agent__workspace-empty">还没有会话</p>
-                      ) : (
-                        <ul className="agent__workspace-threads">
-                          {items.map((item) => (
-                            <li key={item.id} className="agent__thread-row">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="is-danger"
+                            onClick={() =>
+                              void removeWorkspace(
+                                workspace.id,
+                                workspace.title,
+                                totalCount,
+                              )
+                            }
+                          >
+                            删除
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  {collapsed ? null : items.length === 0 ? (
+                    <p className="agent__workspace-empty">还没有会话</p>
+                  ) : (
+                    <ul className="agent__workspace-threads">
+                      {items.map((item) => {
+                        const archived = item.archivedAt != null;
+                        const menuOpen = threadMenuId === item.id;
+                        const age = formatAgentRelativeShort(item.updatedAt, nowMs);
+                        return (
+                          <li
+                            key={item.id}
+                            className={
+                              menuOpen
+                                ? "agent__thread-row is-open"
+                                : "agent__thread-row"
+                            }
+                          >
+                            {renamingThreadId === item.id ? (
+                              <input
+                                className="agent__thread-title-input"
+                                aria-label="会话标题"
+                                value={threadTitleDraft}
+                                autoFocus
+                                maxLength={40}
+                                onChange={(event) =>
+                                  setThreadTitleDraft(event.target.value)
+                                }
+                                onBlur={(event) =>
+                                  commitThreadTitle(item.id, event.currentTarget.value)
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    commitThreadTitle(
+                                      item.id,
+                                      event.currentTarget.value,
+                                    );
+                                  } else if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    setRenamingThreadId(null);
+                                  }
+                                }}
+                              />
+                            ) : (
                               <button
                                 type="button"
                                 className={
@@ -850,37 +1126,91 @@ export function AgentView({
                                 }
                                 onClick={() => onSelectThread(item.id)}
                               >
-                                <span>{item.title}</span>
-                                <small>
-                                  {permissionModeLabel(item.permissionMode)} ·{" "}
-                                  {formatAgentMoment(item.updatedAt, nowMs)}
-                                </small>
+                                <span className="agent__thread-title">
+                                  {archived ? "〔归档〕 " : ""}
+                                  {item.title}
+                                </span>
+                                <span className="agent__thread-age">{age}</span>
                               </button>
+                            )}
+                            <div className="agent__thread-actions">
+                              {renamingThreadId === item.id ? null : (
+                                <button
+                                  type="button"
+                                  className="agent__thread-rename"
+                                  aria-label={`重命名会话 ${item.title}`}
+                                  title="重命名"
+                                  onClick={() => beginRenameThread(item)}
+                                >
+                                  <IconPencil size={14} />
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                className="agent__thread-delete"
-                                aria-label={`删除会话 ${item.title}`}
-                                title="删除会话"
-                                onClick={() => removeThread(item.id, item.title)}
+                                className="agent__thread-menu-btn"
+                                aria-label={`会话操作 ${item.title}`}
+                                aria-haspopup="menu"
+                                aria-expanded={menuOpen}
+                                title="更多"
+                                onClick={() => {
+                                  setThreadMenuId(menuOpen ? null : item.id);
+                                  setWorkspaceMenuId(null);
+                                  setViewMenuOpen(false);
+                                }}
                               >
-                                ×
+                                <IconMore size={14} />
                               </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </section>
-                  );
-                })}
-              </div>
-            )}
-          </>
+                              {menuOpen ? (
+                                <div
+                                  className="agent__thread-menu"
+                                  role="menu"
+                                  aria-label={`会话「${item.title}」`}
+                                >
+                                  {archived ? (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => unarchiveThread(item)}
+                                    >
+                                      取消归档
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => archiveThread(item)}
+                                    >
+                                      归档
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="is-danger"
+                                    onClick={() =>
+                                      void removeThread(item.id, item.title)
+                                    }
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </section>
+              );
+            })}
+          </div>
         )}
       </aside>
 
       <div className="agent__main">
         {thread ? (
-          <header className="agent__bar">
+          <header className="agent__chrome">
             {renaming ? (
               <input
                 className="agent__title-input"
@@ -917,7 +1247,7 @@ export function AgentView({
             )}
             <button
               type="button"
-              className="btn"
+              className="agent__chrome-action"
               title="在会话中查找（Ctrl+F）"
               onClick={() => {
                 setFindOpen(true);
@@ -989,7 +1319,7 @@ export function AgentView({
           </form>
         ) : null}
 
-        <div className="agent__log-wrap">
+        <div className="agent__stage">
           <div
             className="agent__log"
             ref={logRef}
@@ -1004,11 +1334,12 @@ export function AgentView({
             <div className="agent__log-body">
               {!thread ? (
                 <div className="agent__empty">
-                  <p>用自然语言管理任务、笔记和提醒。</p>
+                  <p className="agent__greeting">选一个文件夹开始对话</p>
+                  <p className="agent__empty-desc">用自然语言管理任务、笔记和提醒。</p>
                   <button
                     type="button"
                     className="primary"
-                    onClick={() => onCreateThread()}
+                    onClick={onCreateFromFolder}
                   >
                     新建会话
                   </button>
@@ -1018,15 +1349,12 @@ export function AgentView({
                   <p className="agent__greeting">
                     {agentEmptyGreeting(new Date().getHours())}
                   </p>
-                  <p>
-                    未配置外部模型时，使用本机工作台理解常用指令。写操作默认需要确认。
-                  </p>
                   <div className="agent__examples">
                     {EXAMPLES.map((example) => (
                       <button
                         key={example}
                         type="button"
-                        className="btn"
+                        className="agent__chip"
                         onClick={() => void send(example)}
                       >
                         {example}
@@ -1060,7 +1388,7 @@ export function AgentView({
                         className="agent__msg agent__msg--user"
                         aria-label="你"
                       >
-                        <p>
+                        <div className="agent__bubble">
                           {findNeedle.trim() ? (
                             <HighlightedPlain
                               text={turn.message.content}
@@ -1071,7 +1399,7 @@ export function AgentView({
                           ) : (
                             turn.message.content
                           )}
-                        </p>
+                        </div>
                         <div className="agent__msg-actions">
                           <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
                           <button
@@ -1143,257 +1471,445 @@ export function AgentView({
                   <AgentMarkdown text={live} />
                 </article>
               ) : null}
-              {busyHere && !live ? <p className="agent__hint">正在思考…</p> : null}
+              {busyHere && !live ? (
+                <p className="agent__thinking" aria-live="polite">
+                  正在思考…
+                </p>
+              ) : null}
             </div>
           </div>
           {thread && messages.length > 0 && !pinned ? (
-            <button type="button" className="btn agent__jump" onClick={jumpBottom}>
-              回到底部
+            <button
+              type="button"
+              className="agent__jump"
+              aria-label="回到底部"
+              onClick={jumpBottom}
+            >
+              <IconArrowUp size={16} />
             </button>
           ) : null}
         </div>
 
-        {pending ? (
-          <div className="agent__approval" role="region" aria-label="待确认操作">
-            <div>
-              <strong>需要确认</strong>
-              <p>{relativizeScheduleText(pending.summary, nowMs)}</p>
-              {queued > 1 ? <p>后面还有 {queued - 1} 步。</p> : null}
-            </div>
-            {argLines ? (
-              <details className="agent__approval-more">
-                <summary>详情</summary>
-                <p className="agent__approval-detail">{argLines}</p>
-              </details>
-            ) : null}
-            <div className="agent__approval-actions">
-              <button
-                type="button"
-                className="primary"
-                disabled={Boolean(busyThreadId)}
-                onClick={() => void decide("approved")}
-              >
-                批准
-              </button>
-              <button
-                type="button"
-                className="btn"
-                disabled={Boolean(busyThreadId)}
-                onClick={() => void decide("denied")}
-              >
-                拒绝
-              </button>
-              <span className="agent__approval-hint">Enter 批准 · Esc 拒绝</span>
-            </div>
-          </div>
-        ) : null}
-
-        {error ? <p className="agent__error">{error}</p> : null}
-
-        {queuedPrompts.length > 0 ? (
-          <div className="agent__outbox" aria-label="排队消息">
-            <div className="agent__outbox-head">
-              <span>排队 {queuedPrompts.length}</span>
-              {!busyHere && !pending ? (
-                <button type="button" className="btn" onClick={releaseQueue}>
-                  继续发送
+        <div className="agent__dock">
+          {pending ? (
+            <div className="agent__approval" role="region" aria-label="待确认操作">
+              <div>
+                <strong>需要确认</strong>
+                <p>{relativizeScheduleText(pending.summary, nowMs)}</p>
+                {queued > 1 ? <p>后面还有 {queued - 1} 步。</p> : null}
+              </div>
+              {argLines ? (
+                <details className="agent__approval-more">
+                  <summary>详情</summary>
+                  <p className="agent__approval-detail">{argLines}</p>
+                </details>
+              ) : null}
+              <div className="agent__approval-actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={Boolean(busyThreadId)}
+                  onClick={() => void decide("approved")}
+                >
+                  批准
                 </button>
-              ) : null}
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={Boolean(busyThreadId)}
+                  onClick={() => void decide("denied")}
+                >
+                  拒绝
+                </button>
+                <span className="agent__approval-hint">Enter 批准 · Esc 拒绝</span>
+              </div>
             </div>
-            <ol>
-              {queuedPrompts.map((item, index) => (
-                <li key={`${index}-${item}`}>
-                  <span>{item}</span>
-                  <button
-                    type="button"
-                    className="btn"
-                    aria-label={`取回排队 ${item}`}
-                    onClick={() => recallQueued(index)}
-                  >
-                    取回
-                  </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    aria-label={`移除排队 ${item}`}
-                    onClick={() => removeQueued(index)}
-                  >
-                    移除
-                  </button>
-                </li>
-              ))}
-            </ol>
-          </div>
-        ) : null}
+          ) : null}
 
-        <form
-          className="agent__composer"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const picked = showSlash ? suggestions[slashPick] : null;
-            void send(picked ? `/${picked.name}` : draft);
-          }}
-        >
-          <div className="agent__composer-shell">
-            {showSlash ? (
-              <ul className="agent__slash" aria-label="斜杠命令">
-                {suggestions.map((command, index) => (
-                  <li key={command.name}>
-                    <button
-                      type="button"
-                      className={index === slashPick ? "is-active" : undefined}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => void send(`/${command.name}`)}
-                    >
-                      <span>/{command.name}</span>
-                      <small>{command.summary}</small>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            <textarea
-              ref={inputRef}
-              aria-label="给 Agent 发消息"
-              placeholder={
-                busyHere
-                  ? "这条会排在当前回答之后"
-                  : pending
-                    ? "请先处理待确认操作"
-                    : "告诉 Agent 你要做什么，输入 / 查看命令"
-              }
-              title={
-                busyHere
-                  ? "Enter 把这条排到当前回答之后"
-                  : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
-              }
-              value={draft}
-              disabled={!thread}
-              rows={2}
-              onChange={(event) => {
-                historyNav.current = null;
-                const value = event.target.value;
-                setDraft(value);
-                if (thread) drafts.current.set(thread.id, value);
-              }}
-              onKeyDown={(event) => {
-                if (showSlash && event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setSlashUi((ui) => ({
-                    ...ui,
-                    index: (slashPick + 1) % suggestions.length,
-                  }));
-                  return;
-                }
-                if (showSlash && event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setSlashUi((ui) => ({
-                    ...ui,
-                    index: (slashPick - 1 + suggestions.length) % suggestions.length,
-                  }));
-                  return;
-                }
-                if (showSlash && event.key === "Tab") {
-                  event.preventDefault();
-                  const command = suggestions[slashPick];
-                  if (!command) return;
-                  const value = `/${command.name} `;
-                  setDraft(value);
-                  if (thread) drafts.current.set(thread.id, value);
-                  return;
-                }
-                if (showSlash && event.key === "Escape") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setSlashUi((ui) => ({ ...ui, dismissed: true }));
-                  return;
-                }
-                const node = event.currentTarget;
-                if (event.key === "ArrowUp" && atFirstLine(node)) {
-                  event.preventDefault();
-                  recallHistory(-1);
-                  return;
-                }
-                if (
-                  event.key === "ArrowDown" &&
-                  historyNav.current &&
-                  atFirstLine(node)
-                ) {
-                  event.preventDefault();
-                  recallHistory(1);
-                  return;
-                }
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  const picked = showSlash ? suggestions[slashPick] : null;
-                  void send(picked ? `/${picked.name}` : draft);
-                }
-              }}
-            />
-            <div className="agent__composer-bar">
-              {thread ? (
-                <ModeMenu
-                  mode={mode}
-                  open={picker === "mode"}
-                  onOpenChange={(next) => {
-                    setPicker((current) =>
-                      next ? "mode" : current === "mode" ? null : current,
-                    );
-                  }}
-                  onChange={applyMode}
-                />
-              ) : null}
-              {thread ? (
-                <ModelMenu
-                  modelRef={thread.modelRef}
-                  open={picker === "model"}
-                  onOpenChange={(next) => {
-                    setPicker((current) =>
-                      next ? "model" : current === "model" ? null : current,
-                    );
-                  }}
-                  onSelect={selectModel}
-                  onOpenSettings={onOpenModels}
-                />
-              ) : null}
-              <div className="agent__composer-actions">
-                {busyHere ? (
-                  <>
+          {error ? <p className="agent__error">{error}</p> : null}
+
+          {queuedPrompts.length > 0 ? (
+            <div className="agent__outbox" aria-label="排队消息">
+              <div className="agent__outbox-head">
+                <span>排队 {queuedPrompts.length}</span>
+                {!busyHere && !pending ? (
+                  <button type="button" className="btn" onClick={releaseQueue}>
+                    继续发送
+                  </button>
+                ) : null}
+              </div>
+              <ol>
+                {queuedPrompts.map((item, index) => (
+                  <li key={`${index}-${item}`}>
+                    <span>{item}</span>
                     <button
                       type="button"
                       className="btn"
-                      disabled={!draft.trim() || slashDraft}
-                      onClick={() => void send(draft)}
+                      aria-label={`取回排队 ${item}`}
+                      onClick={() => recallQueued(index)}
                     >
-                      排队
+                      取回
                     </button>
-                    <button type="button" className="primary" onClick={stop}>
-                      停止
+                    <button
+                      type="button"
+                      className="btn"
+                      aria-label={`移除排队 ${item}`}
+                      onClick={() => removeQueued(index)}
+                    >
+                      移除
                     </button>
-                  </>
-                ) : (
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+
+          <form
+            className={
+              showComposerContext ? "agent__composer is-framed" : "agent__composer"
+            }
+            onSubmit={(event) => {
+              event.preventDefault();
+              const picked = showSlash ? suggestions[slashPick] : null;
+              void send(picked ? `/${picked.name}` : draft);
+            }}
+          >
+            {showComposerContext && activeWorkspace ? (
+              <div className="agent__composer-context">
+                <div className="agent__composer-chip-wrap">
                   <button
-                    type="submit"
-                    className="primary"
-                    disabled={!thread || Boolean(pending) || !draft.trim()}
+                    type="button"
+                    className="agent__composer-chip"
+                    title={activeWorkspace.rootPath || activeWorkspace.title}
+                    aria-haspopup="menu"
+                    aria-expanded={picker === "workspace"}
+                    onClick={() =>
+                      setPicker((current) =>
+                        current === "workspace" ? null : "workspace",
+                      )
+                    }
                   >
-                    发送
+                    <IconFolder size={14} />
+                    <span>{activeWorkspace.title}</span>
+                    <span aria-hidden="true">▾</span>
                   </button>
-                )}
+                  {picker === "workspace" ? (
+                    <div
+                      className="agent__thread-menu agent__composer-chip-menu"
+                      role="menu"
+                      aria-label="工作区"
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setPicker(null);
+                          onCreateThread(activeWorkspace.id);
+                        }}
+                      >
+                        在此新建会话
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setPicker(null);
+                          onCreateFromFolder();
+                        }}
+                      >
+                        打开其他文件夹…
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  className="agent__composer-chip-add"
+                  title="打开其他文件夹"
+                  aria-label="打开其他文件夹"
+                  onClick={onCreateFromFolder}
+                >
+                  <IconPlus size={14} />
+                </button>
+              </div>
+            ) : null}
+            <div className="agent__composer-shell">
+              {showSlash ? (
+                <ul className="agent__slash" aria-label="斜杠命令">
+                  {suggestions.map((command, index) => (
+                    <li key={command.name}>
+                      <button
+                        type="button"
+                        className={index === slashPick ? "is-active" : undefined}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => void send(`/${command.name}`)}
+                      >
+                        <span>/{command.name}</span>
+                        <small>{command.summary}</small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <textarea
+                ref={inputRef}
+                aria-label="给 Agent 发消息"
+                placeholder={
+                  busyHere
+                    ? "这条会排在当前回答之后"
+                    : pending
+                      ? "请先处理待确认操作"
+                      : "向工作台提问，使用 / 选择命令"
+                }
+                title={
+                  busyHere
+                    ? "Enter 把这条排到当前回答之后"
+                    : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
+                }
+                value={draft}
+                disabled={!thread}
+                rows={2}
+                onChange={(event) => {
+                  historyNav.current = null;
+                  const value = event.target.value;
+                  setDraft(value);
+                  if (thread) drafts.current.set(thread.id, value);
+                }}
+                onKeyDown={(event) => {
+                  if (showSlash && event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setSlashUi((ui) => ({
+                      ...ui,
+                      index: (slashPick + 1) % suggestions.length,
+                    }));
+                    return;
+                  }
+                  if (showSlash && event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setSlashUi((ui) => ({
+                      ...ui,
+                      index: (slashPick - 1 + suggestions.length) % suggestions.length,
+                    }));
+                    return;
+                  }
+                  if (showSlash && event.key === "Tab") {
+                    event.preventDefault();
+                    const command = suggestions[slashPick];
+                    if (!command) return;
+                    insertComposerText(`/${command.name} `);
+                    return;
+                  }
+                  if (showSlash && event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setSlashUi((ui) => ({ ...ui, dismissed: true }));
+                    return;
+                  }
+                  const node = event.currentTarget;
+                  if (event.key === "ArrowUp" && atFirstLine(node)) {
+                    event.preventDefault();
+                    recallHistory(-1);
+                    return;
+                  }
+                  if (
+                    event.key === "ArrowDown" &&
+                    historyNav.current &&
+                    atFirstLine(node)
+                  ) {
+                    event.preventDefault();
+                    recallHistory(1);
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    const picked = showSlash ? suggestions[slashPick] : null;
+                    void send(picked ? `/${picked.name}` : draft);
+                  }
+                }}
+              />
+              <div className="agent__composer-bar">
+                <div className="agent__composer-leading">
+                  <ComposerPlusMenu
+                    disabled={!thread || Boolean(pending)}
+                    open={picker === "plus"}
+                    onOpenChange={(next) => {
+                      setPicker((current) =>
+                        next ? "plus" : current === "plus" ? null : current,
+                      );
+                    }}
+                    onInsert={(value) => insertComposerText(value)}
+                    onRun={(value) => {
+                      setPicker(null);
+                      void send(value);
+                    }}
+                  />
+                  {thread ? (
+                    <ModeMenu
+                      mode={mode}
+                      open={picker === "mode"}
+                      onOpenChange={(next) => {
+                        setPicker((current) =>
+                          next ? "mode" : current === "mode" ? null : current,
+                        );
+                      }}
+                      onChange={applyMode}
+                    />
+                  ) : null}
+                </div>
+                <div className="agent__composer-actions">
+                  <ModelMenu
+                    modelRef={thread?.modelRef ?? readProviderStore().defaultModelRef}
+                    open={picker === "model"}
+                    onOpenChange={(next) => {
+                      setPicker((current) =>
+                        next ? "model" : current === "model" ? null : current,
+                      );
+                    }}
+                    onSelect={selectModel}
+                    onOpenSettings={onOpenModels}
+                  />
+                  {busyHere ? (
+                    <>
+                      <button
+                        type="button"
+                        className="agent__queue-btn"
+                        disabled={!draft.trim() || slashDraft}
+                        onClick={() => void send(draft)}
+                      >
+                        排队
+                      </button>
+                      <button
+                        type="button"
+                        className="agent__send agent__send--stop"
+                        aria-label="停止"
+                        title="停止"
+                        onClick={stop}
+                      >
+                        <IconStop size={14} />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="submit"
+                      className="agent__send"
+                      aria-label="发送"
+                      title="发送"
+                      disabled={!thread || Boolean(pending) || !draft.trim()}
+                    >
+                      <IconArrowUp size={16} />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        </form>
+          </form>
+        </div>
       </div>
     </section>
   );
 }
 
 const MODES: Array<{ id: AgentPermissionMode; label: string; hint: string }> = [
-  { id: "confirm", label: "需确认", hint: "写入前先问你" },
+  { id: "confirm", label: "变更前确认", hint: "写入前先问你" },
   { id: "session_auto", label: "本会话自动", hint: "普通写入直接执行，删除仍要确认" },
   { id: "readonly", label: "只读", hint: "不能修改任务、笔记和项目" },
 ];
+
+function ComposerPlusMenu({
+  disabled,
+  open,
+  onOpenChange,
+  onInsert,
+  onRun,
+}: {
+  disabled: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onInsert: (value: string) => void;
+  onRun: (value: string) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) onOpenChange(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onOpenChange(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, onOpenChange]);
+
+  return (
+    <div className="agent__composer-plus" ref={rootRef}>
+      <button
+        type="button"
+        className="agent__composer-plus-btn"
+        aria-label="添加命令或快捷操作"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="添加"
+        disabled={disabled}
+        onClick={() => onOpenChange(!open)}
+      >
+        <IconPlus size={16} />
+      </button>
+      {open ? (
+        <div className="agent__thread-menu agent__composer-plus-menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onInsert("/")}
+          >
+            插入 /
+          </button>
+          {SLASH_COMMANDS.filter((command) =>
+            command.name === "today" || command.name === "brief",
+          ).map((command) => (
+            <button
+              key={command.name}
+              type="button"
+              role="menuitem"
+              onClick={() => onRun(`/${command.name}`)}
+            >
+              {command.summary}
+            </button>
+          ))}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onInsert("/mode ")}
+          >
+            切换权限…
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onInsert("/model")}
+          >
+            切换模型…
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onRun("/help")}
+          >
+            查看命令帮助
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function ModeMenu({
   mode,
@@ -1429,15 +1945,16 @@ function ModeMenu({
   }, [open, onOpenChange]);
 
   return (
-    <div className="agent__model" ref={rootRef}>
+    <div className="agent__model agent__mode" ref={rootRef}>
       <button
         type="button"
-        className="agent__model-trigger"
+        className="agent__composer-tool"
         aria-label="会话权限"
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => onOpenChange(!open)}
       >
+        <IconHand size={14} />
         <span>{current.label}</span>
         <span aria-hidden="true">▾</span>
       </button>
@@ -1494,6 +2011,7 @@ function AgentMarkdown({
   indexBase?: number;
   active?: number;
 }) {
+  const dialog = useDialog();
   const html = renderChatMarkdown(text);
   return (
     <div
@@ -1502,7 +2020,19 @@ function AgentMarkdown({
         if (copyCodeBlock(event.target)) {
           event.preventDefault();
           event.stopPropagation();
+          return;
         }
+        const href = externalHrefFromEvent(event.target);
+        if (!href) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!(event.ctrlKey || event.metaKey)) return;
+        void openExternalUrl(href).catch((err) => {
+          void dialog.alert({
+            title: "无法打开链接",
+            message: errorMessage(err, "无法打开链接"),
+          });
+        });
       }}
       dangerouslySetInnerHTML={{
         __html: query.trim() ? markHtmlHits(html, query, indexBase, active) : html,

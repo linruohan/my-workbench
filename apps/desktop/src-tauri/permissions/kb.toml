@@ -1,6 +1,6 @@
 [[permission]]
 identifier = "allow-kb-fs"
-description = "Read and write folders the user imported into the knowledge base."
+description = "Read and write folders the user imported into the knowledge base, and open external links."
 commands.allow = [
   "kb_pick_directory",
   "kb_list_dir",
@@ -10,4 +10,7 @@ commands.allow = [
   "kb_write_base64",
   "kb_exists",
   "kb_mkdir",
+  "kb_rename",
+  "kb_reveal_in_explorer",
+  "open_external",
 ]

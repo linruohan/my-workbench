@@ -14,6 +14,79 @@ export type ProviderStore = {
   defaultModelRef: string;
 };
 
+export type ProviderTemplate = {
+  id: string;
+  name: string;
+  group: "本机" | "常用" | "其他";
+  kind: Exclude<ProviderKind, "builtin">;
+  baseURL: string;
+  modelId: string;
+  apiKeyRequired: boolean;
+  docsUrl?: string;
+};
+
+/** Starter templates inspired by ZCode's provider directory (no OAuth plans). */
+export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
+  {
+    id: "ollama",
+    name: "Ollama",
+    group: "本机",
+    kind: "openai-chat-completions",
+    baseURL: "http://127.0.0.1:11434/v1",
+    modelId: "llama3.1",
+    apiKeyRequired: false,
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    group: "常用",
+    kind: "openai-chat-completions",
+    baseURL: "https://api.openai.com/v1",
+    modelId: "gpt-4.1",
+    apiKeyRequired: true,
+    docsUrl: "https://platform.openai.com/api-keys",
+  },
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    group: "常用",
+    kind: "openai-chat-completions",
+    baseURL: "https://api.deepseek.com/v1",
+    modelId: "deepseek-chat",
+    apiKeyRequired: true,
+    docsUrl: "https://platform.deepseek.com/api_keys",
+  },
+  {
+    id: "zhipu",
+    name: "智谱",
+    group: "常用",
+    kind: "openai-chat-completions",
+    baseURL: "https://open.bigmodel.cn/api/paas/v4",
+    modelId: "glm-4.5",
+    apiKeyRequired: true,
+    docsUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    group: "其他",
+    kind: "anthropic-messages",
+    baseURL: "https://api.anthropic.com",
+    modelId: "claude-sonnet-4-5",
+    apiKeyRequired: true,
+    docsUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
+    id: "custom",
+    name: "自定义端点",
+    group: "其他",
+    kind: "openai-chat-completions",
+    baseURL: "https://api.example.com/v1",
+    modelId: "my-model",
+    apiKeyRequired: true,
+  },
+];
+
 export function readProviderStore(): ProviderStore {
   const fallback: ProviderStore = {
     providers: [builtinProvider()],
@@ -59,23 +132,45 @@ export function addProvider(input: {
 }): ProviderConfig {
   const store = readProviderStore();
   const modelId = input.modelId.trim();
+  const models: ProviderConfig["models"] = {};
+  if (modelId && !modelId.includes("/")) {
+    models[modelId] = { context: 8192, output: 2048 };
+  }
   const provider: ProviderConfig = {
     id: `custom:${createId()}`,
-    name: input.name.trim() || "自定义模型",
+    name: input.name.trim() || "新供应商",
     kind: input.kind,
     baseURL: input.baseURL.trim().replace(/\/+$/, ""),
     apiKeyRequired: input.apiKeyRequired,
     enabled: true,
-    models: { [modelId || "default"]: { context: 8192, output: 2048 } },
+    models,
   };
   store.providers.push(provider);
   writeProviderStore(store);
   return provider;
 }
 
+export function addProviderFromTemplate(templateId: string): ProviderConfig | null {
+  const template = PROVIDER_TEMPLATES.find((item) => item.id === templateId);
+  if (!template) return null;
+  return addProvider({
+    name: template.name,
+    kind: template.kind,
+    baseURL: template.baseURL,
+    modelId: template.modelId,
+    apiKeyRequired: template.apiKeyRequired,
+  });
+}
+
 export function updateProvider(
   id: string,
-  patch: { name?: string; baseURL?: string; apiKeyRequired?: boolean },
+  patch: {
+    name?: string;
+    baseURL?: string;
+    apiKeyRequired?: boolean;
+    kind?: Exclude<ProviderKind, "builtin">;
+    enabled?: boolean;
+  },
 ): boolean {
   if (id === BUILTIN_PROVIDER_ID) return false;
   const store = readProviderStore();
@@ -87,8 +182,15 @@ export function updateProvider(
   }
   if (patch.baseURL != null) provider.baseURL = patch.baseURL.trim().replace(/\/+$/, "");
   if (patch.apiKeyRequired != null) provider.apiKeyRequired = patch.apiKeyRequired;
+  if (patch.kind != null) provider.kind = patch.kind;
+  if (patch.enabled != null) provider.enabled = patch.enabled;
   writeProviderStore(store);
   return true;
+}
+
+export function setProviderEnabled(id: string, enabled: boolean): boolean {
+  if (id === BUILTIN_PROVIDER_ID) return false;
+  return updateProvider(id, { enabled });
 }
 
 export function removeProvider(id: string): void {
@@ -101,17 +203,80 @@ export function removeProvider(id: string): void {
   writeProviderStore(store);
 }
 
-export function addModel(providerId: string, modelId: string): string | null {
+export function addModel(
+  providerId: string,
+  modelId: string,
+  caps: { context?: number; output?: number } = {},
+): string | null {
   const id = modelId.trim();
   if (!id || id.includes("/") || providerId === BUILTIN_PROVIDER_ID) return null;
   const store = readProviderStore();
   const provider = store.providers.find((item) => item.id === providerId);
   if (!provider || provider.kind === "builtin") return null;
   if (!provider.models[id]) {
-    provider.models = { ...provider.models, [id]: { context: 8192, output: 2048 } };
+    provider.models = {
+      ...provider.models,
+      [id]: {
+        context: caps.context ?? 8192,
+        output: caps.output ?? 2048,
+      },
+    };
   }
   writeProviderStore(store);
   return `${provider.id}/${id}`;
+}
+
+export function updateModel(
+  providerId: string,
+  modelId: string,
+  patch: { context?: number; output?: number },
+): boolean {
+  if (providerId === BUILTIN_PROVIDER_ID) return false;
+  const store = readProviderStore();
+  const provider = store.providers.find((item) => item.id === providerId);
+  if (!provider || provider.kind === "builtin") return false;
+  const current = provider.models[modelId];
+  if (!current) return false;
+  provider.models = {
+    ...provider.models,
+    [modelId]: {
+      context:
+        patch.context != null && Number.isFinite(patch.context) && patch.context > 0
+          ? Math.floor(patch.context)
+          : current.context,
+      output:
+        patch.output != null && Number.isFinite(patch.output) && patch.output > 0
+          ? Math.floor(patch.output)
+          : current.output,
+    },
+  };
+  writeProviderStore(store);
+  return true;
+}
+
+export function removeModel(providerId: string, modelId: string): boolean {
+  if (providerId === BUILTIN_PROVIDER_ID) return false;
+  const store = readProviderStore();
+  const provider = store.providers.find((item) => item.id === providerId);
+  if (!provider || provider.kind === "builtin") return false;
+  if (!(modelId in provider.models)) return false;
+  if (Object.keys(provider.models).length <= 1) return false;
+  const next = { ...provider.models };
+  delete next[modelId];
+  provider.models = next;
+  const ref = `${providerId}/${modelId}`;
+  if (store.defaultModelRef === ref) {
+    const first = Object.keys(next)[0];
+    store.defaultModelRef = first ? `${providerId}/${first}` : BUILTIN_MODEL_REF;
+  }
+  writeProviderStore(store);
+  return true;
+}
+
+export function providerKindLabel(kind: ProviderKind): string {
+  if (kind === "builtin") return "本机";
+  if (kind === "anthropic-messages") return "Anthropic Messages";
+  return "OpenAI 兼容";
 }
 
 export type ModelGroup = {

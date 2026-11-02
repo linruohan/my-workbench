@@ -5,6 +5,7 @@ import {
   parseModelRef,
   type ProviderKind,
 } from "@wb/domain";
+import { useDialog } from "../shell/Dialogs";
 import { credentialExists, deleteCredential, writeCredential } from "./credentials";
 import {
   addModel,
@@ -31,6 +32,7 @@ export function ModelMenu({
   onSelect,
   onOpenSettings,
 }: Props) {
+  const dialog = useDialog();
   const [version, setVersion] = useState(0);
   const [configuring, setConfiguring] = useState<false | "add" | "edit">(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -219,19 +221,21 @@ export function ModelMenu({
                     type="button"
                     className="btn"
                     onClick={() => {
-                      if (
-                        !window.confirm(
-                          `移除提供商「${browse.name}」？本机密钥会一起删除。`,
-                        )
-                      ) {
-                        return;
-                      }
-                      const current = parsed?.providerId === browse.id;
-                      removeProvider(browse.id);
-                      deleteCredential(browse.id);
-                      setVersion((value) => value + 1);
-                      setBrowseId(BUILTIN_PROVIDER_ID);
-                      if (current) onSelect(BUILTIN_MODEL_REF);
+                      void (async () => {
+                        const ok = await dialog.confirm({
+                          title: "移除提供商",
+                          message: `移除提供商「${browse.name}」？本机密钥会一起删除。`,
+                          confirmLabel: "移除",
+                          danger: true,
+                        });
+                        if (!ok) return;
+                        const current = parsed?.providerId === browse.id;
+                        removeProvider(browse.id);
+                        deleteCredential(browse.id);
+                        setVersion((value) => value + 1);
+                        setBrowseId(BUILTIN_PROVIDER_ID);
+                        if (current) onSelect(BUILTIN_MODEL_REF);
+                      })();
                     }}
                   >
                     移除

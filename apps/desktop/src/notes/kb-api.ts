@@ -7,21 +7,34 @@ import {
   parentDir,
   pastedImageRel,
   resolveImageTarget,
+  samePath,
 } from "@wb/domain";
+import { errorMessage } from "../lib/errors";
 import { isTauriRuntime, resolveDataDir } from "../lib/paths";
 
 export type KbEntry = {
   name: string;
   path: string;
   isDir: boolean;
+  mtimeMs?: number | null;
 };
 
+export type KbSortKey = "name" | "mtime" | "type";
+export type KbSortDir = "asc" | "desc";
+
 const ROOTS_KEY = "wb.kb.roots.v1";
+const RECENT_KEY = "wb.kb.recent.v1";
+const ACTIVE_ROOT_KEY = "wb.kb.activeRoot.v1";
+const SORT_KEY = "wb.kb.sort.v1";
 const imageCache = new Map<string, string>();
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, args);
+  try {
+    return await invoke<T>(command, args);
+  } catch (err) {
+    throw new Error(errorMessage(err, `调用 ${command} 失败`));
+  }
 }
 
 export function loadKnowledgeRoots(): string[] {
@@ -41,9 +54,85 @@ export function saveKnowledgeRoots(roots: string[]): void {
   localStorage.setItem(ROOTS_KEY, JSON.stringify(roots));
 }
 
-export async function pickDirectory(): Promise<string | null> {
+export function loadActiveKnowledgeRoot(roots: string[]): string | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_ROOT_KEY);
+    if (typeof raw === "string" && raw && roots.some((r) => samePath(r, raw))) {
+      return roots.find((r) => samePath(r, raw)) ?? raw;
+    }
+  } catch {
+    /* ignore */
+  }
+  return roots[0] ?? null;
+}
+
+export function saveActiveKnowledgeRoot(path: string | null): void {
+  if (!path) {
+    localStorage.removeItem(ACTIVE_ROOT_KEY);
+    return;
+  }
+  localStorage.setItem(ACTIVE_ROOT_KEY, path);
+}
+
+export function loadRecentKnowledgeRoots(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is string => typeof item === "string" && item.length > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function pushRecentKnowledgeRoot(path: string, limit = 8): string[] {
+  const prev = loadRecentKnowledgeRoots().filter((item) => !samePath(item, path));
+  const next = [path, ...prev].slice(0, limit);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  return next;
+}
+
+export function loadKnowledgeSort(): { key: KbSortKey; dir: KbSortDir } {
+  try {
+    const raw = localStorage.getItem(SORT_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "key" in parsed &&
+      "dir" in parsed
+    ) {
+      const key = (parsed as { key: string }).key;
+      const dir = (parsed as { dir: string }).dir;
+      if (
+        (key === "name" || key === "mtime" || key === "type") &&
+        (dir === "asc" || dir === "desc")
+      ) {
+        return { key, dir };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { key: "name", dir: "asc" };
+}
+
+export function saveKnowledgeSort(key: KbSortKey, dir: KbSortDir): void {
+  localStorage.setItem(SORT_KEY, JSON.stringify({ key, dir }));
+}
+
+export async function pickDirectory(title = "选择文件夹"): Promise<string | null> {
   if (!isTauriRuntime()) return null;
-  return call<string | null>("kb_pick_directory");
+  return call<string | null>("kb_pick_directory", { title });
+}
+
+export async function revealInExplorer(path: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("在资源管理器中显示需要在桌面应用中使用。");
+  }
+  await call("kb_reveal_in_explorer", { path });
 }
 
 export async function listDirectory(path: string): Promise<KbEntry[]> {
@@ -96,6 +185,13 @@ export async function kbExists(path: string): Promise<boolean> {
 
 export async function kbMkdir(path: string): Promise<void> {
   await call("kb_mkdir", { path });
+}
+
+export async function renameKbPath(from: string, to: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("重命名文件需要在桌面应用中使用。");
+  }
+  await call("kb_rename", { from, to });
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {

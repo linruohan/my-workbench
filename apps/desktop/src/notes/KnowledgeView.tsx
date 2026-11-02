@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Note } from "@wb/domain";
 import {
+  fileNameOf,
   fileStem,
   isImageFile,
   isMarkdownFile,
@@ -10,23 +11,53 @@ import {
   parentDir,
   samePath,
 } from "@wb/domain";
+import { errorMessage } from "../lib/errors";
 import { isTauriRuntime } from "../lib/paths";
 import { PromptModal } from "../shell/PromptModal";
+import { useDialog } from "../shell/Dialogs";
 import { FileTree } from "./FileTree";
+import { KnowledgeLibraryMenu } from "./KnowledgeLibraryMenu";
 import {
   ensureNoteAssetDir,
   kbExists,
   listFilesRecursive,
+  loadActiveKnowledgeRoot,
   loadKnowledgeRoots,
+  loadKnowledgeSort,
+  loadRecentKnowledgeRoots,
   pickDirectory,
+  pushRecentKnowledgeRoot,
   readImageDataUrl,
   readTextFile,
+  renameKbPath,
+  revealInExplorer,
+  saveActiveKnowledgeRoot,
   saveKnowledgeRoots,
+  saveKnowledgeSort,
   writeTextFile,
   type KbEntry,
+  type KbSortDir,
+  type KbSortKey,
 } from "./kb-api";
 import { NoteEditor } from "./NoteEditor";
 import { QuickOpen } from "./QuickOpen";
+
+function sanitizeFileName(name: string): string {
+  return name
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "")
+    .replace(/[. ]+$/g, "")
+    .trim();
+}
+
+function withPreservedExt(oldName: string, nextName: string): string {
+  const trimmed = sanitizeFileName(nextName);
+  if (!trimmed) return oldName;
+  const dot = oldName.lastIndexOf(".");
+  if (dot <= 0) return trimmed;
+  const ext = oldName.slice(dot);
+  if (trimmed.toLowerCase().endsWith(ext.toLowerCase())) return trimmed;
+  return `${trimmed}${ext}`;
+}
 
 type Props = {
   notes: Note[];
@@ -54,7 +85,18 @@ export function KnowledgeView({
   onChange,
   onDelete,
 }: Props) {
+  const dialog = useDialog();
   const [roots, setRoots] = useState<string[]>(() => loadKnowledgeRoots());
+  const [activeRoot, setActiveRoot] = useState<string | null>(() =>
+    loadActiveKnowledgeRoot(loadKnowledgeRoots()),
+  );
+  const [recentRoots, setRecentRoots] = useState<string[]>(() =>
+    loadRecentKnowledgeRoots(),
+  );
+  const initialSort = loadKnowledgeSort();
+  const [sortKey, setSortKey] = useState<KbSortKey>(initialSort.key);
+  const [sortDir, setSortDir] = useState<KbSortDir>(initialSort.dir);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
   const [filter, setFilter] = useState("");
@@ -65,6 +107,18 @@ export function KnowledgeView({
   const [quickFiles, setQuickFiles] = useState<KbEntry[]>([]);
   const [quickLoading, setQuickLoading] = useState(false);
   const pendingSave = useRef<{ path: string; body: string } | null>(null);
+  const libraryRef = useRef<HTMLDivElement>(null);
+
+  const activeRootLabel = useMemo(() => {
+    if (!activeRoot) return "选择目录";
+    return fileNameOf(activeRoot) || activeRoot;
+  }, [activeRoot]);
+
+  const activateRoot = useCallback((path: string) => {
+    setActiveRoot(path);
+    saveActiveKnowledgeRoot(path);
+    setRecentRoots(pushRecentKnowledgeRoot(path));
+  }, []);
 
   const selected = activeId ? notes.find((n) => n.id === activeId) : null;
   const active = openFile
@@ -101,9 +155,12 @@ export function KnowledgeView({
     } catch (err) {
       pendingSave.current = item;
       setSaveState("error");
-      window.alert(err instanceof Error ? err.message : "保存失败");
+      void dialog.alert({
+        title: "保存失败",
+        message: errorMessage(err, "保存失败"),
+      });
     }
-  }, []);
+  }, [dialog]);
 
   // Save pending edits when hiding/closing the app or leaving this view.
   useEffect(() => {
@@ -135,6 +192,33 @@ export function KnowledgeView({
     );
     pendingSave.current = { path, body };
     setSaveState("dirty");
+  };
+
+  const renameOpenFile = async (nextFileName: string) => {
+    if (!openFile || (openFile.kind !== "md" && openFile.kind !== "text")) return;
+    const nextName = withPreservedExt(openFile.title, nextFileName);
+    if (!sanitizeFileName(nextName)) {
+      throw new Error("文件名不能为空或包含非法字符。");
+    }
+    if (!nextName || nextName === openFile.title) return;
+    const dest = joinPath(parentDir(openFile.path), nextName);
+    if (samePath(dest, openFile.path)) return;
+    const fromPath = openFile.path;
+    await flushSave();
+    if (await kbExists(dest)) {
+      throw new Error("同名文件已存在。");
+    }
+    await renameKbPath(fromPath, dest);
+    if (pendingSave.current?.path === fromPath) {
+      pendingSave.current = { ...pendingSave.current, path: dest };
+    }
+    setOpenFile((current) =>
+      current && current.path === fromPath
+        ? { ...current, path: dest, title: nextName }
+        : current,
+    );
+    setRefreshToken((value) => value + 1);
+    setSaveState("saved");
   };
 
   const openQuickOpen = useCallback(() => {
@@ -169,30 +253,65 @@ export function KnowledgeView({
     return () => window.removeEventListener("keydown", onKey);
   }, [flushSave, openQuickOpen]);
 
-  const importDirectory = async () => {
+  useEffect(() => {
+    if (!libraryOpen) return;
+    const onDoc = (event: MouseEvent) => {
+      const root = libraryRef.current;
+      if (!root) return;
+      if (event.target instanceof Node && root.contains(event.target)) return;
+      setLibraryOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setLibraryOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [libraryOpen]);
+
+  const openFolder = async () => {
     if (!isTauriRuntime()) {
-      window.alert("导入本地目录需要在桌面应用中使用。");
+      await dialog.alert("打开本地目录需要在桌面应用中使用。");
       return;
     }
     try {
-      const picked = await pickDirectory();
+      const picked = await pickDirectory("打开知识库目录");
       if (!picked) return;
       setRoots((current) => {
-        if (current.some((item) => samePath(item, picked))) return current;
-        const next = [...current, picked];
+        const exists = current.some((item) => samePath(item, picked));
+        const next = exists ? current : [...current, picked];
         saveKnowledgeRoots(next);
         return next;
       });
+      activateRoot(picked);
+      setLibraryOpen(false);
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "无法打开目录选择器");
+      await dialog.alert({
+        title: "无法打开目录",
+        message: errorMessage(err, "无法打开目录选择器"),
+      });
     }
   };
 
-  const removeRoot = (path: string) => {
-    if (!window.confirm(`从知识库移除目录？\n${path}\n（不会删除磁盘文件）`)) return;
+  const removeRoot = async (path: string) => {
+    const ok = await dialog.confirm({
+      title: "移除目录",
+      message: `从知识库移除目录？\n${path}\n（不会删除磁盘文件）`,
+      confirmLabel: "移除",
+      danger: true,
+    });
+    if (!ok) return;
     setRoots((current) => {
       const next = current.filter((item) => !samePath(item, path));
       saveKnowledgeRoots(next);
+      if (activeRoot && samePath(activeRoot, path)) {
+        const fallback = next[0] ?? null;
+        setActiveRoot(fallback);
+        saveActiveKnowledgeRoot(fallback);
+      }
       return next;
     });
     setOpenFile((current) => {
@@ -201,13 +320,25 @@ export function KnowledgeView({
     });
   };
 
+  const selectRecentRoot = (path: string) => {
+    setRoots((current) => {
+      const exists = current.some((item) => samePath(item, path));
+      const next = exists ? current : [...current, path];
+      saveKnowledgeRoots(next);
+      return next;
+    });
+    activateRoot(path);
+    setRefreshToken((value) => value + 1);
+    setLibraryOpen(false);
+  };
+
   const createMarkdownIn = async (rootPath: string, name: string) => {
     if (!isTauriRuntime()) return;
     const fileName = name.toLowerCase().endsWith(".md") ? name : `${name}.md`;
     const path = joinPath(rootPath, fileName);
     try {
       if (await kbExists(path)) {
-        window.alert("同名文件已存在。");
+        await dialog.alert("同名文件已存在。");
         return;
       }
       const title = fileStem(fileName);
@@ -217,7 +348,10 @@ export function KnowledgeView({
       setOpenFile({ kind: "md", path, title: fileName, body });
       setSaveState("saved");
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "无法创建文件");
+      await dialog.alert({
+        title: "创建失败",
+        message: errorMessage(err, "无法创建文件"),
+      });
     }
   };
 
@@ -270,27 +404,69 @@ export function KnowledgeView({
       <aside className="knowledge__list" aria-label="笔记列表">
         <header className="knowledge__list-header">
           <h1>知识库</h1>
-          <div className="knowledge__header-actions">
-            <button type="button" onClick={() => void importDirectory()}>
-              导入目录
-            </button>
+          <div className="knowledge__library" ref={libraryRef}>
             <button
               type="button"
-              title="刷新目录树"
-              onClick={() => setRefreshToken((value) => value + 1)}
+              className="knowledge__library-trigger"
+              title={activeRoot ?? "打开知识库目录"}
+              aria-haspopup="menu"
+              aria-expanded={libraryOpen}
+              onClick={() => setLibraryOpen((open) => !open)}
             >
-              刷新
+              <span className="knowledge__library-name">{activeRootLabel}</span>
+              <span className="knowledge__library-caret" aria-hidden>
+                ▾
+              </span>
             </button>
-            <button
-              type="button"
-              title="搜索打开文件 Ctrl+P"
-              onClick={() => openQuickOpen()}
-            >
-              打开
-            </button>
-            <button type="button" className="primary" onClick={onCreate}>
-              新建
-            </button>
+            {libraryOpen ? (
+              <KnowledgeLibraryMenu
+                activeRoot={activeRoot}
+                recentRoots={recentRoots}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onClose={() => setLibraryOpen(false)}
+                onNewFile={() => {
+                  setLibraryOpen(false);
+                  if (activeRoot && isTauriRuntime()) {
+                    setCreateFileRoot(activeRoot);
+                    return;
+                  }
+                  // Browser / no folder yet: fall back to an in-app note.
+                  onCreate();
+                }}
+                onSearch={() => {
+                  setLibraryOpen(false);
+                  openQuickOpen();
+                }}
+                onReveal={() => {
+                  if (!activeRoot) return;
+                  void revealInExplorer(activeRoot).catch((err: unknown) => {
+                    void dialog.alert({
+                      title: "无法打开",
+                      message: errorMessage(err, "无法在资源管理器中显示"),
+                    });
+                  });
+                  setLibraryOpen(false);
+                }}
+                onOpenFolder={() => void openFolder()}
+                onRefresh={() => {
+                  setRefreshToken((value) => value + 1);
+                  setLibraryOpen(false);
+                }}
+                onSelectRecent={selectRecentRoot}
+                onSortKey={(key) => {
+                  setSortKey(key);
+                  saveKnowledgeSort(key, sortDir);
+                }}
+                onToggleSortDir={() => {
+                  setSortDir((dir) => {
+                    const next = dir === "asc" ? "desc" : "asc";
+                    saveKnowledgeSort(sortKey, next);
+                    return next;
+                  });
+                }}
+              />
+            ) : null}
           </div>
         </header>
         {roots.length > 0 ? (
@@ -306,9 +482,12 @@ export function KnowledgeView({
         <div className="knowledge__scroll">
           <FileTree
             roots={roots}
+            activeRoot={activeRoot}
             activePath={openFile?.path ?? null}
             refreshToken={refreshToken}
             filter={filter}
+            sortKey={sortKey}
+            sortDir={sortDir}
             onOpen={(entry) => void openEntry(entry)}
             onRemoveRoot={removeRoot}
             onCreateIn={(root) => {
@@ -319,7 +498,7 @@ export function KnowledgeView({
           {roots.length > 0 ? <p className="knowledge__section">笔记</p> : null}
           {notes.length === 0 && roots.length === 0 ? (
             <p className="empty">
-              还没有笔记。可以「新建」，或「导入目录」浏览本地文件。
+              还没有笔记。点击右侧目录名打开文件夹，或用 Ctrl+N 新建应用内笔记。
             </p>
           ) : notes.length === 0 ? (
             <p className="empty">没有应用内笔记。目录里的 Markdown 可以直接编辑。</p>
@@ -370,6 +549,7 @@ export function KnowledgeView({
                 updatedAt: 0,
               }}
               titleReadOnly
+              onRenameFile={(name) => renameOpenFile(name)}
               saveLabel={saveLabel}
               imageBaseDir={parentDir(openFile.path)}
               imageStem={fileStem(openFile.path)}
@@ -389,6 +569,7 @@ export function KnowledgeView({
             saveLabel={saveLabel}
             onSave={() => void flushSave()}
             onChange={(body) => updateFileBody(openFile.path, body)}
+            onRenameFile={(name) => renameOpenFile(name)}
           />
         ) : openFile?.kind === "image" ? (
           <ImageFile key={openFile.path} path={openFile.path} title={openFile.title} />
@@ -411,7 +592,7 @@ export function KnowledgeView({
           />
         ) : (
           <p className="empty knowledge__empty">
-            选择或新建一篇笔记，或导入一个本地目录。
+            选择或新建一篇笔记，或点击目录名打开本地文件夹。
           </p>
         )}
       </div>
@@ -448,6 +629,7 @@ function PlainTextFile({
   saveLabel,
   onChange,
   onSave,
+  onRenameFile,
 }: {
   path: string;
   title: string;
@@ -455,15 +637,77 @@ function PlainTextFile({
   saveLabel: string | null;
   onChange: (body: string) => void;
   onSave: () => void;
+  onRenameFile?: (nextFileName: string) => void | Promise<void>;
 }) {
+  const dialog = useDialog();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const commitLock = useRef(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(title);
+  }, [title, editing]);
+
+  useEffect(() => {
+    if (!editing) return;
+    titleRef.current?.focus();
+    titleRef.current?.select();
+  }, [editing]);
+
+  const commit = async () => {
+    if (!editing || commitLock.current) return;
+    commitLock.current = true;
+    setEditing(false);
+    const next = draft.trim();
+    try {
+      if (!next || next === title || !onRenameFile) {
+        setDraft(title);
+        return;
+      }
+      await onRenameFile(next);
+    } catch (err) {
+      setDraft(title);
+      await dialog.alert({
+        title: "重命名失败",
+        message: errorMessage(err, "重命名失败"),
+      });
+    } finally {
+      commitLock.current = false;
+    }
+  };
+
   return (
     <div className="note-editor">
       <header className="note-editor__toolbar">
         <input
+          ref={titleRef}
           className="note-editor__title"
-          aria-label="文件名"
-          value={title}
-          readOnly
+          aria-label="文件名（双击重命名）"
+          title="双击重命名文件"
+          value={editing ? draft : title}
+          readOnly={!editing}
+          onDoubleClick={() => {
+            if (!onRenameFile) return;
+            setDraft(title);
+            setEditing(true);
+          }}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => {
+            if (editing) void commit();
+          }}
+          onKeyDown={(e) => {
+            if (!editing) return;
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void commit();
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              setDraft(title);
+              setEditing(false);
+            }
+          }}
         />
         {saveLabel ? <span className="note-editor__save">{saveLabel}</span> : null}
       </header>

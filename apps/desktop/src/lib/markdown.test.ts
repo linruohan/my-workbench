@@ -32,8 +32,8 @@ describe("renderMarkdown", () => {
     expect(html).toContain('class="md-code"');
     expect(html).toContain("md-code__dots");
     expect(html).toContain("Shell");
-    expect(html).toContain('class="md-code__num">1<');
-    expect(html).toContain('class="md-code__num">2<');
+    expect(html).toContain('class="md-code__gutter"');
+    expect(html).toContain("1\n2");
     expect(html).toContain("hljs");
   });
 

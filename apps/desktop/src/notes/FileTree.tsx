@@ -1,32 +1,79 @@
 import { useEffect, useMemo, useState } from "react";
 import { fileNameOf, isIgnoredKbName, isPathUnder, samePath } from "@wb/domain";
-import { listDirectory, type KbEntry } from "./kb-api";
+import {
+  listDirectory,
+  type KbEntry,
+  type KbSortDir,
+  type KbSortKey,
+} from "./kb-api";
 import { FileIcon, FolderIcon } from "./FileTreeIcons";
 
 type Props = {
   roots: string[];
+  /** When set, only this root is shown (current library folder). */
+  activeRoot?: string | null;
   activePath: string | null;
   refreshToken: number;
   filter?: string;
+  sortKey?: KbSortKey;
+  sortDir?: KbSortDir;
   onOpen: (entry: KbEntry) => void;
   onRemoveRoot: (path: string) => void;
   onCreateIn?: (rootPath: string) => void;
 };
 
+function extOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i > 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
+export function sortKbEntries(
+  entries: KbEntry[],
+  sortKey: KbSortKey,
+  sortDir: KbSortDir,
+): KbEntry[] {
+  const dir = sortDir === "asc" ? 1 : -1;
+  return [...entries].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    let cmp = 0;
+    if (sortKey === "mtime") {
+      cmp = (a.mtimeMs ?? 0) - (b.mtimeMs ?? 0);
+    } else if (sortKey === "type") {
+      cmp =
+        extOf(a.name).localeCompare(extOf(b.name), undefined, {
+          sensitivity: "base",
+        }) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    } else {
+      cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    }
+    if (cmp === 0) {
+      cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    }
+    return cmp * dir;
+  });
+}
+
 export function FileTree({
   roots,
+  activeRoot = null,
   activePath,
   refreshToken,
   filter = "",
+  sortKey = "name",
+  sortDir = "asc",
   onOpen,
   onRemoveRoot,
   onCreateIn,
 }: Props) {
-  if (roots.length === 0) return null;
+  const visibleRoots =
+    activeRoot && roots.some((r) => samePath(r, activeRoot))
+      ? roots.filter((r) => samePath(r, activeRoot))
+      : roots;
+  if (visibleRoots.length === 0) return null;
   const query = filter.trim().toLowerCase();
   return (
     <div className="knowledge__tree" aria-label="导入的目录">
-      {roots.map((root) => (
+      {visibleRoots.map((root) => (
         <DirNode
           key={root}
           path={root}
@@ -36,6 +83,8 @@ export function FileTree({
           activePath={activePath}
           refreshToken={refreshToken}
           filter={query}
+          sortKey={sortKey}
+          sortDir={sortDir}
           onOpen={onOpen}
           onRemoveRoot={onRemoveRoot}
           onCreateIn={onCreateIn}
@@ -53,6 +102,8 @@ function DirNode({
   activePath,
   refreshToken,
   filter,
+  sortKey,
+  sortDir,
   onOpen,
   onRemoveRoot,
   onCreateIn,
@@ -64,6 +115,8 @@ function DirNode({
   activePath: string | null;
   refreshToken: number;
   filter: string;
+  sortKey: KbSortKey;
+  sortDir: KbSortDir;
   onOpen: (entry: KbEntry) => void;
   onRemoveRoot: (path: string) => void;
   onCreateIn?: (rootPath: string) => void;
@@ -111,11 +164,13 @@ function DirNode({
 
   const visible = useMemo(() => {
     if (!entries) return null;
-    if (!filter) return entries;
-    return entries.filter(
-      (entry) => entry.isDir || entry.name.toLowerCase().includes(filter),
-    );
-  }, [entries, filter]);
+    const filtered = filter
+      ? entries.filter(
+          (entry) => entry.isDir || entry.name.toLowerCase().includes(filter),
+        )
+      : entries;
+    return sortKbEntries(filtered, sortKey, sortDir);
+  }, [entries, filter, sortKey, sortDir]);
 
   const loading = open && !error && loadedFor !== `${path}:${refreshToken}`;
   const toggle = () => setOpen((value) => !value);
@@ -169,6 +224,8 @@ function DirNode({
                 activePath={activePath}
                 refreshToken={refreshToken}
                 filter={filter}
+                sortKey={sortKey}
+                sortDir={sortDir}
                 onOpen={onOpen}
                 onRemoveRoot={onRemoveRoot}
               />

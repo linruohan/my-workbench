@@ -11,8 +11,10 @@ describe("agent workspaces", () => {
       nowMs: 2,
     });
     expect(thread.workspaceId).toBe(workspace.id);
-    expect(store.listAgentThreads(workspace.id)).toHaveLength(1);
+    expect(thread.archivedAt).toBeNull();
+    expect(store.listAgentThreads({ workspaceId: workspace.id })).toHaveLength(1);
     expect(store.getAgentWorkspace(workspace.id)?.updatedAt).toBe(2);
+    expect(store.getAgentWorkspace(workspace.id)?.rootPath).toBeNull();
 
     const legacy = JSON.stringify({
       tasks: [],
@@ -41,6 +43,33 @@ describe("agent workspaces", () => {
       store.listAgentWorkspaces()[0]?.id,
     );
     expect(store.listAgentThreads()[0]?.title).toBe("旧会话");
+    expect(store.listAgentThreads()[0]?.archivedAt).toBeNull();
+  });
+
+  it("binds a folder path and reuses the same workspace", () => {
+    const store = new MemoryWorkbenchRepository();
+    const first = store.createAgentWorkspace({
+      title: "my-workbench",
+      rootPath: "D:\\codehub\\my-workbench",
+      nowMs: 1,
+    });
+    expect(first.rootPath).toBe("D:\\codehub\\my-workbench");
+    expect(store.findAgentWorkspaceByRootPath("D:/codehub/my-workbench/")?.id).toBe(
+      first.id,
+    );
+  });
+
+  it("archives sessions out of the default list", () => {
+    const store = new MemoryWorkbenchRepository();
+    const workspace = store.createAgentWorkspace({ title: "本机", nowMs: 1 });
+    const thread = store.createAgentThread({ workspaceId: workspace.id, nowMs: 2 });
+    store.archiveAgentThread(thread.id, 3);
+    expect(store.listAgentThreads()).toHaveLength(0);
+    expect(store.listAgentThreads({ includeArchived: true })).toHaveLength(1);
+    expect(store.getAgentThread(thread.id)?.archivedAt).toBe(3);
+    store.unarchiveAgentThread(thread.id, 4);
+    expect(store.listAgentThreads()).toHaveLength(1);
+    expect(store.getAgentThread(thread.id)?.archivedAt).toBeNull();
   });
 
   it("deletes a workspace together with its sessions", () => {
@@ -53,9 +82,10 @@ describe("agent workspaces", () => {
       content: "你好",
       nowMs: 3,
     });
+    store.archiveAgentThread(thread.id, 4);
     store.deleteAgentWorkspace(workspace.id);
     expect(store.listAgentWorkspaces()).toHaveLength(0);
-    expect(store.listAgentThreads()).toHaveLength(0);
+    expect(store.listAgentThreads({ includeArchived: true })).toHaveLength(0);
     expect(store.listAgentMessages(thread.id)).toHaveLength(0);
   });
 });

@@ -14,7 +14,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: "mode",
     aliases: [],
     summary: "查看或切换写入权限",
-    usage: "/mode [需确认|本会话自动|只读]",
+    usage: "/mode [变更前确认|本会话自动|只读]",
   },
   {
     name: "model",
@@ -97,11 +97,11 @@ function modeAction(args: string, mode: AgentPermissionMode): SlashAction {
   if (!args) {
     return {
       type: "reply",
-      text: `当前权限：${permissionModeLabel(mode)}。可改为需确认、本会话自动或只读。`,
+      text: `当前权限：${permissionModeLabel(mode)}。可改为变更前确认、本会话自动或只读。`,
     };
   }
   const next = parseMode(args);
-  if (!next) return { type: "reply", text: "权限只能是：需确认、本会话自动、只读。" };
+  if (!next) return { type: "reply", text: "权限只能是：变更前确认、本会话自动、只读。" };
   if (next === mode) {
     return { type: "reply", text: `当前已经是${permissionModeLabel(mode)}。` };
   }
@@ -134,7 +134,14 @@ function findCommand(token: string): SlashCommand | null {
 
 function parseMode(args: string): AgentPermissionMode | null {
   const folded = args.trim().toLowerCase();
-  if (folded === "confirm" || args === "需确认" || args === "确认") return "confirm";
+  if (
+    folded === "confirm" ||
+    args === "变更前确认" ||
+    args === "需确认" ||
+    args === "确认"
+  ) {
+    return "confirm";
+  }
   if (
     folded === "session_auto" ||
     folded === "auto" ||

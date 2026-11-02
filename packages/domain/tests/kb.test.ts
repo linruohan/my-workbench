@@ -23,6 +23,7 @@ import {
   extractMdHeadings,
   isTableLine,
   isTocSource,
+  locateHeadingBlockIndex,
   cutSelectedLines,
   dedupeSelectedLines,
   findAllMatches,
@@ -216,6 +217,13 @@ describe("knowledge headings", () => {
     expect(
       extractMdHeadings("# 一\n## 二\n```\n# skip\n```\n### 三").map((h) => h.text),
     ).toEqual(["一", "二", "三"]);
+
+    const tocDoc = splitMdBlocks("[toc]\n\n# 一\n\n## 二\n\n正文");
+    const heads = extractMdHeadings(joinMdBlocks(tocDoc));
+    expect(locateHeadingBlockIndex(tocDoc, heads[0]!.id)).toBeGreaterThan(0);
+    expect(locateHeadingBlockIndex(tocDoc, heads[1]!.id)).toBeGreaterThan(
+      locateHeadingBlockIndex(tocDoc, heads[0]!.id),
+    );
   });
 
   it("wraps multi-line selections for bold and highlight", () => {
