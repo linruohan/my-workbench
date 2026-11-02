@@ -20,6 +20,9 @@ import {
   resolveImageTarget,
   splitMdBlocks,
   stripHeadingNumber,
+  extractMdHeadings,
+  isTableLine,
+  isTocSource,
   cutSelectedLines,
   dedupeSelectedLines,
   findAllMatches,
@@ -194,6 +197,29 @@ describe("knowledge headings", () => {
     ]);
   });
 
+  it("groups table rows and recognizes toc markers", () => {
+    expect(isTableLine("| a | b |")).toBe(true);
+    expect(isTableLine("| --- | --- |")).toBe(true);
+    expect(isTableLine("plain text")).toBe(false);
+    expect(isTocSource("[toc]")).toBe(true);
+    expect(isTocSource("[TOC]")).toBe(true);
+    expect(isTocSource("[[toc]]")).toBe(true);
+
+    const source = "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n[toc]\n\n# Hi";
+    const blocks = splitMdBlocks(source);
+    expect(blocks[0]).toBe("| a | b |\n| --- | --- |\n| 1 | 2 |");
+    expect(blocks).toContain("[toc]");
+    expect(normalizeMdBlocks(["| a | b |", "| --- | --- |", "| 1 | 2 |", ""])).toEqual([
+      "| a | b |\n| --- | --- |\n| 1 | 2 |",
+      "",
+    ]);
+    expect(extractMdHeadings("# 一\n## 二\n```\n# skip\n```\n### 三").map((h) => h.text)).toEqual([
+      "一",
+      "二",
+      "三",
+    ]);
+  });
+
   it("wraps multi-line selections for bold and highlight", () => {
     const bold = wrapMarkdownSelection("a\nb\n", 0, 3, "**");
     expect(bold.text).toBe("**a**\n**b**\n");
@@ -242,6 +268,14 @@ describe("knowledge headings", () => {
     const cut = cutSelectedLines("a\nb\nc", 2, 2);
     expect(cut.cut).toBe("b\n");
     expect(cut.text).toBe("a\nc");
+
+    const empty = cutSelectedLines("", 0, 0);
+    expect(empty.text).toBe("");
+    expect(empty.cut).toBe("");
+
+    const onlyLine = cutSelectedLines("hello", 2, 2);
+    expect(onlyLine.text).toBe("");
+    expect(onlyLine.cut).toBe("hello");
 
     const sorted = sortSelectedLines("c\na\nb", 0, 5);
     expect(sorted.text).toBe("a\nb\nc");

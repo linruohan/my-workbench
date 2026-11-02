@@ -101,8 +101,16 @@ CREATE TABLE IF NOT EXISTS notes (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_workspaces (
+  id TEXT PRIMARY KEY NOT NULL,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_threads (
   id TEXT PRIMARY KEY NOT NULL,
+  workspace_id TEXT NOT NULL,
   project_id TEXT,
   title TEXT NOT NULL,
   model_ref TEXT NOT NULL,

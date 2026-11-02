@@ -86,15 +86,17 @@ describe("today membership", () => {
     expect(list.map((t) => t.id)).toEqual(["o", "p"]);
   });
 
-  it("planner excludes timed tasks; schedule includes them", () => {
+  it("planner includes both all-day and timed tasks for the day", () => {
     const timed = task({
       id: "t",
       title: "t",
       dueWithTime: new Date(2026, 10, 1, 15, 0).getTime(),
     });
     const dayOnly = task({ id: "d", title: "d", dueDay: "2026-11-01" });
-    expect(isPlannerMember(timed, "2026-11-01")).toBe(false);
+    const otherDay = task({ id: "x", title: "x", dueDay: "2026-11-02" });
+    expect(isPlannerMember(timed, "2026-11-01")).toBe(true);
     expect(isPlannerMember(dayOnly, "2026-11-01")).toBe(true);
+    expect(isPlannerMember(otherDay, "2026-11-01")).toBe(false);
     expect(isScheduleMember(timed, "2026-11-01")).toBe(true);
     expect(isScheduleMember(dayOnly, "2026-11-01")).toBe(false);
   });

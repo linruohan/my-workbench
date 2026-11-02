@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { addLocalDays, formatLocalDay, parseLocalDay } from "@wb/domain";
 
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
@@ -16,6 +17,8 @@ type DateTimeProps = {
   valueLocal: string;
   onChange: (local: string) => void;
 };
+
+type PopoverPos = { top: number; left: number; width: number };
 
 function monthMatrix(anchorDay: string): string[] {
   const start = parseLocalDay(anchorDay);
@@ -55,6 +58,35 @@ function splitDateTimeLocal(value: string): { day: string; time: string } {
   if (m) return { day: m[1]!, time: m[2]! };
   const now = Date.now();
   return { day: formatLocalDay(now), time: "15:00" };
+}
+
+function placePopover(
+  trigger: HTMLElement,
+  popover: HTMLElement,
+  preferWidth: number,
+): PopoverPos {
+  const rect = trigger.getBoundingClientRect();
+  const gap = 4;
+  const width = Math.min(preferWidth, window.innerWidth - 16);
+  let left = Math.min(rect.left, window.innerWidth - width - 8);
+  left = Math.max(8, left);
+
+  const spaceBelow = window.innerHeight - rect.bottom - gap;
+  const spaceAbove = rect.top - gap;
+  const needed = popover.offsetHeight || 280;
+
+  let top: number;
+  if (spaceBelow >= needed || spaceBelow >= spaceAbove) {
+    top = rect.bottom + gap;
+    if (top + needed > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - needed - 8);
+    }
+  } else {
+    top = rect.top - needed - gap;
+    if (top < 8) top = 8;
+  }
+
+  return { top, left, width };
 }
 
 function CalendarMonth(props: {
@@ -121,6 +153,40 @@ function CalendarMonth(props: {
   );
 }
 
+function useCalPopover(open: boolean, preferWidth: number) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<PopoverPos | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    let raf = 0;
+    const update = () => {
+      if (!triggerRef.current || !popoverRef.current) return;
+      setPos(placePopover(triggerRef.current, popoverRef.current, preferWidth));
+    };
+    // Measure twice: first paint may underestimate height (time row etc.).
+    update();
+    raf = requestAnimationFrame(() => {
+      update();
+      raf = requestAnimationFrame(update);
+    });
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open, preferWidth]);
+
+  return { triggerRef, popoverRef, rootRef, pos };
+}
+
 export function DateField({
   label,
   value,
@@ -129,8 +195,10 @@ export function DateField({
   emptyLabel = "未设置",
 }: DateProps) {
   const [open, setOpen] = useState(false);
-  const [viewMonth, setViewMonth] = useState(() => value || formatLocalDay(Date.now()));
-  const rootRef = useRef<HTMLDivElement>(null);
+  const [viewMonth, setViewMonth] = useState(
+    () => value || formatLocalDay(Date.now()),
+  );
+  const { triggerRef, popoverRef, rootRef, pos } = useCalPopover(open, 248);
 
   useEffect(() => {
     if (value) setViewMonth(value);
@@ -139,15 +207,19 @@ export function DateField({
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t)) return;
+      if (popoverRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  }, [open, rootRef, popoverRef]);
 
   return (
     <div className="cal-field" ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className="menu-select__trigger"
         aria-label={label}
@@ -159,45 +231,62 @@ export function DateField({
           ▾
         </span>
       </button>
-      {open ? (
-        <div className="cal-popover" role="dialog" aria-label="选择日期">
-          <CalendarMonth
-            value={value}
-            viewMonth={viewMonth}
-            onViewMonth={setViewMonth}
-            onPick={(day) => {
-              onChange(day);
-              setOpen(false);
-            }}
-          />
-          <div className="cal-popover__footer">
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={() => {
-                const t = formatLocalDay(Date.now());
-                onChange(t);
-                setViewMonth(t);
-                setOpen(false);
-              }}
+      {open
+        ? createPortal(
+            <div
+              ref={popoverRef}
+              className="cal-popover cal-popover--portal"
+              role="dialog"
+              aria-label="选择日期"
+              style={
+                pos
+                  ? {
+                      top: pos.top,
+                      left: pos.left,
+                      width: pos.width,
+                    }
+                  : { visibility: "hidden", top: 0, left: 0 }
+              }
             >
-              今天
-            </button>
-            {allowEmpty ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => {
-                  onChange("");
+              <CalendarMonth
+                value={value}
+                viewMonth={viewMonth}
+                onViewMonth={setViewMonth}
+                onPick={(day) => {
+                  onChange(day);
                   setOpen(false);
                 }}
-              >
-                清除
-              </button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
+              />
+              <div className="cal-popover__footer">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => {
+                    const t = formatLocalDay(Date.now());
+                    onChange(t);
+                    setViewMonth(t);
+                    setOpen(false);
+                  }}
+                >
+                  今天
+                </button>
+                {allowEmpty ? (
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => {
+                      onChange("");
+                      setOpen(false);
+                    }}
+                  >
+                    清除
+                  </button>
+                ) : null}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
@@ -206,7 +295,7 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
   const parts = splitDateTimeLocal(valueLocal);
   const [open, setOpen] = useState(false);
   const [viewMonth, setViewMonth] = useState(parts.day);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const { triggerRef, popoverRef, rootRef, pos } = useCalPopover(open, 280);
 
   useEffect(() => {
     setViewMonth(parts.day);
@@ -215,11 +304,14 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t)) return;
+      if (popoverRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  }, [open, rootRef, popoverRef]);
 
   const display = (() => {
     const ms = Date.parse(valueLocal);
@@ -237,6 +329,7 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
   return (
     <div className="cal-field" ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className="menu-select__trigger"
         aria-label={label}
@@ -248,50 +341,63 @@ export function DateTimeField({ label, valueLocal, onChange }: DateTimeProps) {
           ▾
         </span>
       </button>
-      {open ? (
-        <div
-          className="cal-popover cal-popover--datetime"
-          role="dialog"
-          aria-label="选择日期与时间"
-        >
-          <CalendarMonth
-            value={parts.day}
-            viewMonth={viewMonth}
-            onViewMonth={setViewMonth}
-            onPick={(day) => onChange(`${day}T${parts.time}`)}
-          />
-          <div className="cal-popover__footer cal-popover__footer--datetime">
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={() => {
-                const t = formatLocalDay(Date.now());
-                onChange(`${t}T${parts.time}`);
-                setViewMonth(t);
-              }}
+      {open
+        ? createPortal(
+            <div
+              ref={popoverRef}
+              className="cal-popover cal-popover--datetime cal-popover--portal"
+              role="dialog"
+              aria-label="选择日期与时间"
+              style={
+                pos
+                  ? {
+                      top: pos.top,
+                      left: pos.left,
+                      width: pos.width,
+                    }
+                  : { visibility: "hidden", top: 0, left: 0 }
+              }
             >
-              今天
-            </button>
-            <label className="cal-popover__time-label" htmlFor="cal-time">
-              时间
-            </label>
-            <input
-              id="cal-time"
-              className="field__control cal-popover__time-input"
-              type="time"
-              value={parts.time}
-              onChange={(e) => onChange(`${parts.day}T${e.target.value || "00:00"}`)}
-            />
-            <button
-              type="button"
-              className="btn btn--primary"
-              onClick={() => setOpen(false)}
-            >
-              完成
-            </button>
-          </div>
-        </div>
-      ) : null}
+              <CalendarMonth
+                value={parts.day}
+                viewMonth={viewMonth}
+                onViewMonth={setViewMonth}
+                onPick={(day) => onChange(`${day}T${parts.time}`)}
+              />
+              <div className="cal-popover__footer cal-popover__footer--datetime">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => {
+                    const t = formatLocalDay(Date.now());
+                    onChange(`${t}T${parts.time}`);
+                    setViewMonth(t);
+                  }}
+                >
+                  今天
+                </button>
+                <span className="cal-popover__time-label">时间</span>
+                <input
+                  className="field__control cal-popover__time-input"
+                  type="time"
+                  aria-label="时间"
+                  value={parts.time}
+                  onChange={(e) =>
+                    onChange(`${parts.day}T${e.target.value || "00:00"}`)
+                  }
+                />
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={() => setOpen(false)}
+                >
+                  完成
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

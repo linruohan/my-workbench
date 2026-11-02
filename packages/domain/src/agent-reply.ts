@@ -2,6 +2,59 @@ import { formatLocalDay, parseLocalDay } from "./date.js";
 
 const LIST_LIMIT = 12;
 
+/**
+ * Chat marker for a real model change. The same ref is not a change.
+ * Callers supply the visible name so this stays free of provider storage.
+ */
+export function modelSwitchText(
+  fromRef: string,
+  toRef: string,
+  label: (ref: string) => string,
+): string | null {
+  if (!fromRef || !toRef || fromRef === toRef) return null;
+  const from = label(fromRef).trim() || fromRef;
+  const to = label(toRef).trim() || toRef;
+  return `模型已切换 ${from} → ${to}`;
+}
+
+/** Keep threads whose title contains the query. An empty query keeps the original list. */
+export function filterAgentThreads<T extends { title: string }>(
+  threads: readonly T[],
+  query: string,
+): readonly T[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return threads;
+  return threads.filter((thread) => thread.title.toLowerCase().includes(needle));
+}
+
+/**
+ * Sessions under each workspace, newest workspace and newest session first.
+ * Threads that lost their workspace still appear under that id only if a
+ * matching workspace is present; callers should migrate orphans first.
+ */
+export function groupAgentThreadsByWorkspace<
+  W extends { id: string; updatedAt: number },
+  T extends { workspaceId: string; updatedAt: number },
+>(
+  workspaces: readonly W[],
+  threads: readonly T[],
+): Array<{ workspace: W; threads: T[] }> {
+  const buckets = new Map<string, T[]>();
+  for (const workspace of workspaces) buckets.set(workspace.id, []);
+  for (const thread of threads) {
+    const list = buckets.get(thread.workspaceId);
+    if (list) list.push(thread);
+  }
+  return [...workspaces]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map((workspace) => ({
+      workspace,
+      threads: (buckets.get(workspace.id) ?? []).sort(
+        (a, b) => b.updatedAt - a.updatedAt,
+      ),
+    }));
+}
+
 /** First-message session title, cut on a clause boundary. */
 export function agentThreadTitle(content: string): string {
   const flat = content.replace(/\s+/g, " ").trim();
@@ -69,10 +122,21 @@ export function formatAgentDay(day: string, nowMs: number): string {
 }
 
 export function formatAgentMoment(ms: number, nowMs: number): string {
+  return `${formatAgentDay(formatLocalDay(ms), nowMs)} ${formatAgentClock(ms)}`;
+}
+
+/** Clock on a bubble. Today's messages omit the day; other days keep 昨天 / 明天 / the date. */
+export function formatAgentBubbleTime(ms: number, nowMs: number): string {
+  const day = formatAgentDay(formatLocalDay(ms), nowMs);
+  const clock = formatAgentClock(ms);
+  return day === "今天" ? clock : `${day} ${clock}`;
+}
+
+function formatAgentClock(ms: number): string {
   const date = new Date(ms);
   const hh = String(date.getHours()).padStart(2, "0");
   const mm = String(date.getMinutes()).padStart(2, "0");
-  return `${formatAgentDay(formatLocalDay(ms), nowMs)} ${hh}:${mm}`;
+  return `${hh}:${mm}`;
 }
 
 /** Empty-thread greeting from the device's local hour. 23:00–04:59 is late night. */

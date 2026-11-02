@@ -1,5 +1,12 @@
 import MarkdownIt from "markdown-it";
-import { extractImageSlots, isSafeCssColor, type ImageSlot } from "@wb/domain";
+import {
+  extractImageSlots,
+  extractMdHeadings,
+  isSafeCssColor,
+  isTocSource,
+  type ImageSlot,
+  type MdHeading,
+} from "@wb/domain";
 import { renderCodeBlock } from "./code-block";
 
 type BlockState = {
@@ -107,6 +114,59 @@ md.renderer.rules.fence = (tokens, idx) => {
   if (!token) return "";
   return renderCodeBlock(token.content, token.info || "");
 };
+
+type MdEnv = { headingQueue?: MdHeading[] };
+
+const defaultHeadingOpen =
+  md.renderer.rules.heading_open ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+
+md.renderer.rules.heading_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const queue = (env as MdEnv).headingQueue;
+  if (token && queue && queue.length > 0) {
+    const next = queue.shift();
+    if (next) token.attrSet("id", next.id);
+  }
+  return defaultHeadingOpen(tokens, idx, options, env, self);
+};
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Nested TOC list from document headings (Typora-style [toc]). */
+export function renderTocHtml(headings: MdHeading[]): string {
+  if (headings.length === 0) {
+    return '<nav class="md-toc" aria-label="目录"><p class="md-toc__empty">暂无标题</p></nav>';
+  }
+  type Node = { heading: MdHeading; children: Node[] };
+  const roots: Node[] = [];
+  const stack: { level: number; node: Node }[] = [];
+  for (const heading of headings) {
+    const node: Node = { heading, children: [] };
+    while (stack.length && stack[stack.length - 1]!.level >= heading.level) {
+      stack.pop();
+    }
+    if (stack.length === 0) roots.push(node);
+    else stack[stack.length - 1]!.node.children.push(node);
+    stack.push({ level: heading.level, node });
+  }
+  const renderNodes = (nodes: Node[]): string => {
+    if (nodes.length === 0) return "";
+    return `<ul class="md-toc__list">${nodes
+      .map((n) => {
+        const link = `<a href="#${escapeAttr(n.heading.id)}">${escapeHtml(n.heading.text)}</a>`;
+        return `<li>${link}${renderNodes(n.children)}</li>`;
+      })
+      .join("")}</ul>`;
+  };
+  return `<nav class="md-toc" aria-label="目录">${renderNodes(roots)}</nav>`;
+}
 
 function addInlinePair(name: string, marker: string, tag: string): void {
   md.inline.ruler.before("emphasis", name, (state, silent) => {
@@ -219,10 +279,43 @@ function applyImages(
   });
 }
 
+export type RenderMarkdownOptions = {
+  /** Full note source — used so [toc] / heading ids stay consistent in live blocks. */
+  document?: string;
+};
+
 /** Render note Markdown. `imageUrls[i]` replaces the i-th image outside code fences. */
-export function renderMarkdown(source: string, imageUrls?: Array<string | null>): string {
-  const { markdown, slots } = extractImageSlots(source || "");
-  return applyImages(md.render(markdown), slots, imageUrls);
+export function renderMarkdown(
+  source: string,
+  imageUrls?: Array<string | null>,
+  options?: RenderMarkdownOptions,
+): string {
+  const raw = source || "";
+  const doc = options?.document ?? raw;
+  if (isTocSource(raw)) {
+    return renderTocHtml(extractMdHeadings(doc));
+  }
+  const { markdown, slots } = extractImageSlots(raw);
+  const env: MdEnv = {
+    headingQueue: extractMdHeadings(markdown),
+  };
+  // When rendering a single live block, align heading ids with the full document.
+  if (options?.document && options.document !== raw) {
+    const docHeads = extractMdHeadings(doc);
+    const local = extractMdHeadings(markdown);
+    env.headingQueue = local.map((h) => {
+      const idx = docHeads.findIndex(
+        (d) => d.level === h.level && d.text === h.text,
+      );
+      if (idx >= 0) {
+        const hit = docHeads[idx]!;
+        docHeads.splice(idx, 1);
+        return hit;
+      }
+      return h;
+    });
+  }
+  return applyImages(md.render(markdown, env), slots, imageUrls);
 }
 
 /** Chat replies keep single line breaks. Note rendering stays unchanged. */

@@ -15,8 +15,20 @@ export type ToolEffect = "none" | "read" | "write" | "destructive";
 export type ToolGate = "run" | "ask" | "block";
 export type ProviderKind = "builtin" | "openai-chat-completions" | "anthropic-messages";
 
+/** Folder that holds Agent sessions. Distinct from task projects. */
+export interface AgentWorkspace {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const DEFAULT_AGENT_WORKSPACE_TITLE = "默认工作区";
+
 export interface AgentThread {
   id: string;
+  /** Agent workspace this session belongs to. */
+  workspaceId: string;
   projectId: string | null;
   title: string;
   modelRef: string;

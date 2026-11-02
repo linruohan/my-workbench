@@ -20,5 +20,12 @@ describe("code-block", () => {
     expect(html).toContain("md-code__gutter");
     expect(html).toContain(">1</span>");
     expect(html).toContain(">2</span>");
+    expect(html).toContain('data-code="a\nb"');
+    expect(html).toContain('class="md-code__copy"');
+  });
+
+  it("escapes the copy source so markup stays inside the attribute", () => {
+    const html = renderCodeBlock('a&b"<c>\n', "js");
+    expect(html).toContain('data-code="a&amp;b&quot;&lt;c&gt;"');
   });
 });

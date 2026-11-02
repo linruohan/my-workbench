@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
+  agentEditPlan,
   agentEmptyGreeting,
   agentRetryPlan,
+  filterAgentThreads,
+  formatAgentBubbleTime,
   describeToolArgs,
   describeToolResult,
   formatAgentMoment,
+  groupAgentThreadsByWorkspace,
+  modelSwitchText,
   permissionModeLabel,
+  parseModelRef,
   relativizeScheduleText,
   resolveSlash,
   slashSuggestions,
@@ -19,6 +25,8 @@ import type { AgentUiEffect } from "./execute";
 import { htmlTextHitCount, literalHitCount, markHtmlHits, splitHits } from "./find-text";
 import { readInputHistory, rememberInput } from "./input-history";
 import { enqueuePrompt, recallQueuedPrompt, removeQueuedPrompt } from "./prompt-queue";
+import { writeClipboard } from "../lib/clipboard";
+import { copyCodeBlock } from "../lib/code-copy";
 import { renderChatMarkdown } from "../lib/markdown";
 import { ModelMenu } from "./ModelMenu";
 import { modelGroups, readProviderStore } from "./providers";
@@ -36,7 +44,7 @@ type Props = {
   activeTimerTaskId: string | null;
   timerStartedAt: number | null;
   onSelectThread: (id: string | null) => void;
-  onCreateThread: () => void;
+  onCreateThread: (workspaceId?: string) => void;
   onOpenModels: () => void;
   onEffects: (effects: AgentUiEffect[]) => void;
   onRefresh: () => void;
@@ -56,6 +64,7 @@ export function AgentView({
   onEffects,
   onRefresh,
 }: Props) {
+  const workspaces = store.listAgentWorkspaces();
   const threads = store.listAgentThreads();
   const thread = threads.find((item) => item.id === threadId) ?? threads[0] ?? null;
   const messages = thread ? store.listAgentMessages(thread.id) : [];
@@ -72,6 +81,12 @@ export function AgentView({
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
+  const [threadQuery, setThreadQuery] = useState("");
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string | null>(null);
+  const [workspaceTitleDraft, setWorkspaceTitleDraft] = useState("");
   const [findIndex, setFindIndex] = useState(0);
   const [findTick, setFindTick] = useState(0);
   const [error, setError] = useState("");
@@ -251,6 +266,19 @@ export function AgentView({
       setBusyThreadId(null);
     }
     if (effects.length) onEffects(effects);
+    onRefresh();
+  };
+
+  const selectModel = (nextRef: string) => {
+    if (!thread || nextRef === thread.modelRef) return;
+    const text =
+      store.listAgentMessages(thread.id).length > 0
+        ? modelSwitchText(thread.modelRef, nextRef, modelRefLabel)
+        : null;
+    store.updateAgentThread(thread.id, { modelRef: nextRef });
+    if (text) {
+      store.appendAgentMessage({ threadId: thread.id, role: "system", content: text });
+    }
     onRefresh();
   };
 
@@ -464,6 +492,23 @@ export function AgentView({
     void sendPrompt(plan.text);
   };
 
+  const editLast = () => {
+    if (!thread || busyThreadId || pending || sending.current) return;
+    const plan = agentEditPlan(store.listAgentMessages(thread.id));
+    if (!plan) return;
+    if (draft.trim()) {
+      setError("先清空输入框，再编辑这条消息");
+      return;
+    }
+    store.deleteAgentMessagesFrom(thread.id, plan.userMessageId);
+    placeCaret.current = true;
+    setDraft(plan.text);
+    drafts.current.set(thread.id, plan.text);
+    setError("");
+    onRefresh();
+    inputRef.current?.focus();
+  };
+
   const releaseQueue = () => {
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
     if ((queues[thread.id] ?? []).length === 0) return;
@@ -557,6 +602,49 @@ export function AgentView({
     onRefresh();
   };
 
+  const addWorkspace = () => {
+    const workspace = store.createAgentWorkspace({ title: "新工作区" });
+    setCollapsedWorkspaces((current) => ({ ...current, [workspace.id]: false }));
+    setRenamingWorkspaceId(workspace.id);
+    setWorkspaceTitleDraft(workspace.title);
+    onRefresh();
+  };
+
+  const commitWorkspaceTitle = (id: string, raw: string) => {
+    const next = raw.trim();
+    const current = store.getAgentWorkspace(id);
+    if (!current) {
+      setRenamingWorkspaceId(null);
+      return;
+    }
+    if (next && next !== current.title) {
+      store.updateAgentWorkspace(id, { title: next });
+      onRefresh();
+    }
+    setRenamingWorkspaceId(null);
+  };
+
+  const removeWorkspace = (id: string, title: string, count: number) => {
+    const hint =
+      count > 0
+        ? `删除工作区「${title}」？其中的 ${count} 个会话也会从本机移除。`
+        : `删除工作区「${title}」？`;
+    if (!window.confirm(hint)) return;
+    const selected = thread?.workspaceId === id ? thread.id : null;
+    store.deleteAgentWorkspace(id);
+    setCollapsedWorkspaces((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    if (selected) {
+      onSelectThread(store.listAgentThreads()[0]?.id ?? null);
+    }
+    if (store.listAgentWorkspaces().length === 0) store.ensureAgentWorkspace();
+    onRefresh();
+  };
+
   const mode = thread?.permissionMode ?? "confirm";
   const suggestions = slashSuggestions(draft);
   const showSlash = !slashUi.dismissed && !busyHere && suggestions.length > 0;
@@ -564,12 +652,12 @@ export function AgentView({
   const nowMs = Date.now();
   const turns = conversationBlocks(messages, Boolean(pending));
   const blockTexts = turns.map((turn) =>
-    turn.kind === "user"
-      ? turn.message.content
-      : turn.messages
+    turn.kind === "agent"
+      ? turn.messages
           .map((message) => displayContent(message, nowMs))
           .filter(Boolean)
-          .join("\n\n"),
+          .join("\n\n")
+      : turn.message.content,
   );
   const findNeedle = findOpen ? findQuery : "";
   let findCursor = 0;
@@ -578,9 +666,9 @@ export function AgentView({
     const turn = turns[index];
     findCursor += !findNeedle.trim()
       ? 0
-      : turn?.kind === "user"
-        ? literalHitCount(text, findNeedle)
-        : htmlTextHitCount(renderChatMarkdown(text), findNeedle);
+      : turn?.kind === "agent"
+        ? htmlTextHitCount(renderChatMarkdown(text), findNeedle)
+        : literalHitCount(text, findNeedle);
     return base;
   });
   const totalHits = findCursor;
@@ -603,6 +691,7 @@ export function AgentView({
     setPinned(false);
   };
   const retryPlan = !busyHere && !pending ? agentRetryPlan(messages) : null;
+  const editPlan = !busyHere && !pending ? agentEditPlan(messages) : null;
   const lastAgentId = [...turns].reverse().find((turn) => turn.kind === "agent")
     ?.messages[0]?.id;
   const queued = queueLength(thread?.queueJson ?? null);
@@ -611,47 +700,181 @@ export function AgentView({
     thread && draft.trim() && resolveSlash(draft.trim(), thread.permissionMode),
   );
   const argLines = pending ? describeToolArgs(parseArgs(pending.argsJson), nowMs) : "";
+  const needle = threadQuery.trim().toLowerCase();
+  const visibleThreads = filterAgentThreads(threads, threadQuery);
+  const workspaceGroups = groupAgentThreadsByWorkspace(workspaces, visibleThreads)
+    .map((group) => ({
+      ...group,
+      titleHit: needle ? group.workspace.title.toLowerCase().includes(needle) : false,
+    }))
+    .filter((group) => !needle || group.titleHit || group.threads.length > 0);
 
   return (
     <section className="agent" aria-label="Agent">
       <aside className="agent__threads">
         <header className="agent__threads-head">
-          <h1>会话</h1>
-          <button type="button" className="btn" onClick={onCreateThread}>
+          <h1>工作区</h1>
+          <button type="button" className="btn" onClick={addWorkspace}>
             新建
           </button>
         </header>
-        {threads.length === 0 ? (
-          <p className="agent__hint">还没有会话。</p>
+        {workspaces.length === 0 ? (
+          <p className="agent__hint">还没有工作区。</p>
         ) : (
-          <ul className="agent__thread-list">
-            {threads.map((item) => (
-              <li key={item.id} className="agent__thread-row">
-                <button
-                  type="button"
-                  className={
-                    thread?.id === item.id ? "agent__thread is-active" : "agent__thread"
+          <>
+            <label className="agent__thread-filter">
+              <input
+                aria-label="筛选会话"
+                placeholder="筛选会话或工作区"
+                value={threadQuery}
+                onChange={(event) => setThreadQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && threadQuery.trim()) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setThreadQuery("");
                   }
-                  onClick={() => onSelectThread(item.id)}
-                >
-                  <span>{item.title}</span>
-                  <small>
-                    {permissionModeLabel(item.permissionMode)} ·{" "}
-                    {formatAgentMoment(item.updatedAt, nowMs)}
-                  </small>
-                </button>
-                <button
-                  type="button"
-                  className="agent__thread-delete"
-                  aria-label={`删除会话 ${item.title}`}
-                  title="删除会话"
-                  onClick={() => removeThread(item.id, item.title)}
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
+                }}
+              />
+            </label>
+            {workspaceGroups.length === 0 ? (
+              <p className="agent__hint">没有匹配的会话。</p>
+            ) : (
+              <div className="agent__thread-list">
+                {workspaceGroups.map(({ workspace, threads: items, titleHit }) => {
+                  const collapsed =
+                    !needle &&
+                    !titleHit &&
+                    collapsedWorkspaces[workspace.id] === true &&
+                    thread?.workspaceId !== workspace.id;
+                  return (
+                    <section
+                      key={workspace.id}
+                      className="agent__workspace"
+                      aria-label={workspace.title}
+                    >
+                      <div className="agent__workspace-head">
+                        <button
+                          type="button"
+                          className="agent__workspace-toggle"
+                          aria-expanded={!collapsed}
+                          aria-label={collapsed ? "展开工作区" : "收起工作区"}
+                          onClick={() =>
+                            setCollapsedWorkspaces((current) => ({
+                              ...current,
+                              [workspace.id]: !collapsed,
+                            }))
+                          }
+                        >
+                          {collapsed ? "▸" : "▾"}
+                        </button>
+                        {renamingWorkspaceId === workspace.id ? (
+                          <input
+                            className="agent__workspace-title-input"
+                            aria-label="工作区名称"
+                            value={workspaceTitleDraft}
+                            autoFocus
+                            maxLength={40}
+                            onChange={(event) =>
+                              setWorkspaceTitleDraft(event.target.value)
+                            }
+                            onBlur={(event) =>
+                              commitWorkspaceTitle(
+                                workspace.id,
+                                event.currentTarget.value,
+                              )
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                commitWorkspaceTitle(
+                                  workspace.id,
+                                  event.currentTarget.value,
+                                );
+                              } else if (event.key === "Escape") {
+                                event.preventDefault();
+                                setRenamingWorkspaceId(null);
+                              }
+                            }}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            className="agent__workspace-title"
+                            title="重命名工作区"
+                            onClick={() => {
+                              setRenamingWorkspaceId(workspace.id);
+                              setWorkspaceTitleDraft(workspace.title);
+                            }}
+                          >
+                            {workspace.title}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="agent__workspace-add"
+                          title="在此工作区新建会话"
+                          aria-label={`在 ${workspace.title} 新建会话`}
+                          onClick={() => onCreateThread(workspace.id)}
+                        >
+                          +
+                        </button>
+                        <button
+                          type="button"
+                          className="agent__thread-delete"
+                          title="删除工作区"
+                          aria-label={`删除工作区 ${workspace.title}`}
+                          onClick={() =>
+                            removeWorkspace(
+                              workspace.id,
+                              workspace.title,
+                              store.listAgentThreads(workspace.id).length,
+                            )
+                          }
+                        >
+                          ×
+                        </button>
+                      </div>
+                      {collapsed ? null : items.length === 0 ? (
+                        <p className="agent__workspace-empty">还没有会话</p>
+                      ) : (
+                        <ul className="agent__workspace-threads">
+                          {items.map((item) => (
+                            <li key={item.id} className="agent__thread-row">
+                              <button
+                                type="button"
+                                className={
+                                  thread?.id === item.id
+                                    ? "agent__thread is-active"
+                                    : "agent__thread"
+                                }
+                                onClick={() => onSelectThread(item.id)}
+                              >
+                                <span>{item.title}</span>
+                                <small>
+                                  {permissionModeLabel(item.permissionMode)} ·{" "}
+                                  {formatAgentMoment(item.updatedAt, nowMs)}
+                                </small>
+                              </button>
+                              <button
+                                type="button"
+                                className="agent__thread-delete"
+                                aria-label={`删除会话 ${item.title}`}
+                                title="删除会话"
+                                onClick={() => removeThread(item.id, item.title)}
+                              >
+                                ×
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </aside>
 
@@ -782,7 +1005,11 @@ export function AgentView({
               {!thread ? (
                 <div className="agent__empty">
                   <p>用自然语言管理任务、笔记和提醒。</p>
-                  <button type="button" className="primary" onClick={onCreateThread}>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => onCreateThread()}
+                  >
                     新建会话
                   </button>
                 </div>
@@ -810,6 +1037,22 @@ export function AgentView({
               ) : (
                 turns.map((turn, index) => {
                   const findBase = findBases[index] ?? 0;
+                  if (turn.kind === "marker") {
+                    return (
+                      <p key={turn.message.id} className="agent__marker" role="status">
+                        {findNeedle.trim() ? (
+                          <HighlightedPlain
+                            text={turn.message.content}
+                            query={findNeedle}
+                            indexBase={findBase}
+                            active={activeHit}
+                          />
+                        ) : (
+                          turn.message.content
+                        )}
+                      </p>
+                    );
+                  }
                   if (turn.kind === "user") {
                     return (
                       <article
@@ -830,6 +1073,7 @@ export function AgentView({
                           )}
                         </p>
                         <div className="agent__msg-actions">
+                          <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
                           <button
                             type="button"
                             className="agent__copy"
@@ -839,6 +1083,15 @@ export function AgentView({
                           >
                             {copied === turn.message.id ? "已复制" : "复制"}
                           </button>
+                          {editPlan?.userMessageId === turn.message.id ? (
+                            <button
+                              type="button"
+                              className="agent__copy"
+                              onClick={editLast}
+                            >
+                              编辑
+                            </button>
+                          ) : null}
                         </div>
                       </article>
                     );
@@ -849,6 +1102,7 @@ export function AgentView({
                     .join("\n\n");
                   if (!text) return null;
                   const id = turn.messages[0]!.id;
+                  const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
                   return (
                     <article
                       key={id}
@@ -862,6 +1116,7 @@ export function AgentView({
                         active={activeHit}
                       />
                       <div className="agent__msg-actions">
+                        <MessageTime ms={stamp} nowMs={nowMs} />
                         <button
                           type="button"
                           className="agent__copy"
@@ -1097,10 +1352,7 @@ export function AgentView({
                       next ? "model" : current === "model" ? null : current,
                     );
                   }}
-                  onSelect={(modelRef) => {
-                    store.updateAgentThread(thread.id, { modelRef });
-                    onRefresh();
-                  }}
+                  onSelect={selectModel}
                   onOpenSettings={onOpenModels}
                 />
               ) : null}
@@ -1219,22 +1471,16 @@ function ModeMenu({
   );
 }
 
-async function writeClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.left = "-9999px";
-    document.body.appendChild(area);
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    return ok;
-  }
+function MessageTime({ ms, nowMs }: { ms: number; nowMs: number }) {
+  return (
+    <time
+      className="agent__msg-time"
+      dateTime={new Date(ms).toISOString()}
+      title={formatAgentMoment(ms, nowMs)}
+    >
+      {formatAgentBubbleTime(ms, nowMs)}
+    </time>
+  );
 }
 
 function AgentMarkdown({
@@ -1252,6 +1498,12 @@ function AgentMarkdown({
   return (
     <div
       className="agent__md"
+      onClick={(event) => {
+        if (copyCodeBlock(event.target)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
       dangerouslySetInnerHTML={{
         __html: query.trim() ? markHtmlHits(html, query, indexBase, active) : html,
       }}
@@ -1324,12 +1576,15 @@ function queueLength(json: string | null): number {
   }
 }
 
+type ConversationBlock =
+  | { kind: "user"; message: AgentMessage }
+  | { kind: "agent"; messages: AgentMessage[] }
+  | { kind: "marker"; message: AgentMessage };
+
 function conversationBlocks(
   messages: AgentMessage[],
   pending: boolean,
-): Array<
-  { kind: "user"; message: AgentMessage } | { kind: "agent"; messages: AgentMessage[] }
-> {
+): ConversationBlock[] {
   const visible = messages.filter((message, index) => {
     const next = messages[index + 1];
     return !(
@@ -1337,12 +1592,14 @@ function conversationBlocks(
       (next?.role === "tool" || (pending && index === messages.length - 1))
     );
   });
-  const blocks: Array<
-    { kind: "user"; message: AgentMessage } | { kind: "agent"; messages: AgentMessage[] }
-  > = [];
+  const blocks: ConversationBlock[] = [];
   for (const message of visible) {
     if (message.role === "user") {
       blocks.push({ kind: "user", message });
+      continue;
+    }
+    if (message.role === "system") {
+      blocks.push({ kind: "marker", message });
       continue;
     }
     const last = blocks[blocks.length - 1];
@@ -1379,6 +1636,15 @@ function displayContent(message: AgentMessage, nowMs: number): string {
   }
   if (message.role === "user") return text;
   return relativizeScheduleText(text, nowMs);
+}
+
+function modelRefLabel(ref: string): string {
+  const parsed = parseModelRef(ref);
+  if (!parsed) return ref;
+  const group = modelGroups().find((item) => item.id === parsed.providerId);
+  if (!group) return parsed.modelId || ref;
+  if (group.kind === "builtin") return group.name;
+  return `${group.name} · ${parsed.modelId}`;
 }
 
 function isRemoteModel(modelRef: string | undefined): boolean {

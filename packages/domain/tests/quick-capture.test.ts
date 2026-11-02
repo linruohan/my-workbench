@@ -28,4 +28,17 @@ describe("parseQuickCapture", () => {
     expect(r.projectId).toBeNull();
     expect(r.title).toBe("定数据表");
   });
+
+  it("parses dotted month-day with bare hour as morning time", () => {
+    const r = parseQuickCapture("11.3 号 9点记得开会", { nowMs: now });
+    expect(r.dueDay).toBeNull();
+    expect(r.dueWithTime).toBe(new Date(2026, 10, 3, 9, 0, 0, 0).getTime());
+    expect(r.title).toBe("记得开会");
+  });
+
+  it("parses slash date and half-hour", () => {
+    const r = parseQuickCapture("11/3 9点半 同步", { nowMs: now });
+    expect(r.dueWithTime).toBe(new Date(2026, 10, 3, 9, 30, 0, 0).getTime());
+    expect(r.title).toBe("同步");
+  });
 });

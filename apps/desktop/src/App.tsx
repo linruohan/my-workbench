@@ -641,6 +641,7 @@ export default function App() {
   };
 
   const openAgent = () => {
+    store.ensureAgentWorkspace();
     const threads = store.listAgentThreads();
     const current = threads.find((item) => item.id === agentThreadId) ?? threads[0];
     if (current) {
@@ -651,14 +652,15 @@ export default function App() {
         modelRef: readProviderStore().defaultModelRef,
       });
       setAgentThreadId(created.id);
-      refresh();
     }
+    refresh();
     goNav("agent");
   };
 
-  const newAgentChat = () => {
+  const newAgentChat = (workspaceId?: string) => {
     const created = store.createAgentThread({
       nowMs: Date.now(),
+      workspaceId,
       modelRef: readProviderStore().defaultModelRef,
     });
     setAgentThreadId(created.id);
@@ -737,11 +739,11 @@ export default function App() {
     body = (
       <TaskList
         title={`计划 · ${today}`}
-        empty="这一天还没有全天计划任务。"
+        empty="这一天还没有计划任务。"
         tasks={plannerTasks}
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
-        hint="汇总全部项目的计划日任务"
+        hint="汇总当天全部项目的计划（含全天与时刻）"
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}

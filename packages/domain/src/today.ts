@@ -64,14 +64,13 @@ export function selectTodayTasks(
   return [...ordered, ...rest];
 }
 
-/** Planner columns only show tasks with dueDay and no dueWithTime. */
+/** Planner shows incomplete root tasks whose planned day equals `day` (all-day or timed). */
 export function isPlannerMember(
   task: Pick<Task, "isDone" | "dueDay" | "dueWithTime" | "parentId">,
   day: string,
 ): boolean {
   if (task.isDone || task.parentId) return false;
-  if (task.dueWithTime != null) return false;
-  return task.dueDay === day;
+  return plannedDayOf(task) === day;
 }
 
 /** Schedule timeline shows tasks with a concrete time on that local day. */

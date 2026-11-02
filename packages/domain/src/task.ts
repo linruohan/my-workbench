@@ -1,3 +1,4 @@
+import { formatRelativeDay, formatRelativeMoment } from "./date.js";
 import type { ProjectBucket, Task } from "./types.js";
 
 export type TaskBoardColumnId = "active" | "backlog" | "done";
@@ -77,16 +78,17 @@ export function reorderIds(ids: string[], fromId: string, toId: string): string[
 
 export function formatTaskPlanMeta(
   task: Pick<Task, "dueDay" | "dueWithTime" | "remindAt" | "deadlineDay">,
+  nowMs = Date.now(),
 ): string {
   const parts: string[] = [];
   if (task.dueWithTime != null) {
-    parts.push(new Date(task.dueWithTime).toLocaleString("zh-CN"));
+    parts.push(formatRelativeMoment(task.dueWithTime, nowMs));
   } else if (task.dueDay) {
-    parts.push(task.dueDay);
+    parts.push(formatRelativeDay(task.dueDay, nowMs));
   } else {
     parts.push("未排期");
   }
-  if (task.deadlineDay) parts.push(`截止 ${task.deadlineDay}`);
+  if (task.deadlineDay) parts.push(`截止 ${formatRelativeDay(task.deadlineDay, nowMs)}`);
   if (task.remindAt) parts.push("有提醒");
   return parts.join(" · ");
 }

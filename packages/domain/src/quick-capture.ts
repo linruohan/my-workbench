@@ -36,6 +36,16 @@ function nextWeekday(fromDay: string, weekday: number): string {
   return addLocalDays(fromDay, delta);
 }
 
+function atLocalTime(
+  day: string,
+  hour: number,
+  minute: number,
+): number {
+  const dt = new Date(parseLocalDay(day));
+  dt.setHours(hour, minute, 0, 0);
+  return dt.getTime();
+}
+
 function parseTimeToken(
   text: string,
   day: string,
@@ -46,20 +56,50 @@ function parseTimeToken(
     const minute = Number(hm[3]);
     if (hm[1] === "下午" && hour < 12) hour += 12;
     if (hm[1] === "上午" && hour === 12) hour = 0;
-    const base = parseLocalDay(day);
-    const dt = new Date(base);
-    dt.setHours(hour, minute, 0, 0);
-    return { ms: dt.getTime(), consumed: hm[0] };
+    if (hour > 23 || minute > 59) return null;
+    return { ms: atLocalTime(day, hour, minute), consumed: hm[0] };
   }
-  const cn = /(上午|下午)\s*(\d{1,2})\s*点/.exec(text);
+  const cn =
+    /(上午|下午)?\s*(\d{1,2})\s*点(半|(\d{1,2})\s*分?)?/.exec(text);
   if (cn) {
     let hour = Number(cn[2]);
     if (cn[1] === "下午" && hour < 12) hour += 12;
     if (cn[1] === "上午" && hour === 12) hour = 0;
-    const base = parseLocalDay(day);
-    const dt = new Date(base);
-    dt.setHours(hour, 0, 0, 0);
-    return { ms: dt.getTime(), consumed: cn[0] };
+    let minute = 0;
+    if (cn[3] === "半") minute = 30;
+    else if (cn[4]) minute = Number(cn[4]);
+    if (hour > 23 || minute > 59) return null;
+    return { ms: atLocalTime(day, hour, minute), consumed: cn[0] };
+  }
+  return null;
+}
+
+/** Parse M.D / M/D / M-D / M月D日, optional trailing 号. */
+function parseMonthDayToken(
+  text: string,
+  today: string,
+): { day: string; consumed: string } | null {
+  const md = /(\d{1,2})月(\d{1,2})日/.exec(text);
+  if (md) {
+    const month = Number(md[1]);
+    const date = Number(md[2]);
+    if (month < 1 || month > 12 || date < 1 || date > 31) return null;
+    const y = Number(today.slice(0, 4));
+    return {
+      day: `${y}-${String(month).padStart(2, "0")}-${String(date).padStart(2, "0")}`,
+      consumed: md[0],
+    };
+  }
+  const dotted = /(\d{1,2})[.\/\-](\d{1,2})\s*号?/.exec(text);
+  if (dotted) {
+    const month = Number(dotted[1]);
+    const date = Number(dotted[2]);
+    if (month < 1 || month > 12 || date < 1 || date > 31) return null;
+    const y = Number(today.slice(0, 4));
+    return {
+      day: `${y}-${String(month).padStart(2, "0")}-${String(date).padStart(2, "0")}`,
+      consumed: dotted[0],
+    };
   }
   return null;
 }
@@ -139,11 +179,10 @@ export function parseQuickCapture(
         summary.push(`计划 ${dueDay}`);
       }
     } else {
-      const md = /(\d{1,2})月(\d{1,2})日/.exec(text);
+      const md = parseMonthDayToken(text, today);
       if (md) {
-        const y = Number(today.slice(0, 4));
-        dueDay = `${y}-${String(Number(md[1])).padStart(2, "0")}-${String(Number(md[2])).padStart(2, "0")}`;
-        text = text.replace(md[0], " ").trim();
+        dueDay = md.day;
+        text = text.replace(md.consumed, " ").trim();
         summary.push(`计划 ${dueDay}`);
       }
     }

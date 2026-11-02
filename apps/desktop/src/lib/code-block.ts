@@ -153,11 +153,13 @@ export function renderCodeBlock(code: string, info: string): string {
   const highlighted = highlightCode(code, lang);
   const nums = lineNumberHtml(lineCount(code));
   const langClass = lang ? ` language-${escapeHtml(lang)}` : "";
+  const source = escapeHtml(normalizeFenceContent(code));
   return [
-    `<div class="md-code">`,
-    `<div class="md-code__chrome" aria-hidden="true">`,
-    `<span class="md-code__dots"><i></i><i></i><i></i></span>`,
+    `<div class="md-code" data-code="${source}">`,
+    `<div class="md-code__chrome">`,
+    `<span class="md-code__dots" aria-hidden="true"><i></i><i></i><i></i></span>`,
     `<span class="md-code__lang">${escapeHtml(label)}</span>`,
+    `<button type="button" class="md-code__copy">复制</button>`,
     `</div>`,
     `<div class="md-code__main">`,
     `<pre class="md-code__gutter" aria-hidden="true">${nums}</pre>`,

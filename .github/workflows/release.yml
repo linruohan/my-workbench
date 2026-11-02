@@ -88,6 +88,8 @@ jobs:
         id: meta
         shell: bash
         run: |
+          # Tag / manual runs publish a real Release (not a draft), otherwise
+          # GitHub only shows the tag and the Releases page looks empty.
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
             echo "release_id=${{ github.event.release.id }}" >> "$GITHUB_OUTPUT"
@@ -96,12 +98,12 @@ jobs:
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "tag=v__VERSION__" >> "$GITHUB_OUTPUT"
             echo "release_id=" >> "$GITHUB_OUTPUT"
-            echo "draft=true" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             echo "release_id=" >> "$GITHUB_OUTPUT"
-            echo "draft=true" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 

@@ -1056,13 +1056,73 @@ function isListLine(line: string): boolean {
   return /^\s*([-*+]|\d+[.)])\s+/.test(line);
 }
 
+/** GFM table row or alignment separator (kept as one live-edit block). */
+export function isTableLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  // | --- | :---: | ---: |
+  if (/^\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/.test(t)) return true;
+  // | a | b |
+  if (/^\|.+\|\s*$/.test(t)) return true;
+  // a | b | c  (pipe row without leading pipe)
+  if (/^[^|]+(\s*\|\s*[^|]+)+\s*$/.test(t) && t.includes("|")) return true;
+  return false;
+}
+
+/** Typora-style TOC markers: [toc], [TOC], [[toc]], @[toc]. */
+export function isTocSource(text: string): boolean {
+  return /^\s*(?:@\s*)?\[\[\s*toc\s*\]\]\s*$/i.test(text.trim())
+    || /^\s*(?:@\s*)?\[\s*toc\s*\]\s*$/i.test(text.trim());
+}
+
+export type MdHeading = { level: number; text: string; id: string };
+
+function slugifyHeading(text: string): string {
+  const slug = text
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\u4e00-\u9fff-]+/g, "");
+  return slug || "heading";
+}
+
+/** Collect ATX headings outside fences (for [toc] and heading anchors). */
+export function extractMdHeadings(source: string): MdHeading[] {
+  const lines = (source ?? "").split(/\r?\n/);
+  const out: MdHeading[] = [];
+  const used = new Map<string, number>();
+  let fence: string | null = null;
+  for (const line of lines) {
+    const open = isFenceOpen(line);
+    if (open) {
+      if (fence === open) fence = null;
+      else if (!fence) fence = open;
+      continue;
+    }
+    if (fence) continue;
+    if (isTocSource(line)) continue;
+    const m = /^(#{1,8})\s+(.+?)\s*$/.exec(line);
+    if (!m?.[1] || m[2] == null) continue;
+    const text = m[2].replace(/\s+#+\s*$/, "").trim();
+    if (!text) continue;
+    const base = slugifyHeading(text);
+    const n = used.get(base) ?? 0;
+    used.set(base, n + 1);
+    const id = n === 0 ? base : `${base}-${n}`;
+    out.push({ level: m[1].length, text, id });
+  }
+  return out;
+}
+
 function isBlockBoundaryLine(line: string): boolean {
   return (
     isHeadingLine(line) ||
     isHrLine(line) ||
     isImageLine(line) ||
     isFenceOpen(line) != null ||
-    isListLine(line)
+    isListLine(line) ||
+    isTableLine(line) ||
+    isTocSource(line)
   );
 }
 
@@ -1096,9 +1156,16 @@ export function splitMdBlocks(source: string): string[] {
       i += 1;
       continue;
     }
-    if (isHeadingLine(line) || isHrLine(line) || isImageLine(line)) {
+    if (isTocSource(line) || isHeadingLine(line) || isHrLine(line) || isImageLine(line)) {
       blocks.push(line);
       i += 1;
+      continue;
+    }
+    if (isTableLine(line)) {
+      let j = i + 1;
+      while (j < lines.length && isTableLine(lines[j] ?? "")) j += 1;
+      blocks.push(lines.slice(i, j).join("\n"));
+      i = j;
       continue;
     }
     if (isListLine(line)) {
@@ -1163,11 +1230,23 @@ export function trimFenceBlock(text: string): string {
  * Tidy closed fences and keep blank lines editable.
  * Preserves mid-document blank lines; keeps a single trailing blank so the
  * caret can always move below the last content line.
+ * Also re-joins table rows that were split into adjacent blocks while typing.
  */
 export function normalizeMdBlocks(blocks: string[]): string[] {
   const cleaned: string[] = [];
   for (const raw of blocks) {
     const block = isCompleteFenceBlock(raw) ? trimFenceBlock(raw) : raw;
+    const prev = cleaned[cleaned.length - 1];
+    if (
+      prev != null &&
+      prev !== "" &&
+      block !== "" &&
+      prev.split("\n").every(isTableLine) &&
+      block.split("\n").every(isTableLine)
+    ) {
+      cleaned[cleaned.length - 1] = `${prev}\n${block}`;
+      continue;
+    }
     cleaned.push(block);
   }
   while (

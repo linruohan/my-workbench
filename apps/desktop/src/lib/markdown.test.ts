@@ -4,10 +4,10 @@ import { renderMarkdown } from "./markdown";
 describe("renderMarkdown", () => {
   it("renders headings through h8", () => {
     const html = renderMarkdown("# 一\n## 二\n####### 七\n######## 八");
-    expect(html).toContain("<h1>一</h1>");
-    expect(html).toContain("<h2>二</h2>");
-    expect(html).toContain("<h7>七</h7>");
-    expect(html).toContain("<h8>八</h8>");
+    expect(html).toContain('<h1 id="一">一</h1>');
+    expect(html).toContain('<h2 id="二">二</h2>');
+    expect(html).toContain('<h7 id="七">七</h7>');
+    expect(html).toContain('<h8 id="八">八</h8>');
   });
 
   it("embeds resolved local images and remote urls", () => {
@@ -59,5 +59,30 @@ describe("renderMarkdown", () => {
     const html = renderMarkdown('<span style="color: red; width:1px">x</span>');
     expect(html).not.toContain("<span");
     expect(html).toContain("&lt;span");
+  });
+
+  it("renders tables, lists, and [toc]", () => {
+    const table = renderMarkdown("| a | b |\n| --- | --- |\n| 1 | 2 |");
+    expect(table).toContain("<table>");
+    expect(table).toContain("<th>a</th>");
+    expect(table).toContain("<td>1</td>");
+
+    const ul = renderMarkdown("- 苹果\n- 香蕉");
+    expect(ul).toContain("<ul>");
+    expect(ul).toContain("<li>苹果</li>");
+
+    const ol = renderMarkdown("1. 一\n2. 二");
+    expect(ol).toContain("<ol>");
+    expect(ol).toContain("<li>一</li>");
+
+    const doc = "[toc]\n\n# 章节\n## 小节";
+    const toc = renderMarkdown("[toc]", undefined, { document: doc });
+    expect(toc).toContain('class="md-toc"');
+    expect(toc).toContain("章节");
+    expect(toc).toContain("小节");
+    expect(toc).toContain('href="#');
+
+    const heading = renderMarkdown("# 章节", undefined, { document: doc });
+    expect(heading).toMatch(/<h1 id="[^"]+">章节<\/h1>/);
   });
 });

@@ -25,9 +25,21 @@ describe("NoteEditor", () => {
     );
     expect(screen.getByLabelText("Markdown 编辑器")).toBeInTheDocument();
     expect(screen.queryByLabelText("Markdown 源码")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("编辑第 1 段")).toHaveTextContent("1 Hello");
-    expect(screen.getByLabelText("编辑第 3 段")).toHaveTextContent("世界");
-    expect(screen.getByLabelText("编辑空行（第 4 段）")).toBeInTheDocument();
+    expect(screen.getByLabelText("编辑第 1 行")).toHaveTextContent("Hello");
+    expect(screen.getByLabelText("编辑第 3 行")).toHaveTextContent("世界");
+    expect(screen.getByLabelText("编辑空行（第 4 行）")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "#" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("toggles the line-number gutter from the toolbar", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
+    );
+    expect(document.querySelector(".md-live__gutter")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "#" }));
+    expect(screen.getByRole("button", { name: "#" })).toHaveAttribute("aria-pressed", "false");
+    expect(document.querySelector(".md-live__gutter")).toBeNull();
   });
 
   it("switches a rendered block into source when clicked", async () => {
@@ -35,7 +47,7 @@ describe("NoteEditor", () => {
     renderWithProviders(
       <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
     );
-    await user.click(screen.getByLabelText("编辑第 3 段"));
+    await user.click(screen.getByLabelText("编辑第 3 行"));
     expect(screen.getByLabelText("Markdown 源码")).toHaveValue("世界");
   });
 
@@ -45,7 +57,7 @@ describe("NoteEditor", () => {
     renderWithProviders(
       <NoteEditor note={note} onChange={onChange} onDelete={() => undefined} />,
     );
-    await user.click(screen.getByLabelText("编辑第 1 段"));
+    await user.click(screen.getByLabelText("编辑第 1 行"));
     await user.type(screen.getByLabelText("Markdown 源码"), "!");
     expect(onChange).toHaveBeenCalled();
     expect(onChange.mock.calls.at(-1)?.[0]).toEqual(

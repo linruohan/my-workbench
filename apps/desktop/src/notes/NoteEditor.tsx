@@ -12,6 +12,7 @@ import {
   TEXT_COLOR_PRESETS,
   applyHeadingNumbers,
   blockDocOffset,
+  blockLineCount,
   countDocLines,
   cutSelectedLines,
   dedupeSelectedLines,
@@ -20,6 +21,7 @@ import {
   findNextMatch,
   indentMarkdownSelection,
   isCompleteFenceBlock,
+  isTableLine,
   joinMdBlocks,
   locateInBlocks,
   locateLineInBlocks,
@@ -37,6 +39,7 @@ import {
   type Note,
 } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
+import { copyCodeBlock } from "../lib/code-copy";
 import { renderMarkdown } from "../lib/markdown";
 import {
   bytesToBase64,
@@ -256,6 +259,7 @@ export function NoteEditor({
   const [findStatus, setFindStatus] = useState<string | null>(null);
   const [gotoOpen, setGotoOpen] = useState(false);
   const [gotoValue, setGotoValue] = useState("1");
+  const [showLineNumbers, setShowLineNumbers] = useState(true);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const gotoRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -271,6 +275,15 @@ export function NoteEditor({
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const prepared = useMemo(() => extractImageSlots(note.bodyMd), [note.bodyMd]);
+  const lineStarts = useMemo(() => {
+    const starts: number[] = [];
+    let line = 1;
+    for (const block of blocks) {
+      starts.push(line);
+      line += blockLineCount(block);
+    }
+    return starts;
+  }, [blocks]);
 
   // Keep a stable block list while editing so fence edits do not re-split into empty blocks.
   useEffect(() => {
@@ -552,7 +565,26 @@ export function NoteEditor({
     const end = area.selectionEnd;
     const next = edit(blocks[active] ?? "", start, end);
     if (next.cut != null) {
-      void navigator.clipboard?.writeText(next.cut).catch(() => undefined);
+      // Empty-block cut has no characters; still put a newline on the clipboard (Sublime-style).
+      const clip = next.cut || "\n";
+      void navigator.clipboard?.writeText(clip).catch(() => undefined);
+      // Live editor keeps each source line as its own block — cutting the whole
+      // block (including a blank line) must remove it, not leave "".
+      if (next.text === "" && blocks.length > 1) {
+        const nextBlocks = blocks.filter((_, i) => i !== active);
+        const focus = Math.min(active, nextBlocks.length - 1);
+        const caret = active < nextBlocks.length ? 0 : (nextBlocks[focus] ?? "").length;
+        pendingSelection.current = null;
+        commitBlocks(nextBlocks, focus, caret);
+        requestAnimationFrame(() => {
+          const el = editRef.current;
+          if (!el) return;
+          el.focus();
+          el.setSelectionRange(caret, caret);
+          autosize(el);
+        });
+        return;
+      }
     }
     const nextBlocks = [...blocks];
     nextBlocks[active] = next.text;
@@ -857,10 +889,30 @@ export function NoteEditor({
       if (/^ {0,3}(`{3,}|~{3,})/.test(value) || isCompleteFenceBlock(value)) {
         return;
       }
-      // Split at caret so every line (including new blank lines) is its own editable row.
-      event.preventDefault();
       const before = value.slice(0, start);
       const after = value.slice(end);
+      const lineBefore = before.split("\n").pop() ?? "";
+      const lineAfter = after.split("\n")[0] ?? "";
+      // Keep GFM tables in one block so rows can render; blank line still splits out.
+      if (
+        lineBefore.trim() !== "" &&
+        (isTableLine(lineBefore) ||
+          isTableLine(lineAfter) ||
+          value.split("\n").some(isTableLine))
+      ) {
+        return;
+      }
+      // Keep consecutive list items together (ul / ol) while typing.
+      if (
+        lineBefore.trim() !== "" &&
+        (/^\s*([-*+]|\d+[.)])\s+/.test(lineBefore) ||
+          /^\s*([-*+]|\d+[.)])\s+/.test(lineAfter) ||
+          /^\s*([-*+]|\d+[.)])\s+/.test(value))
+      ) {
+        return;
+      }
+      // Split at caret so every line (including new blank lines) is its own editable row.
+      event.preventDefault();
       const nextBlocks = [...blocks];
       nextBlocks[index] = before;
       nextBlocks.splice(index + 1, 0, after);
@@ -956,7 +1008,7 @@ export function NoteEditor({
     if (!text) return "";
     const { slots } = extractImageSlots(text);
     const blockUrls = slots.map((slot) => urlByDest.get(slot.dest) ?? null);
-    return renderMarkdown(text, blockUrls);
+    return renderMarkdown(text, blockUrls, { document: joinMdBlocks(blocks) });
   };
 
   return (
@@ -1027,11 +1079,21 @@ export function NoteEditor({
           </button>
           <button
             type="button"
+            title={showLineNumbers ? "隐藏行号" : "显示行号"}
+            aria-pressed={showLineNumbers}
+            className={showLineNumbers ? "is-active" : undefined}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setShowLineNumbers((open) => !open)}
+          >
+            #
+          </button>
+          <button
+            type="button"
             title="跳转到行 Ctrl+G"
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => openGoto()}
           >
-            行号
+            跳转
           </button>
           <div className="note-editor__swatch">
             <button
@@ -1187,55 +1249,105 @@ export function NoteEditor({
         className="note-editor__stage note-editor__stage--live-preview"
         aria-label="Markdown 编辑器"
       >
-        <div className="md-live">
+        <div
+          className={["md-live", showLineNumbers ? "has-line-nos" : ""]
+            .filter(Boolean)
+            .join(" ")}
+        >
           {blocks.map((block, index) => {
             const isActive = active === index;
+            const startLine = lineStarts[index] ?? 1;
+            const lineCount = blockLineCount(block);
+            const gutter = showLineNumbers ? (
+              <div className="md-live__gutter" aria-hidden="true">
+                {Array.from({ length: lineCount }, (_, offset) => (
+                  <span key={offset} className="md-live__line-no">
+                    {startLine + offset}
+                  </span>
+                ))}
+              </div>
+            ) : null;
             if (isActive) {
               return (
-                <div key={`edit-${index}`} className="md-live__block is-editing">
-                  <textarea
-                    ref={editRef}
-                    className={[
-                      "md-live__source",
-                      block ? "" : "is-empty",
-                      isFenceSource(block) ? "is-fence" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    aria-label="Markdown 源码"
-                    spellCheck={false}
-                    value={block}
-                    rows={1}
-                    onChange={(e) => {
-                      updateActiveBlock(e.target.value);
-                      autosize(e.currentTarget);
-                    }}
-                    onKeyDown={onEditKeyDown}
-                    onPaste={onPaste}
-                    onBlur={() => {
-                      requestAnimationFrame(() => {
-                        if (suppressBlur.current) return;
-                        const root = rootRef.current;
-                        if (root && root.contains(document.activeElement)) return;
-                        finishEditing();
-                      });
-                    }}
-                  />
+                <div key={`edit-${index}`} className="md-live__row is-editing">
+                  {gutter}
+                  <div className="md-live__block is-editing">
+                    <textarea
+                      ref={editRef}
+                      className={[
+                        "md-live__source",
+                        block ? "" : "is-empty",
+                        isFenceSource(block) ? "is-fence" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      aria-label="Markdown 源码"
+                      spellCheck={false}
+                      value={block}
+                      rows={1}
+                      onChange={(e) => {
+                        updateActiveBlock(e.target.value);
+                        autosize(e.currentTarget);
+                      }}
+                      onKeyDown={onEditKeyDown}
+                      onPaste={onPaste}
+                      onBlur={() => {
+                        requestAnimationFrame(() => {
+                          if (suppressBlur.current) return;
+                          const root = rootRef.current;
+                          if (root && root.contains(document.activeElement)) return;
+                          finishEditing();
+                        });
+                      }}
+                    />
+                  </div>
                 </div>
               );
             }
             if (!block) {
               // Blank source lines stay in the model, but no longer render as grey bars.
               return (
+                <div key={`view-${index}`} className="md-live__row">
+                  {gutter}
+                  <div
+                    className="md-live__gap"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`编辑空行（第 ${startLine} 行）`}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      beginEditAt(index, 0, {
+                        preventDefault: () => e.preventDefault(),
+                        currentTarget: e.currentTarget,
+                      });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        beginEditAt(index, 0);
+                      }
+                    }}
+                  />
+                </div>
+              );
+            }
+            return (
+              <div key={`view-${index}`} className="md-live__row">
+                {gutter}
                 <div
-                  key={`view-${index}`}
-                  className="md-live__gap"
+                  className="md-live__block"
                   role="button"
                   tabIndex={0}
-                  aria-label={`编辑空行（第 ${index + 1} 段）`}
+                  aria-label={`编辑第 ${startLine} 行`}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
-                    beginEditAt(index, 0, {
+                    const target = e.currentTarget.querySelector(
+                      ".md-live__preview",
+                    ) as HTMLElement | null;
+                    const caret = target
+                      ? caretIndexFromClick(block, e.clientX, e.clientY, target)
+                      : 0;
+                    beginEditAt(index, caret, {
                       preventDefault: () => e.preventDefault(),
                       currentTarget: e.currentTarget,
                     });
@@ -1246,40 +1358,26 @@ export function NoteEditor({
                       beginEditAt(index, 0);
                     }
                   }}
-                />
-              );
-            }
-            return (
-              <div
-                key={`view-${index}`}
-                className="md-live__block"
-                role="button"
-                tabIndex={0}
-                aria-label={`编辑第 ${index + 1} 段`}
-                onMouseDown={(e) => {
-                  if (e.button !== 0) return;
-                  const target = e.currentTarget.querySelector(
-                    ".md-live__preview",
-                  ) as HTMLElement | null;
-                  const caret = target
-                    ? caretIndexFromClick(block, e.clientX, e.clientY, target)
-                    : 0;
-                  beginEditAt(index, caret, {
-                    preventDefault: () => e.preventDefault(),
-                    currentTarget: e.currentTarget,
-                  });
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    beginEditAt(index, 0);
-                  }
-                }}
-              >
-                <div
-                  className="md-live__preview md-body"
-                  dangerouslySetInnerHTML={{ __html: renderBlock(block) }}
-                />
+                >
+                  <div
+                    className="md-live__preview md-body"
+                    onMouseDown={(event) => {
+                      if (
+                        event.target instanceof Element &&
+                        event.target.closest(".md-code__copy")
+                      ) {
+                        event.stopPropagation();
+                      }
+                    }}
+                    onClick={(event) => {
+                      if (copyCodeBlock(event.target)) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }
+                    }}
+                    dangerouslySetInnerHTML={{ __html: renderBlock(block) }}
+                  />
+                </div>
               </div>
             );
           })}

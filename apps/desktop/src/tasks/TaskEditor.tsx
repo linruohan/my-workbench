@@ -7,7 +7,6 @@ import {
   formatTaskPlanMeta,
   makePresetSchedule,
   millisecondsDiffToRemindOption,
-  resolveTagChipColors,
   timedPresetLabel,
   timedScheduleLabel,
   type ProjectBucket,
@@ -20,6 +19,7 @@ import {
 import { ScheduleRow } from "../timed/ScheduleRow";
 import { DateField, DateTimeField } from "../ui/CalendarField";
 import { MenuSelect } from "../ui/MenuSelect";
+import { TagPicker } from "../ui/TagPicker";
 
 export type TaskEditorSave = {
   title: string;
@@ -144,7 +144,6 @@ export function TaskEditor({
     fromTask(task, bucket, defaultRemind, selectedTagIds),
   );
   const [subtaskTitle, setSubtaskTitle] = useState("");
-  const [newTagTitle, setNewTagTitle] = useState("");
   const [repeatMenuOpen, setRepeatMenuOpen] = useState(false);
   const repeatMenuRef = useRef<HTMLDivElement>(null);
 
@@ -253,69 +252,15 @@ export function TaskEditor({
               </div>
             </div>
 
-            <div className="task-editor__tags" role="group" aria-label="任务标签">
-              {tags.length === 0 ? (
-                <p className="task-editor__hint">还没有标签，可在下方新建。</p>
-              ) : (
-                tags.map((tag) => {
-                  const active = draft.tagIds.includes(tag.id);
-                  const colors = resolveTagChipColors(tag);
-                  return (
-                    <button
-                      key={tag.id}
-                      type="button"
-                      className={
-                        active ? "task-editor__tag is-active" : "task-editor__tag"
-                      }
-                      aria-pressed={active}
-                      style={
-                        active
-                          ? {
-                              background: colors.background,
-                              borderColor: colors.border,
-                              color: colors.text,
-                            }
-                          : undefined
-                      }
-                      onClick={() =>
-                        setDraft((d) => ({
-                          ...d,
-                          tagIds: d.tagIds.includes(tag.id)
-                            ? d.tagIds.filter((id) => id !== tag.id)
-                            : [...d.tagIds, tag.id],
-                        }))
-                      }
-                    >
-                      {tag.title}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-            {onCreateTag ? (
-              <input
-                aria-label="新建标签"
-                className="field__control"
-                placeholder="新建标签，回车添加"
-                value={newTagTitle}
-                onChange={(e) => setNewTagTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  const title = newTagTitle.trim();
-                  if (!title) return;
-                  const created = onCreateTag(title);
-                  setNewTagTitle("");
-                  if (created) {
-                    setDraft((d) => ({
-                      ...d,
-                      tagIds: d.tagIds.includes(created.id)
-                        ? d.tagIds
-                        : [...d.tagIds, created.id],
-                    }));
-                  }
-                }}
+            <div className="task-editor__inline">
+              <span className="task-editor__inline-label">标签：</span>
+              <TagPicker
+                tags={tags}
+                selectedIds={draft.tagIds}
+                onCreateTag={onCreateTag}
+                onChange={(tagIds) => setDraft((d) => ({ ...d, tagIds }))}
               />
-            ) : null}
+            </div>
           </section>
 
           <section className="task-editor__section">
@@ -352,36 +297,48 @@ export function TaskEditor({
               </div>
             </div>
 
-            {draft.dueMode === "day" ? (
-              <div className="task-editor__inline">
-                <span className="task-editor__inline-label">日期：</span>
-                <DateField
-                  label="计划日期"
-                  value={draft.dueDay}
-                  onChange={(dueDay) => patch({ dueDay })}
-                />
-              </div>
-            ) : null}
-
-            {draft.dueMode === "time" ? (
+            {draft.dueMode === "day" || draft.dueMode === "time" ? (
               <div className="task-editor__inline-row">
                 <div className="task-editor__inline">
-                  <span className="task-editor__inline-label">时刻：</span>
+                  <span className="task-editor__inline-label">
+                    {draft.dueMode === "time" ? "时刻：" : "日期："}
+                  </span>
                   <DateTimeField
-                    label="计划时刻"
-                    valueLocal={draft.dueWithTimeLocal}
-                    onChange={(dueWithTimeLocal) => patch({ dueWithTimeLocal })}
+                    label={draft.dueMode === "time" ? "计划时刻" : "计划日期"}
+                    valueLocal={
+                      draft.dueMode === "time"
+                        ? draft.dueWithTimeLocal
+                        : `${draft.dueDay || formatLocalDay(Date.now())}T09:00`
+                    }
+                    onChange={(dueWithTimeLocal) => {
+                      const time = dueWithTimeLocal.slice(11, 16) || "09:00";
+                      const dueDay = dueWithTimeLocal.slice(0, 10);
+                      // 改了时间则自动切到「时刻」；仅改日期时保留当前计划方式
+                      if (draft.dueMode === "day" && time !== "09:00") {
+                        patch({
+                          dueMode: "time",
+                          dueDay,
+                          dueWithTimeLocal,
+                        });
+                      } else if (draft.dueMode === "day") {
+                        patch({ dueDay, dueWithTimeLocal });
+                      } else {
+                        patch({ dueWithTimeLocal });
+                      }
+                    }}
                   />
                 </div>
-                <div className="task-editor__inline">
-                  <span className="task-editor__inline-label">提醒：</span>
-                  <MenuSelect
-                    label="提醒"
-                    value={draft.remindOption}
-                    options={REMIND_OPTIONS}
-                    onChange={(remindOption) => patch({ remindOption })}
-                  />
-                </div>
+                {draft.dueMode === "time" ? (
+                  <div className="task-editor__inline">
+                    <span className="task-editor__inline-label">提醒：</span>
+                    <MenuSelect
+                      label="提醒"
+                      value={draft.remindOption}
+                      options={REMIND_OPTIONS}
+                      onChange={(remindOption) => patch({ remindOption })}
+                    />
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
