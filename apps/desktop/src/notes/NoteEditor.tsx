@@ -14,8 +14,10 @@ import {
   blockDocOffset,
   blockLineCount,
   countDocLines,
+  adjustSnippetStops,
   cutSelectedLines,
   dedupeSelectedLines,
+  expandGithubMdSnippet,
   extractImageSlots,
   findAllMatches,
   findNextMatch,
@@ -36,6 +38,7 @@ import {
   styleMarkdownSelection,
   wrapMarkdownSelection,
   type InlineStyleKind,
+  type MdSnippetRange,
   type Note,
 } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
@@ -268,6 +271,9 @@ export function NoteEditor({
   const selectionScope = useRef<{ start: number; end: number } | null>(null);
   const suppressBlur = useRef(false);
   const editMinHeight = useRef<number | null>(null);
+  const snippetStops = useRef<MdSnippetRange[] | null>(null);
+  const snippetStopIndex = useRef(0);
+  const lastEditSel = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const findFrom = useRef(0);
   const gPending = useRef(false);
   const gTimer = useRef<number | null>(null);
@@ -873,10 +879,53 @@ export function NoteEditor({
     const index = active ?? 0;
 
     if (event.key === "Tab") {
+      // GitHub markdown snippets: cycle tab stops, or expand trigger (h1/ul/table/…).
+      if (!event.shiftKey && snippetStops.current && snippetStops.current.length > 0) {
+        const stops = snippetStops.current;
+        if (snippetStopIndex.current < stops.length - 1) {
+          event.preventDefault();
+          snippetStopIndex.current += 1;
+          const stop = stops[snippetStopIndex.current]!;
+          area.setSelectionRange(stop.start, stop.end);
+          lastEditSel.current = { start: stop.start, end: stop.end };
+          return;
+        }
+        snippetStops.current = null;
+        snippetStopIndex.current = 0;
+      }
+      if (
+        !event.shiftKey &&
+        start === end &&
+        !isFenceSource(value) &&
+        !isCompleteFenceBlock(value)
+      ) {
+        const expanded = expandGithubMdSnippet(value, start);
+        if (expanded) {
+          event.preventDefault();
+          const nextBlocks = [...blocks];
+          nextBlocks[index] = expanded.text;
+          snippetStops.current = expanded.stops;
+          snippetStopIndex.current = 0;
+          const first = expanded.stops[0] ?? { start: start, end: start };
+          pendingSelection.current = { start: first.start, end: first.end };
+          commitBlocks(nextBlocks, index, undefined);
+          requestAnimationFrame(() => {
+            const el = editRef.current;
+            if (!el) return;
+            el.focus();
+            el.setSelectionRange(first.start, first.end);
+            lastEditSel.current = { start: first.start, end: first.end };
+            autosize(el, { force: true });
+          });
+          return;
+        }
+      }
       event.preventDefault();
       const next = event.shiftKey
         ? outdentMarkdownSelection(value, start, end)
         : indentMarkdownSelection(value, start, end);
+      snippetStops.current = null;
+      snippetStopIndex.current = 0;
       const nextBlocks = [...blocks];
       nextBlocks[index] = next.text;
       commitBlocks(nextBlocks, index, next.end);

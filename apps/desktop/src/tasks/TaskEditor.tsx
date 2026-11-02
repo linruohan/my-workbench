@@ -45,6 +45,7 @@ type Props = {
   selectedTagIds?: string[];
   subtasks?: Task[];
   defaultRemind: ReminderOptionId;
+  nowMs?: number;
   onSave: (patch: TaskEditorSave) => void;
   onDelete: () => void;
   onDuplicate?: () => void;

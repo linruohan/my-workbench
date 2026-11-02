@@ -12,6 +12,7 @@ type Props = {
   tasks: Task[];
   buckets: Record<string, ProjectBucket>;
   projectTitles: Record<string, string>;
+  nowMs?: number;
   onOpen: (task: Task) => void;
   onToggleDone: (task: Task) => void;
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
@@ -22,6 +23,7 @@ export function TaskBoard({
   tasks,
   buckets,
   projectTitles,
+  nowMs,
   onOpen,
   onToggleDone,
   onMoveColumn,
@@ -103,7 +105,7 @@ export function TaskBoard({
                       </button>
                     </div>
                     <div className="task-card__meta">
-                      {formatTaskPlanMeta(task)}
+                      {formatTaskPlanMeta(task, nowMs)}
                       {projectTitles[task.projectId]
                         ? ` · ${projectTitles[task.projectId]}`
                         : ""}

@@ -17,6 +17,8 @@ type Props = {
   timerRunning?: boolean;
   timerElapsedMs?: number;
   canTime?: boolean;
+  /** Wall clock for relative plan labels (今天/明天…). */
+  nowMs?: number;
   onToggleDone: (task: Task) => void;
   onOpen: (task: Task) => void;
   onPlanToday?: (task: Task) => void;
@@ -42,6 +44,7 @@ export function TaskRow({
   timerRunning,
   timerElapsedMs = 0,
   canTime = true,
+  nowMs,
   onToggleDone,
   onOpen,
   onPlanToday,
@@ -143,7 +146,7 @@ export function TaskRow({
         </div>
         {denseMeta ? null : (
           <div className="list__meta">
-            {formatTaskPlanMeta(task)}
+            {formatTaskPlanMeta(task, nowMs)}
             {projectTitle ? ` · ${projectTitle}` : ""}
             {task.timeSpent > 0 ? ` · 已用 ${formatDurationMs(task.timeSpent)}` : ""}
             {task.timeEstimate > 0

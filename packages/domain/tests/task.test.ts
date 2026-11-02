@@ -3,6 +3,7 @@ import {
   formatTaskPlanMeta,
   markTaskComplete,
   markTaskIncomplete,
+  parseLocalDay,
   patchTaskContent,
   reorderIds,
   resolveTaskBoardColumn,
@@ -57,10 +58,12 @@ describe("task helpers", () => {
   });
 
   it("formats plan meta", () => {
-    expect(formatTaskPlanMeta(sample())).toBe("未排期");
-    expect(formatTaskPlanMeta(sample({ dueDay: "2026-11-01", remindAt: 1 }))).toBe(
-      "2026-11-01 · 有提醒",
+    const now = parseLocalDay("2026-11-01") + 12 * 60 * 60 * 1000;
+    expect(formatTaskPlanMeta(sample(), now)).toBe("未排期");
+    expect(formatTaskPlanMeta(sample({ dueDay: "2026-11-01", remindAt: 1 }), now)).toBe(
+      "今天 · 有提醒",
     );
+    expect(formatTaskPlanMeta(sample({ dueDay: "2026-11-02" }), now)).toBe("明天");
   });
 
   it("reorders ids for today list", () => {

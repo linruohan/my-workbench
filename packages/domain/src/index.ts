@@ -9,6 +9,7 @@ export * from "./quick-capture.js";
 export * from "./id.js";
 export * from "./notes.js";
 export * from "./kb.js";
+export * from "./md-snippets.js";
 export * from "./timed-task.js";
 export * from "./task.js";
 export * from "./task-stats.js";
