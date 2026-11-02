@@ -7,6 +7,7 @@ import {
   takeSseData,
   type ProviderConfig,
 } from "@wb/domain";
+import { describeTransportError, hostFetch } from "./host-fetch";
 
 const PROBE_TIMEOUT_MS = 60_000;
 
@@ -18,7 +19,7 @@ export async function testModelConnectivity(input: {
   provider: ProviderConfig;
   modelId: string;
   apiKey: string | null;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: (url: string, init?: RequestInit & { timeoutMs?: number }) => Promise<Response>;
   timeoutMs?: number;
 }): Promise<ModelConnectivityResult> {
   const { provider, modelId } = input;
@@ -39,7 +40,7 @@ export async function testModelConnectivity(input: {
   const headers = applyRuntimeHeaders(request, input.apiKey);
   const secrets = input.apiKey ? [input.apiKey] : [];
   const timeoutMs = input.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const fetchImpl = input.fetchImpl ?? fetch;
+  const fetchImpl = input.fetchImpl ?? hostFetch;
   let response: Response;
   try {
     response = await fetchImpl(request.url, {
@@ -47,11 +48,10 @@ export async function testModelConnectivity(input: {
       headers,
       body: JSON.stringify(request.body),
       signal: AbortSignal.timeout(timeoutMs),
+      timeoutMs,
     });
   } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    if (name === "TimeoutError" || name === "AbortError") return fail("测试超时");
-    return fail("网络错误");
+    return fail(describeTransportError(error, "测试超时"));
   }
 
   if (!response.ok) {
@@ -86,12 +86,35 @@ function fail(message: string): ModelConnectivityResult {
 }
 
 function httpFailure(status: number, body: string): string {
+  const message = providerMessage(body);
+  const classified = classifyProviderError(message || body);
+  if (classified) return classified;
   if (status === 401 || status === 403) return "认证失败";
   if (status === 404) return /model/i.test(body) ? "模型未找到" : "未配置 endpoint";
   if (status === 429) return "请求频率限制";
   if (status >= 500) return "服务端错误";
-  const detail = body.trim();
-  return detail ? `连接失败：${detail}` : "连接失败";
+  return message || "连接失败";
+}
+
+function providerMessage(body: string): string {
+  try {
+    const parsed = connectivityProbeJsonError(JSON.parse(body));
+    if (!parsed || parsed === "模型响应不是 JSON" || parsed === "连接失败") return "";
+    return parsed.replace(/\s*\(request_id:[^)]+\)\s*/gi, "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function classifyProviderError(text: string): string | null {
+  const haystack = text.toLowerCase();
+  if (/insufficient[_\s-]*balance|insufficient[_\s-]*quota|余额不足|欠费/.test(haystack)) {
+    return "余额不足";
+  }
+  if (/invalid[_\s-]*api[_\s-]*key|authentication|unauthorized/.test(haystack)) return "认证失败";
+  if (/model[_\s-]*not[_\s-]*found|unknown model|模型未找到/.test(haystack)) return "模型未找到";
+  if (/rate[_\s-]*limit|too many requests/.test(haystack)) return "请求频率限制";
+  return null;
 }
 
 async function readProbeStream(
@@ -113,9 +136,7 @@ async function readProbeStream(
       if (result) return result;
     }
   } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    if (name === "TimeoutError" || name === "AbortError") return fail("测试超时");
-    return fail("网络错误");
+    return fail(describeTransportError(error, "测试超时"));
   }
   const tail = carry.trim() ? takeSseData(`${carry}\n\n`).data : [];
   return finishFromEvents(kind, tail, secrets) ?? fail("连接测试在结束前中断");
@@ -134,7 +155,8 @@ function finishFromEvents(
       finished = true;
       continue;
     }
-    return fail(redactSecrets(step.error, secrets));
+    const message = redactSecrets(step.error, secrets);
+    return fail(classifyProviderError(message) ?? message.replace(/\s*\(request_id:[^)]+\)\s*/gi, "").trim());
   }
   return finished ? { success: true } : null;
 }

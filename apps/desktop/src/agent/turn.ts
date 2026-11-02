@@ -26,6 +26,7 @@ import {
   type AgentRuntimeContext,
   type AgentUiEffect,
 } from "./execute";
+import { hostFetch } from "./host-fetch";
 
 export type AgentTurnEnv = {
   store: MemoryWorkbenchRepository;
@@ -280,11 +281,12 @@ async function requestModel(
       ? { ...request.body, stream: true }
       : request.body;
   if (env.signal?.aborted) throw new AgentTurnStopped("");
-  const response = await fetch(request.url, {
+  const response = await hostFetch(request.url, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
     signal: env.signal,
+    timeoutMs: 120_000,
   });
   const secrets = apiKey ? [apiKey] : [];
   if (!response.ok) {

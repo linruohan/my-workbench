@@ -1,4 +1,5 @@
 mod kb;
+mod model_http;
 mod open_ext;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,6 +19,7 @@ pub fn run() {
             kb::kb_reveal_in_explorer,
             kb::kb_git_branch,
             open_ext::open_external,
+            model_http::model_http,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

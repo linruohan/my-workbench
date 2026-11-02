@@ -154,11 +154,11 @@ export function buildConnectivityProbe(input: {
   const body: Record<string, unknown> = {
     model: modelId,
     stream: true,
-    max_completion_tokens: 1,
     messages: [
       { role: "system", content: CONNECTIVITY_PROBE_SYSTEM },
       { role: "user", content: CONNECTIVITY_PROBE_USER },
     ],
+    ...chatProbeBudget(provider, modelId),
   };
   applyReasoningField(body, reasoning);
   return {
@@ -296,6 +296,13 @@ export function finishOpenAiStream(acc: OpenAiStreamAcc): AgentTurnPlan {
         args: parseArgs(call.argsText),
       })),
   };
+}
+
+/** Zhipu chat models reject the OpenAI completion budget and think by default. */
+function chatProbeBudget(provider: ProviderConfig, modelId: string): Record<string, unknown> {
+  const zhipu = /bigmodel\.cn/i.test(provider.baseURL) || /^glm[-.]/i.test(modelId);
+  if (!zhipu) return { max_completion_tokens: 1 };
+  return { max_tokens: 16, thinking: { type: "disabled" } };
 }
 
 function lowestReasoningField(

@@ -204,6 +204,48 @@ export function removeProvider(id: string): void {
   writeProviderStore(store);
 }
 
+export function mergeDiscoveredModels(
+  providerId: string,
+  found: Array<{ id: string; context?: number; output?: number; image?: boolean }>,
+): { listed: number; added: number } | null {
+  if (providerId === BUILTIN_PROVIDER_ID) return null;
+  const store = readProviderStore();
+  const provider = store.providers.find((item) => item.id === providerId);
+  if (!provider || provider.kind === "builtin") return null;
+  const models = { ...provider.models };
+  const seen = new Set<string>();
+  let added = 0;
+  for (const item of found) {
+    const id = item.id.trim();
+    if (!id || id.includes("/") || seen.has(id)) continue;
+    seen.add(id);
+    const knownLimits = positiveInt(item.context, 0) > 0 || positiveInt(item.output, 0) > 0;
+    const discovered = modelCapsFrom({
+      context: item.context,
+      output: item.output,
+      smart: !knownLimits,
+      inputs: item.image ? ["image"] : undefined,
+    });
+    const current = models[id];
+    if (!current) {
+      models[id] = discovered;
+      added += 1;
+      continue;
+    }
+    if (!current.smart || (!knownLimits && !item.image)) continue;
+    models[id] = modelCapsFrom({
+      ...current,
+      context: knownLimits ? discovered.context : current.context,
+      output: knownLimits ? discovered.output : current.output,
+      smart: knownLimits ? false : true,
+      inputs: item.image ? discovered.inputs : current.inputs,
+    });
+  }
+  provider.models = models;
+  writeProviderStore(store);
+  return { listed: seen.size, added };
+}
+
 export function addModel(
   providerId: string,
   modelId: string,

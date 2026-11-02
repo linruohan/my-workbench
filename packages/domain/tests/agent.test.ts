@@ -350,6 +350,26 @@ describe("connectivity probe", () => {
       provider: { ...remote, kind: "openai-responses", baseURL: "https://probe.invalid/v1" },
       modelId: "probe-model",
     });
+    const zhipu = buildConnectivityProbe({
+      provider: {
+        ...builtinProvider(),
+        id: "custom:zhipu",
+        kind: "openai-chat-completions",
+        baseURL: "https://open.bigmodel.cn/api/paas/v4",
+        apiKeyRequired: true,
+        models: { "glm-4.5": { context: 8192, output: 2048 } },
+      },
+      modelId: "glm-4.5",
+    });
+    expect(zhipu.url).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions");
+    expect(zhipu.body).toMatchObject({
+      model: "glm-4.5",
+      stream: true,
+      max_tokens: 16,
+      thinking: { type: "disabled" },
+    });
+    expect(zhipu.body).not.toHaveProperty("max_completion_tokens");
+
     expect(responses.url).toBe("https://probe.invalid/v1/responses");
     expect(responses.body).toMatchObject({
       max_output_tokens: 1,

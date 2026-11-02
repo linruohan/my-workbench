@@ -75,6 +75,24 @@ describe("testModelConnectivity", () => {
     });
     expect(denied).toEqual({ success: false, error: { message: "认证失败" } });
 
+    const balance = await testModelConnectivity({
+      provider: provider(),
+      modelId: "probe-model",
+      apiKey: "sk-test-key-12345678",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "Insufficient Balance (request_id: d923ad94-94a4-4cc3-8ac4-d46da4af7365)",
+              type: "insufficient_balance_error",
+              code: "invalid_request_error",
+            },
+          }),
+          { status: 402 },
+        )) as typeof fetch,
+    });
+    expect(balance).toEqual({ success: false, error: { message: "余额不足" } });
+
     const missing = await testModelConnectivity({
       provider: provider(),
       modelId: "probe-model",

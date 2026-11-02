@@ -9,6 +9,7 @@ import { ModelFormDialog, type ModelFormValues } from "./ModelFormDialog";
 import { useDialog } from "../shell/Dialogs";
 import { IconMore, IconPencil, IconPlus, IconRefresh, IconUnplug } from "../shell/icons";
 import { testModelConnectivity } from "./connectivity";
+import { fetchAvailableModels } from "./models-list";
 import {
   credentialExists,
   deleteCredential,
@@ -20,6 +21,7 @@ import {
   PROVIDER_TEMPLATES,
   addModel,
   addProvider,
+  mergeDiscoveredModels,
   addProviderFromTemplate,
   providerKindLabel,
   readProviderStore,
@@ -387,6 +389,9 @@ function ProviderDetail({
   const [probes, setProbes] = useState<
     Record<string, { pending: boolean; ok: boolean; message: string }>
   >({});
+  const [catalog, setCatalog] = useState<null | { pending: boolean; ok: boolean; message: string }>(
+    null,
+  );
   const hasKey = credentialExists(provider.id);
   const models = Object.entries(provider.models);
 
@@ -399,7 +404,8 @@ function ProviderDetail({
     setShowKey(false);
     setModelForm(null);
     setProbes({});
-  }, [provider.id, provider.baseURL, provider.kind, provider.apiKeyRequired]);
+    setCatalog(null);
+  }, [provider.id]);
 
   useEffect(() => {
     if (!formatOpen) return;
@@ -472,6 +478,41 @@ function ProviderDetail({
               message: `${provider.name} / ${modelId} 连接失败：${result.error.message}`,
             },
       }));
+    });
+  };
+
+  const runDiscover = () => {
+    if (!provider.enabled || catalog?.pending) return;
+    saveConnection();
+    setCatalog({ pending: true, ok: false, message: "正在获取可用模型" });
+    const latest = readProviderStore().providers.find((item) => item.id === provider.id);
+    const target: ProviderConfig = {
+      ...(latest ?? provider),
+      baseURL,
+      kind,
+      apiKeyRequired,
+      enabled: provider.enabled,
+    };
+    void fetchAvailableModels({
+      provider: target,
+      apiKey: apiKey.trim() || readCredential(provider.id),
+    }).then((result) => {
+      if (!result.success) {
+        setCatalog({ pending: false, ok: false, message: result.error.message });
+        return;
+      }
+      const merged = mergeDiscoveredModels(provider.id, result.models);
+      const listed = merged?.listed ?? result.models.length;
+      const added = merged?.added ?? 0;
+      onRefresh();
+      setCatalog({
+        pending: false,
+        ok: true,
+        message:
+          added > 0
+            ? `获取到 ${listed} 个模型，新增 ${added} 个`
+            : `获取到 ${listed} 个模型，都已在列表中`,
+      });
     });
   };
 
@@ -626,15 +667,32 @@ function ProviderDetail({
 
       <div className="agent-models__models-head">
         <h3>模型列表</h3>
-        <button
-          type="button"
-          className="btn agent-models__add-btn"
-          onClick={() => setModelForm({ modelId: null })}
-        >
-          <IconPlus size={14} />
-          添加模型
-        </button>
+        <div className="agent-models__model-add">
+          <button
+            type="button"
+            className="btn"
+            disabled={!provider.enabled || catalog?.pending}
+            title={provider.enabled ? "从供应商获取可用模型" : "请先启用供应商"}
+            onClick={runDiscover}
+          >
+            {catalog?.pending ? <IconRefresh size={14} className="agent-models__spin" /> : null}
+            获取模型
+          </button>
+          <button
+            type="button"
+            className="btn agent-models__add-btn"
+            onClick={() => setModelForm({ modelId: null })}
+          >
+            <IconPlus size={14} />
+            添加模型
+          </button>
+        </div>
       </div>
+      {catalog ? (
+        <p className={catalog.ok ? "agent-models__probe is-ok" : catalog.pending ? "agent-models__probe" : "agent-models__probe is-bad"}>
+          {catalog.message}
+        </p>
+      ) : null}
 
       {models.length === 0 ? (
         <div className="agent-models__empty">

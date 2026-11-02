@@ -95,4 +95,34 @@ describe("model API format", () => {
     expect(await screen.findByText("OpenAI / gpt-4.1 连接成功")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledOnce();
   });
+
+  it("fills the model list from the provider index", async () => {
+    const user = userEvent.setup();
+    const provider = addProvider({
+      name: "OpenAI",
+      kind: "openai-chat-completions",
+      baseURL: "https://api.openai.com/v1",
+      modelId: "gpt-4.1",
+      apiKeyRequired: true,
+    });
+    writeCredential(provider.id, "sk-test-key-12345678");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            data: [{ id: "gpt-4.1" }, { id: "gpt-4.1-mini", context_window: 128000 }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    renderWithProviders(<ModelsPane />);
+
+    await user.click(screen.getByRole("button", { name: "获取模型" }));
+    expect(await screen.findByText("获取到 2 个模型，新增 1 个")).toBeInTheDocument();
+    expect(screen.getByText("gpt-4.1-mini")).toBeInTheDocument();
+    const saved = readProviderStore().providers.find((item) => item.id === provider.id);
+    expect(saved?.models["gpt-4.1-mini"]?.context).toBe(128000);
+  });
 });

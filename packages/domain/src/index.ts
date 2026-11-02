@@ -18,6 +18,7 @@ export * from "./task-repeat.js";
 export * from "./agent.js";
 export * from "./agent-plan.js";
 export * from "./agent-model.js";
+export * from "./models-list.js";
 export * from "./agent-reply.js";
 export * from "./agent-commands.js";
 export * from "./agent-retry.js";
