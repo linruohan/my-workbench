@@ -700,6 +700,8 @@ export function NoteEditor({
     if (active == null) return;
     if (findOpen) return;
     setColorMenu(null);
+    snippetStops.current = null;
+    snippetStopIndex.current = 0;
     if (editRef.current) {
       editRef.current.style.minHeight = "";
       editRef.current.style.height = "";
@@ -1334,9 +1336,50 @@ export function NoteEditor({
                       spellCheck={false}
                       value={block}
                       rows={1}
+                      onSelect={(e) => {
+                        lastEditSel.current = {
+                          start: e.currentTarget.selectionStart,
+                          end: e.currentTarget.selectionEnd,
+                        };
+                      }}
+                      onKeyUp={(e) => {
+                        lastEditSel.current = {
+                          start: e.currentTarget.selectionStart,
+                          end: e.currentTarget.selectionEnd,
+                        };
+                      }}
+                      onClick={(e) => {
+                        lastEditSel.current = {
+                          start: e.currentTarget.selectionStart,
+                          end: e.currentTarget.selectionEnd,
+                        };
+                      }}
                       onChange={(e) => {
-                        updateActiveBlock(e.target.value);
-                        autosize(e.currentTarget);
+                        const area = e.currentTarget;
+                        const nextValue = area.value;
+                        const prevValue = block;
+                        if (snippetStops.current) {
+                          const sel = lastEditSel.current;
+                          const oldSpan = Math.max(0, sel.end - sel.start);
+                          const newSpan = Math.max(
+                            0,
+                            nextValue.length - (prevValue.length - oldSpan),
+                          );
+                          snippetStops.current = adjustSnippetStops(
+                            snippetStops.current,
+                            sel.start,
+                            oldSpan,
+                            newSpan,
+                          );
+                        }
+                        updateActiveBlock(nextValue);
+                        autosize(area);
+                        requestAnimationFrame(() => {
+                          lastEditSel.current = {
+                            start: area.selectionStart,
+                            end: area.selectionEnd,
+                          };
+                        });
                       }}
                       onKeyDown={onEditKeyDown}
                       onPaste={onPaste}
