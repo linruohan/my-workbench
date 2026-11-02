@@ -1,22 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
-  defaultCustomSchedule,
-  makePresetSchedule,
-  timedPresetLabel,
   timedScheduleLabel,
   type TimedSchedule,
-  type TimedSchedulePreset,
   type TimedTask,
 } from "@wb/domain";
+import { ScheduleAddMenu } from "./ScheduleAddMenu";
 import { ScheduleRow } from "./ScheduleRow";
-
-const PRESETS: TimedSchedulePreset[] = [
-  "hourly",
-  "daily",
-  "weekdays",
-  "weekly",
-  "monthly",
-];
 
 export type TimedDraft = {
   title: string;
@@ -43,23 +32,8 @@ export function TimedTaskEditor({
 }: Props) {
   const [tab, setTab] = useState<"settings" | "history">("settings");
   const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
 
   const canSubmit = draft.title.trim().length > 0 && draft.schedule != null;
-
-  const setSchedule = (schedule: TimedSchedule) => {
-    onChange({ schedule });
-    setMenuOpen(false);
-  };
 
   return (
     <section className="timed panel">
@@ -121,51 +95,24 @@ export function TimedTaskEditor({
 
           <div className="field">
             <div className="field__label">调度</div>
-            <div className="schedule-board" ref={menuRef}>
-              {draft.schedule ? (
-                <ScheduleRow
-                  schedule={draft.schedule}
-                  onChange={(next) => onChange({ schedule: next })}
-                  onDelete={() => onChange({ schedule: null })}
-                />
-              ) : (
-                <>
+            {draft.schedule ? (
+              <ScheduleRow
+                schedule={draft.schedule}
+                onChange={(next) => onChange({ schedule: next })}
+                onDelete={() => onChange({ schedule: null })}
+              />
+            ) : (
+              <ScheduleAddMenu
+                open={menuOpen}
+                onOpenChange={setMenuOpen}
+                onPick={(schedule) => onChange({ schedule })}
+                addLabel="+ 添加计划"
+                menuLabel="添加计划"
+                emptyHint={
                   <p className="schedule-empty">还没有计划，请添加一个调度规则。</p>
-                  <button
-                    type="button"
-                    className="schedule-add"
-                    aria-expanded={menuOpen}
-                    onClick={() => setMenuOpen((v) => !v)}
-                  >
-                    + 添加计划
-                  </button>
-                  {menuOpen ? (
-                    <ul className="schedule-menu" role="menu" aria-label="添加计划">
-                      {PRESETS.map((preset) => (
-                        <li key={preset}>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => setSchedule(makePresetSchedule(preset))}
-                          >
-                            {timedPresetLabel(preset)}
-                          </button>
-                        </li>
-                      ))}
-                      <li>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => setSchedule(defaultCustomSchedule())}
-                        >
-                          自定义
-                        </button>
-                      </li>
-                    </ul>
-                  ) : null}
-                </>
-              )}
-            </div>
+                }
+              />
+            )}
           </div>
 
           <div className="field">

@@ -1,6 +1,6 @@
 import { cleanup, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { renderWithProviders } from "./test/render";
 
@@ -8,6 +8,7 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   document.documentElement.removeAttribute("data-theme");
+  vi.restoreAllMocks();
 });
 
 async function readyApp() {
@@ -42,7 +43,7 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "收件箱" }));
     await user.type(screen.getByLabelText("快速捕获"), "写周报{Enter}");
-    await user.click(screen.getByRole("button", { name: "今天" }));
+    await user.click(screen.getByRole("button", { name: /可见项排到今天/ }));
     await user.click(screen.getByRole("button", { name: "今日" }));
     expect(screen.getByText("写周报")).toBeInTheDocument();
   });
@@ -63,15 +64,16 @@ describe("App shell", () => {
 
     expect(screen.getByRole("region", { name: "任务分组" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "今日" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收件箱" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "已完成" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "计划" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "时间表" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "定时任务" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "收件箱" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加项目" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "收件箱" }));
     await user.type(screen.getByLabelText("快速捕获"), "跨项目事项{Enter}");
-    await user.click(screen.getByRole("button", { name: "今天" }));
+    await user.click(screen.getByRole("button", { name: /可见项排到今天/ }));
     await user.click(screen.getByRole("button", { name: "今日" }));
     expect(screen.getByText("汇总全部项目 · 拖拽可调整今日顺序")).toBeInTheDocument();
     expect(screen.getByText("跨项目事项")).toBeInTheDocument();
@@ -82,9 +84,10 @@ describe("App shell", () => {
     await readyApp();
 
     await user.click(screen.getByRole("button", { name: "知识库" }));
-    await user.click(screen.getByRole("button", { name: "新建" }));
+    await user.click(screen.getByRole("button", { name: "选择目录" }));
+    await user.click(screen.getByRole("menuitem", { name: "新建文件" }));
     expect(screen.getByLabelText("Markdown 编辑器")).toBeInTheDocument();
-    await user.click(screen.getByLabelText("编辑第 1 段"));
+    await user.click(screen.getByLabelText("编辑第 1 行"));
     const source = screen.getByLabelText("Markdown 源码");
     await user.clear(source);
     await user.type(source, "# 架构笔记");
@@ -162,10 +165,13 @@ describe("App shell", () => {
   it("creates a task from an agent session only after approval", async () => {
     const user = userEvent.setup();
     await readyApp();
+    vi.spyOn(window, "prompt").mockReturnValue("D:/tmp/agent-ws");
 
-    await user.click(screen.getByRole("button", { name: "新建会话" }));
+    await user.click(screen.getByRole("button", { name: "Agent" }));
+    await user.click(screen.getAllByRole("button", { name: "新建会话" })[0]!);
     const box = await screen.findByLabelText("给 Agent 发消息");
-    await user.type(box, "创建任务 验收事项{Enter}");
+    await user.type(box, "创建任务 验收事项");
+    await user.click(screen.getByRole("button", { name: "发送" }));
     await user.click(await screen.findByRole("button", { name: "批准" }));
     expect(await screen.findByText(/已创建任务/)).toBeInTheDocument();
 

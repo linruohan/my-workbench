@@ -10,6 +10,13 @@ import { IconClose } from "../shell/icons";
 
 const UNITS: TimedIntervalUnit[] = ["minute", "hour", "day", "week", "month", "year"];
 
+const HALF_HOUR_TIMES = Array.from({ length: 25 }, (_, i) => {
+  const total = 9 * 60 + i * 30;
+  const h = String(Math.floor(total / 60)).padStart(2, "0");
+  const m = String(total % 60).padStart(2, "0");
+  return `${h}:${m}`;
+});
+
 type Props = {
   initial?: TimedSchedule;
   onCancel: () => void;
@@ -101,14 +108,19 @@ export function CustomRepeatModal({ initial, onCancel, onConfirm }: Props) {
               <label className="field__label" htmlFor="custom-at-time">
                 执行时间
               </label>
-              <input
+              <select
                 id="custom-at-time"
-                type="time"
                 className="date-input"
                 aria-label="执行时间"
-                value={atTime}
+                value={HALF_HOUR_TIMES.includes(atTime) ? atTime : DEFAULT_AT_TIME}
                 onChange={(e) => setAtTime(e.target.value || DEFAULT_AT_TIME)}
-              />
+              >
+                {HALF_HOUR_TIMES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
             </div>
           ) : null}
 

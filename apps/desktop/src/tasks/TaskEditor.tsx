@@ -1,20 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   decodeTaskRepeat,
-  defaultCustomSchedule,
   formatTaskPlanMeta,
-  makePresetSchedule,
   millisecondsDiffToRemindOption,
-  timedPresetLabel,
   timedScheduleLabel,
   type ProjectBucket,
   type ReminderOptionId,
   type Tag,
   type Task,
   type TimedSchedule,
-  type TimedSchedulePreset,
 } from "@wb/domain";
+import { ScheduleAddMenu } from "../timed/ScheduleAddMenu";
 import { ScheduleRow } from "../timed/ScheduleRow";
 import { DateTimeField } from "../ui/CalendarField";
 import { MenuSelect } from "../ui/MenuSelect";
@@ -55,21 +52,12 @@ type Props = {
   onClose: () => void;
 };
 
-const PRESETS: TimedSchedulePreset[] = [
-  "hourly",
-  "daily",
-  "weekdays",
-  "weekly",
-  "monthly",
-];
-
 const STATUS_OPTIONS = [
   { value: "active", label: "进行中" },
   { value: "backlog", label: "待办箱" },
   { value: "done", label: "已完成" },
 ] as const;
 
-const DEFAULT_START_TIME = "09:00";
 const DEFAULT_DEADLINE_TIME = "17:30";
 
 function toDatetimeLocal(ms: number): string {
@@ -78,8 +66,19 @@ function toDatetimeLocal(ms: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function localClock(ms = Date.now()): string {
+  return toDatetimeLocal(ms).slice(11, 16);
+}
+
 function dayAtTime(day: string, time: string): string {
   return `${day}T${time}`;
+}
+
+function autosizeNotes(area: HTMLTextAreaElement | null) {
+  if (!area) return;
+  area.style.height = "0px";
+  const next = Math.max(area.scrollHeight, 40);
+  area.style.height = `${next}px`;
 }
 
 function fromTask(
@@ -87,6 +86,7 @@ function fromTask(
   bucket: ProjectBucket,
   defaultRemind: ReminderOptionId,
   selectedTagIds: string[],
+  nowMs = Date.now(),
 ): TaskEditorSave {
   const remindOption =
     task.dueWithTime != null
@@ -99,7 +99,7 @@ function fromTask(
   if (task.dueWithTime != null) {
     dueWithTimeLocal = toDatetimeLocal(task.dueWithTime);
   } else if (task.dueDay) {
-    dueWithTimeLocal = dayAtTime(task.dueDay, DEFAULT_START_TIME);
+    dueWithTimeLocal = dayAtTime(task.dueDay, localClock(nowMs));
   }
 
   let deadlineWithTimeLocal = "";
@@ -143,33 +143,30 @@ export function TaskEditor({
   onClose,
 }: Props) {
   const [draft, setDraft] = useState(() =>
-    fromTask(task, bucket, defaultRemind, selectedTagIds),
+    fromTask(task, bucket, defaultRemind, selectedTagIds, nowMs ?? Date.now()),
   );
   const [subtaskTitle, setSubtaskTitle] = useState("");
   const [repeatMenuOpen, setRepeatMenuOpen] = useState(false);
-  const repeatMenuRef = useRef<HTMLDivElement>(null);
+  const notesRef = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    autosizeNotes(notesRef.current);
+  }, [draft.notes]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key !== "Escape") return;
+      if (repeatMenuOpen) {
         e.preventDefault();
-        onClose();
+        setRepeatMenuOpen(false);
+        return;
       }
+      e.preventDefault();
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  useEffect(() => {
-    if (!repeatMenuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!repeatMenuRef.current?.contains(e.target as Node)) {
-        setRepeatMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [repeatMenuOpen]);
+  }, [onClose, repeatMenuOpen]);
 
   const patch = (partial: Partial<TaskEditorSave>) =>
     setDraft((d) => ({ ...d, ...partial }));
@@ -213,8 +210,9 @@ export function TaskEditor({
             />
             <textarea
               id="task-notes"
-              className="field__control field__control--area"
-              rows={2}
+              ref={notesRef}
+              className="field__control field__control--area task-editor__notes"
+              rows={1}
               value={draft.notes}
               placeholder="补充说明、清单或上下文"
               aria-label="备注"
@@ -223,7 +221,7 @@ export function TaskEditor({
           </section>
 
           <section className="task-editor__section">
-            <div className="task-editor__inline-row">
+            <div className="task-editor__inline-row task-editor__inline-row--meta">
               <div className="task-editor__inline">
                 <span className="task-editor__inline-label">项目：</span>
                 <MenuSelect
@@ -252,16 +250,15 @@ export function TaskEditor({
                   }}
                 />
               </div>
-            </div>
-
-            <div className="task-editor__inline">
-              <span className="task-editor__inline-label">标签：</span>
-              <TagPicker
-                tags={tags}
-                selectedIds={draft.tagIds}
-                onCreateTag={onCreateTag}
-                onChange={(tagIds) => setDraft((d) => ({ ...d, tagIds }))}
-              />
+              <div className="task-editor__inline task-editor__inline--tags">
+                <span className="task-editor__inline-label">标签：</span>
+                <TagPicker
+                  tags={tags}
+                  selectedIds={draft.tagIds}
+                  onCreateTag={onCreateTag}
+                  onChange={(tagIds) => setDraft((d) => ({ ...d, tagIds }))}
+                />
+              </div>
             </div>
           </section>
 
@@ -274,7 +271,7 @@ export function TaskEditor({
                   valueLocal={draft.dueWithTimeLocal}
                   allowEmpty
                   emptyLabel="未设置开始时间"
-                  defaultTime={DEFAULT_START_TIME}
+                  defaultTime={localClock(nowMs)}
                   onChange={(dueWithTimeLocal) => patch({ dueWithTimeLocal })}
                 />
               </div>
@@ -294,58 +291,19 @@ export function TaskEditor({
             </div>
 
             {canRepeat ? (
-              <div className="schedule-board" ref={repeatMenuRef}>
-                {draft.repeat ? (
-                  <ScheduleRow
-                    schedule={draft.repeat}
-                    onChange={(repeat) => patch({ repeat })}
-                    onDelete={() => patch({ repeat: null })}
-                  />
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      className="schedule-add"
-                      aria-expanded={repeatMenuOpen}
-                      onClick={() => setRepeatMenuOpen((v) => !v)}
-                    >
-                      + 添加重复
-                    </button>
-                    {repeatMenuOpen ? (
-                      <ul className="schedule-menu" role="menu" aria-label="添加重复">
-                        {PRESETS.map((preset) => (
-                          <li key={preset}>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              onClick={() => {
-                                patch({
-                                  repeat: makePresetSchedule(preset),
-                                });
-                                setRepeatMenuOpen(false);
-                              }}
-                            >
-                              {timedPresetLabel(preset)}
-                            </button>
-                          </li>
-                        ))}
-                        <li>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              patch({ repeat: defaultCustomSchedule() });
-                              setRepeatMenuOpen(false);
-                            }}
-                          >
-                            自定义
-                          </button>
-                        </li>
-                      </ul>
-                    ) : null}
-                  </>
-                )}
-              </div>
+              draft.repeat ? (
+                <ScheduleRow
+                  schedule={draft.repeat}
+                  onChange={(repeat) => patch({ repeat })}
+                  onDelete={() => patch({ repeat: null })}
+                />
+              ) : (
+                <ScheduleAddMenu
+                  open={repeatMenuOpen}
+                  onOpenChange={setRepeatMenuOpen}
+                  onPick={(repeat) => patch({ repeat })}
+                />
+              )
             ) : null}
           </section>
 

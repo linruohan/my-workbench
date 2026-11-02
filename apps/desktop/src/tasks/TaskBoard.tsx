@@ -1,14 +1,17 @@
 import { useState } from "react";
 import {
   TASK_BOARD_COLUMNS,
+  decodeTaskRepeat,
   formatLocalDay,
   formatTaskPlanSchedule,
   isTaskOverdue,
   resolveTaskBoardColumn,
+  timedScheduleLabel,
   type ProjectBucket,
   type Task,
   type TaskBoardColumnId,
 } from "@wb/domain";
+import { IconRepeat } from "../shell/icons";
 
 type Props = {
   tasks: Task[];
@@ -76,6 +79,8 @@ export function TaskBoard({
               grouped[col.id].map((task) => {
                 const plan = formatTaskPlanSchedule(task, nowMs);
                 const overdue = isTaskOverdue(task, today, nowMs);
+                const repeat = decodeTaskRepeat(task.repeatCfgId);
+                const repeatLabel = repeat ? timedScheduleLabel(repeat) : null;
                 return (
                   <li key={task.id}>
                     <article
@@ -109,12 +114,25 @@ export function TaskBoard({
                         </button>
                       </div>
                       <div className="task-card__meta">
-                        {plan ? (
-                          <span className={overdue ? "list__plan is-overdue" : "list__plan"}>
-                            {plan}
+                        {plan || repeatLabel ? (
+                          <span
+                            className={overdue ? "list__plan is-overdue" : "list__plan"}
+                            title={[repeatLabel, plan].filter(Boolean).join(" · ")}
+                          >
+                            {repeatLabel ? (
+                              <span
+                                className="list__plan-repeat"
+                                aria-label={`重复：${repeatLabel}`}
+                              >
+                                <IconRepeat size={13} />
+                              </span>
+                            ) : null}
+                            {plan ? <span className="list__plan-text">{plan}</span> : null}
                           </span>
                         ) : null}
-                        {plan && projectTitles[task.projectId] ? " · " : ""}
+                        {(plan || repeatLabel) && projectTitles[task.projectId]
+                          ? " · "
+                          : ""}
                         {projectTitles[task.projectId] ?? ""}
                       </div>
                     </article>

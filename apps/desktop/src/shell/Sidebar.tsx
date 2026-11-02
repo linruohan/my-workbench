@@ -1,8 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { INBOX_PROJECT_ID, type Note } from "@wb/domain";
 import {
-  IconBot,
   IconChat,
+  IconDone,
   IconFolder,
   IconInbox,
   IconKnowledge,
@@ -18,10 +18,18 @@ import {
 } from "./icons";
 
 export type AppNavId =
-  "today" | "planner" | "schedule" | "projects" | "knowledge" | "timed" | "agent";
+  | "today"
+  | "inbox"
+  | "done"
+  | "planner"
+  | "schedule"
+  | "projects"
+  | "knowledge"
+  | "timed"
+  | "agent";
 
 type TaskNavItem = {
-  id: "today" | "planner" | "schedule" | "timed";
+  id: "today" | "inbox" | "done" | "planner" | "schedule" | "timed";
   label: string;
   icon: ReactNode;
 };
@@ -29,6 +37,8 @@ type TaskNavItem = {
 /** 任务分组下的全局视图：覆盖全部项目的任务。 */
 const TASK_NAV: TaskNavItem[] = [
   { id: "today", label: "今日", icon: <IconToday size={15} /> },
+  { id: "inbox", label: "收件箱", icon: <IconInbox size={15} /> },
+  { id: "done", label: "已完成", icon: <IconDone size={15} /> },
   { id: "planner", label: "计划", icon: <IconPlanner size={15} /> },
   { id: "schedule", label: "时间表", icon: <IconSchedule size={15} /> },
   { id: "timed", label: "定时任务", icon: <IconTimed size={15} /> },
@@ -47,9 +57,7 @@ type Props = {
   onCreateProject: () => void;
   onSelectProject: (projectId: string) => void;
   onSelectNote: (id: string) => void;
-  onNewChat: () => void;
   onOpenAgent: () => void;
-  onAutomations: () => void;
   displayName: string;
 };
 
@@ -66,9 +74,7 @@ export function Sidebar({
   onCreateProject,
   onSelectProject,
   onSelectNote,
-  onNewChat,
   onOpenAgent,
-  onAutomations,
   displayName,
 }: Props) {
   const [query, setQuery] = useState("");
@@ -83,11 +89,10 @@ export function Sidebar({
   }, [q]);
 
   const filteredProjects = useMemo(() => {
-    const list = [...projects].sort((a, b) => {
-      if (a.id === INBOX_PROJECT_ID) return -1;
-      if (b.id === INBOX_PROJECT_ID) return 1;
-      return a.title.localeCompare(b.title, "zh-CN");
-    });
+    // 收件箱已固定在「今日」下方，项目列表里不再重复出现。
+    const list = projects
+      .filter((p) => p.id !== INBOX_PROJECT_ID)
+      .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
     if (!q) return list;
     return list.filter((p) => p.title.toLowerCase().includes(q));
   }, [projects, q]);
@@ -95,11 +100,18 @@ export function Sidebar({
   const showKnowledge = !q || "知识库".includes(q) || "knowledge".includes(q);
   const showAgent = !q || "agent".includes(q) || "会话".includes(q);
   const showTaskGroup =
-    !q || "任务".includes(q) || filteredTaskNav.length > 0 || filteredProjects.length > 0;
+    !q ||
+    "任务".includes(q) ||
+    "收件箱".includes(q) ||
+    "已完成".includes(q) ||
+    filteredTaskNav.length > 0 ||
+    filteredProjects.length > 0;
 
   const taskGroupActive =
     !settingsOpen &&
     (nav === "today" ||
+      nav === "inbox" ||
+      nav === "done" ||
       nav === "planner" ||
       nav === "schedule" ||
       nav === "timed" ||
@@ -214,17 +226,6 @@ export function Sidebar({
         ) : null}
       </div>
 
-      <div className="sidebar__actions">
-        <button type="button" className="sidebar__action" onClick={onNewChat}>
-          <IconChat />
-          <span>新建会话</span>
-        </button>
-        <button type="button" className="sidebar__action" onClick={onAutomations}>
-          <IconBot />
-          <span>自动化</span>
-        </button>
-      </div>
-
       <div className="sidebar__scroll">
         {showTaskGroup ? (
           <section className="sidebar__section" aria-label="任务分组">
@@ -301,11 +302,7 @@ export function Sidebar({
                       onClick={() => onSelectProject(p.id)}
                     >
                       <span className="sidebar__row-icon" aria-hidden>
-                        {p.id === INBOX_PROJECT_ID ? (
-                          <IconInbox size={15} />
-                        ) : (
-                          <IconFolder size={15} />
-                        )}
+                        <IconFolder size={15} />
                       </span>
                       <span className="sidebar__row-text">{p.title}</span>
                     </button>

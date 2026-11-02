@@ -1,12 +1,15 @@
 import {
+  decodeTaskRepeat,
   formatDurationMs,
   formatLocalDay,
   formatTaskPlanSchedule,
   isTaskOverdue,
   resolveTagChipColors,
+  timedScheduleLabel,
   type Tag,
   type Task,
 } from "@wb/domain";
+import { IconRepeat } from "../shell/icons";
 
 type Props = {
   task: Task;
@@ -48,6 +51,8 @@ export function TaskRow({
 }: Props) {
   const overdue = isTaskOverdue(task, formatLocalDay(nowMs), nowMs);
   const planLabel = formatTaskPlanSchedule(task, nowMs);
+  const repeat = decodeTaskRepeat(task.repeatCfgId);
+  const repeatLabel = repeat ? timedScheduleLabel(repeat) : null;
 
   return (
     <li
@@ -145,12 +150,23 @@ export function TaskRow({
               return meta ? <div className="list__meta">{meta}</div> : null;
             })()}
       </button>
-      {planLabel ? (
+      {planLabel || repeatLabel ? (
         <span
-          className={overdue ? "list__plan is-overdue" : "list__plan"}
-          title={planLabel}
+          className={[
+            "list__plan",
+            overdue ? "is-overdue" : "",
+            !planLabel ? "list__plan--empty" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          title={[repeatLabel, planLabel].filter(Boolean).join(" · ")}
         >
-          {planLabel}
+          {repeatLabel ? (
+            <span className="list__plan-repeat" aria-label={`重复：${repeatLabel}`}>
+              <IconRepeat size={13} />
+            </span>
+          ) : null}
+          {planLabel ? <span className="list__plan-text">{planLabel}</span> : null}
         </span>
       ) : (
         <span className="list__plan list__plan--empty" aria-hidden="true" />

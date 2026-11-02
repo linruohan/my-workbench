@@ -385,8 +385,16 @@ export function DateTimeField({
                   type="button"
                   className="btn btn--ghost"
                   onClick={() => {
-                    const t = formatLocalDay(Date.now());
-                    onChange(`${t}T${activeTime}`);
+                    const at = Date.now();
+                    const t = formatLocalDay(at);
+                    const time = hasValue
+                      ? parts.time
+                      : (() => {
+                          const d = new Date(at);
+                          const pad = (n: number) => String(n).padStart(2, "0");
+                          return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                        })();
+                    onChange(`${t}T${time}`);
                     setViewMonth(t);
                   }}
                 >

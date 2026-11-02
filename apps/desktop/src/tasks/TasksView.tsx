@@ -13,6 +13,7 @@ import {
   type TaskSortKey,
   type TaskStatusFilter,
 } from "@wb/domain";
+import { useDialog } from "../shell/Dialogs";
 import { TaskBoard } from "./TaskBoard";
 import { TaskEditor, type TaskEditorSave } from "./TaskEditor";
 import { TaskRow } from "./TaskRow";
@@ -111,6 +112,7 @@ export function TasksView({
   onCreateTag,
   onAddSubtask,
 }: Props) {
+  const dialog = useDialog();
   const initialPrefs = useMemo(() => readFilterPrefs(), []);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -181,9 +183,15 @@ export function TasksView({
 
   const title = projectTitles[filterProjectId] ?? "项目";
 
-  const confirmDelete = (taskId: string) => {
-    if (confirmBeforeDelete && !window.confirm("确定删除该任务？此操作不可撤销。")) {
-      return;
+  const confirmDelete = async (taskId: string) => {
+    if (confirmBeforeDelete) {
+      const ok = await dialog.confirm({
+        title: "删除任务",
+        message: "确定删除该任务？此操作不可撤销。",
+        confirmLabel: "删除",
+        danger: true,
+      });
+      if (!ok) return;
     }
     onDeleteTask(taskId);
     setEditingId((prev) => (prev === taskId ? null : prev));
@@ -305,15 +313,18 @@ export function TasksView({
               className="btn btn--ghost"
               disabled={doneInScope.length === 0}
               onClick={() => {
-                if (
-                  confirmBeforeDelete &&
-                  !window.confirm(
-                    `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
-                  )
-                ) {
-                  return;
-                }
-                onClearCompleted(doneInScope.map((t) => t.id));
+                void (async () => {
+                  if (confirmBeforeDelete) {
+                    const ok = await dialog.confirm({
+                      title: "清理已完成",
+                      message: `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
+                      confirmLabel: "清理",
+                      danger: true,
+                    });
+                    if (!ok) return;
+                  }
+                  onClearCompleted(doneInScope.map((t) => t.id));
+                })();
               }}
             >
               清理已完成 ({doneInScope.length})
@@ -386,7 +397,7 @@ export function TasksView({
               defaultRemind={defaultRemind}
               nowMs={nowMs}
               onClose={() => setEditingId(null)}
-              onDelete={() => confirmDelete(editing.id)}
+              onDelete={() => void confirmDelete(editing.id)}
               onDuplicate={() => {
                 onDuplicateTask(editing.id);
                 setEditingId(null);
@@ -394,7 +405,7 @@ export function TasksView({
               onCreateTag={onCreateTag}
               onAddSubtask={(subTitle) => onAddSubtask(editing.id, subTitle)}
               onToggleSubtask={onToggleDone}
-              onDeleteSubtask={(id) => confirmDelete(id)}
+              onDeleteSubtask={(id) => void confirmDelete(id)}
               onSave={(draft) => {
                 onSaveTask(editing.id, draft);
                 setEditingId(null);

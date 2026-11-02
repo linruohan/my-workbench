@@ -4,6 +4,7 @@ import {
   agentWorkspaceTitleFromPath,
   encodeTaskRepeat,
   formatLocalDay,
+  INBOX_PROJECT_ID,
   makePresetSchedule,
   reorderIds,
   inferNoteTitleFromBody,
@@ -24,6 +25,7 @@ import { pickAgentWorkspaceFolder } from "./agent/pick-workspace";
 import { readProviderStore } from "./agent/providers";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
+import { useDialog } from "./shell/Dialogs";
 import { PromptModal } from "./shell/PromptModal";
 import { Sidebar, type AppNavId } from "./shell/Sidebar";
 import { TitleBar } from "./shell/TitleBar";
@@ -52,6 +54,12 @@ function composerPlaceholder(nav: AppNavId, projectTitle: string | undefined): s
   if (nav === "today") {
     return "添加到今日，如：下午3:00 评审 提前15分钟（Ctrl+N）";
   }
+  if (nav === "inbox") {
+    return "添加到收件箱，如：回邮件 明天（Ctrl+N）";
+  }
+  if (nav === "done") {
+    return "新建任务到收件箱（Ctrl+N）";
+  }
   if (nav === "planner") {
     return "添加到计划，如：明天 写周报（Ctrl+N）";
   }
@@ -65,6 +73,7 @@ function composerPlaceholder(nav: AppNavId, projectTitle: string | undefined): s
 }
 
 export default function App() {
+  const dialog = useDialog();
   const [store] = useState(() => createPersistedStore());
   const [nav, setNav] = useState<AppNavId>(() => readPrefs().startupView);
   const [tick, setTick] = useState(0);
@@ -440,10 +449,15 @@ export default function App() {
     setTimedEditing(false);
     setTimedEditId(null);
     setEditingTaskId(null);
+    if (id === "inbox") setFilterProjectId(INBOX_PROJECT_ID);
     setNav(id);
   };
 
   const openProject = (projectId: string) => {
+    if (projectId === INBOX_PROJECT_ID) {
+      goNav("inbox");
+      return;
+    }
     setFilterProjectId(projectId);
     goNav("projects");
   };
@@ -517,12 +531,12 @@ export default function App() {
     }
 
     const parsed = parseQuickCapture(text, { nowMs });
-    let projectId = "inbox";
+    let projectId = INBOX_PROJECT_ID;
     if (parsed.projectTitle) {
       const existing = projects.find((p) => p.title === parsed.projectTitle);
       projectId = existing?.id ?? store.createProject(parsed.projectTitle).id;
-    } else if (nav === "projects") {
-      projectId = filterProjectId;
+    } else if (nav === "projects" || nav === "inbox") {
+      projectId = nav === "inbox" ? INBOX_PROJECT_ID : filterProjectId;
     }
 
     let dueDay = parsed.dueDay;
@@ -593,12 +607,15 @@ export default function App() {
     refresh();
   };
 
-  const deleteNote = (id: string) => {
-    if (
-      prefs.confirmBeforeDelete &&
-      !window.confirm("确定删除这篇笔记？此操作不可撤销。")
-    ) {
-      return;
+  const deleteNote = async (id: string) => {
+    if (prefs.confirmBeforeDelete) {
+      const ok = await dialog.confirm({
+        title: "删除笔记",
+        message: "确定删除这篇笔记？此操作不可撤销。",
+        confirmLabel: "删除",
+        danger: true,
+      });
+      if (!ok) return;
     }
     store.deleteNote(id);
     setActiveNoteId((prev) => (prev === id ? null : prev));
@@ -651,9 +668,15 @@ export default function App() {
     refresh();
   };
 
-  const deleteTimedTask = (id: string) => {
-    if (prefs.confirmBeforeDelete && !window.confirm("确定删除该定时任务？")) {
-      return;
+  const deleteTimedTask = async (id: string) => {
+    if (prefs.confirmBeforeDelete) {
+      const ok = await dialog.confirm({
+        title: "删除定时任务",
+        message: "确定删除该定时任务？",
+        confirmLabel: "删除",
+        danger: true,
+      });
+      if (!ok) return;
     }
     store.deleteTimedTask(id);
     if (timedEditId === id) {
@@ -707,7 +730,7 @@ export default function App() {
   };
 
   const newAgentChatFromFolder = async () => {
-    const rootPath = await pickAgentWorkspaceFolder();
+    const rootPath = await pickAgentWorkspaceFolder(dialog.prompt);
     if (!rootPath) return;
     newAgentChat({ rootPath });
   };
@@ -774,6 +797,59 @@ export default function App() {
         onToggleDone={toggleDone}
         onOpen={(t) => setEditingTaskId(t.id)}
         onReorder={reorderToday}
+      />
+    );
+  } else if (nav === "inbox") {
+    body = (
+      <TasksView
+        tasks={allTasks}
+        projects={projects}
+        tags={allTags}
+        taskTagMap={taskTagMap}
+        buckets={taskBuckets}
+        filterProjectId={INBOX_PROJECT_ID}
+        viewMode={tasksViewMode}
+        showCompleted={showCompleted}
+        denseMeta={prefs.workMode === "office"}
+        defaultRemind={prefs.defaultRemind}
+        confirmBeforeDelete={prefs.confirmBeforeDelete}
+        activeTimerTaskId={activeTimerTaskId}
+        timerElapsedMs={timerElapsedMs}
+        nowMs={now}
+        onViewModeChange={changeTasksViewMode}
+        onShowCompletedChange={changeShowCompleted}
+        onToggleDone={toggleDone}
+        onPlanToday={scheduleToday}
+        onPlanTime={scheduleAfternoon}
+        onClearPlan={clearPlan}
+        onToggleTimer={toggleTimer}
+        onMoveColumn={moveTaskColumn}
+        onSaveTask={saveEditedTask}
+        onDeleteTask={deleteTask}
+        onDuplicateTask={duplicateTask}
+        onClearCompleted={clearCompletedTasks}
+        onCreateTag={createTag}
+        onAddSubtask={addSubtask}
+      />
+    );
+  } else if (nav === "done") {
+    const doneTasks = allTasks
+      .filter((t) => t.isDone && !t.parentId)
+      .sort((a, b) => (b.doneOn ?? 0) - (a.doneOn ?? 0));
+    body = (
+      <TaskList
+        title="已完成"
+        empty="还没有已完成的任务。"
+        tasks={doneTasks}
+        projectTitles={projectTitles}
+        taskTagMap={taskTagMap}
+        hint="汇总全部项目的已完成任务"
+        nowMs={now}
+        showDoneStyle
+        activeTimerTaskId={activeTimerTaskId}
+        timerElapsedMs={timerElapsedMs}
+        onToggleDone={toggleDone}
+        onOpen={(t) => setEditingTaskId(t.id)}
       />
     );
   } else if (nav === "planner") {
@@ -957,13 +1033,18 @@ export default function App() {
               nowMs={now}
               onClose={() => setEditingTaskId(null)}
               onDelete={() => {
-                if (
-                  prefs.confirmBeforeDelete &&
-                  !window.confirm("确定删除该任务？此操作不可撤销。")
-                ) {
-                  return;
-                }
-                deleteTask(editingTask.id);
+                void (async () => {
+                  if (prefs.confirmBeforeDelete) {
+                    const ok = await dialog.confirm({
+                      title: "删除任务",
+                      message: "确定删除该任务？此操作不可撤销。",
+                      confirmLabel: "删除",
+                      danger: true,
+                    });
+                    if (!ok) return;
+                  }
+                  deleteTask(editingTask.id);
+                })();
               }}
               onDuplicate={() => {
                 duplicateTask(editingTask.id);
@@ -973,13 +1054,18 @@ export default function App() {
               onAddSubtask={(title) => addSubtask(editingTask.id, title)}
               onToggleSubtask={toggleDone}
               onDeleteSubtask={(id) => {
-                if (
-                  prefs.confirmBeforeDelete &&
-                  !window.confirm("确定删除该子任务？此操作不可撤销。")
-                ) {
-                  return;
-                }
-                deleteTask(id);
+                void (async () => {
+                  if (prefs.confirmBeforeDelete) {
+                    const ok = await dialog.confirm({
+                      title: "删除子任务",
+                      message: "确定删除该子任务？此操作不可撤销。",
+                      confirmLabel: "删除",
+                      danger: true,
+                    });
+                    if (!ok) return;
+                  }
+                  deleteTask(id);
+                })();
               }}
               onSave={(draft) => {
                 saveEditedTask(editingTask.id, draft);
@@ -1031,6 +1117,7 @@ function TaskList(props: {
   projectTitles?: Record<string, string>;
   taskTagMap?: Record<string, Tag[]>;
   denseMeta?: boolean;
+  showDoneStyle?: boolean;
   reorderable?: boolean;
   hint?: string;
   nowMs?: number;
@@ -1061,6 +1148,7 @@ function TaskList(props: {
               projectTitle={props.projectTitles?.[task.projectId]}
               tags={props.taskTagMap?.[task.id] ?? []}
               denseMeta={props.denseMeta}
+              showDoneStyle={props.showDoneStyle}
               nowMs={props.nowMs}
               timerRunning={props.activeTimerTaskId === task.id}
               timerElapsedMs={
