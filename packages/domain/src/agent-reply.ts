@@ -98,7 +98,7 @@ export function agentThreadTitle(content: string): string {
 const VIEW_LABEL: Record<string, string> = {
   today: "今日",
   planner: "计划",
-  schedule: "时间表",
+  schedule: "计划",
   knowledge: "知识库",
   timed: "定时任务",
   projects: "任务",

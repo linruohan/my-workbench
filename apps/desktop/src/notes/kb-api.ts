@@ -128,6 +128,16 @@ export async function pickDirectory(title = "选择文件夹"): Promise<string |
   return call<string | null>("kb_pick_directory", { title });
 }
 
+/** Current git branch for a folder, or null when not a repo / unavailable. */
+export async function readGitBranch(path: string): Promise<string | null> {
+  if (!isTauriRuntime() || !path.trim()) return null;
+  try {
+    return await call<string | null>("kb_git_branch", { path });
+  } catch {
+    return null;
+  }
+}
+
 export async function revealInExplorer(path: string): Promise<void> {
   if (!isTauriRuntime()) {
     throw new Error("在资源管理器中显示需要在桌面应用中使用。");

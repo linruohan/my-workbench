@@ -12,5 +12,6 @@ commands.allow = [
   "kb_mkdir",
   "kb_rename",
   "kb_reveal_in_explorer",
+  "kb_git_branch",
   "open_external",
 ]

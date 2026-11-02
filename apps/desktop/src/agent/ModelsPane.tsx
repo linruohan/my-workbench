@@ -14,6 +14,7 @@ import {
   writeCredential,
 } from "./credentials";
 import {
+  API_FORMATS,
   PROVIDER_TEMPLATES,
   addModel,
   addProvider,
@@ -305,6 +306,10 @@ function AddProviderPanel({
   );
 }
 
+function editableKind(kind: ProviderKind): Exclude<ProviderKind, "builtin"> {
+  return kind === "builtin" ? "openai-chat-completions" : kind;
+}
+
 function BuiltinDetail({
   defaultModelRef,
   onSetDefault,
@@ -370,10 +375,9 @@ function ProviderDetail({
   const dialog = useDialog();
   const [baseURL, setBaseURL] = useState(provider.baseURL);
   const [kind, setKind] = useState<Exclude<ProviderKind, "builtin">>(
-    provider.kind === "anthropic-messages"
-      ? "anthropic-messages"
-      : "openai-chat-completions",
+    editableKind(provider.kind),
   );
+  const [formatOpen, setFormatOpen] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [apiKeyRequired, setApiKeyRequired] = useState(provider.apiKeyRequired);
@@ -386,16 +390,40 @@ function ProviderDetail({
 
   useEffect(() => {
     setBaseURL(provider.baseURL);
-    setKind(
-      provider.kind === "anthropic-messages"
-        ? "anthropic-messages"
-        : "openai-chat-completions",
-    );
+    setKind(editableKind(provider.kind));
+    setFormatOpen(false);
     setApiKeyRequired(provider.apiKeyRequired);
     setApiKey("");
     setShowKey(false);
     setEditingModel(null);
   }, [provider.id, provider.baseURL, provider.kind, provider.apiKeyRequired]);
+
+  useEffect(() => {
+    if (!formatOpen) return;
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".agent-models__format")) return;
+      setFormatOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFormatOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [formatOpen]);
+
+  const chooseFormat = (next: Exclude<ProviderKind, "builtin">) => {
+    setKind(next);
+    setFormatOpen(false);
+    const nextKeyRequired = next === "anthropic-messages" ? true : apiKeyRequired;
+    setApiKeyRequired(nextKeyRequired);
+    updateProvider(provider.id, { kind: next, apiKeyRequired: nextKeyRequired });
+    onRefresh();
+  };
 
   const saveConnection = () => {
     updateProvider(provider.id, {
@@ -476,29 +504,38 @@ function ProviderDetail({
         />
       </label>
 
-      <label className="agent-models__field">
-        <span>API 格式</span>
-        <select
-          className="settings__select"
-          aria-label="API 格式"
-          value={kind}
-          onChange={(event) => {
-            const next = event.target.value as Exclude<ProviderKind, "builtin">;
-            setKind(next);
-            setApiKeyRequired(next === "anthropic-messages" ? true : apiKeyRequired);
-            updateProvider(provider.id, {
-              kind: next,
-              apiKeyRequired: next === "anthropic-messages" ? true : apiKeyRequired,
-            });
-            onRefresh();
-          }}
-        >
-          <option value="openai-chat-completions">
-            Chat Completions (/chat/completions)
-          </option>
-          <option value="anthropic-messages">Anthropic Messages</option>
-        </select>
-      </label>
+      <div className="agent-models__field">
+        <span id={`api-format-${provider.id}`}>API 格式</span>
+        <div className="agent-models__format">
+          <button
+            type="button"
+            className="agent-models__format-btn"
+            aria-labelledby={`api-format-${provider.id}`}
+            aria-haspopup="listbox"
+            aria-expanded={formatOpen}
+            onClick={() => setFormatOpen((open) => !open)}
+          >
+            {providerKindLabel(kind)}
+          </button>
+          {formatOpen ? (
+            <ul className="agent-models__format-menu" role="listbox" aria-label="API 格式">
+              {API_FORMATS.map((item) => (
+                <li key={item.kind}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={kind === item.kind}
+                    className={kind === item.kind ? "is-active" : undefined}
+                    onClick={() => chooseFormat(item.kind)}
+                  >
+                    {item.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </div>
 
       <label className="agent-models__field">
         <span>API Key</span>

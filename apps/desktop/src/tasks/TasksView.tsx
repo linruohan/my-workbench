@@ -53,7 +53,6 @@ type Props = {
   /** 项目视图下必填：每个项目只看自己的任务。 */
   filterProjectId: string;
   viewMode: TasksViewMode;
-  showCompleted: boolean;
   denseMeta?: boolean;
   defaultRemind: ReminderOptionId;
   confirmBeforeDelete: boolean;
@@ -61,7 +60,6 @@ type Props = {
   timerElapsedMs: number;
   nowMs: number;
   onViewModeChange: (mode: TasksViewMode) => void;
-  onShowCompletedChange: (show: boolean) => void;
   onToggleDone: (task: Task) => void;
   onPlanToday: (task: Task) => void;
   onPlanTime: (task: Task) => void;
@@ -90,7 +88,6 @@ export function TasksView({
   buckets,
   filterProjectId,
   viewMode,
-  showCompleted,
   denseMeta,
   defaultRemind,
   confirmBeforeDelete,
@@ -98,7 +95,6 @@ export function TasksView({
   timerElapsedMs,
   nowMs,
   onViewModeChange,
-  onShowCompletedChange,
   onToggleDone,
   onPlanToday,
   onPlanTime,
@@ -159,7 +155,8 @@ export function TasksView({
     const filtered = filterTasks(scopedTasks, {
       query,
       status,
-      showCompleted: status === "all" ? showCompleted : true,
+      // 列表默认不展示已完成；侧栏「已完成」或状态筛「已完成」另看。
+      showCompleted: false,
       today,
       rootsOnly: true,
     }).filter((task) => {
@@ -171,7 +168,6 @@ export function TasksView({
     scopedTasks,
     query,
     status,
-    showCompleted,
     today,
     sortKey,
     filterTagId,
@@ -213,18 +209,6 @@ export function TasksView({
           <span className="panel__count">{isStats ? stats.total : visible.length}</span>
         </div>
         <div className="tasks__toolbar">
-          {!isStats ? (
-            <label className="tasks__check">
-              <input
-                type="checkbox"
-                checked={showCompleted}
-                onChange={(e) => onShowCompletedChange(e.target.checked)}
-                disabled={status !== "all"}
-              />
-              显示已完成
-            </label>
-          ) : null}
-
           <div className="tasks__view-toggle" role="group" aria-label="视图切换">
             {VIEW_MODES.map((mode) => (
               <button

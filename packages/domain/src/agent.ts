@@ -13,7 +13,11 @@ export type AgentPermissionMode = "confirm" | "session_auto" | "readonly";
 export type AgentRole = "user" | "assistant" | "tool" | "system";
 export type ToolEffect = "none" | "read" | "write" | "destructive";
 export type ToolGate = "run" | "ask" | "block";
-export type ProviderKind = "builtin" | "openai-chat-completions" | "anthropic-messages";
+export type ProviderKind =
+  | "builtin"
+  | "openai-chat-completions"
+  | "openai-responses"
+  | "anthropic-messages";
 
 /** Folder that holds Agent sessions. Distinct from task projects. */
 export interface AgentWorkspace {
@@ -259,9 +263,9 @@ export const AGENT_TOOLS: ToolSpec[] = [
     },
     ["notificationId"],
   ),
-  tool("ui_open", "none", "打开今日、计划、时间表、知识库、通知或某条任务/笔记", {
+  tool("ui_open", "none", "打开今日、计划、知识库、通知或某条任务/笔记", {
     view: str(
-      "today | planner | schedule | knowledge | timed | projects | notifications | task | note",
+      "today | planner | knowledge | timed | projects | notifications | task | note",
     ),
     taskId: str("任务 id"),
     noteId: str("笔记 id"),
@@ -459,7 +463,10 @@ export function buildAgentSystemPrompt(input: {
   unread: number;
   modelRef: string;
   permissionMode: AgentPermissionMode;
+  /** User rules from settings. Blank rules are omitted. */
+  rules?: string;
 }): string {
+  const rules = input.rules?.trim() ?? "";
   return [
     "你是个人工作台里的 Agent，通过工具管理任务、日程、笔记、提醒和通知。",
     "不要编造 id。需要细节时调用 task_get、note_get 或 search。",
@@ -468,6 +475,7 @@ export function buildAgentSystemPrompt(input: {
     `权限：${permissionModeLabel(input.permissionMode)}。模型：${input.modelRef}。`,
     `未读通知：${input.unread}。`,
     input.focus ? `当前对象：${input.focus}` : "",
+    rules ? `用户规则：\n${rules}` : "",
     `今日任务：\n${input.todaySummary || "（空）"}`,
   ]
     .filter(Boolean)

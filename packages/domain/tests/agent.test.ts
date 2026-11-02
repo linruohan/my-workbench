@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BUILTIN_MODEL_REF,
   applyRuntimeHeaders,
+  buildAgentSystemPrompt,
   buildModelHttpRequest,
   builtinProvider,
   finishOpenAiStream,
@@ -22,6 +23,23 @@ import {
 } from "../src/index.js";
 
 const now = new Date(2026, 10, 1, 8, 0, 0).getTime();
+
+describe("agent system prompt", () => {
+  const base = {
+    todaySummary: "",
+    focus: null,
+    unread: 0,
+    modelRef: BUILTIN_MODEL_REF,
+    permissionMode: "confirm" as const,
+  };
+
+  it("adds trimmed user rules and drops a blank rules section", () => {
+    expect(buildAgentSystemPrompt({ ...base, rules: "  用短句  " })).toContain(
+      "用户规则：\n用短句",
+    );
+    expect(buildAgentSystemPrompt({ ...base, rules: "  " })).not.toContain("用户规则");
+  });
+});
 
 describe("agent permissions", () => {
   it("asks before writes, auto-runs them in session mode, and always asks before delete", () => {
@@ -234,6 +252,48 @@ describe("model protocol", () => {
     const body = JSON.stringify(request.body);
     expect(body).not.toContain("task_create");
     expect(body).toContain("task_list_today");
+  });
+
+  it("builds and parses an OpenAI Responses request", () => {
+    const request = buildModelHttpRequest({
+      provider: {
+        ...builtinProvider(),
+        id: "custom:openai",
+        kind: "openai-responses",
+        baseURL: "https://api.openai.com/v1",
+        apiKeyRequired: true,
+      },
+      modelId: "gpt-4.1",
+      system: "system",
+      messages,
+      permissionMode: "confirm",
+    });
+    expect(request.url).toBe("https://api.openai.com/v1/responses");
+    expect(request.secretHeaderNames).toEqual(["authorization"]);
+    const body = request.body as { instructions: string; tools: Array<{ name: string }> };
+    expect(body.instructions).toBe("system");
+    expect(body.tools.some((tool) => tool.name === "task_create")).toBe(true);
+
+    const plan = parseModelResponse("openai-responses", {
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "好的" }],
+        },
+        {
+          type: "function_call",
+          call_id: "call_2",
+          name: "task_create",
+          arguments: JSON.stringify({ title: "写周报" }),
+        },
+      ],
+    });
+    expect(plan.text).toBe("好的");
+    expect(plan.calls[0]).toMatchObject({
+      id: "call_2",
+      name: "task_create",
+      args: { title: "写周报" },
+    });
   });
 });
 

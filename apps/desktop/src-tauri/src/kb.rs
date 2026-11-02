@@ -3,6 +3,7 @@ use base64::Engine;
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -171,6 +172,125 @@ pub fn kb_rename(from: String, to: String) -> Result<(), String> {
     fs::rename(src, dest).map_err(|err| format!("无法重命名：{err}"))
 }
 
+/// Current git branch for a workspace folder, if the path is inside a repo.
+/// Prefers reading `.git/HEAD` so GUI apps do not depend on `git` being on PATH.
+#[tauri::command]
+pub fn kb_git_branch(path: String) -> Option<String> {
+    let root = Path::new(&path);
+    if !root.exists() {
+        return None;
+    }
+    if let Some(branch) = branch_from_git_dir(root) {
+        return Some(branch);
+    }
+    branch_via_git_cli(&path)
+}
+
+fn branch_from_git_dir(start: &Path) -> Option<String> {
+    let git_dir = find_git_dir(start)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(refer) = head.strip_prefix("ref:") {
+        let name = refer.trim();
+        if let Some(branch) = name.strip_prefix("refs/heads/") {
+            return (!branch.is_empty()).then(|| branch.to_string());
+        }
+        let short = name.rsplit('/').next().unwrap_or(name);
+        return (!short.is_empty()).then(|| short.to_string());
+    }
+    // Detached HEAD stores a raw object id.
+    if head.len() >= 7 && head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(head[..7].to_string());
+    }
+    None
+}
+
+fn find_git_dir(start: &Path) -> Option<std::path::PathBuf> {
+    let mut cur = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+    loop {
+        let marker = cur.join(".git");
+        if marker.is_dir() {
+            return Some(marker);
+        }
+        if marker.is_file() {
+            let text = fs::read_to_string(&marker).ok()?;
+            for line in text.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix("gitdir:") else {
+                    continue;
+                };
+                let target = rest.trim();
+                let path = {
+                    let candidate = Path::new(target);
+                    if candidate.is_absolute() {
+                        candidate.to_path_buf()
+                    } else {
+                        cur.join(candidate)
+                    }
+                };
+                return path.is_dir().then_some(path);
+            }
+            return None;
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+fn branch_via_git_cli(path: &str) -> Option<String> {
+    let mut inside = Command::new("git");
+    inside.args(["-C", path, "rev-parse", "--is-inside-work-tree"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        inside.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let inside = inside.output().ok()?;
+    if !inside.status.success() {
+        return None;
+    }
+    if String::from_utf8_lossy(&inside.stdout).trim() != "true" {
+        return None;
+    }
+
+    let mut output = Command::new("git");
+    output.args(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        output.creation_flags(0x0800_0000);
+    }
+    let output = output.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    if branch == "HEAD" {
+        let mut sha = Command::new("git");
+        sha.args(["-C", path, "rev-parse", "--short", "HEAD"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            sha.creation_flags(0x0800_0000);
+        }
+        let sha = sha.output().ok()?;
+        if !sha.status.success() {
+            return None;
+        }
+        let short = String::from_utf8_lossy(&sha.stdout).trim().to_string();
+        return (!short.is_empty()).then_some(short);
+    }
+    Some(branch)
+}
+
 fn read_limited(path: &str) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|err| format!("无法读取文件：{err}"))?;
     if meta.len() > MAX_BYTES {
@@ -202,4 +322,24 @@ fn should_skip_entry(name: &str) -> bool {
             | ".idea"
             | ".vscode"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_branch_from_this_repo() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // apps/desktop/src-tauri → repo root
+        let repo = manifest
+            .ancestors()
+            .nth(3)
+            .expect("repo root from src-tauri");
+        let branch = branch_from_git_dir(repo);
+        assert!(
+            branch.as_deref().is_some_and(|b| !b.is_empty()),
+            "expected a branch for {repo:?}, got {branch:?}"
+        );
+    }
 }

@@ -17,6 +17,12 @@ import {
 } from "../lib/prefs";
 import { ModelsPane } from "../agent/ModelsPane";
 import {
+  AGENT_CAPABILITY_NAV,
+  AgentCapabilityPane,
+  isAgentCapability,
+  type AgentCapabilityId,
+} from "./AgentCapabilities";
+import {
   IconBack,
   IconBell,
   IconBot,
@@ -29,11 +35,21 @@ import {
 } from "../shell/icons";
 
 export type SettingsSectionId =
-  "general" | "appearance" | "notifications" | "models" | "data" | "about";
+  | "general"
+  | "appearance"
+  | "notifications"
+  | "models"
+  | AgentCapabilityId
+  | "data"
+  | "about";
 
 const SECTION_GROUPS: Array<{
   label: string;
-  items: Array<{ id: SettingsSectionId; label: string; icon: ReactNode }>;
+  items: Array<{
+    id: SettingsSectionId;
+    label: string;
+    icon: ReactNode;
+  }>;
 }> = [
   {
     label: "基础设置",
@@ -45,7 +61,10 @@ const SECTION_GROUPS: Array<{
   },
   {
     label: "Agent",
-    items: [{ id: "models", label: "模型", icon: <IconBot size={15} /> }],
+    items: [
+      { id: "models", label: "模型", icon: <IconBot size={15} /> },
+      ...AGENT_CAPABILITY_NAV,
+    ],
   },
   {
     label: "数据与关于",
@@ -143,6 +162,9 @@ export function SettingsView({
           <NotificationsPane prefs={prefs} onPatch={patch} />
         ) : null}
         {section === "models" ? <ModelsPane /> : null}
+        {isAgentCapability(section) ? (
+          <AgentCapabilityPane id={section} prefs={prefs} onPatch={patch} />
+        ) : null}
         {section === "data" ? (
           <DataPane prefs={prefs} dataDir={dataDir} onPatch={patch} />
         ) : null}

@@ -42,6 +42,7 @@ import {
   IconFilter,
   IconFolder,
   IconFolderOpen,
+  IconGitBranch,
   IconHand,
   IconMore,
   IconPencil,
@@ -49,6 +50,7 @@ import {
   IconSearch,
   IconStop,
 } from "../shell/icons";
+import { readGitBranch } from "../notes/kb-api";
 import { ModelMenu } from "./ModelMenu";
 import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
 import {
@@ -62,6 +64,7 @@ type Props = {
   store: MemoryWorkbenchRepository;
   threadId: string | null;
   displayName: string;
+  rules: string;
   activeTimerTaskId: string | null;
   timerStartedAt: number | null;
   onSelectThread: (id: string | null) => void;
@@ -80,6 +83,7 @@ export function AgentView({
   store,
   threadId,
   displayName,
+  rules,
   activeTimerTaskId,
   timerStartedAt,
   onSelectThread,
@@ -131,6 +135,7 @@ export function AgentView({
   const [picker, setPicker] = useState<null | "mode" | "model" | "plus" | "workspace">(
     null,
   );
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
@@ -168,6 +173,29 @@ export function AgentView({
       mounted.current = false;
     };
   }, []);
+
+  const workspaceRootPath = (
+    thread?.workspaceId
+      ? (store.getAgentWorkspace(thread.workspaceId)?.rootPath ??
+        workspaces.find((item) => item.id === thread.workspaceId)?.rootPath)
+      : null
+  )
+    ?.trim() ?? "";
+
+  useEffect(() => {
+    if (!workspaceRootPath) {
+      setGitBranch(null);
+      return;
+    }
+    let cancelled = false;
+    setGitBranch(null);
+    void readGitBranch(workspaceRootPath).then((branch) => {
+      if (!cancelled) setGitBranch(branch);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceRootPath]);
 
   useEffect(() => {
     if (!threadMenuId && !workspaceMenuId && !viewMenuOpen && picker !== "workspace") {
@@ -322,6 +350,7 @@ export function AgentView({
       providers: readProviderStore().providers,
       readApiKey: readCredential,
       displayName,
+      rules,
       timer: { taskId: activeTimerTaskId, startedAt: timerStartedAt },
       onStep: onRefresh,
       onDelta: (text) => {
@@ -839,7 +868,7 @@ export function AgentView({
       workspaces.find((item) => item.id === thread.workspaceId) ??
       null)
     : null;
-  const showComposerContext = Boolean(thread && messages.length === 0 && activeWorkspace);
+  const showComposerContext = Boolean(thread && activeWorkspace);
   const insertComposerText = (value: string) => {
     setDraft(value);
     if (thread) drafts.current.set(thread.id, value);
@@ -1622,6 +1651,15 @@ export function AgentView({
                     </div>
                   ) : null}
                 </div>
+                {gitBranch ? (
+                  <span
+                    className="agent__composer-chip agent__composer-chip--static"
+                    title={`当前分支 ${gitBranch}`}
+                  >
+                    <IconGitBranch size={14} />
+                    <span>{gitBranch}</span>
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   className="agent__composer-chip-add"

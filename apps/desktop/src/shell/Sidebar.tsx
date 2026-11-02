@@ -8,7 +8,6 @@ import {
   IconKnowledge,
   IconPlus,
   IconPlanner,
-  IconSchedule,
   IconSearch,
   IconSettings,
   IconSidebar,
@@ -22,14 +21,13 @@ export type AppNavId =
   | "inbox"
   | "done"
   | "planner"
-  | "schedule"
   | "projects"
   | "knowledge"
   | "timed"
   | "agent";
 
 type TaskNavItem = {
-  id: "today" | "inbox" | "done" | "planner" | "schedule" | "timed";
+  id: "today" | "inbox" | "done" | "planner" | "timed";
   label: string;
   icon: ReactNode;
 };
@@ -40,9 +38,10 @@ const TASK_NAV: TaskNavItem[] = [
   { id: "inbox", label: "收件箱", icon: <IconInbox size={15} /> },
   { id: "done", label: "已完成", icon: <IconDone size={15} /> },
   { id: "planner", label: "计划", icon: <IconPlanner size={15} /> },
-  { id: "schedule", label: "时间表", icon: <IconSchedule size={15} /> },
   { id: "timed", label: "定时任务", icon: <IconTimed size={15} /> },
 ];
+
+type TaskNavCounts = Partial<Record<TaskNavItem["id"], number>>;
 
 type Props = {
   collapsed: boolean;
@@ -53,6 +52,10 @@ type Props = {
   onOpenSettings: () => void;
   projects: Array<{ id: string; title: string }>;
   activeProjectId?: string | null;
+  /** 固定任务分类数量，与对应视图列表口径一致。 */
+  taskNavCounts?: TaskNavCounts;
+  /** 项目内未完成根任务数量。 */
+  projectTaskCounts?: Record<string, number>;
   notes: Note[];
   onCreateProject: () => void;
   onSelectProject: (projectId: string) => void;
@@ -60,6 +63,16 @@ type Props = {
   onOpenAgent: () => void;
   displayName: string;
 };
+
+function NavCount({ value }: { value: number | undefined }) {
+  if (value == null) return null;
+  // 视觉计数；隐藏于无障碍名称，避免侧栏按钮 name 变成「今日 3」。
+  return (
+    <span className="sidebar__count" aria-hidden="true">
+      {value}
+    </span>
+  );
+}
 
 export function Sidebar({
   collapsed,
@@ -70,6 +83,8 @@ export function Sidebar({
   onOpenSettings,
   projects,
   activeProjectId = null,
+  taskNavCounts,
+  projectTaskCounts,
   notes,
   onCreateProject,
   onSelectProject,
@@ -113,7 +128,6 @@ export function Sidebar({
       nav === "inbox" ||
       nav === "done" ||
       nav === "planner" ||
-      nav === "schedule" ||
       nav === "timed" ||
       nav === "projects");
 
@@ -280,6 +294,7 @@ export function Sidebar({
                       {item.icon}
                     </span>
                     <span className="sidebar__row-text">{item.label}</span>
+                    <NavCount value={taskNavCounts?.[item.id]} />
                   </button>
                 ))}
 
@@ -305,6 +320,7 @@ export function Sidebar({
                         <IconFolder size={15} />
                       </span>
                       <span className="sidebar__row-text">{p.title}</span>
+                      <NavCount value={projectTaskCounts?.[p.id]} />
                     </button>
                   );
                 })}

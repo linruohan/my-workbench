@@ -273,10 +273,18 @@ export function removeModel(providerId: string, modelId: string): boolean {
   return true;
 }
 
+export const API_FORMATS: Array<{
+  kind: Exclude<ProviderKind, "builtin">;
+  label: string;
+}> = [
+  { kind: "anthropic-messages", label: "Anthropic Messages (/v1/messages)" },
+  { kind: "openai-chat-completions", label: "Chat Completions (/chat/completions)" },
+  { kind: "openai-responses", label: "Responses (/responses)" },
+];
+
 export function providerKindLabel(kind: ProviderKind): string {
   if (kind === "builtin") return "本机";
-  if (kind === "anthropic-messages") return "Anthropic Messages";
-  return "OpenAI 兼容";
+  return API_FORMATS.find((item) => item.kind === kind)?.label ?? API_FORMATS[1]!.label;
 }
 
 export type ModelGroup = {
@@ -338,6 +346,7 @@ function isProvider(value: unknown): value is ProviderConfig {
     typeof item.name === "string" &&
     (item.kind === "builtin" ||
       item.kind === "openai-chat-completions" ||
+      item.kind === "openai-responses" ||
       item.kind === "anthropic-messages") &&
     typeof item.baseURL === "string" &&
     typeof item.enabled === "boolean" &&

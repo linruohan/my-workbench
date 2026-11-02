@@ -307,7 +307,7 @@ function viewName(label: string): string | null {
     今日: "today",
     今天: "today",
     计划: "planner",
-    时间表: "schedule",
+    时间表: "planner",
     知识库: "knowledge",
     笔记: "knowledge",
     定时任务: "timed",
@@ -315,7 +315,7 @@ function viewName(label: string): string | null {
     任务: "projects",
     today: "today",
     planner: "planner",
-    schedule: "schedule",
+    schedule: "planner",
     knowledge: "knowledge",
   };
   return map[label] ?? null;

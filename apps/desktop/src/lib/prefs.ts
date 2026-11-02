@@ -28,6 +28,8 @@ export type AppPrefs = {
   systemNotifications: boolean;
   warningNotifications: boolean;
   completionSound: boolean;
+  /** Standing instructions injected into every Agent session. Local only. */
+  agentRules: string;
 };
 
 const DEFAULTS: AppPrefs = {
@@ -48,6 +50,7 @@ const DEFAULTS: AppPrefs = {
   systemNotifications: true,
   warningNotifications: true,
   completionSound: false,
+  agentRules: "",
 };
 
 function mergePrefs(partial?: Partial<AppPrefs> | null): AppPrefs {

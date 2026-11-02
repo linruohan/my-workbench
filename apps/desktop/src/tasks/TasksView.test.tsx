@@ -42,14 +42,12 @@ const baseProps = {
   buckets: { t1: "active" as const, t2: "backlog" as const },
   filterProjectId: "inbox",
   viewMode: "list" as const,
-  showCompleted: false,
   defaultRemind: "m15" as const,
   confirmBeforeDelete: false,
   activeTimerTaskId: null as string | null,
   timerElapsedMs: 0,
   nowMs: Date.parse("2026-11-01T12:00:00"),
   onViewModeChange: vi.fn(),
-  onShowCompletedChange: vi.fn(),
   onToggleDone: vi.fn(),
   onPlanToday: vi.fn(),
   onPlanTime: vi.fn(),
@@ -122,7 +120,6 @@ describe("TasksView", () => {
       <TasksView
         {...baseProps}
         viewMode="board"
-        showCompleted
         tasks={[
           makeTask({ id: "t1", title: "进行中任务" }),
           makeTask({ id: "t2", title: "积压任务" }),

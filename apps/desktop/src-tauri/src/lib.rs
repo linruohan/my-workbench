@@ -16,6 +16,7 @@ pub fn run() {
             kb::kb_mkdir,
             kb::kb_rename,
             kb::kb_reveal_in_explorer,
+            kb::kb_git_branch,
             open_ext::open_external,
         ])
         .setup(|app| {

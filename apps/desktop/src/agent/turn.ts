@@ -35,6 +35,8 @@ export type AgentTurnEnv = {
   apiKey?: string | null;
   readApiKey?: (providerId: string) => string | null;
   displayName?: string;
+  /** Standing user rules from settings. */
+  rules?: string;
   timer?: { taskId: string | null; startedAt: number | null };
   /** When set, skips the network and uses this plan for the next model turn. */
   plan?: (
@@ -266,6 +268,7 @@ async function requestModel(
         .length,
       modelRef: thread.modelRef,
       permissionMode: thread.permissionMode,
+      rules: env.rules,
     }),
     messages: transcript,
     permissionMode: thread.permissionMode,

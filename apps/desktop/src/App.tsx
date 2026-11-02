@@ -3,6 +3,7 @@ import {
   ActiveTimer,
   agentWorkspaceTitleFromPath,
   encodeTaskRepeat,
+  filterTasks,
   formatLocalDay,
   INBOX_PROJECT_ID,
   makePresetSchedule,
@@ -36,16 +37,11 @@ import { TimedTaskEditor } from "./timed/TimedTaskEditor";
 import { TimedTaskList } from "./timed/TimedTaskList";
 
 const TASKS_VIEW_KEY = "wb.tasks.viewMode";
-const TASKS_SHOW_DONE_KEY = "wb.tasks.showCompleted";
 
 function readTasksViewMode(): TasksViewMode {
   const raw = localStorage.getItem(TASKS_VIEW_KEY);
   if (raw === "board" || raw === "stats") return raw;
   return "list";
-}
-
-function readShowCompleted(): boolean {
-  return localStorage.getItem(TASKS_SHOW_DONE_KEY) === "1";
 }
 
 function composerPlaceholder(nav: AppNavId, projectTitle: string | undefined): string {
@@ -62,9 +58,6 @@ function composerPlaceholder(nav: AppNavId, projectTitle: string | undefined): s
   }
   if (nav === "planner") {
     return "添加到计划，如：明天 写周报（Ctrl+N）";
-  }
-  if (nav === "schedule") {
-    return "添加到时间表，如：下午3:00 评审（Ctrl+N）";
   }
   if (nav === "projects") {
     return `添加到「${projectTitle ?? "项目"}」，如：明天 回访客户（Ctrl+N）`;
@@ -103,7 +96,6 @@ export default function App() {
   const [tasksViewMode, setTasksViewMode] = useState<TasksViewMode>(() =>
     readTasksViewMode(),
   );
-  const [showCompleted, setShowCompleted] = useState(() => readShowCompleted());
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [agentThreadId, setAgentThreadId] = useState<string | null>(null);
   const [cooldown] = useState(() => new ReminderUiCooldown());
@@ -208,7 +200,6 @@ export default function App() {
   void tick;
   const todayTasks = store.listToday(now);
   const plannerTasks = store.listPlannerDay(today);
-  const scheduleTasks = store.listScheduleDay(today);
   const allTasks = store.listTasks();
   const openTasks = allTasks.filter((t) => !t.isDone);
   const notifications = store.listNotifications();
@@ -216,6 +207,38 @@ export default function App() {
   const projects = store.listProjects();
   const timedTasks = store.listTimedTasks();
   const allTags = store.listTags();
+  const doneTasks = useMemo(
+    () => allTasks.filter((t) => t.isDone && !t.parentId),
+    [allTasks],
+  );
+  const taskNavCounts = useMemo(
+    () => ({
+      today: todayTasks.length,
+      inbox: filterTasks(allTasks, {
+        projectId: INBOX_PROJECT_ID,
+        showCompleted: false,
+        rootsOnly: true,
+        today,
+      }).length,
+      done: doneTasks.length,
+      planner: plannerTasks.length,
+      timed: timedTasks.length,
+    }),
+    [todayTasks, allTasks, today, doneTasks, plannerTasks, timedTasks],
+  );
+  const projectTaskCounts = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const p of projects) {
+      if (p.id === INBOX_PROJECT_ID) continue;
+      map[p.id] = filterTasks(allTasks, {
+        projectId: p.id,
+        showCompleted: false,
+        rootsOnly: true,
+        today,
+      }).length;
+    }
+    return map;
+  }, [projects, allTasks, today]);
   const projectTitles = useMemo(() => {
     const map: Record<string, string> = {};
     for (const p of projects) map[p.id] = p.title;
@@ -317,11 +340,6 @@ export default function App() {
   const changeTasksViewMode = (mode: TasksViewMode) => {
     setTasksViewMode(mode);
     localStorage.setItem(TASKS_VIEW_KEY, mode);
-  };
-
-  const changeShowCompleted = (show: boolean) => {
-    setShowCompleted(show);
-    localStorage.setItem(TASKS_SHOW_DONE_KEY, show ? "1" : "0");
   };
 
   const moveTaskColumn = (taskId: string, column: TaskBoardColumnId) => {
@@ -543,11 +561,6 @@ export default function App() {
     let dueWithTime = parsed.dueWithTime;
     if (!dueDay && !dueWithTime) {
       if (nav === "today" || nav === "planner") dueDay = today;
-      else if (nav === "schedule") {
-        const at = new Date();
-        at.setHours(15, 0, 0, 0);
-        dueWithTime = at.getTime();
-      }
     }
 
     const remindOption =
@@ -809,7 +822,6 @@ export default function App() {
         buckets={taskBuckets}
         filterProjectId={INBOX_PROJECT_ID}
         viewMode={tasksViewMode}
-        showCompleted={showCompleted}
         denseMeta={prefs.workMode === "office"}
         defaultRemind={prefs.defaultRemind}
         confirmBeforeDelete={prefs.confirmBeforeDelete}
@@ -817,7 +829,6 @@ export default function App() {
         timerElapsedMs={timerElapsedMs}
         nowMs={now}
         onViewModeChange={changeTasksViewMode}
-        onShowCompletedChange={changeShowCompleted}
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
@@ -833,14 +844,12 @@ export default function App() {
       />
     );
   } else if (nav === "done") {
-    const doneTasks = allTasks
-      .filter((t) => t.isDone && !t.parentId)
-      .sort((a, b) => (b.doneOn ?? 0) - (a.doneOn ?? 0));
+    const doneList = [...doneTasks].sort((a, b) => (b.doneOn ?? 0) - (a.doneOn ?? 0));
     body = (
       <TaskList
         title="已完成"
         empty="还没有已完成的任务。"
-        tasks={doneTasks}
+        tasks={doneList}
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
         hint="汇总全部项目的已完成任务"
@@ -861,22 +870,6 @@ export default function App() {
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
         hint="汇总当天全部项目的计划（含全天与时刻）"
-        nowMs={now}
-        activeTimerTaskId={activeTimerTaskId}
-        timerElapsedMs={timerElapsedMs}
-        onToggleDone={toggleDone}
-        onOpen={(t) => setEditingTaskId(t.id)}
-      />
-    );
-  } else if (nav === "schedule") {
-    body = (
-      <TaskList
-        title={`时间表 · ${today}`}
-        empty="没有排到具体时刻的任务。"
-        tasks={scheduleTasks}
-        projectTitles={projectTitles}
-        taskTagMap={taskTagMap}
-        hint="汇总全部项目的时刻安排"
         nowMs={now}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
@@ -923,6 +916,7 @@ export default function App() {
         store={store}
         threadId={agentThreadId}
         displayName={prefs.displayName}
+        rules={prefs.agentRules}
         activeTimerTaskId={activeTimerTaskId}
         timerStartedAt={timerStartedAt}
         onSelectThread={setAgentThreadId}
@@ -943,7 +937,6 @@ export default function App() {
         buckets={taskBuckets}
         filterProjectId={filterProjectId}
         viewMode={tasksViewMode}
-        showCompleted={showCompleted}
         denseMeta={prefs.workMode === "office"}
         defaultRemind={prefs.defaultRemind}
         confirmBeforeDelete={prefs.confirmBeforeDelete}
@@ -951,7 +944,6 @@ export default function App() {
         timerElapsedMs={timerElapsedMs}
         nowMs={now}
         onViewModeChange={changeTasksViewMode}
-        onShowCompletedChange={changeShowCompleted}
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
         onPlanTime={scheduleAfternoon}
@@ -1008,6 +1000,8 @@ export default function App() {
           onOpenSettings={() => openSettings("general")}
           projects={projects}
           activeProjectId={filterProjectId}
+          taskNavCounts={taskNavCounts}
+          projectTaskCounts={projectTaskCounts}
           notes={notes}
           onCreateProject={() => setCreateProjectOpen(true)}
           onSelectProject={openProject}

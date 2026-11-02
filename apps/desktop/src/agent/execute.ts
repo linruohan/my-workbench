@@ -12,7 +12,7 @@ import {
 export type AgentUiEffect =
   | {
       type: "navigate";
-      nav: "today" | "planner" | "schedule" | "knowledge" | "timed" | "projects";
+      nav: "today" | "planner" | "knowledge" | "timed" | "projects";
     }
   | { type: "open-task"; taskId: string }
   | { type: "open-note"; noteId: string }
@@ -374,9 +374,11 @@ function openView(args: Record<string, unknown>): AgentToolResult {
       effects: [{ type: "notifications" }],
     };
   }
+  // 「时间表」入口已并入「计划」；旧指令仍可打开计划视图。
+  const resolved = view === "schedule" ? "planner" : view;
   const nav = (
-    ["today", "planner", "schedule", "knowledge", "timed", "projects"] as const
-  ).find((item) => item === view);
+    ["today", "planner", "knowledge", "timed", "projects"] as const
+  ).find((item) => item === resolved);
   if (!nav) throw new DomainError(`未知视图 ${view}`);
   return {
     ok: true,

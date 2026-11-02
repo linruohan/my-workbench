@@ -1,5 +1,4 @@
 import {
-  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -9,7 +8,16 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import {
+  DialogContext,
+  type AlertOptions,
+  type ConfirmOptions,
+  type DialogApi,
+  type PromptOptions,
+} from "./dialog-context";
 import { IconClose } from "./icons";
+
+export type { AlertOptions, ConfirmOptions, DialogApi, PromptOptions };
 
 type AlertRequest = {
   kind: "alert";
@@ -40,36 +48,6 @@ type PromptRequest = {
 };
 
 type DialogRequest = AlertRequest | ConfirmRequest | PromptRequest;
-
-export type AlertOptions = {
-  title?: string;
-  message: string;
-  confirmLabel?: string;
-};
-
-export type ConfirmOptions = {
-  title?: string;
-  message: string;
-  confirmLabel?: string;
-  cancelLabel?: string;
-  danger?: boolean;
-};
-
-export type PromptOptions = {
-  title: string;
-  label: string;
-  initialValue?: string;
-  confirmLabel?: string;
-  cancelLabel?: string;
-};
-
-export type DialogApi = {
-  alert: (opts: AlertOptions | string) => Promise<void>;
-  confirm: (opts: ConfirmOptions | string) => Promise<boolean>;
-  prompt: (opts: PromptOptions) => Promise<string | null>;
-};
-
-const DialogContext = createContext<DialogApi | null>(null);
 
 export function useDialog(): DialogApi {
   const ctx = useContext(DialogContext);

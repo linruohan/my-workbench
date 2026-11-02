@@ -67,7 +67,7 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "收件箱" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "已完成" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "计划" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "时间表" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "时间表" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "定时任务" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加项目" })).toBeInTheDocument();
 

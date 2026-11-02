@@ -34,6 +34,24 @@ export function buildModelHttpRequest(input: {
     description: spec.description,
     parameters: spec.parameters,
   }));
+  if (input.provider.kind === "openai-responses") {
+    return {
+      url: endpoint(input.provider),
+      headers: { "content-type": "application/json" },
+      secretHeaderNames: ["authorization"],
+      body: {
+        model: input.modelId,
+        instructions: input.system,
+        input: responsesInput(input.messages),
+        tools: tools.map((spec) => ({
+          type: "function",
+          name: spec.name,
+          description: spec.description,
+          parameters: spec.parameters,
+        })),
+      },
+    };
+  }
   if (input.provider.kind === "anthropic-messages") {
     return {
       url: endpoint(input.provider),
@@ -95,6 +113,7 @@ export function applyRuntimeHeaders(
 
 export function parseModelResponse(kind: ProviderKind, payload: unknown): AgentTurnPlan {
   if (kind === "anthropic-messages") return parseAnthropic(payload);
+  if (kind === "openai-responses") return parseResponses(payload);
   return parseOpenAi(payload);
 }
 
@@ -167,8 +186,41 @@ function endpoint(provider: ProviderConfig): string {
     if (base.endsWith("/v1")) return `${base}/messages`;
     return `${base}/v1/messages`;
   }
+  if (provider.kind === "openai-responses") {
+    if (base.endsWith("/responses")) return base;
+    return `${base}/responses`;
+  }
   if (base.endsWith("/chat/completions")) return base;
   return `${base}/chat/completions`;
+}
+
+function responsesInput(messages: AgentMessage[]): unknown[] {
+  const out: unknown[] = [];
+  for (const message of messages) {
+    if (message.role === "system") continue;
+    if (message.role === "user") {
+      out.push({ role: "user", content: message.content });
+      continue;
+    }
+    if (message.role === "tool") {
+      out.push({
+        type: "function_call_output",
+        call_id: message.toolCallId,
+        output: message.content,
+      });
+      continue;
+    }
+    if (message.content) out.push({ role: "assistant", content: message.content });
+    for (const call of readCalls(message.toolCallsJson)) {
+      out.push({
+        type: "function_call",
+        call_id: call.id,
+        name: call.name,
+        arguments: JSON.stringify(call.args),
+      });
+    }
+  }
+  return out;
 }
 
 function openAiMessages(messages: AgentMessage[]): unknown[] {
@@ -256,6 +308,33 @@ function parseOpenAi(payload: unknown): AgentTurnPlan {
         name,
         args: parseArgs(fn?.arguments),
       });
+    }
+  }
+  return { text, calls };
+}
+
+function parseResponses(payload: unknown): AgentTurnPlan {
+  const output = asArray(asRecord(payload)?.output) ?? [];
+  let text = "";
+  const calls: PlannedCall[] = [];
+  for (const raw of output) {
+    const item = asRecord(raw);
+    if (!item) continue;
+    if (item.type === "message") {
+      if (typeof item.content === "string") text += item.content;
+      for (const part of asArray(item.content) ?? []) {
+        const block = asRecord(part);
+        if (block?.type === "output_text" && typeof block.text === "string") text += block.text;
+      }
+    }
+    if (item.type === "function_call" && typeof item.name === "string") {
+      const id =
+        typeof item.call_id === "string"
+          ? item.call_id
+          : typeof item.id === "string"
+            ? item.id
+            : createId();
+      calls.push({ id, name: item.name, args: parseArgs(item.arguments) });
     }
   }
   return { text, calls };
