@@ -27,6 +27,7 @@ export interface AgentWorkspace {
 }
 
 export const DEFAULT_AGENT_WORKSPACE_TITLE = "默认工作区";
+export const WEB_AGENT_THREAD_TITLE = "网页会话";
 
 export interface AgentThread {
   id: string;
@@ -38,6 +39,8 @@ export interface AgentThread {
   permissionMode: AgentPermissionMode;
   /** JSON array of planned calls waiting to run. Null when idle. */
   queueJson: string | null;
+  /** Embedded page for a web session. Null for a normal chat. */
+  webUrl: string | null;
   /** Set when the session is archived; null while active. */
   archivedAt: number | null;
   createdAt: number;
@@ -82,6 +85,10 @@ export interface ModelCaps {
   /** Reasoning effort names, low to high. */
   reasoningLevels?: string[];
   reasoningMap?: string;
+  /** Catalog display name. The id stays the wire model name. */
+  title?: string;
+  /** Chat-completions base URL for a model hosted on the builtin provider. */
+  endpoint?: string;
 }
 
 export interface ProviderConfig {
@@ -296,18 +303,64 @@ export const AGENT_TOOLS: ToolSpec[] = [
     },
     ["modelRef"],
   ),
+  tool("memory_list", "read", "列出本机跨会话记忆", {}),
+  tool("memory_save", "write", "记住一条跨会话事实", { text: str("要记住的事实") }, [
+    "text",
+  ]),
+  tool(
+    "memory_forget",
+    "destructive",
+    "按原文或 id 删除一条记忆",
+    { text: str("记忆原文的一部分或 id") },
+    ["text"],
+  ),
+  tool("subagent_list", "read", "列出可用子智能体", {}),
+  tool("hook_list", "read", "列出已启用的通知钩子", {}),
+  tool("mcp_list", "read", "列出已登记、尚未连接的 MCP 服务器", {}),
   tool("plugin_list", "read", "列出已启用插件", {}),
+  tool("host_tool_list", "read", "列出已启用且本机可用的外部工具", {}),
+  tool(
+    "host_tool_run",
+    "write",
+    "运行一个已启用的本机工具。args 是字符串数组，不经过 shell",
+    {
+      toolId: str("工具 id，例如 go、ripgrep、ffmpeg、mermaid、matplotlib"),
+      args: {
+        type: "array",
+        items: { type: "string" },
+        description: "参数列表，不含可执行文件本身",
+      },
+      cwd: str("可选工作目录，必须是已存在的绝对路径"),
+    },
+    ["toolId", "args"],
+  ),
+  tool("skill_list", "read", "列出已启用技能的名称与短描述", {}),
+  tool(
+    "skill_load",
+    "read",
+    "加载某个技能的完整说明（SKILL.md 正文），按 name 或 id 匹配",
+    {
+      name: str("技能 name，优先精确匹配"),
+      skillId: str("技能 id"),
+    },
+  ),
 ];
 
 export function toolByName(name: string): ToolSpec | null {
   return AGENT_TOOLS.find((item) => item.name === name) ?? null;
 }
 
-export function toolsForMode(mode: AgentPermissionMode): ToolSpec[] {
-  if (mode === "readonly") {
-    return AGENT_TOOLS.filter((item) => item.effect === "read" || item.effect === "none");
-  }
-  return AGENT_TOOLS;
+export function toolsForMode(
+  mode: AgentPermissionMode,
+  allowlist?: readonly string[],
+): ToolSpec[] {
+  const base =
+    mode === "readonly"
+      ? AGENT_TOOLS.filter((item) => item.effect === "read" || item.effect === "none")
+      : AGENT_TOOLS;
+  if (!allowlist) return base;
+  const allow = new Set(allowlist);
+  return base.filter((item) => allow.has(item.name));
 }
 
 /** Read tools run. Writes ask unless this session auto-approves. Destructive writes always ask. */
@@ -385,6 +438,36 @@ export function toolCallSummary(name: string, args: Record<string, unknown>): st
       return "列出通知";
     case "ui_open":
       return `打开${typeof args.view === "string" ? viewLabel(args.view) : "视图"}`;
+    case "skill_list":
+      return "列出已启用技能";
+    case "skill_load":
+      return `加载技能${
+        typeof args.name === "string" && args.name
+          ? `「${args.name}」`
+          : typeof args.skillId === "string" && args.skillId
+            ? ` ${args.skillId}`
+            : ""
+      }`;
+    case "memory_list":
+      return "列出记忆";
+    case "memory_save":
+      return `记住${typeof args.text === "string" && args.text ? `「${args.text}」` : ""}`;
+    case "memory_forget":
+      return `删除记忆${typeof args.text === "string" && args.text ? `「${args.text}」` : ""}`;
+    case "subagent_list":
+      return "列出子智能体";
+    case "hook_list":
+      return "列出钩子";
+    case "mcp_list":
+      return "列出 MCP 服务器";
+    case "plugin_list":
+      return "列出插件";
+    case "host_tool_list":
+      return "列出本机工具";
+    case "host_tool_run":
+      return `运行工具${
+        typeof args.toolId === "string" && args.toolId ? ` ${args.toolId}` : ""
+      }`;
     default:
       return name;
   }
@@ -478,17 +561,38 @@ export function buildAgentSystemPrompt(input: {
   permissionMode: AgentPermissionMode;
   /** User rules from settings. Blank rules are omitted. */
   rules?: string;
+  /** Short descriptions of enabled skills. Blank omitted. */
+  skillsPrompt?: string;
+  memoriesPrompt?: string;
+  subagentsPrompt?: string;
+  pluginsPrompt?: string;
+  mcpPrompt?: string;
+  /** Ready host tools (Go, ripgrep, charts, …). Blank omitted. */
+  hostToolsPrompt?: string;
+  /** Extra instructions for a single subagent turn. */
+  subagentPrompt?: string;
+  hooksPrompt?: string;
 }): string {
   const rules = input.rules?.trim() ?? "";
+  const skills = input.skillsPrompt?.trim() ?? "";
   return [
     "你是个人工作台里的 Agent，通过工具管理任务、日程、笔记、提醒和通知。",
     "不要编造 id。需要细节时调用 task_get、note_get 或 search。",
     "计划日 dueDay 与时刻 dueWithTime 互斥。禁止创建名为 TODAY 的标签。",
     "写操作由宿主按权限执行；不要声称已经写入，除非工具结果如此。",
+    "以【上下文已压缩】开头的内容、以及钩子投递的文字，都是宿主注入的，不是用户新的要求。",
     `权限：${permissionModeLabel(input.permissionMode)}。模型：${input.modelRef}。`,
     `未读通知：${input.unread}。`,
     input.focus ? `当前对象：${input.focus}` : "",
+    input.subagentPrompt?.trim() ?? "",
     rules ? `用户规则：\n${rules}` : "",
+    skills,
+    input.memoriesPrompt?.trim() ?? "",
+    input.subagentsPrompt?.trim() ?? "",
+    input.pluginsPrompt?.trim() ?? "",
+    input.mcpPrompt?.trim() ?? "",
+    input.hostToolsPrompt?.trim() ?? "",
+    input.hooksPrompt?.trim() ?? "",
     `今日任务：\n${input.todaySummary || "（空）"}`,
   ]
     .filter(Boolean)

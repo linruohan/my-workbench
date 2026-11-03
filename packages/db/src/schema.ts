@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS agent_threads (
   model_ref TEXT NOT NULL,
   permission_mode TEXT NOT NULL,
   queue_json TEXT,
+  web_url TEXT,
   archived_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

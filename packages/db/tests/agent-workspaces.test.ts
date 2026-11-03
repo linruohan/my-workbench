@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DomainError } from "@wb/domain";
 import { MemoryWorkbenchRepository } from "../src/memory-repository.js";
 
 describe("agent workspaces", () => {
@@ -70,6 +71,65 @@ describe("agent workspaces", () => {
     store.unarchiveAgentThread(thread.id, 4);
     expect(store.listAgentThreads()).toHaveLength(1);
     expect(store.getAgentThread(thread.id)?.archivedAt).toBeNull();
+  });
+
+  it("stores a web session address and keeps it across snapshots", () => {
+    const store = new MemoryWorkbenchRepository();
+    const workspace = store.createAgentWorkspace({ title: "默认工作区", nowMs: 1 });
+    const thread = store.createAgentThread({
+      workspaceId: workspace.id,
+      title: "网页会话",
+      webUrl: "example.com/docs",
+      nowMs: 2,
+    });
+    expect(thread.webUrl).toBe("https://example.com/docs");
+    expect(store.getAgentThread(thread.id)?.webUrl).toBe("https://example.com/docs");
+    expect(() =>
+      store.createAgentThread({
+        workspaceId: workspace.id,
+        webUrl: "javascript:alert(1)",
+      }),
+    ).toThrow(DomainError);
+
+    const copy = new MemoryWorkbenchRepository();
+    copy.importSnapshot(store.exportSnapshot());
+    expect(copy.getAgentThread(thread.id)?.webUrl).toBe("https://example.com/docs");
+
+    const legacy = new MemoryWorkbenchRepository();
+    legacy.importSnapshot(
+      JSON.stringify({
+        tasks: [],
+        projects: [],
+        buckets: [],
+        todayOrder: [],
+        notifications: [],
+        agentWorkspaces: [
+          {
+            id: "w1",
+            title: "默认工作区",
+            rootPath: null,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        agentThreads: [
+          {
+            id: "t1",
+            workspaceId: "w1",
+            projectId: null,
+            title: "旧会话",
+            modelRef: "builtin:workbench/local",
+            permissionMode: "confirm",
+            queueJson: null,
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        agentMessages: [],
+        agentApprovals: [],
+      }),
+    );
+    expect(legacy.getAgentThread("t1")?.webUrl).toBeNull();
   });
 
   it("deletes a workspace together with its sessions", () => {

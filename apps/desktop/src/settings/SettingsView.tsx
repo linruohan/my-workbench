@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
+import type { HostToolSnapshot } from "@wb/domain";
 import { useTheme } from "../theme/ThemeProvider";
 import {
   defaultRemindLabel,
@@ -81,6 +82,7 @@ type Props = {
   onPrefsChange: (next: AppPrefs) => void;
   onBack: () => void;
   initialSection?: SettingsSectionId;
+  onHostTools?: (tools: HostToolSnapshot[]) => void;
 };
 
 export function SettingsView({
@@ -89,6 +91,7 @@ export function SettingsView({
   onPrefsChange,
   onBack,
   initialSection = "general",
+  onHostTools,
 }: Props) {
   const { mode, setMode, label } = useTheme();
   const [section, setSection] = useState<SettingsSectionId>(initialSection);
@@ -163,7 +166,13 @@ export function SettingsView({
         ) : null}
         {section === "models" ? <ModelsPane /> : null}
         {isAgentCapability(section) ? (
-          <AgentCapabilityPane id={section} prefs={prefs} onPatch={patch} />
+          <AgentCapabilityPane
+            id={section}
+            prefs={prefs}
+            dataDir={dataDir}
+            onPatch={patch}
+            onHostTools={onHostTools}
+          />
         ) : null}
         {section === "data" ? (
           <DataPane prefs={prefs} dataDir={dataDir} onPatch={patch} />
@@ -502,7 +511,8 @@ function DataPane({
           <div>
             <div className="settings__row-title">文件说明</div>
             <div className="settings__row-desc">
-              workbench.json（任务/笔记快照）· prefs.json（设置）· theme.json（主题）
+              workbench.json（任务/笔记快照）· prefs.json（设置）· theme.json（主题）·
+              models/paddleocr（本地识图模型）
             </div>
           </div>
         </div>

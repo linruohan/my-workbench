@@ -15,4 +15,11 @@ commands.allow = [
   "kb_git_branch",
   "open_external",
   "model_http",
+  "tools_probe",
+  "tools_install",
+  "tools_run",
+  "web_session_show",
+  "web_session_reload",
+  "web_session_hide",
+  "web_session_close",
 ]

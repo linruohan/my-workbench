@@ -1,6 +1,9 @@
 mod kb;
 mod model_http;
+mod ocr;
 mod open_ext;
+mod tools;
+mod web_session;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -20,6 +23,15 @@ pub fn run() {
             kb::kb_git_branch,
             open_ext::open_external,
             model_http::model_http,
+            ocr::ocr_ensure_models,
+            ocr::ocr_read_model,
+            tools::tools_probe,
+            tools::tools_install,
+            tools::tools_run,
+            web_session::web_session_show,
+            web_session::web_session_reload,
+            web_session::web_session_hide,
+            web_session::web_session_close,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

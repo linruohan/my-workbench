@@ -1,3 +1,12 @@
+import type {
+  AgentCustomCommand,
+  AgentHook,
+  AgentHookEvent,
+  AgentMemory,
+  AgentSubagent,
+  McpServer,
+  SkillSourceDir,
+} from "@wb/domain";
 import { dataFilePath, ensureDataDir, isTauriRuntime, PREFS_FILE } from "./paths";
 
 const PREFS_KEY = "wb.prefs.v1";
@@ -30,6 +39,18 @@ export type AppPrefs = {
   completionSound: boolean;
   /** Standing instructions injected into every Agent session. Local only. */
   agentRules: string;
+  /** Local skill directories registered in Settings → 技能. */
+  skillDirs: SkillSourceDir[];
+  /** Facts kept across Agent sessions. */
+  agentMemories: AgentMemory[];
+  agentHooks: AgentHook[];
+  agentSubagents: AgentSubagent[];
+  agentCommands: AgentCustomCommand[];
+  /** Local plugin folders. */
+  pluginDirs: SkillSourceDir[];
+  mcpServers: McpServer[];
+  /** Catalog ids the user turned off in Settings → 工具. */
+  disabledHostTools: string[];
 };
 
 const DEFAULTS: AppPrefs = {
@@ -51,10 +72,178 @@ const DEFAULTS: AppPrefs = {
   warningNotifications: true,
   completionSound: false,
   agentRules: "",
+  skillDirs: [],
+  agentMemories: [],
+  agentHooks: [],
+  agentSubagents: [],
+  agentCommands: [],
+  pluginDirs: [],
+  mcpServers: [],
+  disabledHostTools: [],
 };
 
+function normalizeSkillDirs(value: unknown): SkillSourceDir[] {
+  if (!Array.isArray(value)) return [];
+  const out: SkillSourceDir[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<SkillSourceDir>;
+    if (typeof row.id !== "string" || !row.id.trim()) continue;
+    if (typeof row.path !== "string" || !row.path.trim()) continue;
+    out.push({
+      id: row.id.trim(),
+      path: row.path.trim(),
+      enabled: row.enabled !== false,
+      addedAt: typeof row.addedAt === "number" ? row.addedAt : 0,
+    });
+  }
+  return out;
+}
+
 function mergePrefs(partial?: Partial<AppPrefs> | null): AppPrefs {
-  return { ...DEFAULTS, ...(partial ?? {}) };
+  const next = { ...DEFAULTS, ...(partial ?? {}) };
+  next.skillDirs = normalizeSkillDirs(next.skillDirs);
+  next.pluginDirs = normalizeSkillDirs(next.pluginDirs);
+  next.agentMemories = normalizeMemories(next.agentMemories);
+  next.agentHooks = normalizeHooks(next.agentHooks);
+  next.agentSubagents = normalizeSubagents(next.agentSubagents);
+  next.agentCommands = normalizeCommands(next.agentCommands);
+  next.mcpServers = normalizeMcp(next.mcpServers);
+  next.disabledHostTools = normalizeDisabledHostTools(next.disabledHostTools);
+  return next;
+}
+
+function normalizeDisabledHostTools(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const id = item.trim();
+    if (!id || out.includes(id)) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+function normalizeMemories(value: unknown): AgentMemory[] {
+  if (!Array.isArray(value)) return [];
+  const out: AgentMemory[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<AgentMemory>;
+    if (typeof row.id !== "string" || typeof row.text !== "string" || !row.text.trim()) {
+      continue;
+    }
+    out.push({
+      id: row.id,
+      text: row.text.trim(),
+      createdAt: typeof row.createdAt === "number" ? row.createdAt : 0,
+    });
+  }
+  return out;
+}
+
+function normalizeHooks(value: unknown): AgentHook[] {
+  if (!Array.isArray(value)) return [];
+  const events = new Set<AgentHookEvent>([
+    "session_start",
+    "task_completed",
+    "reminder_due",
+  ]);
+  const out: AgentHook[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<AgentHook>;
+    if (
+      typeof row.id !== "string" ||
+      typeof row.title !== "string" ||
+      typeof row.body !== "string"
+    ) {
+      continue;
+    }
+    if (!events.has(row.event as AgentHookEvent)) continue;
+    out.push({
+      id: row.id,
+      event: row.event as AgentHookEvent,
+      title: row.title.trim(),
+      body: row.body.trim(),
+      enabled: row.enabled !== false,
+    });
+  }
+  return out;
+}
+
+function normalizeSubagents(value: unknown): AgentSubagent[] {
+  if (!Array.isArray(value)) return [];
+  const out: AgentSubagent[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<AgentSubagent>;
+    if (
+      typeof row.id !== "string" ||
+      typeof row.name !== "string" ||
+      typeof row.prompt !== "string"
+    ) {
+      continue;
+    }
+    out.push({
+      id: row.id,
+      name: row.name.trim(),
+      description: typeof row.description === "string" ? row.description : "",
+      prompt: row.prompt,
+      toolNames: Array.isArray(row.toolNames)
+        ? row.toolNames.filter((name): name is string => typeof name === "string")
+        : [],
+      source: "user",
+    });
+  }
+  return out;
+}
+
+function normalizeCommands(value: unknown): AgentCustomCommand[] {
+  if (!Array.isArray(value)) return [];
+  const out: AgentCustomCommand[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<AgentCustomCommand>;
+    if (
+      typeof row.id !== "string" ||
+      typeof row.name !== "string" ||
+      typeof row.body !== "string"
+    ) {
+      continue;
+    }
+    out.push({
+      id: row.id,
+      name: row.name.trim(),
+      summary: typeof row.summary === "string" ? row.summary : "",
+      body: row.body,
+      source: "user",
+    });
+  }
+  return out;
+}
+
+function normalizeMcp(value: unknown): McpServer[] {
+  if (!Array.isArray(value)) return [];
+  const out: McpServer[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<McpServer>;
+    if (typeof row.id !== "string" || typeof row.name !== "string") continue;
+    out.push({
+      id: row.id,
+      name: row.name.trim(),
+      command: typeof row.command === "string" ? row.command : "",
+      args: Array.isArray(row.args)
+        ? row.args.filter((arg): arg is string => typeof arg === "string")
+        : [],
+      url: typeof row.url === "string" ? row.url : "",
+      enabled: row.enabled !== false,
+      source: "user",
+    });
+  }
+  return out;
 }
 
 export function readPrefs(): AppPrefs {

@@ -1,4 +1,8 @@
 import { permissionModeLabel, type AgentPermissionMode } from "./agent.js";
+import {
+  expandCommandTemplate,
+  type AgentCustomCommand,
+} from "./agent-custom-commands.js";
 
 export type SlashCommand = {
   name: string;
@@ -24,6 +28,24 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   { name: "today", aliases: [], summary: "看看今天有什么", usage: "/today" },
   { name: "brief", aliases: ["晨报"], summary: "根据今天的安排写晨报", usage: "/brief" },
+  {
+    name: "compact",
+    aliases: ["压缩"],
+    summary: "压缩更早的对话，减轻模型上下文",
+    usage: "/compact",
+  },
+  {
+    name: "memory",
+    aliases: ["记忆"],
+    summary: "查看或记下一条本机记忆",
+    usage: "/memory [内容]",
+  },
+  {
+    name: "agent",
+    aliases: ["子智能体"],
+    summary: "列出子智能体，或让其中一个处理任务",
+    usage: "/agent [名称] [任务]",
+  },
 ];
 
 export type SlashAction =
@@ -32,7 +54,10 @@ export type SlashAction =
   | { type: "mode"; mode: AgentPermissionMode }
   | { type: "model-menu" }
   | { type: "model"; modelRef: string }
-  | { type: "prompt"; text: string };
+  | { type: "prompt"; text: string }
+  | { type: "compact" }
+  | { type: "memory"; text: string }
+  | { type: "agent"; name: string; task: string };
 
 /** Command name being typed, before any argument. A space hides suggestions. */
 export function slashQuery(draft: string): string | null {
@@ -42,22 +67,71 @@ export function slashQuery(draft: string): string | null {
   return text.slice(1);
 }
 
-export function slashSuggestions(draft: string): SlashCommand[] {
+export function slashSuggestions(
+  draft: string,
+  extras: readonly AgentCustomCommand[] = [],
+): SlashCommand[] {
   const query = slashQuery(draft);
   if (query == null) return [];
   const folded = query.toLowerCase();
-  return SLASH_COMMANDS.filter((command) => {
-    if (command.name.startsWith(folded)) return true;
-    return command.aliases.some(
-      (alias) => alias.toLowerCase().startsWith(folded) || alias.startsWith(query),
-    );
-  }).slice(0, 6);
+  const builtin = SLASH_COMMANDS.filter((command) =>
+    commandMatches(command, folded, query),
+  );
+  const builtinNames = new Set(
+    SLASH_COMMANDS.flatMap((command) => [
+      command.name.toLowerCase(),
+      ...command.aliases.map((alias) => alias.toLowerCase()),
+    ]),
+  );
+  const custom = extras
+    .filter((command) => !builtinNames.has(command.name.toLowerCase()))
+    .filter((command) => command.name.toLowerCase().startsWith(folded))
+    .map((command): SlashCommand => ({
+      name: command.name,
+      aliases: [],
+      summary: command.summary,
+      usage: `/${command.name}`,
+    }));
+  return [...builtin, ...custom].slice(0, 12);
+}
+
+export type SlashSkillHit = {
+  name: string;
+  summary: string;
+};
+
+/** Skills offered from the same `/` menu as commands. */
+export function slashSkillSuggestions(
+  draft: string,
+  skills: readonly { name: string; description: string }[],
+): SlashSkillHit[] {
+  const query = slashQuery(draft);
+  if (query == null) return [];
+  const folded = query.toLowerCase();
+  const matched = skills.filter((skill) => {
+    if (!folded) return true;
+    const name = skill.name.toLowerCase();
+    if (name.includes(folded)) return true;
+    return folded.length >= 2 && skill.description.toLowerCase().includes(folded);
+  });
+  return matched.slice(0, folded ? 12 : 8).map((skill) => ({
+    name: skill.name,
+    summary: skill.description,
+  }));
+}
+
+/** Replace the `/…` token being typed with a finished token and a trailing space. */
+export function applySlashToken(draft: string, token: string): string {
+  if (/\/[^\s/]*$/.test(draft)) return draft.replace(/\/[^\s/]*$/, `${token} `);
+  const gap = draft.length === 0 || /\s$/.test(draft) ? "" : " ";
+  return `${draft}${gap}${token} `;
 }
 
 /** Local slash command. Ordinary chat returns null and still goes to the model. */
 export function resolveSlash(
   text: string,
   mode: AgentPermissionMode,
+  extras: readonly AgentCustomCommand[] = [],
 ): SlashAction | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return null;
@@ -65,32 +139,66 @@ export function resolveSlash(
   const splitAt = body.search(/\s/);
   const rawToken = splitAt === -1 ? body : body.slice(0, splitAt);
   const args = splitAt === -1 ? "" : body.slice(splitAt + 1).trim();
-  if (!rawToken) return helpAction("");
+  if (!rawToken) return helpAction("", extras);
   const command = findCommand(rawToken);
   if (!command) {
+    const custom = extras.find(
+      (item) => item.name.toLowerCase() === rawToken.toLowerCase(),
+    );
+    if (custom) {
+      return { type: "prompt", text: expandCommandTemplate(custom.body, args) };
+    }
     return {
       type: "reply",
       text: `没有「/${rawToken || " "}」这个命令。输入 /help 查看可用命令。`,
     };
   }
-  if (command.name === "help") return helpAction(args);
+  if (command.name === "help") return helpAction(args, extras);
   if (command.name === "new") return { type: "new" };
   if (command.name === "mode") return modeAction(args, mode);
   if (command.name === "model") return modelAction(args);
   if (command.name === "today") return { type: "prompt", text: "看看今天有什么" };
+  if (command.name === "compact") return { type: "compact" };
+  if (command.name === "memory") return { type: "memory", text: args };
+  if (command.name === "agent") return agentAction(args);
   return { type: "prompt", text: "晨报" };
 }
 
-function helpAction(args: string): SlashAction {
-  const target = args ? findCommand(args.replace(/^\//, "")) : null;
+function helpAction(args: string, extras: readonly AgentCustomCommand[]): SlashAction {
+  const token = args.replace(/^\//, "");
+  const target = args ? findCommand(token) : null;
   if (args && !target) {
+    const custom = extras.find((item) => item.name.toLowerCase() === token.toLowerCase());
+    if (custom) {
+      return { type: "reply", text: `/${custom.name}\n${custom.summary}` };
+    }
     return { type: "reply", text: `没有「${args}」这个命令。` };
   }
   if (target) return { type: "reply", text: `${target.usage}\n${target.summary}` };
-  const lines = SLASH_COMMANDS.map(
-    (command) => `- \`${command.usage}\` ${command.summary}`,
-  );
+  const lines = [
+    ...SLASH_COMMANDS.map((command) => `- \`${command.usage}\` ${command.summary}`),
+    ...extras.map((command) => `- \`/${command.name}\` ${command.summary}`),
+  ];
   return { type: "reply", text: lines.join("\n") };
+}
+
+function agentAction(args: string): SlashAction {
+  const trimmed = args.trim();
+  if (!trimmed) return { type: "agent", name: "", task: "" };
+  const splitAt = trimmed.search(/\s/);
+  if (splitAt === -1) return { type: "agent", name: trimmed, task: "" };
+  return {
+    type: "agent",
+    name: trimmed.slice(0, splitAt),
+    task: trimmed.slice(splitAt + 1).trim(),
+  };
+}
+
+function commandMatches(command: SlashCommand, folded: string, query: string): boolean {
+  if (command.name.startsWith(folded)) return true;
+  return command.aliases.some(
+    (alias) => alias.toLowerCase().startsWith(folded) || alias.startsWith(query),
+  );
 }
 
 function modeAction(args: string, mode: AgentPermissionMode): SlashAction {

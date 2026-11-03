@@ -8,6 +8,13 @@ export function migrate(db: Database.Database): void {
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
     { value: string } | undefined;
 
+  const threadColumns = db.prepare(`PRAGMA table_info(agent_threads)`).all() as Array<{
+    name: string;
+  }>;
+  if (!threadColumns.some((column) => column.name === "web_url")) {
+    db.exec(`ALTER TABLE agent_threads ADD COLUMN web_url TEXT`);
+  }
+
   if (!row) {
     const now = Date.now();
     db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`).run(

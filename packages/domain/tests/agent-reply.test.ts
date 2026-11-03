@@ -9,6 +9,8 @@ import {
   groupAgentThreadsByWorkspace,
   modelSwitchText,
   normalizeAgentRootPath,
+  normalizeAgentWebUrl,
+  orderAgentWorkspaceThreads,
 } from "../src/index.js";
 
 describe("agent empty greeting", () => {
@@ -41,6 +43,43 @@ describe("agent thread filter", () => {
     expect(filterAgentThreads([{ title: "Hello" }], "hello")).toEqual([
       { title: "Hello" },
     ]);
+  });
+});
+
+describe("agent web url", () => {
+  it("accepts http(s) addresses and rejects other schemes", () => {
+    expect(normalizeAgentWebUrl("example.com/docs")).toBe("https://example.com/docs");
+    expect(normalizeAgentWebUrl("127.0.0.1:3080")).toBe("http://127.0.0.1:3080/");
+    expect(normalizeAgentWebUrl("http://127.0.0.1:3080/?token=abc")).toBe(
+      "http://127.0.0.1:3080/?token=abc",
+    );
+    expect(normalizeAgentWebUrl("  http://localhost:3000/a  ")).toBe(
+      "http://localhost:3000/a",
+    );
+    expect(normalizeAgentWebUrl("javascript:alert(1)")).toBeNull();
+    expect(normalizeAgentWebUrl("not a url")).toBeNull();
+    expect(normalizeAgentWebUrl("")).toBeNull();
+  });
+
+  it("keeps web sessions above chats in the default workspace", () => {
+    const ordered = orderAgentWorkspaceThreads(
+      [
+        { updatedAt: 5, title: "聊天", webUrl: null },
+        { updatedAt: 2, title: "网页会话", webUrl: "https://example.com/" },
+        { updatedAt: 4, title: "另一页", webUrl: "https://a.test/" },
+      ],
+      true,
+    );
+    expect(ordered.map((item) => item.title)).toEqual(["另一页", "网页会话", "聊天"]);
+    expect(
+      orderAgentWorkspaceThreads(
+        [
+          { updatedAt: 1, title: "旧" },
+          { updatedAt: 3, title: "新" },
+        ],
+        false,
+      ).map((item) => item.title),
+    ).toEqual(["旧", "新"]);
   });
 });
 

@@ -4,6 +4,7 @@ import { IconBell } from "./icons";
 export type NotificationItem = {
   id: string;
   title: string;
+  body?: string;
   kind: string;
   status: string;
   fireAt: number;
@@ -14,6 +15,7 @@ export type ActiveReminder = {
   title: string;
   remindAt: number;
   isDeadline: boolean;
+  note?: string;
 };
 
 type Props = {
@@ -23,6 +25,7 @@ type Props = {
   activeReminders: ActiveReminder[];
   onCompleteReminder: (taskId: string, remindAt: number) => void;
   onDismissReminder: (taskId: string, remindAt: number) => void;
+  onDismissNotification?: (id: string) => void;
 };
 
 export function NotificationBell({
@@ -32,9 +35,11 @@ export function NotificationBell({
   activeReminders,
   onCompleteReminder,
   onDismissReminder,
+  onDismissNotification,
 }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
-  const count = notifications.length + activeReminders.length;
+  const visible = notifications.filter((item) => item.status !== "dismissed");
+  const count = visible.length + activeReminders.length;
 
   useEffect(() => {
     if (!open) return;
@@ -77,7 +82,7 @@ export function NotificationBell({
             <strong>通知</strong>
             <span className="notif__count">{count}</span>
           </header>
-          {activeReminders.length === 0 && notifications.length === 0 ? (
+          {activeReminders.length === 0 && visible.length === 0 ? (
             <p className="notif__empty">暂无通知。提醒到期后会出现在这里。</p>
           ) : (
             <ul className="notif__list">
@@ -88,6 +93,7 @@ export function NotificationBell({
                     <div className="notif__item-meta">
                       {r.isDeadline ? "截止提醒" : "计划提醒"} · 待处理
                     </div>
+                    {r.note ? <div className="notif__item-meta">{r.note}</div> : null}
                   </div>
                   <div className="notif__item-actions">
                     <button
@@ -105,14 +111,23 @@ export function NotificationBell({
                   </div>
                 </li>
               ))}
-              {notifications.map((n) => (
+              {visible.map((n) => (
                 <li key={n.id} className="notif__item">
                   <div className="notif__item-body">
                     <div className="notif__item-title">{n.title}</div>
+                    {n.body ? <div className="notif__item-meta">{n.body}</div> : null}
                     <div className="notif__item-meta">
-                      {n.kind} · {n.status} · {new Date(n.fireAt).toLocaleString("zh-CN")}
+                      {n.kind === "system" ? "系统" : n.kind} · {n.status} ·{" "}
+                      {new Date(n.fireAt).toLocaleString("zh-CN")}
                     </div>
                   </div>
+                  {n.kind === "system" && onDismissNotification ? (
+                    <div className="notif__item-actions">
+                      <button type="button" onClick={() => onDismissNotification(n.id)}>
+                        知道了
+                      </button>
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>

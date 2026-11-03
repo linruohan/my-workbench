@@ -19,6 +19,7 @@ type Props = {
   activeReminders: ActiveReminder[];
   onCompleteReminder: (taskId: string, remindAt: number) => void;
   onDismissReminder: (taskId: string, remindAt: number) => void;
+  onDismissNotification?: (id: string) => void;
 };
 
 export function TitleBar({
@@ -28,6 +29,7 @@ export function TitleBar({
   activeReminders,
   onCompleteReminder,
   onDismissReminder,
+  onDismissNotification,
 }: Props) {
   return (
     <header className="titlebar">
@@ -49,6 +51,7 @@ export function TitleBar({
           activeReminders={activeReminders}
           onCompleteReminder={onCompleteReminder}
           onDismissReminder={onDismissReminder}
+          onDismissNotification={onDismissNotification}
         />
         <button
           type="button"

@@ -1,9 +1,20 @@
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
+  addAgentMemory,
   DomainError,
+  findSkill,
+  forgetAgentMemory,
+  listEnabledSkillSummaries,
+  mcpEndpointLabel,
   parseLocalDay,
   parseModelRef,
   remindOptionToMilliseconds,
+  type AgentHook,
+  type AgentMemory,
+  type AgentSkill,
+  type AgentSubagent,
+  type HostToolSnapshot,
+  type McpServer,
   type ReminderOptionId,
   type SchedulePatch,
   type Task,
@@ -33,6 +44,20 @@ export type AgentRuntimeContext = {
   threadId: string;
   displayName: string;
   timer: { taskId: string | null; startedAt: number | null };
+  /** Enabled skills discovered from Settings → 技能 directories. */
+  skills?: AgentSkill[];
+  memories?: {
+    list: () => AgentMemory[];
+    replace: (next: AgentMemory[]) => void;
+  };
+  subagents?: AgentSubagent[];
+  hooks?: AgentHook[];
+  plugins?: Array<{ name: string; version: string; description: string }>;
+  mcpServers?: McpServer[];
+  /** Detected local tools from Settings → 工具. */
+  hostTools?: HostToolSnapshot[];
+  /** Subagent turns may only call these tools. */
+  toolAllowlist?: readonly string[];
 };
 
 const REMIND: ReminderOptionId[] = ["none", "at_start", "m5", "m10", "m15", "m30", "h1"];
@@ -57,6 +82,14 @@ function runTool(
   args: Record<string, unknown>,
   ctx: AgentRuntimeContext,
 ): AgentToolResult {
+  if (ctx.toolAllowlist && !ctx.toolAllowlist.includes(name)) {
+    return {
+      ok: false,
+      summary: `当前子智能体不能使用 ${name}`,
+      data: { error: "tool not allowed" },
+      effects: [],
+    };
+  }
   switch (name) {
     case "task_list_today": {
       const tasks = store.listToday(ctx.nowMs).map((task) => taskView(store, task));
@@ -334,8 +367,109 @@ function runTool(
       store.updateAgentThread(ctx.threadId, { modelRef }, ctx.nowMs);
       return ok(`已切换模型 ${modelRef}`, { modelRef });
     }
-    case "plugin_list":
-      return ok("当前没有启用的插件", { plugins: [] });
+    case "memory_list": {
+      const memories = ctx.memories?.list() ?? [];
+      return ok(memories.length ? `有 ${memories.length} 条记忆` : "还没有记忆", {
+        memories,
+      });
+    }
+    case "memory_save": {
+      if (!ctx.memories) throw new DomainError("记忆还没有接到本机会话");
+      const text = str(args, "text");
+      if (!text) throw new DomainError("请写出要记住的内容");
+      const result = addAgentMemory(ctx.memories.list(), text, ctx.nowMs);
+      if (!result.added) throw new DomainError(result.reason ?? "无法记下");
+      ctx.memories.replace(result.memories);
+      return ok(`已记住「${result.added.text}」`, { memory: result.added });
+    }
+    case "memory_forget": {
+      if (!ctx.memories) throw new DomainError("记忆还没有接到本机会话");
+      const text = str(args, "text");
+      if (!text) throw new DomainError("请提供要删除的记忆");
+      const result = forgetAgentMemory(ctx.memories.list(), text);
+      if (!result.removed) throw new DomainError(`没有匹配「${text}」的记忆`);
+      ctx.memories.replace(result.memories);
+      return ok(`已删除 ${result.removed} 条记忆`, { removed: result.removed });
+    }
+    case "subagent_list": {
+      const subagents = (ctx.subagents ?? []).map((item) => ({
+        name: item.name,
+        description: item.description,
+      }));
+      return ok(
+        subagents.length ? `有 ${subagents.length} 个子智能体` : "还没有子智能体",
+        { subagents },
+      );
+    }
+    case "hook_list": {
+      const hooks = (ctx.hooks ?? [])
+        .filter((item) => item.enabled)
+        .map((item) => ({ event: item.event, title: item.title, body: item.body }));
+      return ok(hooks.length ? `有 ${hooks.length} 个钩子` : "还没有钩子", { hooks });
+    }
+    case "mcp_list": {
+      const servers = (ctx.mcpServers ?? []).map((item) => ({
+        name: item.name,
+        endpoint: mcpEndpointLabel(item),
+        enabled: item.enabled,
+        connected: false,
+      }));
+      return ok(
+        servers.length
+          ? `已登记 ${servers.length} 个 MCP 服务器，尚未连接`
+          : "还没有 MCP 服务器",
+        { servers },
+      );
+    }
+    case "plugin_list": {
+      const plugins = ctx.plugins ?? [];
+      return ok(
+        plugins.length ? `已启用 ${plugins.length} 个插件` : "当前没有启用的插件",
+        {
+          plugins,
+        },
+      );
+    }
+    case "host_tool_list": {
+      const tools = (ctx.hostTools ?? [])
+        .filter((item) => item.enabled && item.status === "ready")
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          path: item.path,
+          version: item.version,
+          usage: item.usage,
+        }));
+      return ok(
+        tools.length ? `有 ${tools.length} 个本机工具可用` : "还没有可用的本机工具",
+        {
+          tools,
+        },
+      );
+    }
+    case "host_tool_run":
+      throw new DomainError("本机工具要由桌面宿主运行");
+    case "skill_list": {
+      const skills = listEnabledSkillSummaries(ctx.skills ?? []);
+      return ok(skills.length ? `已启用 ${skills.length} 个技能` : "还没有启用的技能", {
+        skills,
+      });
+    }
+    case "skill_load": {
+      const name = str(args, "name");
+      const skillId = str(args, "skillId");
+      const query = name || skillId;
+      if (!query) throw new DomainError("请提供技能 name 或 skillId");
+      const skill = findSkill(ctx.skills ?? [], query);
+      if (!skill) throw new DomainError(`未找到技能「${query}」`);
+      return ok(`已加载技能「${skill.name}」`, {
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        dirPath: skill.dirPath,
+        body: skill.body,
+      });
+    }
     default:
       return {
         ok: false,

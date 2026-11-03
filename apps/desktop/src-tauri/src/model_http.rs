@@ -37,7 +37,11 @@ pub async fn model_http(
         .timeout(Duration::from_millis(timeout))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::limited(3));
-    if let Some(proxy_url) = proxy.as_deref().map(str::trim).filter(|item| !item.is_empty()) {
+    if let Some(proxy_url) = proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         let proxy = reqwest::Proxy::all(proxy_url).map_err(|_| "代理地址无效".to_string())?;
         builder = builder.proxy(proxy);
     }

@@ -343,7 +343,7 @@ export type ModelGroup = {
   id: string;
   name: string;
   kind: ProviderKind;
-  models: Array<{ id: string; ref: string }>;
+  models: Array<{ id: string; ref: string; title?: string }>;
 };
 
 export function modelGroups(store: ProviderStore = readProviderStore()): ModelGroup[] {
@@ -353,9 +353,10 @@ export function modelGroups(store: ProviderStore = readProviderStore()): ModelGr
       id: provider.id,
       name: provider.name,
       kind: provider.kind,
-      models: Object.keys(provider.models).map((id) => ({
+      models: Object.entries(provider.models).map(([id, caps]) => ({
         id,
         ref: `${provider.id}/${id}`,
+        title: caps.title,
       })),
     }));
 }

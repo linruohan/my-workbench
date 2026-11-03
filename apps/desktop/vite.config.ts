@@ -1,14 +1,57 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
+
+const ORT_ASSETS = ["ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"];
+
+function ortAssets(distDir: string): Plugin {
+  const serve = (name: string) => {
+    if (!ORT_ASSETS.includes(name)) return null;
+    const file = path.join(distDir, name);
+    return fs.existsSync(file) ? file : null;
+  };
+  return {
+    name: "ort-assets",
+    configureServer(server) {
+      server.middlewares.use("/ort", (req, res, next) => {
+        const name = decodeURIComponent((req.url ?? "").split("?")[0] ?? "").replace(
+          /^\/+/,
+          "",
+        );
+        const file = serve(name);
+        if (!file) {
+          next();
+          return;
+        }
+        res.setHeader(
+          "Content-Type",
+          name.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+        );
+        fs.createReadStream(file).pipe(res);
+      });
+    },
+    closeBundle() {
+      const out = path.resolve(rootDir, "dist/ort");
+      fs.mkdirSync(out, { recursive: true });
+      for (const name of ORT_ASSETS) {
+        const file = serve(name);
+        if (file) fs.copyFileSync(file, path.join(out, name));
+      }
+    },
+  };
+}
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const pkg = (rel: string) => path.resolve(rootDir, rel);
 const workspaceRoot = path.resolve(rootDir, "../..");
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    ortAssets(path.join(workspaceRoot, "node_modules/onnxruntime-web/dist")),
+  ],
   resolve: {
     // Exact matches only: a bare "@wb/theme" -> index.ts alias must not
     // swallow "@wb/theme/tokens.css" as index.ts/tokens.css.

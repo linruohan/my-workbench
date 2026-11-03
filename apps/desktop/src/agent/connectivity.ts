@@ -1,5 +1,7 @@
 import {
   applyRuntimeHeaders,
+  chatProviderFor,
+  isLocalBuiltin,
   buildConnectivityProbe,
   connectivityProbeJsonError,
   readConnectivityProbeEvent,
@@ -24,8 +26,9 @@ export async function testModelConnectivity(input: {
   ) => Promise<Response>;
   timeoutMs?: number;
 }): Promise<ModelConnectivityResult> {
-  const { provider, modelId } = input;
-  if (provider.kind === "builtin") {
+  const { modelId } = input;
+  const provider = chatProviderFor(input.provider, modelId);
+  if (isLocalBuiltin(input.provider, modelId)) {
     return fail("本机模型不需要测试连接");
   }
   if (!provider.enabled) return fail("请先启用供应商");

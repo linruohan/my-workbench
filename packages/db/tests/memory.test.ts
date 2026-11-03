@@ -13,4 +13,31 @@ describe("MemoryWorkbenchRepository", () => {
     restored.importSnapshot(json);
     expect(restored.listToday(now).map((t) => t.title)).toEqual(["本地快照"]);
   });
+
+  it("keeps one undismissed system notice and refreshes its body", () => {
+    const store = new MemoryWorkbenchRepository();
+    const first = store.pushNotification({
+      title: "识图模型下载失败",
+      body: "网络错误",
+      nowMs: 1,
+    });
+    const again = store.pushNotification({
+      title: "识图模型下载失败",
+      body: "下载超时",
+      nowMs: 2,
+    });
+    expect(again.id).toBe(first.id);
+    expect(store.listNotifications()).toEqual([
+      expect.objectContaining({
+        title: "识图模型下载失败",
+        body: "下载超时",
+        status: "delivered",
+      }),
+    ]);
+    store.dismissNotification(first.id);
+    store.pushNotification({ title: "识图模型下载失败", body: "再次失败", nowMs: 3 });
+    expect(
+      store.listNotifications().filter((item) => item.status !== "dismissed"),
+    ).toHaveLength(1);
+  });
 });

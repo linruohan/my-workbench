@@ -96,7 +96,7 @@ export const COLOR = {
     muted: "#9b9b9b",
     line: "#2a2a2a",
     accent: "#6b9cff",
-    accentSoft: "#2a2a2a",
+    accentSoft: "#1a2740",
     onAccent: "#0b1220",
     success: "#22c55e",
     warning: "#fbbf24",

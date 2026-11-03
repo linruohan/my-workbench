@@ -1,15 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  BUILTIN_MODEL_REF,
-  BUILTIN_PROVIDER_ID,
-  type ProviderConfig,
-  type ProviderKind,
-} from "@wb/domain";
+import { BUILTIN_PROVIDER_ID, type ProviderConfig, type ProviderKind } from "@wb/domain";
 import { ModelFormDialog, type ModelFormValues } from "./ModelFormDialog";
 import { useDialog } from "../shell/Dialogs";
 import { IconMore, IconPencil, IconPlus, IconRefresh, IconUnplug } from "../shell/icons";
 import { testModelConnectivity } from "./connectivity";
 import { fetchAvailableModels } from "./models-list";
+import { refreshOcFreeModels } from "./oc-models";
 import {
   credentialExists,
   deleteCredential,
@@ -171,11 +167,9 @@ export function ModelsPane() {
             />
           ) : selected?.kind === "builtin" ? (
             <BuiltinDetail
+              provider={selected}
               defaultModelRef={store.defaultModelRef}
-              onSetDefault={() => {
-                setDefaultModel(BUILTIN_MODEL_REF);
-                refresh();
-              }}
+              onRefresh={refresh}
             />
           ) : selected ? (
             <ProviderDetail
@@ -312,45 +306,199 @@ function editableKind(kind: ProviderKind): Exclude<ProviderKind, "builtin"> {
 }
 
 function BuiltinDetail({
+  provider,
   defaultModelRef,
-  onSetDefault,
+  onRefresh,
 }: {
+  provider: ProviderConfig;
   defaultModelRef: string;
-  onSetDefault: () => void;
+  onRefresh: () => void;
 }) {
-  const isDefault = defaultModelRef === BUILTIN_MODEL_REF;
+  const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [catalog, setCatalog] = useState<null | { pending: boolean; message: string }>(
+    null,
+  );
+  const [probes, setProbes] = useState<
+    Record<string, { pending: boolean; ok: boolean; message: string }>
+  >({});
+  const hasKey = credentialExists(provider.id);
+  const models = Object.entries(provider.models);
+
+  useEffect(() => {
+    let live = true;
+    void refreshOcFreeModels()
+      .then(() => {
+        if (live) onRefresh();
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+    // Load the catalog once when this provider card opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadCatalog = () => {
+    if (catalog?.pending) return;
+    setCatalog({ pending: true, message: "正在获取 OpenCode 免费模型" });
+    void refreshOcFreeModels()
+      .then((count) => {
+        onRefresh();
+        setCatalog({ pending: false, message: `获取到 ${count} 个免费模型` });
+      })
+      .catch((error: unknown) => {
+        setCatalog({
+          pending: false,
+          message: error instanceof Error ? error.message : "没有获取到免费模型",
+        });
+      });
+  };
+
+  const saveKey = () => {
+    if (apiKey.trim() || showKey) writeCredential(provider.id, apiKey);
+  };
+
   return (
     <div className="agent-models__card">
       <div className="agent-models__card-head">
         <div>
           <h2 className="agent-models__card-title">本机工作台</h2>
           <p className="agent-models__card-desc">
-            离线理解常用指令，不调用外部 API，也不需要密钥。
+            local 离线理解常用指令。其余模型从 OpenCode 目录按价格筛出，调用需要 OpenCode
+            密钥。
           </p>
         </div>
         <span className="settings__pill">内置</span>
       </div>
-      <div className="agent-models__field">
-        <span>状态</span>
-        <span className="agent-models__field-value">始终可用</span>
-      </div>
+      <label className="agent-models__field">
+        <span>OpenCode 密钥</span>
+        <div className="agent-models__key-row">
+          <input
+            className="settings__input settings__input--grow"
+            aria-label="OpenCode 密钥"
+            type={showKey ? "text" : "password"}
+            autoComplete="off"
+            value={apiKey}
+            placeholder={hasKey ? "已保存，输入新密钥可覆盖" : "OPENCODE_API_KEY"}
+            onChange={(event) => setApiKey(event.target.value)}
+            onBlur={saveKey}
+          />
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              if (!showKey && hasKey && !apiKey) {
+                setApiKey(readCredential(provider.id) ?? "");
+              }
+              setShowKey((value) => !value);
+            }}
+          >
+            {showKey ? "隐藏" : "显示"}
+          </button>
+        </div>
+      </label>
       <div className="agent-models__models-head">
         <h3>模型列表</h3>
+        <button
+          type="button"
+          className="btn"
+          disabled={catalog?.pending}
+          onClick={loadCatalog}
+        >
+          <IconRefresh size={14} />
+          获取免费模型
+        </button>
       </div>
+      {catalog ? (
+        <p className={catalog.pending ? "agent-models__probe" : "agent-models__probe"}>
+          {catalog.message}
+        </p>
+      ) : null}
       <ul className="agent-models__models">
-        <li className="agent-models__model">
-          <div>
-            <strong>local</strong>
-            <small>上下文 8192 · 输出 2048</small>
-          </div>
-          {isDefault ? (
-            <span className="settings__pill">默认</span>
-          ) : (
-            <button type="button" className="btn" onClick={onSetDefault}>
-              设为默认
-            </button>
-          )}
-        </li>
+        {models.map(([modelId, caps]) => {
+          const ref = `${provider.id}/${modelId}`;
+          const isDefault = defaultModelRef === ref;
+          const probe = probes[modelId];
+          return (
+            <li key={modelId} className="agent-models__model">
+              <div className="agent-models__model-main">
+                <strong>{caps.title || modelId}</strong>
+                <small>
+                  {modelId === "local" ? "离线指令 · " : ""}
+                  上下文 {caps.context} · 输出 {caps.output}
+                </small>
+                {probe ? (
+                  <small
+                    className={
+                      probe.ok
+                        ? "agent-models__probe is-ok"
+                        : "agent-models__probe is-bad"
+                    }
+                  >
+                    {probe.message}
+                  </small>
+                ) : null}
+              </div>
+              <div className="agent-models__model-actions">
+                {caps.endpoint ? (
+                  <button
+                    type="button"
+                    className="agent-models__icon-btn"
+                    aria-label={`测试模型 ${modelId}`}
+                    title="测试模型"
+                    disabled={probe?.pending}
+                    onClick={() => {
+                      setProbes((current) => ({
+                        ...current,
+                        [modelId]: {
+                          pending: true,
+                          ok: false,
+                          message: `正在测试 ${provider.name} / ${caps.title || modelId}`,
+                        },
+                      }));
+                      void testModelConnectivity({
+                        provider,
+                        modelId,
+                        apiKey: apiKey.trim() || readCredential(provider.id),
+                      }).then((result) => {
+                        const ok = result.success === true;
+                        setProbes((current) => ({
+                          ...current,
+                          [modelId]: {
+                            pending: false,
+                            ok,
+                            message: ok
+                              ? `${provider.name} / ${caps.title || modelId} 连接成功`
+                              : `${provider.name} / ${caps.title || modelId} 连接失败：${
+                                  result.success === false ? result.error.message : ""
+                                }`,
+                          },
+                        }));
+                      });
+                    }}
+                  >
+                    <IconUnplug size={14} />
+                  </button>
+                ) : null}
+                {isDefault ? (
+                  <span className="settings__pill">默认</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setDefaultModel(ref);
+                      onRefresh();
+                    }}
+                  >
+                    设为默认
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

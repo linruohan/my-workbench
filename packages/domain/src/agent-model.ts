@@ -29,8 +29,12 @@ export function buildModelHttpRequest(input: {
   system: string;
   messages: AgentMessage[];
   permissionMode: AgentPermissionMode;
+  /** When set, only these tool names are offered. */
+  toolAllowlist?: readonly string[];
+  /** Data URL attached to the latest user message when that model can see images. */
+  imageDataUrl?: string;
 }): ModelHttpRequest {
-  const tools = toolsForMode(input.permissionMode).map((spec) => ({
+  const tools = toolsForMode(input.permissionMode, input.toolAllowlist).map((spec) => ({
     name: spec.name,
     description: spec.description,
     parameters: spec.parameters,
@@ -70,7 +74,7 @@ export function buildModelHttpRequest(input: {
           description: spec.description,
           input_schema: spec.parameters,
         })),
-        messages: anthropicMessages(input.messages),
+        messages: anthropicMessages(input.messages, input.imageDataUrl),
       },
     };
   }
@@ -82,7 +86,7 @@ export function buildModelHttpRequest(input: {
       model: input.modelId,
       messages: [
         { role: "system", content: input.system },
-        ...openAiMessages(input.messages),
+        ...openAiMessages(input.messages, input.imageDataUrl),
       ],
       tools: tools.map((spec) => ({
         type: "function",
@@ -406,9 +410,25 @@ function responsesInput(messages: AgentMessage[]): unknown[] {
   return out;
 }
 
-function openAiMessages(messages: AgentMessage[]): unknown[] {
+function chatImage(dataUrl: string | undefined): string | null {
+  if (!dataUrl?.startsWith("data:image/")) return null;
+  if (dataUrl.length > 7_000_000) return null;
+  return dataUrl;
+}
+
+function lastUserIndex(messages: readonly AgentMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") return i;
+  }
+  return -1;
+}
+
+function openAiMessages(messages: AgentMessage[], imageDataUrl?: string): unknown[] {
+  const image = chatImage(imageDataUrl);
+  const imageAt = image ? lastUserIndex(messages) : -1;
   const out: unknown[] = [];
-  for (const message of messages) {
+  for (let i = 0; i < messages.length; i += 1) {
+    const message = messages[i]!;
     if (message.role === "system") continue;
     if (message.role === "tool") {
       out.push({
@@ -433,18 +453,54 @@ function openAiMessages(messages: AgentMessage[]): unknown[] {
         continue;
       }
     }
+    if (i === imageAt && image) {
+      out.push({
+        role: "user",
+        content: [
+          { type: "text", text: message.content || "请看这张图片" },
+          { type: "image_url", image_url: { url: image } },
+        ],
+      });
+      continue;
+    }
     out.push({ role: message.role, content: message.content });
   }
   return out;
 }
 
-function anthropicMessages(messages: AgentMessage[]): unknown[] {
+function anthropicImage(dataUrl: string): { mediaType: string; data: string } | null {
+  const matched = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/.exec(
+    dataUrl,
+  );
+  const mediaType = matched?.[1];
+  const data = matched?.[2]?.replace(/\s/g, "");
+  if (!mediaType || !data) return null;
+  return { mediaType, data };
+}
+
+function anthropicMessages(messages: AgentMessage[], imageDataUrl?: string): unknown[] {
+  const image = chatImage(imageDataUrl);
+  const parsed = image ? anthropicImage(image) : null;
+  const imageAt = parsed ? lastUserIndex(messages) : -1;
   const out: Array<{ role: string; content: unknown }> = [];
   for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i]!;
     if (message.role === "system" || message.role === "tool") continue;
     if (message.role === "user") {
-      out.push({ role: "user", content: message.content });
+      if (i === imageAt && parsed) {
+        out.push({
+          role: "user",
+          content: [
+            { type: "text", text: message.content || "请看这张图片" },
+            {
+              type: "image",
+              source: { type: "base64", media_type: parsed.mediaType, data: parsed.data },
+            },
+          ],
+        });
+      } else {
+        out.push({ role: "user", content: message.content });
+      }
       continue;
     }
     const calls = readCalls(message.toolCallsJson);

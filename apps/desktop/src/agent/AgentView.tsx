@@ -1,29 +1,58 @@
 import { useEffect, useRef, useState } from "react";
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
+  addAgentMemory,
   agentEditPlan,
   agentEmptyGreeting,
   agentRetryPlan,
+  applyMention,
+  applySlashToken,
+  compactMarkerText,
   filterAgentThreads,
+  findSubagent,
+  forgetAgentMemory,
   formatAgentBubbleTime,
   formatAgentRelativeShort,
+  formatMemoriesForPrompt,
+  formatSubagentList,
+  DEFAULT_AGENT_WORKSPACE_TITLE,
   describeToolArgs,
   describeToolResult,
   formatAgentMoment,
   groupAgentThreadsByWorkspace,
+  manualCompactPlan,
+  normalizeAgentWebUrl,
+  orderAgentWorkspaceThreads,
+  WEB_AGENT_THREAD_TITLE,
+  findProvider,
+  imageOnlyCaption,
+  isLocalBuiltin,
+  localOcrReply,
+  mentionQuery,
+  mentionSuggestions,
   modelSwitchText,
   permissionModeLabel,
   parseModelRef,
   relativizeScheduleText,
   resolveSlash,
   SLASH_COMMANDS,
+  slashSkillSuggestions,
   slashSuggestions,
+  subagentTurnText,
+  type AgentCustomCommand,
+  type AgentHook,
+  type AgentMemory,
   type AgentMessage,
   type AgentPermissionMode,
+  type AgentSkill,
+  type AgentSubagent,
   type AgentThread,
+  type HostToolSnapshot,
+  type McpServer,
   type SlashAction,
 } from "@wb/domain";
 import { readCredential } from "./credentials";
+import { runHostTool } from "./host-tools";
 import type { AgentUiEffect } from "./execute";
 import { htmlTextHitCount, literalHitCount, markHtmlHits, splitHits } from "./find-text";
 import { readInputHistory, rememberInput } from "./input-history";
@@ -31,6 +60,7 @@ import { enqueuePrompt, recallQueuedPrompt, removeQueuedPrompt } from "./prompt-
 import { writeClipboard } from "../lib/clipboard";
 import { copyCodeBlock } from "../lib/code-copy";
 import { errorMessage } from "../lib/errors";
+import { isTauriRuntime } from "../lib/paths";
 import { renderChatMarkdown } from "../lib/markdown";
 import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { useDialog } from "../shell/Dialogs";
@@ -40,15 +70,24 @@ import {
   IconFolder,
   IconFolderOpen,
   IconGitBranch,
+  IconGlobe,
   IconHand,
   IconMore,
   IconPencil,
   IconPlus,
+  IconRefresh,
   IconSearch,
   IconStop,
 } from "../shell/icons";
 import { readGitBranch } from "../notes/kb-api";
 import { ModelMenu } from "./ModelMenu";
+import {
+  webSessionClose,
+  webSessionEmbedded,
+  webSessionHide,
+  webSessionReload,
+  webSessionShow,
+} from "./web-session";
 import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
 import {
   resumeAgentQueue,
@@ -62,6 +101,16 @@ type Props = {
   threadId: string | null;
   displayName: string;
   rules: string;
+  /** Enabled skills discovered from Settings → 技能. */
+  skills?: AgentSkill[];
+  memories?: AgentMemory[];
+  onMemories?: (next: AgentMemory[]) => void;
+  commands?: AgentCustomCommand[];
+  subagents?: AgentSubagent[];
+  hooks?: AgentHook[];
+  plugins?: Array<{ name: string; version: string; description: string }>;
+  mcpServers?: McpServer[];
+  hostTools?: HostToolSnapshot[];
   activeTimerTaskId: string | null;
   timerStartedAt: number | null;
   onSelectThread: (id: string | null) => void;
@@ -81,6 +130,15 @@ export function AgentView({
   threadId,
   displayName,
   rules,
+  skills = [],
+  memories = [],
+  onMemories,
+  commands = [],
+  subagents = [],
+  hooks = [],
+  plugins = [],
+  mcpServers = [],
+  hostTools = [],
   activeTimerTaskId,
   timerStartedAt,
   onSelectThread,
@@ -113,6 +171,8 @@ export function AgentView({
   const [queueRev, setQueueRev] = useState(0);
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
+  const [webReload, setWebReload] = useState(0);
+  const [webSessionError, setWebSessionError] = useState("");
   const [findQuery, setFindQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
@@ -137,6 +197,7 @@ export function AgentView({
   const [titleDraft, setTitleDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const approveBtnRef = useRef<HTMLButtonElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const activeHitRef = useRef(0);
   const drafts = useRef(new Map<string, string>());
@@ -155,6 +216,11 @@ export function AgentView({
   const sending = useRef(false);
   const busyHere = Boolean(thread && busyThreadId === thread.id);
   const findOpenRef = useRef(false);
+  const webSessionRef = useRef(false);
+  const webHostRef = useRef<HTMLDivElement>(null);
+  const webCoveredRef = useRef(false);
+  const webSyncRef = useRef<() => void>(() => {});
+  webSessionRef.current = Boolean(thread?.webUrl);
   findOpenRef.current = findOpen;
   const viewingThreadId = useRef(thread?.id ?? null);
   viewingThreadId.current = thread?.id ?? null;
@@ -261,6 +327,7 @@ export function AgentView({
     const onKey = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       if ((event.ctrlKey || event.metaKey) && key === "f") {
+        if (webSessionRef.current) return;
         event.preventDefault();
         setFindOpen(true);
         setFindTick((tick) => tick + 1);
@@ -277,8 +344,18 @@ export function AgentView({
         return;
       }
       if (!pendingRef.current || sending.current) return;
-      const tag = (event.target as HTMLElement | null)?.tagName;
-      if (tag === "SELECT" || tag === "TEXTAREA" || tag === "INPUT") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const inComposer = Boolean(target?.closest(".agent__composer"));
+      const inApproval = Boolean(target?.closest(".agent__approval"));
+      // Allow Enter/Esc from composer or approval panel; skip other form fields.
+      if (
+        !inComposer &&
+        !inApproval &&
+        (tag === "SELECT" || tag === "TEXTAREA" || tag === "INPUT")
+      ) {
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         void decideRef.current("denied");
@@ -292,14 +369,23 @@ export function AgentView({
   }, []);
 
   useEffect(() => {
+    if (!pending) return;
+    setPicker(null);
+    const frame = requestAnimationFrame(() => {
+      approveBtnRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [pending?.id]);
+
+  useEffect(() => {
     if (findOpen) {
       findInputRef.current?.focus();
       findInputRef.current?.select();
       return;
     }
-    if (!thread || pendingRef.current) return;
+    if (!thread || thread.webUrl || pendingRef.current) return;
     inputRef.current?.focus({ preventScroll: true });
-  }, [findOpen, findTick, thread?.id]);
+  }, [findOpen, findTick, thread?.id, thread?.webUrl]);
 
   useEffect(() => {
     if (!findOpen || !findQuery.trim()) return;
@@ -319,13 +405,56 @@ export function AgentView({
 
   // Keep the composer ready to type when entering Agent or switching sessions.
   useEffect(() => {
-    if (!thread) return;
+    if (!thread || thread.webUrl) return;
     const frame = requestAnimationFrame(() => {
       if (findOpenRef.current || pendingRef.current) return;
       inputRef.current?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [thread?.id]);
+  }, [thread?.id, thread?.webUrl]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    return () => {
+      void webSessionClose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const url = thread?.webUrl ?? "";
+    const sync = () => {
+      if (webCoveredRef.current) return;
+      if (!url) {
+        void webSessionHide();
+        return;
+      }
+      const node = webHostRef.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2) return;
+      void webSessionShow({
+        url,
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+      }).then(
+        () => setWebSessionError(""),
+        (err) => setWebSessionError(errorMessage(err, "无法打开网页")),
+      );
+    };
+    webSyncRef.current = sync;
+    sync();
+    const observer = new ResizeObserver(sync);
+    if (webHostRef.current) observer.observe(webHostRef.current);
+    window.addEventListener("resize", sync);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", sync);
+      webSyncRef.current = () => {};
+    };
+  }, [thread?.webUrl]);
 
   useEffect(() => {
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
@@ -361,6 +490,15 @@ export function AgentView({
       readApiKey: readCredential,
       displayName,
       rules,
+      skills,
+      memories,
+      onMemories,
+      subagents,
+      hooks,
+      plugins,
+      mcpServers,
+      hostTools,
+      runHostTool: (args) => runHostTool(hostTools, args),
       timer: { taskId: activeTimerTaskId, startedAt: timerStartedAt },
       onStep: onRefresh,
       onDelta: (text) => {
@@ -474,7 +612,10 @@ export function AgentView({
     write(history[nav.index] ?? "");
   };
 
-  const sendPrompt = async (content: string): Promise<boolean> => {
+  const sendPrompt = async (
+    content: string,
+    subagent?: AgentSubagent,
+  ): Promise<boolean> => {
     const current = env();
     if (!current || sending.current || busyThreadId || pending) return false;
     sending.current = true;
@@ -486,7 +627,15 @@ export function AgentView({
     if (isRemoteModel(thread?.modelRef)) setBusyThreadId(current.threadId);
     try {
       const result = await startAgentTurn(
-        { ...current, signal: controller.signal },
+        {
+          ...current,
+          signal: controller.signal,
+          subagentPrompt: subagent
+            ? `你正在作为子智能体「${subagent.name}」回答。\n${subagent.prompt}`
+            : undefined,
+          toolAllowlist:
+            subagent && subagent.toolNames.length ? subagent.toolNames : undefined,
+        },
         content,
       );
       finish(result.effects);
@@ -559,6 +708,80 @@ export function AgentView({
       void sendPrompt(action.text);
       return;
     }
+    if (action.type === "compact") {
+      const plan = manualCompactPlan(store.listAgentMessages(thread.id));
+      if (!plan) {
+        say(command, "当前对话还很短，不必压缩。");
+        return;
+      }
+      const now = Date.now();
+      if (thread.title === "新会话") {
+        store.updateAgentThread(thread.id, { title: slashThreadTitle(command) });
+      }
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "user",
+        content: command,
+        nowMs: now,
+      });
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "system",
+        content: compactMarkerText(plan.summary, plan.dropped),
+        nowMs: now,
+      });
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "assistant",
+        content: "已压缩更早的对话。模型之后只看摘要和这之后的内容。",
+        nowMs: now,
+      });
+      onRefresh();
+      return;
+    }
+    if (action.type === "memory") {
+      const query = action.text.trim();
+      if (!query) {
+        say(command, formatMemoriesForPrompt(memories) || "还没有记忆。");
+        return;
+      }
+      const forgetting = /^(?:忘记|忘掉)\s+([\s\S]+)$/.exec(query);
+      if (forgetting?.[1]) {
+        const result = forgetAgentMemory(memories, forgetting[1].trim());
+        if (!result.removed) {
+          say(command, "没有匹配的记忆。");
+          return;
+        }
+        onMemories?.(result.memories);
+        say(command, `已删除 ${result.removed} 条记忆。`);
+        return;
+      }
+      const result = addAgentMemory(memories, query);
+      if (!result.added) {
+        say(command, result.reason ?? "无法记下。");
+        return;
+      }
+      onMemories?.(result.memories);
+      say(command, `已记住「${result.added.text}」。`);
+      return;
+    }
+    if (action.type === "agent") {
+      if (!action.name) {
+        say(command, formatSubagentList(subagents));
+        return;
+      }
+      const found = findSubagent(subagents, action.name);
+      if (!found) {
+        say(command, `没有叫「${action.name}」的子智能体。`);
+        return;
+      }
+      if (!action.task) {
+        say(command, `${found.name}：${found.description}`);
+        return;
+      }
+      void sendPrompt(subagentTurnText(found, action.task), found);
+      return;
+    }
     say(command, action.text);
   };
 
@@ -569,7 +792,7 @@ export function AgentView({
       setError("另一个会话还在回答");
       return;
     }
-    const action = resolveSlash(content, thread.permissionMode);
+    const action = resolveSlash(content, thread.permissionMode, commands);
     if (busyHere) {
       if (action) {
         setError("请等当前回答结束后再使用命令");
@@ -598,7 +821,7 @@ export function AgentView({
     if (!thread || busyThreadId || pending || sending.current) return;
     const plan = agentRetryPlan(store.listAgentMessages(thread.id));
     if (!plan) return;
-    const action = resolveSlash(plan.text, thread.permissionMode);
+    const action = resolveSlash(plan.text, thread.permissionMode, commands);
     store.deleteAgentMessagesFrom(thread.id, plan.userMessageId);
     onRefresh();
     if (action) {
@@ -811,9 +1034,37 @@ export function AgentView({
   };
 
   const mode = thread?.permissionMode ?? "confirm";
-  const suggestions = slashSuggestions(draft);
-  const showSlash = !slashUi.dismissed && !busyHere && suggestions.length > 0;
-  const slashPick = Math.min(slashUi.index, Math.max(suggestions.length - 1, 0));
+  const suggestions = slashSuggestions(draft, commands);
+  const skillHits = slashSkillSuggestions(draft, skills);
+  const slashRows = [
+    ...suggestions.map((command) => ({
+      kind: "command" as const,
+      name: command.name,
+      summary: command.summary,
+    })),
+    ...skillHits.map((skill) => ({
+      kind: "skill" as const,
+      name: skill.name,
+      summary: skill.summary,
+    })),
+  ];
+  const showSlash = !slashUi.dismissed && !busyHere && slashRows.length > 0;
+  const slashPick = Math.min(slashUi.index, Math.max(slashRows.length - 1, 0));
+  const mentionItems = mentionSuggestions(draft, [
+    ...skills.map((skill) => ({
+      kind: "skill" as const,
+      name: skill.name,
+      summary: skill.description,
+    })),
+    ...subagents.map((agent) => ({
+      kind: "subagent" as const,
+      name: agent.name,
+      summary: agent.description,
+    })),
+  ]);
+  const showMention =
+    !showSlash && mentionQuery(draft) != null && mentionItems.length > 0;
+  const mentionPick = Math.min(slashUi.index, Math.max(mentionItems.length - 1, 0));
   const nowMs = Date.now();
   const turns = conversationBlocks(messages, Boolean(pending));
   const blockTexts = turns.map((turn) =>
@@ -862,7 +1113,7 @@ export function AgentView({
   const queued = queueLength(thread?.queueJson ?? null);
   const queuedPrompts = thread ? (queues[thread.id] ?? []) : [];
   const slashDraft = Boolean(
-    thread && draft.trim() && resolveSlash(draft.trim(), thread.permissionMode),
+    thread && draft.trim() && resolveSlash(draft.trim(), thread.permissionMode, commands),
   );
   const argLines = pending ? describeToolArgs(parseArgs(pending.argsJson), nowMs) : "";
   const needle = threadQuery.trim().toLowerCase();
@@ -884,6 +1135,58 @@ export function AgentView({
     if (thread) drafts.current.set(thread.id, value);
     setPicker(null);
     requestAnimationFrame(() => inputRef.current?.focus());
+  };
+  const openWebSession = async () => {
+    const raw = await dialog.prompt({
+      title: "打开网页",
+      label: "网址",
+      confirmLabel: "打开",
+    });
+    if (!raw) return;
+    const webUrl = normalizeAgentWebUrl(raw);
+    if (!webUrl) {
+      await dialog.alert({ title: "无法打开", message: "请输入 http 或 https 网址。" });
+      return;
+    }
+    const existing = store
+      .listAgentWorkspaces()
+      .find((item) => item.title === DEFAULT_AGENT_WORKSPACE_TITLE);
+    const workspace =
+      existing ?? store.createAgentWorkspace({ title: DEFAULT_AGENT_WORKSPACE_TITLE });
+    const created = store.createAgentThread({
+      workspaceId: workspace.id,
+      title: WEB_AGENT_THREAD_TITLE,
+      webUrl,
+      modelRef: readProviderStore().defaultModelRef,
+    });
+    setCollapsedWorkspaces((current) => ({ ...current, [workspace.id]: false }));
+    onSelectThread(created.id);
+    onRefresh();
+  };
+  const editWebSession = async () => {
+    if (!thread?.webUrl) return;
+    webCoveredRef.current = true;
+    if (isTauriRuntime()) await webSessionHide().catch(() => undefined);
+    try {
+      const raw = await dialog.prompt({
+        title: "修改链接",
+        label: "网址",
+        initialValue: thread.webUrl,
+        confirmLabel: "保存",
+      });
+      if (!raw) return;
+      const webUrl = normalizeAgentWebUrl(raw);
+      if (!webUrl) {
+        await dialog.alert({ title: "无法打开", message: "请输入 http 或 https 网址。" });
+        return;
+      }
+      if (webUrl === thread.webUrl) return;
+      store.updateAgentThread(thread.id, { webUrl });
+      onRefresh();
+    } finally {
+      webCoveredRef.current = false;
+      webSyncRef.current();
+    }
   };
 
   return (
@@ -945,6 +1248,16 @@ export function AgentView({
                 </div>
               ) : null}
             </div>
+            <button
+              type="button"
+              className="agent__threads-tool agent__threads-tool--text"
+              title="打开网页"
+              aria-label="网页"
+              onClick={() => void openWebSession()}
+            >
+              <IconGlobe size={14} />
+              <span>网页</span>
+            </button>
             <button
               type="button"
               className="agent__threads-tool"
@@ -1111,7 +1424,10 @@ export function AgentView({
                     <p className="agent__workspace-empty">还没有会话</p>
                   ) : (
                     <ul className="agent__workspace-threads">
-                      {items.map((item) => {
+                      {orderAgentWorkspaceThreads(
+                        items,
+                        workspace.title === DEFAULT_AGENT_WORKSPACE_TITLE,
+                      ).map((item) => {
                         const archived = item.archivedAt != null;
                         const menuOpen = threadMenuId === item.id;
                         const age = formatAgentRelativeShort(item.updatedAt, nowMs);
@@ -1153,6 +1469,7 @@ export function AgentView({
                                     ? "agent__thread is-active"
                                     : "agent__thread"
                                 }
+                                title={item.webUrl || undefined}
                                 onClick={() => onSelectThread(item.id)}
                               >
                                 <span className="agent__thread-title">
@@ -1236,7 +1553,53 @@ export function AgentView({
       </aside>
 
       <div className="agent__main">
-        {thread ? (
+        {thread?.webUrl ? (
+          <div className="agent__web-frame">
+            <div className="agent__web-tools">
+              <button
+                type="button"
+                className="agent__web-tool"
+                title="刷新"
+                aria-label="刷新网页"
+                onClick={() => {
+                  if (webSessionEmbedded()) {
+                    void webSessionReload().catch((err) =>
+                      setWebSessionError(errorMessage(err, "无法刷新网页")),
+                    );
+                    return;
+                  }
+                  setWebReload((count) => count + 1);
+                }}
+              >
+                <IconRefresh size={14} />
+              </button>
+              <button
+                type="button"
+                className="agent__web-tool"
+                title="修改链接"
+                aria-label="修改链接"
+                onClick={() => void editWebSession()}
+              >
+                <IconPencil size={14} />
+              </button>
+            </div>
+            <div className="agent__web-host" ref={webHostRef}>
+              {webSessionEmbedded() ? (
+                webSessionError ? (
+                  <p className="agent__web-error">{webSessionError}</p>
+                ) : null
+              ) : (
+                <iframe
+                  key={`${thread.id}-${webReload}`}
+                  className="agent__web"
+                  title={thread.title}
+                  src={thread.webUrl}
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
+                />
+              )}
+            </div>
+          </div>
+        ) : thread ? (
           <header className="agent__chrome">
             {renaming ? (
               <input
@@ -1286,557 +1649,673 @@ export function AgentView({
           </header>
         ) : null}
 
-        {findOpen ? (
-          <form
-            className="agent__find"
-            role="search"
-            aria-label="在会话中查找"
-            onSubmit={(event) => {
-              event.preventDefault();
-              moveFind(1);
-            }}
-          >
-            <input
-              ref={findInputRef}
-              aria-label="查找"
-              placeholder="查找"
-              value={findQuery}
-              onChange={(event) => {
-                setFindQuery(event.target.value);
-                setFindIndex(0);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
+        {thread?.webUrl ? null : (
+          <>
+            {findOpen ? (
+              <form
+                className="agent__find"
+                role="search"
+                aria-label="在会话中查找"
+                onSubmit={(event) => {
                   event.preventDefault();
-                  moveFind(event.shiftKey ? -1 : 1);
-                } else if (event.key === "Escape") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setFindOpen(false);
-                }
-              }}
-            />
-            <span className="agent__find-status" aria-live="polite">
-              {findStatus}
-            </span>
-            <button
-              type="button"
-              className="btn"
-              disabled={totalHits === 0}
-              onClick={() => moveFind(-1)}
-            >
-              上一个
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={totalHits === 0}
-              onClick={() => moveFind(1)}
-            >
-              下一个
-            </button>
-            <button
-              type="button"
-              className="btn"
-              aria-label="关闭查找"
-              onClick={() => setFindOpen(false)}
-            >
-              关闭
-            </button>
-          </form>
-        ) : null}
-
-        <div className="agent__stage">
-          <div
-            className="agent__log"
-            ref={logRef}
-            aria-live="polite"
-            onScroll={(event) => {
-              const node = event.currentTarget;
-              const next = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-              stickRef.current = next;
-              setPinned((current) => (current === next ? current : next));
-            }}
-          >
-            <div className="agent__log-body">
-              {!thread ? (
-                <div className="agent__empty">
-                  <p className="agent__greeting">选一个文件夹开始对话</p>
-                  <p className="agent__empty-desc">用自然语言管理任务、笔记和提醒。</p>
-                  <button type="button" className="primary" onClick={onCreateFromFolder}>
-                    新建会话
-                  </button>
-                </div>
-              ) : messages.length === 0 ? (
-                <div className="agent__empty">
-                  <p className="agent__greeting">
-                    {agentEmptyGreeting(new Date().getHours())}
-                  </p>
-                  <div className="agent__examples">
-                    {EXAMPLES.map((example) => (
-                      <button
-                        key={example}
-                        type="button"
-                        className="agent__chip"
-                        onClick={() => void send(example)}
-                      >
-                        {example}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                turns.map((turn, index) => {
-                  const findBase = findBases[index] ?? 0;
-                  if (turn.kind === "marker") {
-                    return (
-                      <p key={turn.message.id} className="agent__marker" role="status">
-                        {findNeedle.trim() ? (
-                          <HighlightedPlain
-                            text={turn.message.content}
-                            query={findNeedle}
-                            indexBase={findBase}
-                            active={activeHit}
-                          />
-                        ) : (
-                          turn.message.content
-                        )}
-                      </p>
-                    );
-                  }
-                  if (turn.kind === "user") {
-                    return (
-                      <article
-                        key={turn.message.id}
-                        className="agent__msg agent__msg--user"
-                        aria-label="你"
-                      >
-                        <div className="agent__bubble">
-                          {findNeedle.trim() ? (
-                            <HighlightedPlain
-                              text={turn.message.content}
-                              query={findNeedle}
-                              indexBase={findBase}
-                              active={activeHit}
-                            />
-                          ) : (
-                            turn.message.content
-                          )}
-                        </div>
-                        <div className="agent__msg-actions">
-                          <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
-                          <button
-                            type="button"
-                            className="agent__copy"
-                            onClick={() =>
-                              void copyReply(turn.message.id, turn.message.content)
-                            }
-                          >
-                            {copied === turn.message.id ? "已复制" : "复制"}
-                          </button>
-                          {editPlan?.userMessageId === turn.message.id ? (
-                            <button
-                              type="button"
-                              className="agent__copy"
-                              onClick={editLast}
-                            >
-                              编辑
-                            </button>
-                          ) : null}
-                        </div>
-                      </article>
-                    );
-                  }
-                  const text = turn.messages
-                    .map((message) => displayContent(message, nowMs))
-                    .filter(Boolean)
-                    .join("\n\n");
-                  if (!text) return null;
-                  const id = turn.messages[0]!.id;
-                  const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
-                  return (
-                    <article
-                      key={id}
-                      className="agent__msg agent__msg--assistant"
-                      aria-label="Agent"
-                    >
-                      <AgentMarkdown
-                        text={text}
-                        query={findNeedle}
-                        indexBase={findBase}
-                        active={activeHit}
-                      />
-                      <div className="agent__msg-actions">
-                        <MessageTime ms={stamp} nowMs={nowMs} />
-                        <button
-                          type="button"
-                          className="agent__copy"
-                          onClick={() => void copyReply(id, text)}
-                        >
-                          {copied === id ? "已复制" : "复制"}
-                        </button>
-                        {retryPlan && id === lastAgentId ? (
-                          <button
-                            type="button"
-                            className="agent__copy"
-                            onClick={retryLast}
-                          >
-                            重试
-                          </button>
-                        ) : null}
-                      </div>
-                    </article>
-                  );
-                })
-              )}
-              {live ? (
-                <article className="agent__msg agent__msg--assistant" aria-label="Agent">
-                  <AgentMarkdown text={live} />
-                </article>
-              ) : null}
-              {busyHere && !live ? (
-                <p className="agent__thinking" aria-live="polite">
-                  正在思考…
-                </p>
-              ) : null}
-            </div>
-          </div>
-          {thread && messages.length > 0 && !pinned ? (
-            <button
-              type="button"
-              className="agent__jump"
-              aria-label="回到底部"
-              onClick={jumpBottom}
-            >
-              <IconArrowUp size={16} />
-            </button>
-          ) : null}
-        </div>
-
-        <div className="agent__dock">
-          {pending ? (
-            <div className="agent__approval" role="region" aria-label="待确认操作">
-              <div>
-                <strong>需要确认</strong>
-                <p>{relativizeScheduleText(pending.summary, nowMs)}</p>
-                {queued > 1 ? <p>后面还有 {queued - 1} 步。</p> : null}
-              </div>
-              {argLines ? (
-                <details className="agent__approval-more">
-                  <summary>详情</summary>
-                  <p className="agent__approval-detail">{argLines}</p>
-                </details>
-              ) : null}
-              <div className="agent__approval-actions">
+                  moveFind(1);
+                }}
+              >
+                <input
+                  ref={findInputRef}
+                  aria-label="查找"
+                  placeholder="查找"
+                  value={findQuery}
+                  onChange={(event) => {
+                    setFindQuery(event.target.value);
+                    setFindIndex(0);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      moveFind(event.shiftKey ? -1 : 1);
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setFindOpen(false);
+                    }
+                  }}
+                />
+                <span className="agent__find-status" aria-live="polite">
+                  {findStatus}
+                </span>
                 <button
                   type="button"
-                  className="primary"
-                  disabled={Boolean(busyThreadId)}
-                  onClick={() => void decide("approved")}
+                  className="btn"
+                  disabled={totalHits === 0}
+                  onClick={() => moveFind(-1)}
                 >
-                  批准
+                  上一个
                 </button>
                 <button
                   type="button"
                   className="btn"
-                  disabled={Boolean(busyThreadId)}
-                  onClick={() => void decide("denied")}
+                  disabled={totalHits === 0}
+                  onClick={() => moveFind(1)}
                 >
-                  拒绝
+                  下一个
                 </button>
-                <span className="agent__approval-hint">Enter 批准 · Esc 拒绝</span>
-              </div>
-            </div>
-          ) : null}
-
-          {error ? <p className="agent__error">{error}</p> : null}
-
-          {queuedPrompts.length > 0 ? (
-            <div className="agent__outbox" aria-label="排队消息">
-              <div className="agent__outbox-head">
-                <span>排队 {queuedPrompts.length}</span>
-                {!busyHere && !pending ? (
-                  <button type="button" className="btn" onClick={releaseQueue}>
-                    继续发送
-                  </button>
-                ) : null}
-              </div>
-              <ol>
-                {queuedPrompts.map((item, index) => (
-                  <li key={`${index}-${item}`}>
-                    <span>{item}</span>
-                    <button
-                      type="button"
-                      className="btn"
-                      aria-label={`取回排队 ${item}`}
-                      onClick={() => recallQueued(index)}
-                    >
-                      取回
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      aria-label={`移除排队 ${item}`}
-                      onClick={() => removeQueued(index)}
-                    >
-                      移除
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          ) : null}
-
-          <form
-            className={
-              showComposerContext ? "agent__composer is-framed" : "agent__composer"
-            }
-            onSubmit={(event) => {
-              event.preventDefault();
-              const picked = showSlash ? suggestions[slashPick] : null;
-              void send(picked ? `/${picked.name}` : draft);
-            }}
-          >
-            {showComposerContext && activeWorkspace ? (
-              <div className="agent__composer-context">
-                <div className="agent__composer-chip-wrap">
-                  <button
-                    type="button"
-                    className="agent__composer-chip"
-                    title={activeWorkspace.rootPath || activeWorkspace.title}
-                    aria-haspopup="menu"
-                    aria-expanded={picker === "workspace"}
-                    onClick={() =>
-                      setPicker((current) =>
-                        current === "workspace" ? null : "workspace",
-                      )
-                    }
-                  >
-                    <IconFolder size={14} />
-                    <span>{activeWorkspace.title}</span>
-                    <span aria-hidden="true">▾</span>
-                  </button>
-                  {picker === "workspace" ? (
-                    <div
-                      className="agent__thread-menu agent__composer-chip-menu"
-                      role="menu"
-                      aria-label="工作区"
-                    >
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setPicker(null);
-                          onCreateThread(activeWorkspace.id);
-                        }}
-                      >
-                        在此新建会话
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setPicker(null);
-                          onCreateFromFolder();
-                        }}
-                      >
-                        打开其他文件夹…
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-                {gitBranch ? (
-                  <span
-                    className="agent__composer-chip agent__composer-chip--static"
-                    title={`当前分支 ${gitBranch}`}
-                  >
-                    <IconGitBranch size={14} />
-                    <span>{gitBranch}</span>
-                    <span aria-hidden="true">▾</span>
-                  </span>
-                ) : null}
                 <button
                   type="button"
-                  className="agent__composer-chip-add"
-                  title="打开其他文件夹"
-                  aria-label="打开其他文件夹"
-                  onClick={onCreateFromFolder}
+                  className="btn"
+                  aria-label="关闭查找"
+                  onClick={() => setFindOpen(false)}
                 >
-                  <IconPlus size={14} />
+                  关闭
                 </button>
-              </div>
+              </form>
             ) : null}
-            <div className="agent__composer-shell">
-              {showSlash ? (
-                <ul className="agent__slash" aria-label="斜杠命令">
-                  {suggestions.map((command, index) => (
-                    <li key={command.name}>
+
+            <div className="agent__stage">
+              <div
+                className="agent__log"
+                ref={logRef}
+                aria-live="polite"
+                onScroll={(event) => {
+                  const node = event.currentTarget;
+                  const next =
+                    node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+                  stickRef.current = next;
+                  setPinned((current) => (current === next ? current : next));
+                }}
+              >
+                <div className="agent__log-body">
+                  {!thread ? (
+                    <div className="agent__empty">
+                      <p className="agent__greeting">选一个文件夹开始对话</p>
+                      <p className="agent__empty-desc">
+                        用自然语言管理任务、笔记和提醒。
+                      </p>
                       <button
                         type="button"
-                        className={index === slashPick ? "is-active" : undefined}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => void send(`/${command.name}`)}
+                        className="primary"
+                        onClick={onCreateFromFolder}
                       >
-                        <span>/{command.name}</span>
-                        <small>{command.summary}</small>
+                        新建会话
                       </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-              <textarea
-                ref={inputRef}
-                aria-label="给 Agent 发消息"
-                placeholder={
-                  busyHere
-                    ? "这条会排在当前回答之后"
-                    : pending
-                      ? "请先处理待确认操作"
-                      : "向工作台提问，使用 / 选择命令或能力"
-                }
-                title={
-                  busyHere
-                    ? "Enter 把这条排到当前回答之后"
-                    : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
-                }
-                value={draft}
-                disabled={!thread}
-                rows={2}
-                onChange={(event) => {
-                  historyNav.current = null;
-                  const value = event.target.value;
-                  setDraft(value);
-                  if (thread) drafts.current.set(thread.id, value);
-                }}
-                onKeyDown={(event) => {
-                  if (showSlash && event.key === "ArrowDown") {
-                    event.preventDefault();
-                    setSlashUi((ui) => ({
-                      ...ui,
-                      index: (slashPick + 1) % suggestions.length,
-                    }));
-                    return;
-                  }
-                  if (showSlash && event.key === "ArrowUp") {
-                    event.preventDefault();
-                    setSlashUi((ui) => ({
-                      ...ui,
-                      index: (slashPick - 1 + suggestions.length) % suggestions.length,
-                    }));
-                    return;
-                  }
-                  if (showSlash && event.key === "Tab") {
-                    event.preventDefault();
-                    const command = suggestions[slashPick];
-                    if (!command) return;
-                    insertComposerText(`/${command.name} `);
-                    return;
-                  }
-                  if (showSlash && event.key === "Escape") {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setSlashUi((ui) => ({ ...ui, dismissed: true }));
-                    return;
-                  }
-                  const node = event.currentTarget;
-                  if (event.key === "ArrowUp" && atFirstLine(node)) {
-                    event.preventDefault();
-                    recallHistory(-1);
-                    return;
-                  }
-                  if (
-                    event.key === "ArrowDown" &&
-                    historyNav.current &&
-                    atFirstLine(node)
-                  ) {
-                    event.preventDefault();
-                    recallHistory(1);
-                    return;
-                  }
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    const picked = showSlash ? suggestions[slashPick] : null;
-                    void send(picked ? `/${picked.name}` : draft);
-                  }
-                }}
-              />
-              <div className="agent__composer-bar">
-                <div className="agent__composer-leading">
-                  <ComposerPlusMenu
-                    disabled={!thread || Boolean(pending)}
-                    open={picker === "plus"}
-                    onOpenChange={(next) => {
-                      setPicker((current) =>
-                        next ? "plus" : current === "plus" ? null : current,
-                      );
-                    }}
-                    onInsert={(value) => insertComposerText(value)}
-                    onRun={(value) => {
-                      setPicker(null);
-                      void send(value);
-                    }}
-                  />
-                  {thread ? (
-                    <ModeMenu
-                      mode={mode}
-                      open={picker === "mode"}
-                      onOpenChange={(next) => {
-                        setPicker((current) =>
-                          next ? "mode" : current === "mode" ? null : current,
+                    </div>
+                  ) : messages.length === 0 ? (
+                    <div className="agent__empty">
+                      <p className="agent__greeting">
+                        {agentEmptyGreeting(new Date().getHours())}
+                      </p>
+                      <div className="agent__examples">
+                        {EXAMPLES.map((example) => (
+                          <button
+                            key={example}
+                            type="button"
+                            className="agent__chip"
+                            onClick={() => void send(example)}
+                          >
+                            {example}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    turns.map((turn, index) => {
+                      const findBase = findBases[index] ?? 0;
+                      if (turn.kind === "marker") {
+                        return (
+                          <p
+                            key={turn.message.id}
+                            className="agent__marker"
+                            role="status"
+                          >
+                            {findNeedle.trim() ? (
+                              <HighlightedPlain
+                                text={turn.message.content}
+                                query={findNeedle}
+                                indexBase={findBase}
+                                active={activeHit}
+                              />
+                            ) : (
+                              turn.message.content
+                            )}
+                          </p>
                         );
-                      }}
-                      onChange={applyMode}
-                    />
+                      }
+                      if (turn.kind === "user") {
+                        return (
+                          <article
+                            key={turn.message.id}
+                            className="agent__msg agent__msg--user"
+                            aria-label="你"
+                          >
+                            <div className="agent__bubble">
+                              {findNeedle.trim() ? (
+                                <HighlightedPlain
+                                  text={turn.message.content}
+                                  query={findNeedle}
+                                  indexBase={findBase}
+                                  active={activeHit}
+                                />
+                              ) : (
+                                turn.message.content
+                              )}
+                            </div>
+                            <div className="agent__msg-actions">
+                              <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
+                              <button
+                                type="button"
+                                className="agent__copy"
+                                onClick={() =>
+                                  void copyReply(turn.message.id, turn.message.content)
+                                }
+                              >
+                                {copied === turn.message.id ? "已复制" : "复制"}
+                              </button>
+                              {editPlan?.userMessageId === turn.message.id ? (
+                                <button
+                                  type="button"
+                                  className="agent__copy"
+                                  onClick={editLast}
+                                >
+                                  编辑
+                                </button>
+                              ) : null}
+                            </div>
+                          </article>
+                        );
+                      }
+                      const text = turn.messages
+                        .map((message) => displayContent(message, nowMs))
+                        .filter(Boolean)
+                        .join("\n\n");
+                      if (!text) return null;
+                      const id = turn.messages[0]!.id;
+                      const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
+                      return (
+                        <article
+                          key={id}
+                          className="agent__msg agent__msg--assistant"
+                          aria-label="Agent"
+                        >
+                          <AgentMarkdown
+                            text={text}
+                            query={findNeedle}
+                            indexBase={findBase}
+                            active={activeHit}
+                          />
+                          <div className="agent__msg-actions">
+                            <MessageTime ms={stamp} nowMs={nowMs} />
+                            <button
+                              type="button"
+                              className="agent__copy"
+                              onClick={() => void copyReply(id, text)}
+                            >
+                              {copied === id ? "已复制" : "复制"}
+                            </button>
+                            {retryPlan && id === lastAgentId ? (
+                              <button
+                                type="button"
+                                className="agent__copy"
+                                onClick={retryLast}
+                              >
+                                重试
+                              </button>
+                            ) : null}
+                          </div>
+                        </article>
+                      );
+                    })
+                  )}
+                  {live ? (
+                    <article
+                      className="agent__msg agent__msg--assistant"
+                      aria-label="Agent"
+                    >
+                      <AgentMarkdown text={live} />
+                    </article>
+                  ) : null}
+                  {busyHere && !live ? (
+                    <p className="agent__thinking" aria-live="polite">
+                      正在思考…
+                    </p>
                   ) : null}
                 </div>
-                <div className="agent__composer-actions">
-                  <ModelMenu
-                    modelRef={thread?.modelRef ?? readProviderStore().defaultModelRef}
-                    open={picker === "model"}
-                    onOpenChange={(next) => {
-                      setPicker((current) =>
-                        next ? "model" : current === "model" ? null : current,
-                      );
-                    }}
-                    onSelect={selectModel}
-                    onOpenSettings={onOpenModels}
-                  />
-                  {busyHere ? (
-                    <>
-                      <button
-                        type="button"
-                        className="agent__queue-btn"
-                        disabled={!draft.trim() || slashDraft}
-                        onClick={() => void send(draft)}
-                      >
-                        排队
-                      </button>
-                      <button
-                        type="button"
-                        className="agent__send agent__send--stop"
-                        aria-label="停止"
-                        title="停止"
-                        onClick={stop}
-                      >
-                        <IconStop size={14} />
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="submit"
-                      className="agent__send"
-                      aria-label="发送"
-                      title="发送"
-                      disabled={!thread || Boolean(pending) || !draft.trim()}
-                    >
-                      <IconArrowUp size={16} />
-                    </button>
-                  )}
-                </div>
               </div>
+              {thread && messages.length > 0 && !pinned ? (
+                <button
+                  type="button"
+                  className="agent__jump"
+                  aria-label="回到底部"
+                  onClick={jumpBottom}
+                >
+                  <IconArrowUp size={16} />
+                </button>
+              ) : null}
             </div>
-          </form>
-        </div>
+
+            <div className="agent__dock">
+              {pending ? (
+                <div className="agent__approval" role="region" aria-label="待确认操作">
+                  <div>
+                    <strong>需要确认</strong>
+                    <p>{relativizeScheduleText(pending.summary, nowMs)}</p>
+                    {queued > 1 ? <p>后面还有 {queued - 1} 步。</p> : null}
+                  </div>
+                  {argLines ? (
+                    <details className="agent__approval-more">
+                      <summary>详情</summary>
+                      <p className="agent__approval-detail">{argLines}</p>
+                    </details>
+                  ) : null}
+                  <div className="agent__approval-actions">
+                    <button
+                      ref={approveBtnRef}
+                      type="button"
+                      className="primary"
+                      disabled={Boolean(busyThreadId)}
+                      onClick={() => void decide("approved")}
+                    >
+                      批准
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={Boolean(busyThreadId)}
+                      onClick={() => void decide("denied")}
+                    >
+                      拒绝
+                    </button>
+                    <span className="agent__approval-hint">Enter 批准 · Esc 拒绝</span>
+                  </div>
+                </div>
+              ) : null}
+
+              {error ? <p className="agent__error">{error}</p> : null}
+
+              {queuedPrompts.length > 0 ? (
+                <div className="agent__outbox" aria-label="排队消息">
+                  <div className="agent__outbox-head">
+                    <span>排队 {queuedPrompts.length}</span>
+                    {!busyHere && !pending ? (
+                      <button type="button" className="btn" onClick={releaseQueue}>
+                        继续发送
+                      </button>
+                    ) : null}
+                  </div>
+                  <ol>
+                    {queuedPrompts.map((item, index) => (
+                      <li key={`${index}-${item}`}>
+                        <span>{item}</span>
+                        <button
+                          type="button"
+                          className="btn"
+                          aria-label={`取回排队 ${item}`}
+                          onClick={() => recallQueued(index)}
+                        >
+                          取回
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          aria-label={`移除排队 ${item}`}
+                          onClick={() => removeQueued(index)}
+                        >
+                          移除
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
+
+              <form
+                className={
+                  showComposerContext ? "agent__composer is-framed" : "agent__composer"
+                }
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (showMention) {
+                    const picked = mentionItems[mentionPick];
+                    if (picked) insertComposerText(applyMention(draft, picked.name));
+                    return;
+                  }
+                  const picked = showSlash ? slashRows[slashPick] : null;
+                  if (picked?.kind === "skill") {
+                    insertComposerText(applySlashToken(draft, `@${picked.name}`));
+                    return;
+                  }
+                  void send(picked ? `/${picked.name}` : draft);
+                }}
+              >
+                {showComposerContext && activeWorkspace ? (
+                  <div className="agent__composer-context">
+                    <div className="agent__composer-chip-wrap">
+                      <button
+                        type="button"
+                        className="agent__composer-chip"
+                        title={activeWorkspace.rootPath || activeWorkspace.title}
+                        aria-haspopup="menu"
+                        aria-expanded={picker === "workspace"}
+                        onClick={() =>
+                          setPicker((current) =>
+                            current === "workspace" ? null : "workspace",
+                          )
+                        }
+                      >
+                        <IconFolder size={14} />
+                        <span>{activeWorkspace.title}</span>
+                        <span aria-hidden="true">▾</span>
+                      </button>
+                      {picker === "workspace" ? (
+                        <div
+                          className="agent__thread-menu agent__composer-chip-menu"
+                          role="menu"
+                          aria-label="工作区"
+                        >
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setPicker(null);
+                              onCreateThread(activeWorkspace.id);
+                            }}
+                          >
+                            在此新建会话
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setPicker(null);
+                              onCreateFromFolder();
+                            }}
+                          >
+                            打开其他文件夹…
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {gitBranch ? (
+                      <span
+                        className="agent__composer-chip agent__composer-chip--static"
+                        title={`当前分支 ${gitBranch}`}
+                      >
+                        <IconGitBranch size={14} />
+                        <span>{gitBranch}</span>
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="agent__composer-chip-add"
+                      title="打开其他文件夹"
+                      aria-label="打开其他文件夹"
+                      onClick={onCreateFromFolder}
+                    >
+                      <IconPlus size={14} />
+                    </button>
+                  </div>
+                ) : null}
+                <div className="agent__composer-shell">
+                  {showSlash ? (
+                    <ul className="agent__slash" aria-label="斜杠命令">
+                      {slashRows.map((row, index) => (
+                        <li key={`${row.kind}-${row.name}`}>
+                          {row.kind === "skill" &&
+                          slashRows[index - 1]?.kind !== "skill" ? (
+                            <div className="agent__slash-label">技能</div>
+                          ) : null}
+                          <button
+                            type="button"
+                            className={index === slashPick ? "is-active" : undefined}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => {
+                              if (row.kind === "skill") {
+                                insertComposerText(
+                                  applySlashToken(draft, `@${row.name}`),
+                                );
+                                return;
+                              }
+                              void send(`/${row.name}`);
+                            }}
+                          >
+                            <span>
+                              {row.kind === "skill" ? `@${row.name}` : `/${row.name}`}
+                            </span>
+                            <small>
+                              {row.kind === "skill"
+                                ? `技能 · ${row.summary}`
+                                : row.summary}
+                            </small>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {showMention ? (
+                    <ul className="agent__slash" aria-label="提及">
+                      {mentionItems.map((item, index) => (
+                        <li key={`${item.kind}-${item.name}`}>
+                          <button
+                            type="button"
+                            className={index === mentionPick ? "is-active" : undefined}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() =>
+                              insertComposerText(applyMention(draft, item.name))
+                            }
+                          >
+                            <span>@{item.name}</span>
+                            <small>
+                              {item.kind === "skill" ? "技能" : "子智能体"} ·{" "}
+                              {item.summary}
+                            </small>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <textarea
+                    ref={inputRef}
+                    aria-label="给 Agent 发消息"
+                    placeholder={
+                      busyHere
+                        ? "这条会排在当前回答之后"
+                        : pending
+                          ? "请先处理待确认操作"
+                          : "向工作台提问，使用 / 选择命令或能力"
+                    }
+                    title={
+                      pending
+                        ? "Enter 批准 · Esc 拒绝"
+                        : busyHere
+                          ? "Enter 把这条排到当前回答之后"
+                          : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
+                    }
+                    value={draft}
+                    disabled={!thread}
+                    readOnly={Boolean(pending)}
+                    rows={2}
+                    onChange={(event) => {
+                      historyNav.current = null;
+                      const value = event.target.value;
+                      setDraft(value);
+                      if (thread) drafts.current.set(thread.id, value);
+                    }}
+                    onKeyDown={(event) => {
+                      if (pending) {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          void decide("denied");
+                          return;
+                        }
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          void decide("approved");
+                          return;
+                        }
+                      }
+                      if (showSlash && event.key === "ArrowDown") {
+                        event.preventDefault();
+                        setSlashUi((ui) => ({
+                          ...ui,
+                          index: (slashPick + 1) % slashRows.length,
+                        }));
+                        return;
+                      }
+                      if (showSlash && event.key === "ArrowUp") {
+                        event.preventDefault();
+                        setSlashUi((ui) => ({
+                          ...ui,
+                          index: (slashPick - 1 + slashRows.length) % slashRows.length,
+                        }));
+                        return;
+                      }
+                      if (showSlash && event.key === "Tab") {
+                        event.preventDefault();
+                        const row = slashRows[slashPick];
+                        if (!row) return;
+                        insertComposerText(
+                          applySlashToken(
+                            draft,
+                            row.kind === "skill" ? `@${row.name}` : `/${row.name}`,
+                          ),
+                        );
+                        return;
+                      }
+                      if (showSlash && event.key === "Escape") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setSlashUi((ui) => ({ ...ui, dismissed: true }));
+                        return;
+                      }
+                      if (
+                        showMention &&
+                        (event.key === "ArrowDown" || event.key === "ArrowUp")
+                      ) {
+                        event.preventDefault();
+                        const delta = event.key === "ArrowDown" ? 1 : -1;
+                        setSlashUi((ui) => ({
+                          ...ui,
+                          index:
+                            (mentionPick + delta + mentionItems.length) %
+                            mentionItems.length,
+                        }));
+                        return;
+                      }
+                      if (showMention && (event.key === "Tab" || event.key === "Enter")) {
+                        event.preventDefault();
+                        const picked = mentionItems[mentionPick];
+                        if (picked) insertComposerText(applyMention(draft, picked.name));
+                        return;
+                      }
+                      const node = event.currentTarget;
+                      if (event.key === "ArrowUp" && atFirstLine(node)) {
+                        event.preventDefault();
+                        recallHistory(-1);
+                        return;
+                      }
+                      if (
+                        event.key === "ArrowDown" &&
+                        historyNav.current &&
+                        atFirstLine(node)
+                      ) {
+                        event.preventDefault();
+                        recallHistory(1);
+                        return;
+                      }
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        const picked = showSlash ? slashRows[slashPick] : null;
+                        if (picked?.kind === "skill") {
+                          insertComposerText(applySlashToken(draft, `@${picked.name}`));
+                          return;
+                        }
+                        void send(picked ? `/${picked.name}` : draft);
+                      }
+                    }}
+                  />
+                  <div className="agent__composer-bar">
+                    <div className="agent__composer-leading">
+                      <ComposerPlusMenu
+                        disabled={!thread || Boolean(pending)}
+                        open={picker === "plus"}
+                        onOpenChange={(next) => {
+                          setPicker((current) =>
+                            next ? "plus" : current === "plus" ? null : current,
+                          );
+                        }}
+                        onInsert={(value) => insertComposerText(value)}
+                        onRun={(value) => {
+                          setPicker(null);
+                          void send(value);
+                        }}
+                        onOpenMode={() => setPicker("mode")}
+                        onOpenModel={() => setPicker("model")}
+                      />
+                      {thread ? (
+                        <ModeMenu
+                          mode={mode}
+                          disabled={Boolean(pending)}
+                          open={picker === "mode"}
+                          onOpenChange={(next) => {
+                            setPicker((current) =>
+                              next ? "mode" : current === "mode" ? null : current,
+                            );
+                          }}
+                          onChange={applyMode}
+                        />
+                      ) : null}
+                    </div>
+                    <div className="agent__composer-actions">
+                      <ModelMenu
+                        modelRef={thread?.modelRef ?? readProviderStore().defaultModelRef}
+                        disabled={Boolean(pending)}
+                        open={picker === "model" && !pending}
+                        onOpenChange={(next) => {
+                          if (pending) return;
+                          setPicker((current) =>
+                            next ? "model" : current === "model" ? null : current,
+                          );
+                        }}
+                        onSelect={selectModel}
+                        onOpenSettings={onOpenModels}
+                      />
+                      {busyHere ? (
+                        <>
+                          <button
+                            type="button"
+                            className="agent__queue-btn"
+                            disabled={!draft.trim() || slashDraft}
+                            onClick={() => void send(draft)}
+                          >
+                            排队
+                          </button>
+                          <button
+                            type="button"
+                            className="agent__send agent__send--stop"
+                            aria-label="停止"
+                            title="停止"
+                            onClick={stop}
+                          >
+                            <IconStop size={14} />
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="submit"
+                          className="agent__send"
+                          aria-label="发送"
+                          title="发送"
+                          disabled={!thread || Boolean(pending) || !draft.trim()}
+                        >
+                          <IconArrowUp size={16} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </>
+        )}
       </div>
     </section>
   );
@@ -1854,12 +2333,16 @@ function ComposerPlusMenu({
   onOpenChange,
   onInsert,
   onRun,
+  onOpenMode,
+  onOpenModel,
 }: {
   disabled: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onInsert: (value: string) => void;
   onRun: (value: string) => void;
+  onOpenMode: () => void;
+  onOpenModel: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -1913,10 +2396,24 @@ function ComposerPlusMenu({
               {command.summary}
             </button>
           ))}
-          <button type="button" role="menuitem" onClick={() => onInsert("/mode ")}>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onOpenChange(false);
+              onOpenMode();
+            }}
+          >
             切换权限…
           </button>
-          <button type="button" role="menuitem" onClick={() => onInsert("/model")}>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onOpenChange(false);
+              onOpenModel();
+            }}
+          >
             切换模型…
           </button>
           <button type="button" role="menuitem" onClick={() => onRun("/help")}>
@@ -1930,11 +2427,13 @@ function ComposerPlusMenu({
 
 function ModeMenu({
   mode,
+  disabled = false,
   open,
   onOpenChange,
   onChange,
 }: {
   mode: AgentPermissionMode;
+  disabled?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChange: (mode: AgentPermissionMode) => void;
@@ -1943,7 +2442,7 @@ function ModeMenu({
   const current = MODES.find((item) => item.id === mode) ?? MODES[0]!;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || disabled) return;
     const onPointer = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) onOpenChange(false);
     };
@@ -1959,7 +2458,11 @@ function ModeMenu({
       window.removeEventListener("mousedown", onPointer);
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [open, onOpenChange]);
+  }, [open, disabled, onOpenChange]);
+
+  useEffect(() => {
+    if (disabled && open) onOpenChange(false);
+  }, [disabled, open, onOpenChange]);
 
   return (
     <div className="agent__model agent__mode" ref={rootRef}>
@@ -1969,13 +2472,15 @@ function ModeMenu({
         aria-label="会话权限"
         aria-haspopup="dialog"
         aria-expanded={open}
+        disabled={disabled}
+        title={disabled ? "请先处理待确认操作" : undefined}
         onClick={() => onOpenChange(!open)}
       >
         <IconHand size={14} />
         <span>{current.label}</span>
         <span aria-hidden="true">▾</span>
       </button>
-      {open ? (
+      {open && !disabled ? (
         <div
           className="agent__model-menu agent__mode-menu"
           role="dialog"
@@ -2190,10 +2695,16 @@ function modelRefLabel(ref: string): string {
   if (!parsed) return ref;
   const group = modelGroups().find((item) => item.id === parsed.providerId);
   if (!group) return parsed.modelId || ref;
-  if (group.kind === "builtin") return group.name;
-  return `${group.name} · ${parsed.modelId}`;
+  const model = group.models.find((item) => item.id === parsed.modelId);
+  if (group.kind === "builtin" && parsed.modelId === "local") return group.name;
+  if (group.kind === "builtin")
+    return `${group.name} · ${model?.title || parsed.modelId}`;
+  return `${group.name} · ${model?.title || parsed.modelId}`;
 }
 
 function isRemoteModel(modelRef: string | undefined): boolean {
-  return Boolean(modelRef && !modelRef.startsWith("builtin:"));
+  if (!modelRef) return false;
+  if (!modelRef.startsWith("builtin:")) return true;
+  const found = findProvider(readProviderStore().providers, modelRef);
+  return Boolean(found?.provider.models[found.modelId]?.endpoint);
 }

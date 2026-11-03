@@ -15,10 +15,14 @@ function Harness({
   initialSection = "general" as const,
   onPrefs,
 }: {
-  initialSection?: "general" | "personal";
+  initialSection?: "general" | "personal" | "skills" | "memory" | "tools";
   onPrefs?: (prefs: AppPrefs) => void;
 }) {
-  const [prefs, setPrefs] = useState<AppPrefs>({ ...readPrefs(), agentRules: "" });
+  const [prefs, setPrefs] = useState<AppPrefs>({
+    ...readPrefs(),
+    agentRules: "",
+    skillDirs: [],
+  });
   return (
     <SettingsView
       prefs={prefs}
@@ -47,6 +51,7 @@ describe("Agent capabilities settings", () => {
     expect(models).toBeGreaterThan(-1);
     expect(labels.indexOf("个性化")).toBe(models + 1);
     expect(labels.indexOf("钩子")).toBe(models + 8);
+    expect(labels.indexOf("工具")).toBe(models + 9);
     expect(screen.queryByText("Agent 能力")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "能力" })).not.toBeInTheDocument();
 
@@ -56,7 +61,7 @@ describe("Agent capabilities settings", () => {
     expect(screen.getByText("根据今天的安排写晨报")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "钩子" }));
-    expect(screen.getByText("任务完成")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "任务完成" })).toBeInTheDocument();
     expect(screen.getAllByText("还没有钩子")).toHaveLength(3);
   });
 
@@ -72,6 +77,18 @@ describe("Agent capabilities settings", () => {
     expect(seen.at(-1)?.agentRules).toBe("用短句");
   });
 
+  it("saves a memory into prefs", async () => {
+    const user = userEvent.setup();
+    const seen: AppPrefs[] = [];
+    renderWithProviders(
+      <Harness initialSection="memory" onPrefs={(prefs) => seen.push(prefs)} />,
+    );
+    await user.type(screen.getByLabelText("新记忆"), "周五写周报");
+    await user.click(screen.getByRole("button", { name: "添加记忆" }));
+    expect(screen.getByText("周五写周报")).toBeInTheDocument();
+    expect(seen.at(-1)?.agentMemories.map((item) => item.text)).toEqual(["周五写周报"]);
+  });
+
   it("finds a capability from the settings search", async () => {
     const user = userEvent.setup();
     renderWithProviders(<Harness />);
@@ -81,5 +98,36 @@ describe("Agent capabilities settings", () => {
     expect(screen.queryByRole("button", { name: "插件" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "记忆" }));
     expect(screen.getByRole("heading", { name: "记忆" })).toBeInTheDocument();
+  });
+
+  it("lists host tools and an install action when nothing is detected", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Harness initialSection="tools" />);
+
+    expect(await screen.findByRole("heading", { name: "工具" })).toBeInTheDocument();
+    expect(await screen.findByText("Go")).toBeInTheDocument();
+    expect(screen.getByText("ripgrep")).toBeInTheDocument();
+    expect(screen.getByText("FFmpeg")).toBeInTheDocument();
+    expect(screen.getByText("Inkscape")).toBeInTheDocument();
+    expect(screen.getByText("Mermaid")).toBeInTheDocument();
+    expect(screen.getByText("Matplotlib")).toBeInTheDocument();
+    expect(screen.getByText("Plotly")).toBeInTheDocument();
+    expect(screen.getByText("Altair")).toBeInTheDocument();
+    expect(screen.getByText("Bokeh")).toBeInTheDocument();
+    expect(screen.getByLabelText("工具目录").textContent).toMatch(/my-workbench\/tools$/);
+    expect(screen.getAllByRole("button", { name: "安装" }).length).toBeGreaterThan(0);
+    expect(screen.getByText(/矢量图/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("switch", { name: "停用 Go" }));
+    expect(screen.getByText("已停用")).toBeInTheDocument();
+  });
+
+  it("shows skills pane actions for adding directories", async () => {
+    renderWithProviders(<Harness initialSection="skills" />);
+    expect(screen.getByRole("heading", { name: "技能" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加技能目录" })).toBeInTheDocument();
+    expect(
+      screen.getByText("还没有技能目录。选择包含 SKILL.md 的文件夹即可。"),
+    ).toBeInTheDocument();
   });
 });

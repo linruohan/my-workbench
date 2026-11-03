@@ -26,6 +26,7 @@ import {
   settleTimerSegment,
   sumTimeSpentOnDay,
   DEFAULT_AGENT_WORKSPACE_TITLE,
+  normalizeAgentWebUrl,
   type AgentApproval,
   type AgentMessage,
   type AgentPermissionMode,
@@ -54,6 +55,7 @@ type MemNotification = {
   id: string;
   kind: string;
   title: string;
+  body?: string;
   status: string;
   fireAt: number;
   refId: string | null;
@@ -483,6 +485,38 @@ export class MemoryWorkbenchRepository {
     row.status = "dismissed";
   }
 
+  pushNotification(input: {
+    title: string;
+    body?: string;
+    kind?: string;
+    nowMs?: number;
+  }): MemNotification {
+    const now = input.nowMs ?? Date.now();
+    const title = input.title.trim() || "通知";
+    const body = input.body?.trim() ?? "";
+    const kind = input.kind?.trim() || "system";
+    const existing = this.notifications.find(
+      (item) => item.kind === kind && item.title === title && item.status !== "dismissed",
+    );
+    if (existing) {
+      existing.body = body;
+      existing.fireAt = now;
+      existing.status = "delivered";
+      return existing;
+    }
+    const row: MemNotification = {
+      id: createId(now),
+      kind,
+      title,
+      body,
+      status: "delivered",
+      fireAt: now,
+      refId: null,
+    };
+    this.notifications.push(row);
+    return row;
+  }
+
   snoozeNotification(id: string, untilMs: number): void {
     const row = this.notifications.find((item) => item.id === id);
     if (!row) throw new DomainError(`notification not found: ${id}`);
@@ -570,6 +604,7 @@ export class MemoryWorkbenchRepository {
     projectId?: string | null;
     modelRef?: string;
     permissionMode?: AgentPermissionMode;
+    webUrl?: string | null;
     nowMs?: number;
   }): AgentThread {
     const now = input?.nowMs ?? Date.now();
@@ -577,6 +612,9 @@ export class MemoryWorkbenchRepository {
       input?.workspaceId && this.agentWorkspaces.has(input.workspaceId)
         ? input.workspaceId
         : this.ensureAgentWorkspace(now).id;
+    const rawWebUrl = input?.webUrl?.trim() ?? "";
+    const webUrl = rawWebUrl ? normalizeAgentWebUrl(rawWebUrl) : null;
+    if (rawWebUrl && !webUrl) throw new DomainError("网页地址无效");
     const thread: AgentThread = {
       id: createId(now),
       workspaceId,
@@ -585,6 +623,7 @@ export class MemoryWorkbenchRepository {
       modelRef: input?.modelRef || BUILTIN_MODEL_REF,
       permissionMode: input?.permissionMode ?? "confirm",
       queueJson: null,
+      webUrl,
       archivedAt: null,
       createdAt: now,
       updatedAt: now,
@@ -624,6 +663,7 @@ export class MemoryWorkbenchRepository {
         | "projectId"
         | "workspaceId"
         | "queueJson"
+        | "webUrl"
         | "archivedAt"
       >
     >,
@@ -634,7 +674,17 @@ export class MemoryWorkbenchRepository {
     if (patch.workspaceId && !this.agentWorkspaces.has(patch.workspaceId)) {
       throw new DomainError(`agent workspace not found: ${patch.workspaceId}`);
     }
-    const next = { ...current, ...patch, updatedAt: nowMs };
+    const rawWebUrl = patch.webUrl === undefined ? null : (patch.webUrl?.trim() ?? "");
+    const webUrl =
+      patch.webUrl === undefined
+        ? current.webUrl
+        : rawWebUrl
+          ? normalizeAgentWebUrl(rawWebUrl)
+          : null;
+    if (patch.webUrl !== undefined && rawWebUrl && !webUrl) {
+      throw new DomainError("网页地址无效");
+    }
+    const next = { ...current, ...patch, webUrl, updatedAt: nowMs };
     this.agentThreads.set(id, next);
     this.touchAgentWorkspace(next.workspaceId, nowMs);
     return next;
@@ -929,6 +979,7 @@ export class MemoryWorkbenchRepository {
             ...thread,
             workspaceId,
             queueJson: thread.queueJson ?? null,
+            webUrl: thread.webUrl ?? null,
             archivedAt: thread.archivedAt ?? null,
           },
         ];

@@ -23,6 +23,7 @@
     "@wb/theme": "0.1.0",
     "highlight.js": "^11.12.0",
     "markdown-it": "^15.0.3",
+    "onnxruntime-web": "^1.22.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

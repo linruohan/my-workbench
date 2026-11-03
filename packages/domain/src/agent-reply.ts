@@ -18,6 +18,53 @@ export function agentWorkspaceTitleFromPath(path: string): string {
   return name || "工作区";
 }
 
+/**
+ * Turn a typed address into an http(s) URL.
+ * A bare host gets https. Loopback hosts stay on http. Other schemes are rejected.
+ */
+export function normalizeAgentWebUrl(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed || /\s/.test(trimmed)) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed)
+    ? trimmed
+    : `${loopbackScheme(trimmed)}://${trimmed}`;
+  let url: URL;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (!url.hostname) return null;
+  return url.toString();
+}
+
+/** Local tools such as dsh web listen on http, not https. */
+function loopbackScheme(input: string): "http" | "https" {
+  const host = input
+    .split("/")[0]
+    ?.split(":")[0]
+    ?.replace(/^\[|\]$/g, "")
+    .toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return "http";
+  return "https";
+}
+
+/** Web sessions stay above chats. Within each group, newer sessions come first. */
+export function orderAgentWorkspaceThreads<
+  T extends { updatedAt: number; webUrl?: string | null },
+>(threads: readonly T[], pinWebSessions: boolean): T[] {
+  const next = [...threads];
+  if (!pinWebSessions) return next;
+  next.sort((a, b) => {
+    const aWeb = a.webUrl ? 1 : 0;
+    const bWeb = b.webUrl ? 1 : 0;
+    if (aWeb !== bWeb) return bWeb - aWeb;
+    return b.updatedAt - a.updatedAt;
+  });
+  return next;
+}
+
 export function agentRootsMatch(
   a: string | null | undefined,
   b: string | null | undefined,
@@ -297,7 +344,35 @@ export function describeToolResult(name: string, data: unknown, summary: string)
     return [summary, body].filter(Boolean).join("\n");
   }
 
+  if (name === "host_tool_list") {
+    const tools = asArray(record.tools) ?? [];
+    return joinList(
+      summary,
+      tools.map((item) => {
+        const tool = asRecord(item);
+        if (!tool || typeof tool.id !== "string") return "";
+        const version =
+          typeof tool.version === "string" && tool.version ? ` ${tool.version}` : "";
+        return `· ${tool.id}${version}`;
+      }),
+    );
+  }
+
+  if (name === "host_tool_run") {
+    const stdout = clipOutput(record.stdout);
+    const stderr = clipOutput(record.stderr);
+    const truncated = record.truncated === true ? "输出已截断" : "";
+    return [summary, stdout, stderr, truncated].filter(Boolean).join("\n");
+  }
+
   return summary;
+}
+
+function clipOutput(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  if (!text) return "";
+  return text.length > 8000 ? `${text.slice(0, 8000)}…` : text;
 }
 
 function join(summary: string, lines: string[]): string {

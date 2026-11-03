@@ -460,6 +460,25 @@ export function IconUnplug({ size, className }: IconProps) {
   );
 }
 
+export function IconGlobe({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a14 14 0 0 1 0 18" />
+      <path d="M12 3a14 14 0 0 0 0 18" />
+    </Svg>
+  );
+}
+
+export function IconTool({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.1-2.1Z" />
+    </Svg>
+  );
+}
+
 export function IconHook({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>

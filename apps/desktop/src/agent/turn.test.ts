@@ -71,6 +71,28 @@ describe("agent turn", () => {
     expect(saved).toContain("[redacted]");
   });
 
+  it("saves a local memory when the session can write", async () => {
+    const store = new MemoryWorkbenchRepository();
+    const thread = store.createAgentThread({
+      permissionMode: "session_auto",
+      nowMs: now,
+    });
+    const saved: string[] = [];
+    await startAgentTurn(
+      {
+        store,
+        threadId: thread.id,
+        nowMs: now,
+        memories: [],
+        onMemories: (next) => {
+          saved.splice(0, saved.length, ...next.map((item) => item.text));
+        },
+      },
+      "记住 周五写周报",
+    );
+    expect(saved).toEqual(["周五写周报"]);
+  });
+
   it("answers 今天有什么 with the task titles", async () => {
     const store = new MemoryWorkbenchRepository();
     const task = store.createTask({ title: "写周报", nowMs: now });

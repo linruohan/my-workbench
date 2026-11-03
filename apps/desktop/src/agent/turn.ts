@@ -5,9 +5,24 @@ import {
   buildModelHttpRequest,
   applyRuntimeHeaders,
   emptyOpenAiStream,
+  chatProviderFor,
   findProvider,
+  isLocalBuiltin,
   finishOpenAiStream,
+  formatHookNotices,
+  formatHostToolsForPrompt,
+  formatMcpForPrompt,
+  formatMemoriesForPrompt,
+  formatPluginsForPrompt,
+  formatInvokedSkills,
+  formatSkillsForPrompt,
+  invokedSkillsInText,
+  formatSubagentsForPrompt,
   gateTool,
+  hooksForEvent,
+  listEnabledSkillSummaries,
+  modelCanSeeImages,
+  modelTranscript,
   parseModelResponse,
   planLocalTurn,
   redactPlan,
@@ -16,14 +31,21 @@ import {
   takeSseData,
   describeToolResult,
   toolCallSummary,
+  type AgentHook,
+  type AgentMemory,
   type AgentMessage,
+  type AgentSkill,
+  type AgentSubagent,
   type AgentTurnPlan,
+  type HostToolSnapshot,
+  type McpServer,
   type PlannedCall,
   type ProviderConfig,
 } from "@wb/domain";
 import {
   executeAgentTool,
   type AgentRuntimeContext,
+  type AgentToolResult,
   type AgentUiEffect,
 } from "./execute";
 import { hostFetch } from "./host-fetch";
@@ -38,6 +60,22 @@ export type AgentTurnEnv = {
   displayName?: string;
   /** Standing user rules from settings. */
   rules?: string;
+  /** Enabled skills from Settings → 技能. */
+  skills?: AgentSkill[];
+  memories?: AgentMemory[];
+  onMemories?: (next: AgentMemory[]) => void;
+  subagents?: AgentSubagent[];
+  hooks?: AgentHook[];
+  plugins?: Array<{ name: string; version: string; description: string }>;
+  mcpServers?: McpServer[];
+  /** Ready and missing host tools. The prompt only includes ready, enabled ones. */
+  hostTools?: HostToolSnapshot[];
+  runHostTool?: (args: Record<string, unknown>) => Promise<AgentToolResult>;
+  /** Picture for this turn when the selected model can see images. */
+  imageDataUrl?: string;
+  /** Persona for one /agent turn. */
+  subagentPrompt?: string;
+  toolAllowlist?: readonly string[];
   timer?: { taskId: string | null; startedAt: number | null };
   /** When set, skips the network and uses this plan for the next model turn. */
   plan?: (
@@ -63,12 +101,26 @@ export async function startAgentTurn(
     say(env, "还有待确认的操作，请先批准或拒绝。", nowMs);
     return { effects: [] };
   }
+  const priorUsers = env.store
+    .listAgentMessages(thread.id)
+    .filter((message) => message.role === "user").length;
   env.store.appendAgentMessage({
     threadId: thread.id,
     role: "user",
     content: text.trim(),
     nowMs,
   });
+  if (priorUsers === 0) {
+    const notice = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
+    if (notice) {
+      env.store.appendAgentMessage({
+        threadId: thread.id,
+        role: "system",
+        content: notice,
+        nowMs,
+      });
+    }
+  }
   env.onStep?.();
   return continueFromModel(env, 0);
 }
@@ -101,7 +153,7 @@ export async function settleAgentApproval(
   }
 
   env.store.resolveAgentApproval(pending.id, "approved", nowMs);
-  const result = executeAgentTool(env.store, call.name, call.args, runtime(env, nowMs));
+  const result = await executeCall(env, call, nowMs);
   sayTool(env, call, toolContent(call.name, result), nowMs);
   shiftQueue(env, nowMs);
   const rest = await drain(env, 0, true);
@@ -189,6 +241,12 @@ async function drain(
       }
       return { effects };
     }
+    if (env.toolAllowlist && !env.toolAllowlist.includes(call.name)) {
+      closePending(env, call.id, "denied", nowMs);
+      sayTool(env, call, `当前子智能体不能使用 ${call.name}`, nowMs);
+      shiftQueue(env, nowMs);
+      continue;
+    }
     const gate = gateTool(thread.permissionMode, call.name);
     if (gate === "block") {
       closePending(env, call.id, "denied", nowMs);
@@ -219,9 +277,22 @@ async function drain(
       return { effects };
     }
     closePending(env, call.id, "approved", nowMs);
-    const result = executeAgentTool(env.store, call.name, call.args, runtime(env, nowMs));
+    const result = await executeCall(env, call, nowMs);
     effects.push(...result.effects);
-    sayTool(env, call, toolContent(call.name, result), nowMs);
+    let content = toolContent(call.name, result);
+    if (result.ok && call.name === "task_complete") {
+      const notice = formatHookNotices(hooksForEvent(env.hooks ?? [], "task_completed"));
+      if (notice) {
+        content = `${content}\n钩子：${notice}`;
+        env.store.appendAgentMessage({
+          threadId: env.threadId,
+          role: "system",
+          content: notice,
+          nowMs,
+        });
+      }
+    }
+    sayTool(env, call, content, nowMs);
     shiftQueue(env, nowMs);
     ranTool = true;
   }
@@ -235,8 +306,26 @@ async function requestModel(
   const providers = env.providers?.length ? env.providers : [builtinProvider()];
   const found = findProvider(providers, thread.modelRef);
   if (!found || !found.provider.enabled) throw new Error("当前模型不可用");
-  if (found.provider.kind === "builtin") {
-    return planLocalTurn(latestUserText(transcript), {
+  const provider = chatProviderFor(found.provider, found.modelId);
+  const userText = latestUserText(transcript);
+  if (isLocalBuiltin(found.provider, found.modelId)) {
+    const invoked = invokedSkillsInText(env.skills ?? [], userText);
+    if (invoked.length > 0) {
+      const request = userText
+        .replace(/(?:^|\s)@[^\s@]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      const bodies = invoked
+        .map((skill) => `「${skill.name}」\n${skill.body.trim()}`.trim())
+        .join("\n\n");
+      return {
+        text: request
+          ? `已载入技能。\n\n${bodies}\n\n要求：${request}`
+          : `已载入技能。\n\n${bodies}`,
+        calls: [],
+      };
+    }
+    return planLocalTurn(userText, {
       nowMs: env.nowMs ?? Date.now(),
       tasks: env.store.listTasks().map((task) => ({
         id: task.id,
@@ -249,8 +338,8 @@ async function requestModel(
       })),
     });
   }
-  const apiKey = env.readApiKey?.(found.provider.id) ?? env.apiKey ?? null;
-  if (found.provider.apiKeyRequired && !apiKey) {
+  const apiKey = env.readApiKey?.(provider.id) ?? env.apiKey ?? null;
+  if (provider.apiKeyRequired && !apiKey) {
     throw new Error("缺少模型密钥，请在设置 · 模型中填写。密钥不会写入会话。");
   }
   const nowMs = env.nowMs ?? Date.now();
@@ -259,8 +348,13 @@ async function requestModel(
     .slice(0, 12)
     .map((task) => `· ${task.title}`)
     .join("\n");
+  const caps = provider.models[found.modelId];
+  const contextLimit = caps?.context ?? 8192;
+  const outputLimit = caps?.output ?? 2048;
+  const budget = Math.max(1024, contextLimit - outputLimit - 512);
+  const sessionHooks = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
   const request = buildModelHttpRequest({
-    provider: found.provider,
+    provider,
     modelId: found.modelId,
     system: buildAgentSystemPrompt({
       todaySummary: today,
@@ -270,12 +364,27 @@ async function requestModel(
       modelRef: thread.modelRef,
       permissionMode: thread.permissionMode,
       rules: env.rules,
+      skillsPrompt: [
+        formatSkillsForPrompt(listEnabledSkillSummaries(env.skills ?? [])),
+        formatInvokedSkills(env.skills ?? [], latestUserText(transcript)),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      memoriesPrompt: formatMemoriesForPrompt(memoryPort(env).list()),
+      subagentsPrompt: formatSubagentsForPrompt(env.subagents ?? []),
+      pluginsPrompt: formatPluginsForPrompt(env.plugins ?? []),
+      mcpPrompt: formatMcpForPrompt(env.mcpServers ?? []),
+      hostToolsPrompt: formatHostToolsForPrompt(env.hostTools ?? []),
+      subagentPrompt: env.subagentPrompt,
+      hooksPrompt: sessionHooks ? `会话开始时宿主还记下：\n${sessionHooks}` : "",
     }),
-    messages: transcript,
+    messages: modelTranscript(transcript, budget),
     permissionMode: thread.permissionMode,
+    toolAllowlist: env.toolAllowlist,
+    imageDataUrl: modelCanSeeImages(provider.kind, caps) ? env.imageDataUrl : undefined,
   });
   const headers = applyRuntimeHeaders(request, apiKey);
-  const stream = found.provider.kind === "openai-chat-completions";
+  const stream = provider.kind === "openai-chat-completions";
   const body =
     stream && request.body && typeof request.body === "object"
       ? { ...request.body, stream: true }
@@ -306,7 +415,7 @@ async function requestModel(
   } catch {
     throw new Error("模型响应不是 JSON");
   }
-  return redactPlan(parseModelResponse(found.provider.kind, payload), secrets);
+  return redactPlan(parseModelResponse(provider.kind, payload), secrets);
 }
 
 class AgentTurnStopped extends Error {
@@ -360,7 +469,23 @@ function remoteEnabled(env: AgentTurnEnv): boolean {
   if (!thread) return false;
   const providers = env.providers?.length ? env.providers : [builtinProvider()];
   const found = findProvider(providers, thread.modelRef);
-  return Boolean(found && found.provider.kind !== "builtin");
+  return Boolean(found && !isLocalBuiltin(found.provider, found.modelId));
+}
+
+const memoryBoxes = new WeakMap<AgentTurnEnv, AgentMemory[]>();
+
+function memoryPort(env: AgentTurnEnv): {
+  list: () => AgentMemory[];
+  replace: (next: AgentMemory[]) => void;
+} {
+  if (!memoryBoxes.has(env)) memoryBoxes.set(env, [...(env.memories ?? [])]);
+  return {
+    list: () => memoryBoxes.get(env) ?? [],
+    replace: (next) => {
+      memoryBoxes.set(env, next);
+      env.onMemories?.(next);
+    },
+  };
 }
 
 function runtime(env: AgentTurnEnv, nowMs: number): AgentRuntimeContext {
@@ -369,7 +494,39 @@ function runtime(env: AgentTurnEnv, nowMs: number): AgentRuntimeContext {
     threadId: env.threadId,
     displayName: env.displayName ?? "",
     timer: env.timer ?? { taskId: null, startedAt: null },
+    skills: env.skills ?? [],
+    memories: memoryPort(env),
+    subagents: env.subagents ?? [],
+    hooks: env.hooks ?? [],
+    plugins: env.plugins ?? [],
+    mcpServers: env.mcpServers ?? [],
+    hostTools: env.hostTools ?? [],
+    toolAllowlist: env.toolAllowlist,
   };
+}
+
+async function executeCall(
+  env: AgentTurnEnv,
+  call: PlannedCall,
+  nowMs: number,
+): Promise<AgentToolResult> {
+  if (call.name !== "host_tool_run") {
+    return executeAgentTool(env.store, call.name, call.args, runtime(env, nowMs));
+  }
+  if (!env.runHostTool) {
+    return {
+      ok: false,
+      summary: "当前环境不能运行本机工具",
+      data: { error: "当前环境不能运行本机工具" },
+      effects: [],
+    };
+  }
+  try {
+    return await env.runHostTool(call.args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "工具执行失败";
+    return { ok: false, summary: message, data: { error: message }, effects: [] };
+  }
 }
 
 function say(env: AgentTurnEnv, content: string, nowMs: number): void {

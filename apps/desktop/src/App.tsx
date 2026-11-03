@@ -12,6 +12,14 @@ import {
   parseQuickCapture,
   ReminderUiCooldown,
   selectPlannerTasks,
+  dedupeSkillNames,
+  formatHookNotices,
+  type HostToolSnapshot,
+  hooksForEvent,
+  mergeCustomCommands,
+  mergeSubagents,
+  type AgentSkill,
+  type LoadedPlugin,
   type ProjectBucket,
   type Tag,
   type Task,
@@ -25,6 +33,10 @@ import { AgentView } from "./agent/AgentView";
 import type { AgentUiEffect } from "./agent/execute";
 import { pickAgentWorkspaceFolder } from "./agent/pick-workspace";
 import { readProviderStore } from "./agent/providers";
+import { ensurePaddleOcr } from "./agent/ocr-models";
+import { probeHostTools } from "./agent/host-tools";
+import { loadAgentPlugins } from "./agent/plugins-loader";
+import { loadAgentSkills } from "./agent/skills-loader";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
 import { useDialog } from "./shell/Dialogs";
@@ -79,6 +91,9 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("general");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [prefs, setPrefs] = useState<AppPrefs>(() => readPrefs());
+  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
+  const [hostTools, setHostTools] = useState<HostToolSnapshot[]>([]);
+  const [pluginCatalog, setPluginCatalog] = useState<LoadedPlugin[]>([]);
   const [dataDir, setDataDir] = useState(DEFAULT_DATA_DIR_DISPLAY);
   const [ready, setReady] = useState(() => !isTauriRuntime());
   const [timedEditing, setTimedEditing] = useState(false);
@@ -136,6 +151,59 @@ export default function App() {
   }, [store]);
 
   useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void ensurePaddleOcr().then((result) => {
+      if (cancelled || result.ok === true || result.skipped) return;
+      store.pushNotification({
+        kind: "system",
+        title: "识图模型下载失败",
+        body: result.message,
+      });
+      setNotificationsOpen(true);
+      refresh();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, store, refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadAgentSkills(prefs.skillDirs).then((skills) => {
+      if (!cancelled) setAgentSkills(skills);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [prefs.skillDirs]);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void probeHostTools(prefs.disabledHostTools)
+      .then((tools) => {
+        if (!cancelled) setHostTools(tools);
+      })
+      .catch(() => {
+        if (!cancelled) setHostTools([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prefs.disabledHostTools, ready]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadAgentPlugins(prefs.pluginDirs).then((plugins) => {
+      if (!cancelled) setPluginCatalog(plugins);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [prefs.pluginDirs]);
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       const at = Date.now();
       setNow(at);
@@ -144,13 +212,21 @@ export default function App() {
         (d) => !cooldown.isSuppressed(d.taskId, d.remindAt, at),
       );
       if (visible.length) {
-        setActiveReminders((prev) => [...visible, ...prev].slice(0, 5));
+        const note = formatHookNotices(
+          hooksForEvent(
+            [...prefs.agentHooks, ...pluginCatalog.flatMap((item) => item.hooks)],
+            "reminder_due",
+          ),
+        );
+        setActiveReminders((prev) =>
+          [...visible.map((item) => ({ ...item, note })), ...prev].slice(0, 5),
+        );
         setNotificationsOpen(true);
         refresh();
       }
     }, 15_000);
     return () => window.clearInterval(id);
-  }, [store, cooldown, refresh]);
+  }, [store, cooldown, refresh, prefs.agentHooks, pluginCatalog]);
 
   // Refresh wall clock at next local midnight so 明天 → 今天 flips promptly.
   useEffect(() => {
@@ -784,6 +860,7 @@ export default function App() {
         onPrefsChange={updatePrefs}
         onBack={() => setSettingsOpen(false)}
         initialSection={settingsSection}
+        onHostTools={setHostTools}
       />
     );
   } else if (nav === "today") {
@@ -917,6 +994,36 @@ export default function App() {
         threadId={agentThreadId}
         displayName={prefs.displayName}
         rules={prefs.agentRules}
+        skills={dedupeSkillNames([
+          ...agentSkills,
+          ...pluginCatalog.flatMap((item) => item.skills),
+        ])}
+        memories={prefs.agentMemories}
+        onMemories={(next) => {
+          setPrefs((current) => {
+            const updated = { ...current, agentMemories: next };
+            writePrefs(updated);
+            return updated;
+          });
+        }}
+        commands={mergeCustomCommands(
+          prefs.agentCommands,
+          pluginCatalog.flatMap((item) => item.commands),
+        )}
+        subagents={mergeSubagents(
+          prefs.agentSubagents,
+          pluginCatalog.flatMap((item) => item.subagents),
+        )}
+        hooks={[...prefs.agentHooks, ...pluginCatalog.flatMap((item) => item.hooks)]}
+        plugins={pluginCatalog
+          .filter((item) => !item.error)
+          .map((item) => ({
+            name: item.name,
+            version: item.version,
+            description: item.description,
+          }))}
+        mcpServers={[...prefs.mcpServers, ...pluginCatalog.flatMap((item) => item.mcp)]}
+        hostTools={hostTools}
         activeTimerTaskId={activeTimerTaskId}
         timerStartedAt={timerStartedAt}
         onSelectThread={setAgentThreadId}
@@ -989,6 +1096,10 @@ export default function App() {
           dismissReminder(taskId, remindAt);
         }}
         onDismissReminder={dismissReminder}
+        onDismissNotification={(id) => {
+          store.dismissNotification(id);
+          refresh();
+        }}
       />
       <div className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}>
         <Sidebar

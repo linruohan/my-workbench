@@ -17,6 +17,7 @@ const HELP = [
   "· 完成 写周报",
   "· 新建笔记 会议纪要",
   "· 打开今日",
+  "· 记住 周五写周报",
 ].join("\n");
 
 export function planLocalTurn(input: string, ctx: PlannerContext): AgentTurnPlan {
@@ -44,6 +45,29 @@ function planClause(raw: string, ctx: PlannerContext): AgentTurnPlan {
   const text = raw.replace(/^(?:(?:请|帮我|给我|麻烦你?)\s*)+/, "").trim();
   if (/^(帮助|你能做什么|help|\?|？)$/i.test(text)) {
     return { text: HELP, calls: [] };
+  }
+  const remember = /^(?:记住|记一下|请记住)\s*[:：]?\s*(.+)$/.exec(text);
+  if (remember?.[1]?.trim()) {
+    return {
+      text: "准备记下这条。",
+      calls: [call("memory_save", { text: remember[1].trim() })],
+    };
+  }
+  const forget = /^(?:忘记|忘掉|删除记忆)\s*[:：]?\s*(.+)$/.exec(text);
+  if (forget?.[1]?.trim()) {
+    return {
+      text: "准备删除匹配的记忆。",
+      calls: [call("memory_forget", { text: forget[1].trim() })],
+    };
+  }
+  if (/^(?:有哪些记忆|我的记忆|记忆列表)$/.test(text)) {
+    return { text: "正在查看记忆。", calls: [call("memory_list", {})] };
+  }
+  if (/^(?:有哪些技能|技能列表)$/.test(text)) {
+    return { text: "正在查看技能。", calls: [call("skill_list", {})] };
+  }
+  if (/^(?:有哪些插件|插件列表)$/.test(text)) {
+    return { text: "正在查看插件。", calls: [call("plugin_list", {})] };
   }
   if (/^(晨报|今日简报|今天简报)$/.test(text)) {
     return {
