@@ -19,10 +19,15 @@ export function formatSessionContext(input: AgentSessionContext): string {
   const lines = [
     `现在是 ${formatLocalDay(input.nowMs)} 周${WEEKDAY[date.getDay()] ?? ""} ${hours}:${minutes}。`,
   ];
-  const place = [input.workspaceTitle?.trim(), input.workspacePath?.trim()]
-    .filter(Boolean)
-    .join(" · ");
-  if (place) lines.push(`工作区：${place}`);
+  const title = input.workspaceTitle?.trim() ?? "";
+  const path = input.workspacePath?.trim() ?? "";
+  if (path) {
+    const base = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+    const same = title.length > 0 && base.toLowerCase() === title.toLowerCase();
+    lines.push(same || !title ? `工作区：${path}` : `工作区：${title} · ${path}`);
+  } else if (title) {
+    lines.push(`工作区：${title}`);
+  }
   const branch = input.gitBranch?.trim();
   if (branch) lines.push(`当前分支：${branch}`);
   const focus = input.focus?.trim();

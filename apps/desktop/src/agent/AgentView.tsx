@@ -9,8 +9,6 @@ import {
   applySlashToken,
   chatProviderFor,
   compactMarkerText,
-  estimateTranscriptTokens,
-  modelContextBudget,
   filterAgentThreads,
   findSubagent,
   forgetAgentMemory,
@@ -97,6 +95,7 @@ import {
 } from "./web-session";
 import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
 import {
+  previewAgentContext,
   resumeAgentQueue,
   settleAgentApproval,
   startAgentTurn,
@@ -169,13 +168,6 @@ export function AgentView({
     activeThreads[0] ??
     null;
   const messages = thread ? store.listAgentMessages(thread.id) : [];
-  const modelCaps = (() => {
-    const ref = thread?.modelRef ?? readProviderStore().defaultModelRef;
-    const found = findProvider(readProviderStore().providers, ref);
-    return found ? found.provider.models[found.modelId] : undefined;
-  })();
-  const contextBudget = modelContextBudget(modelCaps?.context, modelCaps?.output);
-  const contextUsed = estimateTranscriptTokens(messages, contextBudget);
   const pending = thread
     ? (store.listAgentApprovals(thread.id).find((item) => item.status === "pending") ??
       null)
@@ -244,6 +236,8 @@ export function AgentView({
   const webHostRef = useRef<HTMLDivElement>(null);
   const webCoveredRef = useRef(false);
   const webSyncRef = useRef<() => void>(() => {});
+  const webLoginRef = useRef<() => Promise<void>>(async () => {});
+  const webLoginBusy = useRef(false);
   webSessionRef.current = Boolean(thread?.webUrl);
   findOpenRef.current = findOpen;
   const viewingThreadId = useRef(thread?.id ?? null);
@@ -451,7 +445,56 @@ export function AgentView({
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    let alive = true;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const stop = await listen("web-session-auth", () => {
+        void webLoginRef.current();
+      });
+      if (!alive) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    webLoginRef.current = async () => {
+      if (!thread?.webUrl || webLoginBusy.current) return;
+      webLoginBusy.current = true;
+      webCoveredRef.current = true;
+      await webSessionHide().catch(() => undefined);
+      try {
+        const raw = await dialog.prompt({
+          title: "登录 dsh web",
+          label: "把 dsh web 启动时打印的完整地址粘贴到这里",
+          confirmLabel: "登录",
+        });
+        if (!raw) return;
+        const webUrl = normalizeAgentWebUrl(raw);
+        if (!webUrl) {
+          await dialog.alert({
+            title: "无法登录",
+            message: "请输入 http 或 https 网址。",
+          });
+          return;
+        }
+        store.updateAgentThread(thread.id, { webUrl });
+        onRefresh();
+      } finally {
+        webLoginBusy.current = false;
+        webCoveredRef.current = false;
+        webSyncRef.current();
+      }
+    };
+  }, [dialog, onRefresh, store, thread?.id, thread?.webUrl]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
     const url = thread?.webUrl ?? "";
+    const threadId = thread?.id ?? "";
     const sync = () => {
       if (webCoveredRef.current) return;
       if (!url) {
@@ -469,8 +512,18 @@ export function AgentView({
         width: rect.width,
         height: rect.height,
       }).then(
-        () => setWebSessionError(""),
-        (err) => setWebSessionError(errorMessage(err, "无法打开网页")),
+        (opened) => {
+          setWebSessionError("");
+          if (threadId && opened && opened !== url) {
+            store.updateAgentThread(threadId, { webUrl: opened });
+            onRefresh();
+          }
+        },
+        (err) => {
+          const message = errorMessage(err, "无法打开网页");
+          setWebSessionError(message);
+          if (message.includes("粘贴新打印的地址")) void webLoginRef.current();
+        },
       );
     };
     webSyncRef.current = sync;
@@ -541,6 +594,12 @@ export function AgentView({
       },
     };
   };
+  const turnEnv = env();
+  const contextPreview = turnEnv ? previewAgentContext(turnEnv, messages) : null;
+  const contextRatio =
+    contextPreview && contextPreview.budget > 0
+      ? contextPreview.used / contextPreview.budget
+      : 0;
 
   const finish = (effects: AgentUiEffect[]) => {
     refocus.current = true;
@@ -2440,17 +2499,24 @@ export function AgentView({
                       ) : null}
                     </div>
                     <div className="agent__composer-actions">
-                      {thread ? (
+                      {thread && contextPreview ? (
                         <span
                           className={
-                            contextUsed / contextBudget >= 0.85
+                            contextRatio >= 0.85
                               ? "agent__context-usage is-tight"
                               : "agent__context-usage"
                           }
                           title="发给模型的上下文估计。接近上限时会先清空较早的工具结果，再压缩更早的对话。"
                         >
-                          上下文 {formatContextTokens(contextUsed)}/
-                          {formatContextTokens(contextBudget)}
+                          <span className="agent__context-bar" aria-hidden="true">
+                            <span
+                              style={{
+                                width: `${Math.min(100, Math.round(contextRatio * 100))}%`,
+                              }}
+                            />
+                          </span>
+                          上下文 {formatContextTokens(contextPreview.used)}/
+                          {formatContextTokens(contextPreview.budget)}
                         </span>
                       ) : null}
                       <ModelMenu

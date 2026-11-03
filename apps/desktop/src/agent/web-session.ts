@@ -18,9 +18,11 @@ async function invoke(command: string, args?: Record<string, unknown>): Promise<
   await call(command, args);
 }
 
-export async function webSessionShow(bounds: WebSessionBounds): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("web_session_show", { ...bounds });
+/** Opens the page and returns the URL that should be stored. A spent launch token is removed. */
+export async function webSessionShow(bounds: WebSessionBounds): Promise<string> {
+  if (!isTauriRuntime()) return bounds.url;
+  const { invoke: call } = await import("@tauri-apps/api/core");
+  return call<string>("web_session_show", { ...bounds });
 }
 
 export async function webSessionReload(): Promise<void> {

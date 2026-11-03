@@ -14,6 +14,7 @@ import {
   formatMcpForPrompt,
   formatMemoriesForPrompt,
   formatPluginsForPrompt,
+  estimateContextTokens,
   formatActiveSkills,
   formatSessionContext,
   formatSkillsForPrompt,
@@ -36,6 +37,7 @@ import {
   type AgentHook,
   type AgentMemory,
   type AgentMessage,
+  type AgentThread,
   type AgentSkill,
   type AgentSubagent,
   type AgentTurnPlan,
@@ -305,6 +307,65 @@ async function drain(
   }
 }
 
+function composeSystemPrompt(
+  env: AgentTurnEnv,
+  transcript: AgentMessage[],
+  budget: number,
+  thread: AgentThread,
+): string {
+  const nowMs = env.nowMs ?? Date.now();
+  const today = env.store
+    .listToday(nowMs)
+    .slice(0, 12)
+    .map((task) => `· ${task.title}`)
+    .join("\n");
+  const visible = modelTranscript(transcript, budget);
+  const sessionHooks = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
+  return buildAgentSystemPrompt({
+    todaySummary: today,
+    focus: env.focus ?? null,
+    unread: env.store.listNotifications().filter((item) => item.status !== "dismissed")
+      .length,
+    modelRef: thread.modelRef,
+    permissionMode: thread.permissionMode,
+    rules: env.rules,
+    contextPrompt: formatSessionContext({
+      nowMs,
+      workspaceTitle: env.workspaceTitle,
+      workspacePath: env.workspacePath,
+      gitBranch: env.gitBranch,
+    }),
+    skillsPrompt: [
+      formatSkillsForPrompt(listEnabledSkillSummaries(env.skills ?? [])),
+      formatActiveSkills(env.skills ?? [], visible),
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    memoriesPrompt: formatMemoriesForPrompt(memoryPort(env).list()),
+    subagentsPrompt: formatSubagentsForPrompt(env.subagents ?? []),
+    pluginsPrompt: formatPluginsForPrompt(env.plugins ?? []),
+    mcpPrompt: formatMcpForPrompt(env.mcpServers ?? []),
+    hostToolsPrompt: formatHostToolsForPrompt(env.hostTools ?? []),
+    subagentPrompt: env.subagentPrompt,
+    hooksPrompt: sessionHooks ? `会话开始时宿主还记下：\n${sessionHooks}` : "",
+  });
+}
+
+/** Same token estimate the next model request would send. */
+export function previewAgentContext(
+  env: AgentTurnEnv,
+  transcript: AgentMessage[],
+): { used: number; budget: number } | null {
+  const thread = env.store.getAgentThread(env.threadId);
+  if (!thread) return null;
+  const providers = env.providers?.length ? env.providers : [builtinProvider()];
+  const found = findProvider(providers, thread.modelRef);
+  const caps = found?.provider.models[found.modelId];
+  const budget = modelContextBudget(caps?.context, caps?.output);
+  const system = composeSystemPrompt(env, transcript, budget, thread);
+  return { used: estimateContextTokens(system, transcript, budget), budget };
+}
+
 async function requestModel(
   env: AgentTurnEnv,
   transcript: AgentMessage[],
@@ -349,47 +410,13 @@ async function requestModel(
   if (provider.apiKeyRequired && !apiKey) {
     throw new Error("缺少模型密钥，请在设置 · 模型中填写。密钥不会写入会话。");
   }
-  const nowMs = env.nowMs ?? Date.now();
-  const today = env.store
-    .listToday(nowMs)
-    .slice(0, 12)
-    .map((task) => `· ${task.title}`)
-    .join("\n");
   const caps = provider.models[found.modelId];
   const budget = modelContextBudget(caps?.context, caps?.output);
   const visible = modelTranscript(transcript, budget);
-  const sessionHooks = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
   const request = buildModelHttpRequest({
     provider,
     modelId: found.modelId,
-    system: buildAgentSystemPrompt({
-      todaySummary: today,
-      focus: env.focus ?? null,
-      unread: env.store.listNotifications().filter((item) => item.status !== "dismissed")
-        .length,
-      modelRef: thread.modelRef,
-      permissionMode: thread.permissionMode,
-      rules: env.rules,
-      contextPrompt: formatSessionContext({
-        nowMs,
-        workspaceTitle: env.workspaceTitle,
-        workspacePath: env.workspacePath,
-        gitBranch: env.gitBranch,
-      }),
-      skillsPrompt: [
-        formatSkillsForPrompt(listEnabledSkillSummaries(env.skills ?? [])),
-        formatActiveSkills(env.skills ?? [], visible),
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-      memoriesPrompt: formatMemoriesForPrompt(memoryPort(env).list()),
-      subagentsPrompt: formatSubagentsForPrompt(env.subagents ?? []),
-      pluginsPrompt: formatPluginsForPrompt(env.plugins ?? []),
-      mcpPrompt: formatMcpForPrompt(env.mcpServers ?? []),
-      hostToolsPrompt: formatHostToolsForPrompt(env.hostTools ?? []),
-      subagentPrompt: env.subagentPrompt,
-      hooksPrompt: sessionHooks ? `会话开始时宿主还记下：\n${sessionHooks}` : "",
-    }),
+    system: composeSystemPrompt(env, transcript, budget, thread),
     messages: visible,
     permissionMode: thread.permissionMode,
     toolAllowlist: env.toolAllowlist,

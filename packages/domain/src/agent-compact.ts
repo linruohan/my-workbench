@@ -24,11 +24,26 @@ export function modelContextBudget(
   return Math.max(1024, (contextLimit ?? 8192) - (outputLimit ?? 2048) - 512);
 }
 
+export function estimateTextTokens(text: string): number {
+  const chars = text.trim().length;
+  if (!chars) return 0;
+  return Math.max(1, Math.ceil(chars / ESTIMATED_TOKEN_CHAR_DIVISOR));
+}
+
 export function estimateTranscriptTokens(
   messages: AgentMessage[],
   budgetTokens: number,
 ): number {
   return tokenSum(modelTranscript(messages, budgetTokens));
+}
+
+/** System prompt plus the compacted transcript, matching one model request. */
+export function estimateContextTokens(
+  system: string,
+  messages: AgentMessage[],
+  budgetTokens: number,
+): number {
+  return estimateTextTokens(system) + estimateTranscriptTokens(messages, budgetTokens);
 }
 
 /**

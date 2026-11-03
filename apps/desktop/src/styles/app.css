@@ -6023,13 +6023,36 @@ input {
 }
 
 .agent__context-usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--wb-muted);
   font-size: var(--wb-text-xs);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.agent__context-bar {
+  width: 2.75rem;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wb-muted) 28%, transparent);
+  overflow: hidden;
+}
+
+.agent__context-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--wb-muted);
 }
 
 .agent__context-usage.is-tight {
   color: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
+}
+
+.agent__context-usage.is-tight .agent__context-bar > span {
+  background: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
 }
 
 .agent__composer-actions .agent__model-trigger {

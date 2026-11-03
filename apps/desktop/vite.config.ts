@@ -6,6 +6,18 @@ import { defineConfig, type Plugin } from "vite";
 
 const ORT_ASSETS = ["ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"];
 
+function ortWasmEntry(distDir: string): Plugin {
+  const entry = path.join(distDir, "ort.wasm.min.mjs");
+  return {
+    name: "ort-wasm-entry",
+    enforce: "pre",
+    resolveId(id) {
+      if (id === "onnxruntime-web/wasm") return entry;
+      return null;
+    },
+  };
+}
+
 function ortAssets(distDir: string, outDir: string): Plugin {
   const serve = (name: string) => {
     if (!ORT_ASSETS.includes(name)) return null;
@@ -50,6 +62,7 @@ const workspaceRoot = path.resolve(rootDir, "../..");
 export default defineConfig({
   plugins: [
     react(),
+    ortWasmEntry(path.join(workspaceRoot, "node_modules/onnxruntime-web/dist")),
     ortAssets(
       path.join(workspaceRoot, "node_modules/onnxruntime-web/dist"),
       path.join(rootDir, "dist"),
@@ -78,13 +91,6 @@ export default defineConfig({
       {
         find: /^@wb\/db$/,
         replacement: pkg("../../packages/db/src/index.ts"),
-      },
-      {
-        find: "onnxruntime-web/wasm",
-        replacement: path.join(
-          workspaceRoot,
-          "node_modules/onnxruntime-web/dist/ort.wasm.min.mjs",
-        ),
       },
     ],
   },

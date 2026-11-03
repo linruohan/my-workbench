@@ -96,8 +96,14 @@ describe("agent context", () => {
     });
     expect(text).toContain("2026-11-03");
     expect(text).toContain("23:05");
-    expect(text).toContain("工作区：my-workbench · D:/codehub/my-workbench");
+    expect(text).toContain("工作区：D:/codehub/my-workbench");
     expect(text).toContain("当前分支：main");
+    const named = formatSessionContext({
+      nowMs: new Date(2026, 10, 3, 23, 5).getTime(),
+      workspaceTitle: "工作台",
+      workspacePath: "D:/codehub/my-workbench",
+    });
+    expect(named).toContain("工作区：工作台 · D:/codehub/my-workbench");
   });
 
   it("keeps a skill named earlier in the visible transcript", () => {
