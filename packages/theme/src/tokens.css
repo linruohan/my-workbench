@@ -19,15 +19,44 @@
   --wb-success: #15803d;
   --wb-warning: #a16207;
   --wb-danger: #c2410c;
+  --wb-on-danger: #ffffff;
+  --wb-window-close: #e81123;
+
+  /* Scrims / elevation — absolute ink lives only in the theme package */
+  --wb-overlay: rgb(28 31 38 / 28%);
+  --wb-overlay-strong: rgb(28 31 38 / 45%);
   --wb-shadow: 0 1px 2px rgb(16 24 40 / 6%);
+  --wb-shadow-md: 0 8px 24px rgb(16 24 40 / 14%);
+  --wb-shadow-lg: 0 16px 48px rgb(16 24 40 / 18%);
+  --wb-shadow-xl: 0 28px 90px rgb(16 24 40 / 22%);
+  --wb-elev-ring: color-mix(in srgb, var(--wb-text) 8%, transparent);
+  --wb-elev-inset: color-mix(in srgb, #fff 70%, transparent);
+
+  /* Code fence chrome + syntax (One Light / One Dark family) */
+  --wb-code-bg: #e8e6ef;
+  --wb-code-border: color-mix(in srgb, #7a7590 18%, transparent);
+  --wb-code-dot-close: #ff5f57;
+  --wb-code-dot-min: #febc2e;
+  --wb-code-dot-max: #28c840;
+  --wb-syn-keyword: #a626a4;
+  --wb-syn-string: #50a14f;
+  --wb-syn-number: #c18401;
+  --wb-syn-title: #4078f2;
+  --wb-syn-variable: #986801;
+  --wb-syn-meta: #0184bc;
+  --wb-syn-deletion: #e45649;
 
   --wb-font-ui: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   --wb-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --wb-text-micro: 10px;
   --wb-text-xs: 12px;
   --wb-text-sm: 13px;
   --wb-text-md: 14px;
   --wb-text-lg: 20px;
+  --wb-text-xl: 28px;
 
+  /* 4px density scale (design §9.2); space-0 for hairline gaps only */
+  --wb-space-0: 2px;
   --wb-space-1: 4px;
   --wb-space-2: 8px;
   --wb-space-3: 12px;
@@ -35,13 +64,16 @@
   --wb-space-5: 24px;
   --wb-space-6: 32px;
 
-  --wb-sidebar-width: 260px;
+  --wb-sidebar-width: 220px;
   --wb-sidebar-collapsed: 52px;
   --wb-titlebar-height: 36px;
   --wb-schedule-width: 320px;
   --wb-row: 36px;
+  --wb-radius-xs: 4px;
+  --wb-radius-sm: 6px;
   --wb-radius-control: 8px;
   --wb-radius-panel: 12px;
+  --wb-radius-pill: 999px;
 
   --wb-motion-fast: 120ms;
   --wb-motion-normal: 180ms;
@@ -62,7 +94,30 @@
   --wb-success: #22c55e;
   --wb-warning: #fbbf24;
   --wb-danger: #fb7185;
+  --wb-on-danger: #ffffff;
+  --wb-window-close: #e81123;
+
+  --wb-overlay: rgb(0 0 0 / 48%);
+  --wb-overlay-strong: rgb(0 0 0 / 55%);
   --wb-shadow: 0 1px 2px rgb(0 0 0 / 35%);
+  --wb-shadow-md: 0 8px 24px rgb(0 0 0 / 28%);
+  --wb-shadow-lg: 0 16px 48px rgb(0 0 0 / 35%);
+  --wb-shadow-xl: 0 28px 90px rgb(0 0 0 / 42%);
+  --wb-elev-ring: color-mix(in srgb, #fff 8%, transparent);
+  --wb-elev-inset: color-mix(in srgb, #fff 5%, transparent);
+
+  --wb-code-bg: color-mix(in srgb, var(--wb-text) 7%, var(--wb-panel));
+  --wb-code-border: var(--wb-line);
+  --wb-code-dot-close: #ff5f57;
+  --wb-code-dot-min: #febc2e;
+  --wb-code-dot-max: #28c840;
+  --wb-syn-keyword: #c678dd;
+  --wb-syn-string: #98c379;
+  --wb-syn-number: #d19a66;
+  --wb-syn-title: #61afef;
+  --wb-syn-variable: #e5c07b;
+  --wb-syn-meta: #56b6c2;
+  --wb-syn-deletion: #e06c75;
 }
 
 @media (prefers-reduced-motion: reduce) {

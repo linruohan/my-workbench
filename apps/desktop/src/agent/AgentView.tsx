@@ -32,10 +32,7 @@ import { writeClipboard } from "../lib/clipboard";
 import { copyCodeBlock } from "../lib/code-copy";
 import { errorMessage } from "../lib/errors";
 import { renderChatMarkdown } from "../lib/markdown";
-import {
-  externalHrefFromEvent,
-  openExternalUrl,
-} from "../lib/open-external";
+import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { useDialog } from "../shell/Dialogs";
 import {
   IconArrowUp,
@@ -174,13 +171,12 @@ export function AgentView({
     };
   }, []);
 
-  const workspaceRootPath = (
-    thread?.workspaceId
+  const workspaceRootPath =
+    (thread?.workspaceId
       ? (store.getAgentWorkspace(thread.workspaceId)?.rootPath ??
         workspaces.find((item) => item.id === thread.workspaceId)?.rootPath)
       : null
-  )
-    ?.trim() ?? "";
+    )?.trim() ?? "";
 
   useEffect(() => {
     if (!workspaceRootPath) {
@@ -1016,19 +1012,14 @@ export function AgentView({
                         value={workspaceTitleDraft}
                         autoFocus
                         maxLength={40}
-                        onChange={(event) =>
-                          setWorkspaceTitleDraft(event.target.value)
-                        }
+                        onChange={(event) => setWorkspaceTitleDraft(event.target.value)}
                         onBlur={(event) =>
                           commitWorkspaceTitle(workspace.id, event.currentTarget.value)
                         }
                         onKeyDown={(event) => {
                           if (event.key === "Enter") {
                             event.preventDefault();
-                            commitWorkspaceTitle(
-                              workspace.id,
-                              event.currentTarget.value,
-                            );
+                            commitWorkspaceTitle(workspace.id, event.currentTarget.value);
                           } else if (event.key === "Escape") {
                             event.preventDefault();
                             setRenamingWorkspaceId(null);
@@ -1128,9 +1119,7 @@ export function AgentView({
                           <li
                             key={item.id}
                             className={
-                              menuOpen
-                                ? "agent__thread-row is-open"
-                                : "agent__thread-row"
+                              menuOpen ? "agent__thread-row is-open" : "agent__thread-row"
                             }
                           >
                             {renamingThreadId === item.id ? (
@@ -1149,10 +1138,7 @@ export function AgentView({
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter") {
                                     event.preventDefault();
-                                    commitThreadTitle(
-                                      item.id,
-                                      event.currentTarget.value,
-                                    );
+                                    commitThreadTitle(item.id, event.currentTarget.value);
                                   } else if (event.key === "Escape") {
                                     event.preventDefault();
                                     setRenamingThreadId(null);
@@ -1230,9 +1216,7 @@ export function AgentView({
                                     type="button"
                                     role="menuitem"
                                     className="is-danger"
-                                    onClick={() =>
-                                      void removeThread(item.id, item.title)
-                                    }
+                                    onClick={() => void removeThread(item.id, item.title)}
                                   >
                                     删除
                                   </button>
@@ -1379,11 +1363,7 @@ export function AgentView({
                 <div className="agent__empty">
                   <p className="agent__greeting">选一个文件夹开始对话</p>
                   <p className="agent__empty-desc">用自然语言管理任务、笔记和提醒。</p>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={onCreateFromFolder}
-                  >
+                  <button type="button" className="primary" onClick={onCreateFromFolder}>
                     新建会话
                   </button>
                 </div>
@@ -1918,15 +1898,11 @@ function ComposerPlusMenu({
       </button>
       {open ? (
         <div className="agent__thread-menu agent__composer-plus-menu" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => onInsert("/")}
-          >
+          <button type="button" role="menuitem" onClick={() => onInsert("/")}>
             插入 /
           </button>
-          {SLASH_COMMANDS.filter((command) =>
-            command.name === "today" || command.name === "brief",
+          {SLASH_COMMANDS.filter(
+            (command) => command.name === "today" || command.name === "brief",
           ).map((command) => (
             <button
               key={command.name}
@@ -1937,25 +1913,13 @@ function ComposerPlusMenu({
               {command.summary}
             </button>
           ))}
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => onInsert("/mode ")}
-          >
+          <button type="button" role="menuitem" onClick={() => onInsert("/mode ")}>
             切换权限…
           </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => onInsert("/model")}
-          >
+          <button type="button" role="menuitem" onClick={() => onInsert("/model")}>
             切换模型…
           </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => onRun("/help")}
-          >
+          <button type="button" role="menuitem" onClick={() => onRun("/help")}>
             查看命令帮助
           </button>
         </div>

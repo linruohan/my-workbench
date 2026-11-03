@@ -64,8 +64,7 @@ export function ModelMenu({
     }) ??
     null;
   const missingKey = Boolean(current?.missingKey);
-  const triggerLabel =
-    current?.label ?? (choices.length ? "选择模型" : "未配置模型");
+  const triggerLabel = current?.label ?? (choices.length ? "选择模型" : "未配置模型");
   const openRef = useRef(open);
   const onOpenChangeRef = useRef(onOpenChange);
   openRef.current = open;

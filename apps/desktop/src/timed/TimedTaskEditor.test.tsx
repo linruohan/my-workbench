@@ -37,7 +37,7 @@ describe("TimedTaskEditor", () => {
         draft={{
           title: "巡检",
           command: "检查日志",
-          schedule: makePresetSchedule("daily", "09:02"),
+          schedule: makePresetSchedule("daily", "09:00"),
         }}
         onChange={onChange}
         onSubmit={() => undefined}
@@ -46,7 +46,7 @@ describe("TimedTaskEditor", () => {
     );
 
     expect(screen.getByLabelText("计划类型")).toHaveTextContent("每天");
-    expect(screen.getByText("GMT+8 每天，09:02")).toBeInTheDocument();
+    expect(screen.getByText("GMT+8 每天，09:00")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "+ 添加计划" })).not.toBeInTheDocument();
 
     await user.click(screen.getByLabelText("计划类型"));
@@ -56,7 +56,7 @@ describe("TimedTaskEditor", () => {
         kind: "custom",
         every: 1,
         unit: "day",
-        atTime: "09:02",
+        atTime: "09:00",
       }),
     });
 

@@ -63,10 +63,7 @@ export function visibleRange(
   const { offsets, heights, total } = metrics;
   const n = offsets.length;
   if (n === 0) return { start: 0, end: 0 };
-  const start = Math.max(
-    0,
-    indexAtOffset(offsets, Math.max(0, scrollTop)) - overscan,
-  );
+  const start = Math.max(0, indexAtOffset(offsets, Math.max(0, scrollTop)) - overscan);
   const bottom = Math.min(total, scrollTop + Math.max(viewportHeight, 1));
   let end = indexAtOffset(offsets, bottom) + 1 + overscan;
   // Include the row that contains bottom even when offset equals bottom.

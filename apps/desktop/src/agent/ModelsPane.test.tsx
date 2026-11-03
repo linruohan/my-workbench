@@ -83,10 +83,13 @@ describe("model API format", () => {
     writeCredential(provider.id, "sk-test-key-12345678");
     const fetchMock = vi.fn(
       async () =>
-        new Response('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        }),
+        new Response(
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
     renderWithProviders(<ModelsPane />);

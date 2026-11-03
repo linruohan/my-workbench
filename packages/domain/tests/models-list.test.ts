@@ -4,7 +4,10 @@ import { modelsListUrl, parseAvailableModels } from "../src/models-list.js";
 describe("available models", () => {
   it("builds the models index for each API format", () => {
     expect(
-      modelsListUrl({ kind: "openai-chat-completions", baseURL: "https://api.openai.com/v1/" }),
+      modelsListUrl({
+        kind: "openai-chat-completions",
+        baseURL: "https://api.openai.com/v1/",
+      }),
     ).toBe("https://api.openai.com/v1/models");
     expect(
       modelsListUrl({
@@ -12,9 +15,9 @@ describe("available models", () => {
         baseURL: "https://api.openai.com/v1/responses",
       }),
     ).toBe("https://api.openai.com/v1/models");
-    expect(modelsListUrl({ kind: "anthropic-messages", baseURL: "https://api.anthropic.com" })).toBe(
-      "https://api.anthropic.com/v1/models",
-    );
+    expect(
+      modelsListUrl({ kind: "anthropic-messages", baseURL: "https://api.anthropic.com" }),
+    ).toBe("https://api.anthropic.com/v1/models");
   });
 
   it("reads ids, limits, and image support, and skips unsafe ids", () => {

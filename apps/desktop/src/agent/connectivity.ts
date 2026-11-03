@@ -12,14 +12,16 @@ import { describeTransportError, hostFetch } from "./host-fetch";
 const PROBE_TIMEOUT_MS = 60_000;
 
 export type ModelConnectivityResult =
-  | { success: true }
-  | { success: false; error: { message: string } };
+  { success: true } | { success: false; error: { message: string } };
 
 export async function testModelConnectivity(input: {
   provider: ProviderConfig;
   modelId: string;
   apiKey: string | null;
-  fetchImpl?: (url: string, init?: RequestInit & { timeoutMs?: number }) => Promise<Response>;
+  fetchImpl?: (
+    url: string,
+    init?: RequestInit & { timeoutMs?: number },
+  ) => Promise<Response>;
   timeoutMs?: number;
 }): Promise<ModelConnectivityResult> {
   const { provider, modelId } = input;
@@ -108,11 +110,15 @@ function providerMessage(body: string): string {
 
 function classifyProviderError(text: string): string | null {
   const haystack = text.toLowerCase();
-  if (/insufficient[_\s-]*balance|insufficient[_\s-]*quota|余额不足|欠费/.test(haystack)) {
+  if (
+    /insufficient[_\s-]*balance|insufficient[_\s-]*quota|余额不足|欠费/.test(haystack)
+  ) {
     return "余额不足";
   }
-  if (/invalid[_\s-]*api[_\s-]*key|authentication|unauthorized/.test(haystack)) return "认证失败";
-  if (/model[_\s-]*not[_\s-]*found|unknown model|模型未找到/.test(haystack)) return "模型未找到";
+  if (/invalid[_\s-]*api[_\s-]*key|authentication|unauthorized/.test(haystack))
+    return "认证失败";
+  if (/model[_\s-]*not[_\s-]*found|unknown model|模型未找到/.test(haystack))
+    return "模型未找到";
   if (/rate[_\s-]*limit|too many requests/.test(haystack)) return "请求频率限制";
   return null;
 }
@@ -156,7 +162,10 @@ function finishFromEvents(
       continue;
     }
     const message = redactSecrets(step.error, secrets);
-    return fail(classifyProviderError(message) ?? message.replace(/\s*\(request_id:[^)]+\)\s*/gi, "").trim());
+    return fail(
+      classifyProviderError(message) ??
+        message.replace(/\s*\(request_id:[^)]+\)\s*/gi, "").trim(),
+    );
   }
   return finished ? { success: true } : null;
 }

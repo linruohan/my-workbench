@@ -73,10 +73,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     () => ({
       alert: (opts) =>
         new Promise<void>((resolve) => {
-          const normalized =
-            typeof opts === "string"
-              ? { message: opts }
-              : opts;
+          const normalized = typeof opts === "string" ? { message: opts } : opts;
           enqueue({
             kind: "alert",
             title: normalized.title ?? "提示",
@@ -90,10 +87,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
         }),
       confirm: (opts) =>
         new Promise<boolean>((resolve) => {
-          const normalized =
-            typeof opts === "string"
-              ? { message: opts }
-              : opts;
+          const normalized = typeof opts === "string" ? { message: opts } : opts;
           enqueue({
             kind: "confirm",
             title: normalized.title ?? "请确认",

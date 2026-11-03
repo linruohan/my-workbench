@@ -1,4 +1,4 @@
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -179,11 +179,14 @@ describe("App shell", () => {
   it("creates a task from an agent session only after approval", async () => {
     const user = userEvent.setup();
     await readyApp();
-    vi.spyOn(window, "prompt").mockReturnValue("D:/tmp/agent-ws");
 
     await user.click(screen.getByRole("button", { name: "Agent" }));
     await user.click(screen.getAllByRole("button", { name: "新建会话" })[0]!);
+    const path = await screen.findByLabelText("工作区目录的完整路径");
+    await user.type(path, "D:/tmp/agent-ws");
+    await user.click(screen.getByRole("button", { name: "确定" }));
     const box = await screen.findByLabelText("给 Agent 发消息");
+    await waitFor(() => expect(box).toBeEnabled());
     await user.type(box, "创建任务 验收事项");
     await user.click(screen.getByRole("button", { name: "发送" }));
     await user.click(await screen.findByRole("button", { name: "批准" }));

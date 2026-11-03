@@ -283,9 +283,7 @@ export function TaskEditor({
                   allowEmpty
                   emptyLabel="未设置截止时间"
                   defaultTime={DEFAULT_DEADLINE_TIME}
-                  onChange={(deadlineWithTimeLocal) =>
-                    patch({ deadlineWithTimeLocal })
-                  }
+                  onChange={(deadlineWithTimeLocal) => patch({ deadlineWithTimeLocal })}
                 />
               </div>
             </div>

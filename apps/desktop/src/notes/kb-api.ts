@@ -98,12 +98,7 @@ export function loadKnowledgeSort(): { key: KbSortKey; dir: KbSortDir } {
   try {
     const raw = localStorage.getItem(SORT_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : null;
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      "key" in parsed &&
-      "dir" in parsed
-    ) {
+    if (parsed && typeof parsed === "object" && "key" in parsed && "dir" in parsed) {
       const key = (parsed as { key: string }).key;
       const dir = (parsed as { dir: string }).dir;
       if (

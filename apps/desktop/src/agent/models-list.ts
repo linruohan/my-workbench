@@ -17,7 +17,10 @@ export type ModelsListResult =
 export async function fetchAvailableModels(input: {
   provider: ProviderConfig;
   apiKey: string | null;
-  fetchImpl?: (url: string, init?: RequestInit & { timeoutMs?: number }) => Promise<Response>;
+  fetchImpl?: (
+    url: string,
+    init?: RequestInit & { timeoutMs?: number },
+  ) => Promise<Response>;
   timeoutMs?: number;
 }): Promise<ModelsListResult> {
   const { provider } = input;
@@ -60,7 +63,8 @@ export async function fetchAvailableModels(input: {
   const models = parseAvailableModels(payload);
   if (models.length > 0) return { success: true, models };
   const message = connectivityProbeJsonError(payload);
-  if (message && message !== "模型响应不是 JSON") return fail(redactSecrets(message, secrets));
+  if (message && message !== "模型响应不是 JSON")
+    return fail(redactSecrets(message, secrets));
   return fail("没有获取到可用模型");
 }
 

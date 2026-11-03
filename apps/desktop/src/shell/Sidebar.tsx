@@ -17,14 +17,7 @@ import {
 } from "./icons";
 
 export type AppNavId =
-  | "today"
-  | "inbox"
-  | "done"
-  | "planner"
-  | "projects"
-  | "knowledge"
-  | "timed"
-  | "agent";
+  "today" | "inbox" | "done" | "planner" | "projects" | "knowledge" | "timed" | "agent";
 
 type TaskNavItem = {
   id: "today" | "inbox" | "done" | "planner" | "timed";

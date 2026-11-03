@@ -14,10 +14,7 @@ export type AgentRole = "user" | "assistant" | "tool" | "system";
 export type ToolEffect = "none" | "read" | "write" | "destructive";
 export type ToolGate = "run" | "ask" | "block";
 export type ProviderKind =
-  | "builtin"
-  | "openai-chat-completions"
-  | "openai-responses"
-  | "anthropic-messages";
+  "builtin" | "openai-chat-completions" | "openai-responses" | "anthropic-messages";
 
 /** Folder that holds Agent sessions. Distinct from task projects. */
 export interface AgentWorkspace {

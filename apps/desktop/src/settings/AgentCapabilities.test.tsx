@@ -63,7 +63,9 @@ describe("Agent capabilities settings", () => {
   it("saves user rules into prefs", async () => {
     const user = userEvent.setup();
     const seen: AppPrefs[] = [];
-    renderWithProviders(<Harness initialSection="personal" onPrefs={(prefs) => seen.push(prefs)} />);
+    renderWithProviders(
+      <Harness initialSection="personal" onPrefs={(prefs) => seen.push(prefs)} />,
+    );
 
     await user.type(screen.getByLabelText("用户规则"), "用短句");
     expect(screen.getByLabelText("用户规则")).toHaveValue("用短句");

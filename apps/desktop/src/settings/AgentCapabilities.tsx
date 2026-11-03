@@ -82,7 +82,8 @@ function PersonalPane({
   return (
     <>
       <p className="agent-cap__lead">
-        写给 Agent 的长期偏好，例如称呼、回复长短、排期习惯。每次会话都会放进系统提示，只保存在本机。
+        写给 Agent
+        的长期偏好，例如称呼、回复长短、排期习惯。每次会话都会放进系统提示，只保存在本机。
       </p>
       <textarea
         className="agent-cap__rules"
@@ -110,7 +111,8 @@ function SubagentsPane() {
   return (
     <>
       <p className="agent-cap__lead">
-        子智能体带有独立说明和工具范围，由本地插件的 agents 目录注册。启用插件后出现在这里。
+        子智能体带有独立说明和工具范围，由本地插件的 agents
+        目录注册。启用插件后出现在这里。
       </p>
       <p className="agent-cap__empty">还没有子智能体。</p>
     </>
@@ -121,9 +123,12 @@ function PluginsPane() {
   return (
     <>
       <p className="agent-cap__lead">
-        插件是本机目录里的能力包。启用后会注册其中的技能、命令、子智能体、钩子和 MCP；停用则全部卸下。
+        插件是本机目录里的能力包。启用后会注册其中的技能、命令、子智能体、钩子和
+        MCP；停用则全部卸下。
       </p>
-      <p className="agent-cap__empty">还没有安装插件。从本地文件夹安装会在宿主接入后开放。</p>
+      <p className="agent-cap__empty">
+        还没有安装插件。从本地文件夹安装会在宿主接入后开放。
+      </p>
     </>
   );
 }
@@ -134,7 +139,9 @@ function McpPane() {
       <p className="agent-cap__lead">
         MCP 服务器提供外部工具，并进入同一套权限。调用默认需要确认，密钥不会放进插件目录。
       </p>
-      <p className="agent-cap__empty">还没有 MCP 服务器。它们来自已启用插件里的 .mcp.json。</p>
+      <p className="agent-cap__empty">
+        还没有 MCP 服务器。它们来自已启用插件里的 .mcp.json。
+      </p>
     </>
   );
 }

@@ -219,7 +219,8 @@ export function mergeDiscoveredModels(
     const id = item.id.trim();
     if (!id || id.includes("/") || seen.has(id)) continue;
     seen.add(id);
-    const knownLimits = positiveInt(item.context, 0) > 0 || positiveInt(item.output, 0) > 0;
+    const knownLimits =
+      positiveInt(item.context, 0) > 0 || positiveInt(item.output, 0) > 0;
     const discovered = modelCapsFrom({
       context: item.context,
       output: item.output,

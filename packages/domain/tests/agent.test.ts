@@ -317,7 +317,11 @@ describe("connectivity probe", () => {
 
   it("sends one token, no tools, and the lowest reasoning level", () => {
     const chat = buildConnectivityProbe({
-      provider: { ...remote, kind: "openai-chat-completions", baseURL: "https://probe.invalid/v1" },
+      provider: {
+        ...remote,
+        kind: "openai-chat-completions",
+        baseURL: "https://probe.invalid/v1",
+      },
       modelId: "probe-model",
     });
     expect(chat.url).toBe("https://probe.invalid/v1/chat/completions");
@@ -334,7 +338,11 @@ describe("connectivity probe", () => {
     expect(JSON.stringify(chat.body)).not.toContain("tools");
 
     const anthropic = buildConnectivityProbe({
-      provider: { ...remote, kind: "anthropic-messages", baseURL: "https://probe.invalid" },
+      provider: {
+        ...remote,
+        kind: "anthropic-messages",
+        baseURL: "https://probe.invalid",
+      },
       modelId: "probe-model",
     });
     expect(anthropic.url).toBe("https://probe.invalid/v1/messages");
@@ -347,7 +355,11 @@ describe("connectivity probe", () => {
     });
 
     const responses = buildConnectivityProbe({
-      provider: { ...remote, kind: "openai-responses", baseURL: "https://probe.invalid/v1" },
+      provider: {
+        ...remote,
+        kind: "openai-responses",
+        baseURL: "https://probe.invalid/v1",
+      },
       modelId: "probe-model",
     });
     const zhipu = buildConnectivityProbe({
@@ -388,7 +400,9 @@ describe("connectivity probe", () => {
         JSON.stringify({ choices: [{ finish_reason: "length" }] }),
       ),
     ).toBe("finish");
-    expect(readConnectivityProbeEvent("openai-chat-completions", "[DONE]")).toBe("finish");
+    expect(readConnectivityProbeEvent("openai-chat-completions", "[DONE]")).toBe(
+      "finish",
+    );
     expect(
       readConnectivityProbeEvent(
         "anthropic-messages",
@@ -401,9 +415,9 @@ describe("connectivity probe", () => {
         JSON.stringify({ type: "response.completed" }),
       ),
     ).toBe("finish");
-    expect(
-      connectivityProbeJsonError({ error: { message: "model not found" } }),
-    ).toBe("model not found");
+    expect(connectivityProbeJsonError({ error: { message: "model not found" } })).toBe(
+      "model not found",
+    );
     expect(connectivityProbeJsonError({ choices: [] })).toBeNull();
   });
 });

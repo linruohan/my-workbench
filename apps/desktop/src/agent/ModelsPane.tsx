@@ -48,10 +48,7 @@ export function ModelsPane() {
   const [adding, setAdding] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const selected =
-    providers.find((item) => item.id === selectedId) ??
-    customs[0] ??
-    builtin ??
-    null;
+    providers.find((item) => item.id === selectedId) ?? customs[0] ?? builtin ?? null;
 
   useEffect(() => {
     if (!selected) return;
@@ -245,9 +242,7 @@ function ProviderNavButton({
     >
       <span className="agent-models__nav-name">{provider.name}</span>
       <span
-        className={
-          ready ? "agent-models__dot is-ready" : "agent-models__dot is-warn"
-        }
+        className={ready ? "agent-models__dot is-ready" : "agent-models__dot is-warn"}
         title={ready ? "可用" : "待完善"}
         aria-hidden="true"
       />
@@ -279,7 +274,9 @@ function AddProviderPanel({
       <div className="agent-models__card-head">
         <div>
           <h2 className="agent-models__card-title">添加供应商</h2>
-          <p className="agent-models__card-desc">从目录选择模板，或创建空白自定义端点。</p>
+          <p className="agent-models__card-desc">
+            从目录选择模板，或创建空白自定义端点。
+          </p>
         </div>
         <button type="button" className="btn" onClick={onCancel}>
           取消
@@ -389,9 +386,11 @@ function ProviderDetail({
   const [probes, setProbes] = useState<
     Record<string, { pending: boolean; ok: boolean; message: string }>
   >({});
-  const [catalog, setCatalog] = useState<null | { pending: boolean; ok: boolean; message: string }>(
-    null,
-  );
+  const [catalog, setCatalog] = useState<null | {
+    pending: boolean;
+    ok: boolean;
+    message: string;
+  }>(null);
   const hasKey = credentialExists(provider.id);
   const models = Object.entries(provider.models);
 
@@ -468,15 +467,14 @@ function ProviderDetail({
       modelId,
       apiKey: apiKey.trim() || readCredential(provider.id),
     }).then((result) => {
+      const ok = result.success === true;
+      const message =
+        result.success === false
+          ? `${provider.name} / ${modelId} 连接失败：${result.error.message}`
+          : `${provider.name} / ${modelId} 连接成功`;
       setProbes((current) => ({
         ...current,
-        [modelId]: result.success
-          ? { pending: false, ok: true, message: `${provider.name} / ${modelId} 连接成功` }
-          : {
-              pending: false,
-              ok: false,
-              message: `${provider.name} / ${modelId} 连接失败：${result.error.message}`,
-            },
+        [modelId]: { pending: false, ok, message },
       }));
     });
   };
@@ -497,7 +495,7 @@ function ProviderDetail({
       provider: target,
       apiKey: apiKey.trim() || readCredential(provider.id),
     }).then((result) => {
-      if (!result.success) {
+      if (result.success === false) {
         setCatalog({ pending: false, ok: false, message: result.error.message });
         return;
       }
@@ -605,7 +603,11 @@ function ProviderDetail({
             {providerKindLabel(kind)}
           </button>
           {formatOpen ? (
-            <ul className="agent-models__format-menu" role="listbox" aria-label="API 格式">
+            <ul
+              className="agent-models__format-menu"
+              role="listbox"
+              aria-label="API 格式"
+            >
               {API_FORMATS.map((item) => (
                 <li key={item.kind}>
                   <button
@@ -675,7 +677,9 @@ function ProviderDetail({
             title={provider.enabled ? "从供应商获取可用模型" : "请先启用供应商"}
             onClick={runDiscover}
           >
-            {catalog?.pending ? <IconRefresh size={14} className="agent-models__spin" /> : null}
+            {catalog?.pending ? (
+              <IconRefresh size={14} className="agent-models__spin" />
+            ) : null}
             获取模型
           </button>
           <button
@@ -689,7 +693,15 @@ function ProviderDetail({
         </div>
       </div>
       {catalog ? (
-        <p className={catalog.ok ? "agent-models__probe is-ok" : catalog.pending ? "agent-models__probe" : "agent-models__probe is-bad"}>
+        <p
+          className={
+            catalog.ok
+              ? "agent-models__probe is-ok"
+              : catalog.pending
+                ? "agent-models__probe"
+                : "agent-models__probe is-bad"
+          }
+        >
           {catalog.message}
         </p>
       ) : null}

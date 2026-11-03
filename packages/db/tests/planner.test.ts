@@ -12,11 +12,7 @@ describe("planner list after scheduling", () => {
     store.scheduleTask(a.id, { dueDay: today }, now);
 
     const b = store.createTask({ title: "时刻计划", nowMs: now + 1 });
-    store.scheduleTask(
-      b.id,
-      { dueWithTime: new Date(2026, 10, 3, 9, 0).getTime() },
-      now,
-    );
+    store.scheduleTask(b.id, { dueWithTime: new Date(2026, 10, 3, 9, 0).getTime() }, now);
 
     const undated = store.createTask({ title: "无日期", nowMs: now + 2 });
 

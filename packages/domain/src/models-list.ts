@@ -8,10 +8,16 @@ export interface AvailableModel {
 }
 
 /** OpenAI-compatible and Anthropic model indexes live at `{base}/models`. */
-export function modelsListUrl(provider: Pick<ProviderConfig, "kind" | "baseURL">): string {
+export function modelsListUrl(
+  provider: Pick<ProviderConfig, "kind" | "baseURL">,
+): string {
   let base = provider.baseURL.trim().replace(/\/+$/, "");
   base = base.replace(/\/(?:chat\/completions|responses|messages)$/, "");
-  if (provider.kind === "anthropic-messages" && !base.endsWith("/models") && !/\/v\d+$/.test(base)) {
+  if (
+    provider.kind === "anthropic-messages" &&
+    !base.endsWith("/models") &&
+    !/\/v\d+$/.test(base)
+  ) {
     base = `${base}/v1`;
   }
   if (base.endsWith("/models")) return base;
@@ -42,10 +48,7 @@ function readModel(item: unknown): AvailableModel | null {
   if (typeof item === "string") return cleanId(item) ? { id: item.trim() } : null;
   const record = asRecord(item);
   if (!record) return null;
-  const id =
-    cleanId(record.id) ??
-    cleanId(record.name) ??
-    cleanId(record.model);
+  const id = cleanId(record.id) ?? cleanId(record.name) ?? cleanId(record.model);
   if (!id) return null;
   const context = firstPositive(
     record.context_window,
@@ -72,7 +75,8 @@ function cleanId(value: unknown): string | null {
 
 function firstPositive(...values: unknown[]): number | undefined {
   for (const value of values) {
-    const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+    const number =
+      typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
     if (Number.isFinite(number) && number > 0) return Math.floor(number);
   }
   return undefined;
@@ -81,12 +85,18 @@ function firstPositive(...values: unknown[]): number | undefined {
 function supportsImage(record: Record<string, unknown>): boolean {
   const buckets = [record.input_modalities, record.modalities, record.architecture];
   for (const bucket of buckets) {
-    if (Array.isArray(bucket) && bucket.some((item) => item === "image" || item === "vision")) {
+    if (
+      Array.isArray(bucket) &&
+      bucket.some((item) => item === "image" || item === "vision")
+    ) {
       return true;
     }
     const nested = asRecord(bucket);
     const input = nested?.input_modalities ?? nested?.input;
-    if (Array.isArray(input) && input.some((item) => item === "image" || item === "vision")) {
+    if (
+      Array.isArray(input) &&
+      input.some((item) => item === "image" || item === "vision")
+    ) {
       return true;
     }
   }

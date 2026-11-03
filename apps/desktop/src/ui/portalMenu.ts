@@ -23,10 +23,7 @@ export function placePortalMenu(
   const spaceAbove = rect.top - gap - 8;
   const openUp = spaceBelow < Math.min(menuH, 200) && spaceAbove > spaceBelow;
   const maxHeight = Math.max(140, openUp ? spaceAbove : spaceBelow);
-  const left = Math.min(
-    Math.max(8, rect.left),
-    window.innerWidth - width - 8,
-  );
+  const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
   const top = openUp
     ? Math.max(8, rect.top - gap - Math.min(menuH, maxHeight))
     : rect.bottom + gap;

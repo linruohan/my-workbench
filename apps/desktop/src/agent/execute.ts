@@ -376,9 +376,9 @@ function openView(args: Record<string, unknown>): AgentToolResult {
   }
   // 「时间表」入口已并入「计划」；旧指令仍可打开计划视图。
   const resolved = view === "schedule" ? "planner" : view;
-  const nav = (
-    ["today", "planner", "knowledge", "timed", "projects"] as const
-  ).find((item) => item === resolved);
+  const nav = (["today", "planner", "knowledge", "timed", "projects"] as const).find(
+    (item) => item === resolved,
+  );
   if (!nav) throw new DomainError(`未知视图 ${view}`);
   return {
     ok: true,

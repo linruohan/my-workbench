@@ -146,7 +146,15 @@ export function IconArrowUp({ size, className }: IconProps) {
 export function IconStop({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>
-      <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none" />
+      <rect
+        x="7"
+        y="7"
+        width="10"
+        height="10"
+        rx="1.5"
+        fill="currentColor"
+        stroke="none"
+      />
     </Svg>
   );
 }

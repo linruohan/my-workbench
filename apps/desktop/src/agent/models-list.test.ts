@@ -1,7 +1,12 @@
 import { builtinProvider, type ProviderConfig } from "@wb/domain";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchAvailableModels } from "./models-list";
-import { addProvider, mergeDiscoveredModels, readProviderStore, updateModel } from "./providers";
+import {
+  addProvider,
+  mergeDiscoveredModels,
+  readProviderStore,
+  updateModel,
+} from "./providers";
 
 function provider(): ProviderConfig {
   return {
@@ -33,12 +38,19 @@ describe("fetchAvailableModels", () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("https://api.openai.com/v1/models");
       expect(init?.method).toBe("GET");
-      expect(init?.headers).toMatchObject({ authorization: "Bearer sk-test-key-12345678" });
+      expect(init?.headers).toMatchObject({
+        authorization: "Bearer sk-test-key-12345678",
+      });
       return new Response(
         JSON.stringify({
           data: [
             { id: "gpt-4.1", context_window: 999 },
-            { id: "gpt-4.1-mini", context_window: 128000, max_output_tokens: 4096, vision: true },
+            {
+              id: "gpt-4.1-mini",
+              context_window: 128000,
+              max_output_tokens: 4096,
+              vision: true,
+            },
           ],
         }),
         { status: 200 },
@@ -51,8 +63,13 @@ describe("fetchAvailableModels", () => {
     });
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(mergeDiscoveredModels(saved.id, result.models)).toEqual({ listed: 2, added: 1 });
-    const models = readProviderStore().providers.find((item) => item.id === saved.id)?.models;
+    expect(mergeDiscoveredModels(saved.id, result.models)).toEqual({
+      listed: 2,
+      added: 1,
+    });
+    const models = readProviderStore().providers.find(
+      (item) => item.id === saved.id,
+    )?.models;
     expect(models?.["gpt-4.1"]).toEqual({ context: 32000, output: 1024 });
     expect(models?.["gpt-4.1-mini"]).toEqual({
       context: 128000,

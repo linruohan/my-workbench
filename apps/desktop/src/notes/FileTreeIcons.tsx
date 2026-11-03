@@ -255,10 +255,7 @@ function IconShell({ size }: SvgProps) {
 function IconToml({ size }: SvgProps) {
   return (
     <DocShell size={size} fill="#9C4221" title="TOML">
-      <path
-        fill="#fff"
-        d="M4.5 5.7h7v1.15H8.85v4.9H7.15v-4.9H4.5Z"
-      />
+      <path fill="#fff" d="M4.5 5.7h7v1.15H8.85v4.9H7.15v-4.9H4.5Z" />
     </DocShell>
   );
 }

@@ -97,9 +97,6 @@ export function TasksView({
   onViewModeChange,
   onToggleDone,
   onPlanToday,
-  onPlanTime,
-  onClearPlan,
-  onToggleTimer,
   onMoveColumn,
   onSaveTask,
   onDeleteTask,
@@ -164,15 +161,7 @@ export function TasksView({
       return (taskTagMap[task.id] ?? []).some((t) => t.id === filterTagId);
     });
     return sortTasks(filtered, sortKey);
-  }, [
-    scopedTasks,
-    query,
-    status,
-    today,
-    sortKey,
-    filterTagId,
-    taskTagMap,
-  ]);
+  }, [scopedTasks, query, status, today, sortKey, filterTagId, taskTagMap]);
 
   const editing = editingId ? (tasks.find((t) => t.id === editingId) ?? null) : null;
   const editingSubtasks = editing ? listChildTasks(tasks, editing.id) : [];

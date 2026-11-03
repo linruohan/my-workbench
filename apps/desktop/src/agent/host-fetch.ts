@@ -14,7 +14,8 @@ export async function hostFetch(
   init: RequestInit & { timeoutMs?: number } = {},
 ): Promise<Response> {
   if (!isTauriRuntime()) return fetch(url, init);
-  if (init.signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+  if (init.signal?.aborted)
+    throw new DOMException("The operation was aborted.", "AbortError");
   const { invoke } = await import("@tauri-apps/api/core");
   const proxy = readPrefs().httpProxy.trim();
   let result: HostResponse;
@@ -36,7 +37,8 @@ export async function hostFetch(
           : "";
     throw new Error(message || "网络错误");
   }
-  const contentType = result.contentType || result.content_type || "application/octet-stream";
+  const contentType =
+    result.contentType || result.content_type || "application/octet-stream";
   return new Response(result.body, {
     status: result.status,
     headers: { "content-type": contentType },
@@ -46,7 +48,12 @@ export async function hostFetch(
 export function describeTransportError(error: unknown, timeoutLabel: string): string {
   const name = error instanceof Error ? error.name : "";
   const message = error instanceof Error ? error.message.trim() : "";
-  if (name === "TimeoutError" || name === "AbortError" || message === "测试超时" || /超时/.test(message)) {
+  if (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    message === "测试超时" ||
+    /超时/.test(message)
+  ) {
     return timeoutLabel;
   }
   if (message && message !== "Failed to fetch") return message.slice(0, 200);

@@ -19,10 +19,15 @@ function provider(patch: Partial<ProviderConfig> = {}): ProviderConfig {
 describe("testModelConnectivity", () => {
   it("succeeds when the stream finishes and sends the probe body", async () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { tools?: unknown; max_completion_tokens?: number };
+      const body = JSON.parse(String(init?.body)) as {
+        tools?: unknown;
+        max_completion_tokens?: number;
+      };
       expect(body.tools).toBeUndefined();
       expect(body.max_completion_tokens).toBe(1);
-      expect(init?.headers).toMatchObject({ authorization: "Bearer sk-test-key-12345678" });
+      expect(init?.headers).toMatchObject({
+        authorization: "Bearer sk-test-key-12345678",
+      });
       return new Response(
         [
           'data: {"choices":[{"delta":{"content":"h"},"finish_reason":null}]}',
@@ -46,10 +51,13 @@ describe("testModelConnectivity", () => {
 
   it("fails when the stream ends before finish", async () => {
     const fetchImpl = vi.fn(async () => {
-      return new Response('data: {"choices":[{"delta":{"content":"h"},"finish_reason":null}]}\n\n', {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      });
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"h"},"finish_reason":null}]}\n\n',
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
     });
     const result = await testModelConnectivity({
       provider: provider(),
@@ -65,7 +73,9 @@ describe("testModelConnectivity", () => {
 
   it("classifies auth failures and skips the network when the key is missing", async () => {
     const fetchImpl = vi.fn(async () => {
-      return new Response(JSON.stringify({ error: { message: "bad key" } }), { status: 401 });
+      return new Response(JSON.stringify({ error: { message: "bad key" } }), {
+        status: 401,
+      });
     });
     const denied = await testModelConnectivity({
       provider: provider(),
@@ -83,7 +93,8 @@ describe("testModelConnectivity", () => {
         new Response(
           JSON.stringify({
             error: {
-              message: "Insufficient Balance (request_id: d923ad94-94a4-4cc3-8ac4-d46da4af7365)",
+              message:
+                "Insufficient Balance (request_id: d923ad94-94a4-4cc3-8ac4-d46da4af7365)",
               type: "insufficient_balance_error",
               code: "invalid_request_error",
             },

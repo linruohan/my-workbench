@@ -127,7 +127,9 @@ export function TaskBoard({
                                 <IconRepeat size={13} />
                               </span>
                             ) : null}
-                            {plan ? <span className="list__plan-text">{plan}</span> : null}
+                            {plan ? (
+                              <span className="list__plan-text">{plan}</span>
+                            ) : null}
                           </span>
                         ) : null}
                         {(plan || repeatLabel) && projectTitles[task.projectId]

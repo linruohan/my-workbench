@@ -55,9 +55,7 @@ export function PlannerView({
                     denseMeta
                     nowMs={nowMs}
                     timerRunning={activeTimerTaskId === task.id}
-                    timerElapsedMs={
-                      activeTimerTaskId === task.id ? timerElapsedMs : 0
-                    }
+                    timerElapsedMs={activeTimerTaskId === task.id ? timerElapsedMs : 0}
                     onToggleDone={onToggleDone}
                     onOpen={onOpen}
                   />

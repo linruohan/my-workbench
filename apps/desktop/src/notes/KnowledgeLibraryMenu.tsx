@@ -77,7 +77,9 @@ export function KnowledgeLibraryMenu({
           </button>
           <button
             type="button"
-            className={sortDir === "asc" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"}
+            className={
+              sortDir === "asc" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"
+            }
             title={sortDir === "asc" ? "升序" : "降序"}
             aria-label={sortDir === "asc" ? "升序" : "降序"}
             aria-pressed={sortDir === "asc"}
@@ -87,7 +89,9 @@ export function KnowledgeLibraryMenu({
           </button>
           <button
             type="button"
-            className={sortKey === "name" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"}
+            className={
+              sortKey === "name" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"
+            }
             title="按名称"
             aria-label="按名称"
             aria-pressed={sortKey === "name"}
@@ -97,7 +101,9 @@ export function KnowledgeLibraryMenu({
           </button>
           <button
             type="button"
-            className={sortKey === "mtime" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"}
+            className={
+              sortKey === "mtime" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"
+            }
             title="按修改时间"
             aria-label="按修改时间"
             aria-pressed={sortKey === "mtime"}
@@ -107,7 +113,9 @@ export function KnowledgeLibraryMenu({
           </button>
           <button
             type="button"
-            className={sortKey === "type" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"}
+            className={
+              sortKey === "type" ? "kb-menu__sort-btn is-active" : "kb-menu__sort-btn"
+            }
             title="按类型"
             aria-label="按类型"
             aria-pressed={sortKey === "type"}
@@ -130,7 +138,9 @@ export function KnowledgeLibraryMenu({
                 <li key={path}>
                   <button
                     type="button"
-                    className={active ? "kb-menu__recent-item is-active" : "kb-menu__recent-item"}
+                    className={
+                      active ? "kb-menu__recent-item is-active" : "kb-menu__recent-item"
+                    }
                     title={path}
                     role="menuitem"
                     onClick={() => onSelectRecent(path)}
@@ -139,7 +149,9 @@ export function KnowledgeLibraryMenu({
                       <IconFolder />
                     </span>
                     <span className="kb-menu__recent-name">{fileNameOf(path)}</span>
-                    {active ? <span className="kb-menu__dot" aria-label="当前目录" /> : null}
+                    {active ? (
+                      <span className="kb-menu__dot" aria-label="当前目录" />
+                    ) : null}
                   </button>
                 </li>
               );
@@ -181,7 +193,15 @@ function IconSortName() {
 
 function IconSortTime() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      aria-hidden
+    >
       <circle cx="8" cy="8" r="5.2" />
       <path d="M8 5.2V8l2 1.4" strokeLinecap="round" />
     </svg>

@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   defaultCustomSchedule,
@@ -42,10 +36,7 @@ function placeMenu(trigger: HTMLElement, menu: HTMLElement): Pos {
   const spaceAbove = rect.top - gap - 8;
   const openUp = spaceBelow < Math.min(menuH, 220) && spaceAbove > spaceBelow;
   const maxHeight = Math.max(160, openUp ? spaceAbove : spaceBelow);
-  const left = Math.min(
-    Math.max(8, rect.left),
-    window.innerWidth - width - 8,
-  );
+  const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
   const top = openUp
     ? Math.max(8, rect.top - gap - Math.min(menuH, maxHeight))
     : rect.bottom + gap;

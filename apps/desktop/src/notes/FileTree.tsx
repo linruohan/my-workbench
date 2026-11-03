@@ -1,11 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { fileNameOf, isIgnoredKbName, isPathUnder, samePath } from "@wb/domain";
-import {
-  listDirectory,
-  type KbEntry,
-  type KbSortDir,
-  type KbSortKey,
-} from "./kb-api";
+import { listDirectory, type KbEntry, type KbSortDir, type KbSortKey } from "./kb-api";
 import { FileIcon, FolderIcon } from "./FileTreeIcons";
 
 type Props = {

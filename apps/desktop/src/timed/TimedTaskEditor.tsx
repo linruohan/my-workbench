@@ -1,9 +1,5 @@
 import { useState } from "react";
-import {
-  timedScheduleLabel,
-  type TimedSchedule,
-  type TimedTask,
-} from "@wb/domain";
+import { timedScheduleLabel, type TimedSchedule, type TimedTask } from "@wb/domain";
 import { ScheduleAddMenu } from "./ScheduleAddMenu";
 import { ScheduleRow } from "./ScheduleRow";
 

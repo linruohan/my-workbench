@@ -96,9 +96,7 @@ export function selectPlannerTasks(tasks: Task[], day?: string | null): Task[] {
 }
 
 /** Group already-sorted planner tasks into day sections. */
-export function groupPlannerByDay(
-  tasks: Task[],
-): Array<{ day: string; tasks: Task[] }> {
+export function groupPlannerByDay(tasks: Task[]): Array<{ day: string; tasks: Task[] }> {
   const groups: Array<{ day: string; tasks: Task[] }> = [];
   for (const task of tasks) {
     const day = plannedDayOf(task);

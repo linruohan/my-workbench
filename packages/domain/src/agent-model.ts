@@ -120,7 +120,9 @@ export function buildConnectivityProbe(input: {
       max_tokens: 1,
       stream: true,
       system: [{ type: "text", text: CONNECTIVITY_PROBE_SYSTEM }],
-      messages: [{ role: "user", content: [{ type: "text", text: CONNECTIVITY_PROBE_USER }] }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: CONNECTIVITY_PROBE_USER }] },
+      ],
     };
     applyReasoningField(body, reasoning);
     return {
@@ -140,7 +142,10 @@ export function buildConnectivityProbe(input: {
       max_output_tokens: 1,
       input: [
         { role: "system", content: CONNECTIVITY_PROBE_SYSTEM },
-        { role: "user", content: [{ type: "input_text", text: CONNECTIVITY_PROBE_USER }] },
+        {
+          role: "user",
+          content: [{ type: "input_text", text: CONNECTIVITY_PROBE_USER }],
+        },
       ],
     };
     applyReasoningField(body, reasoning);
@@ -189,13 +194,18 @@ export function readConnectivityProbeEvent(
   if (kind === "anthropic-messages") {
     if (record.type === "message_stop") return "finish";
     const delta = asRecord(record.delta);
-    if (record.type === "message_delta" && typeof delta?.stop_reason === "string" && delta.stop_reason) {
+    if (
+      record.type === "message_delta" &&
+      typeof delta?.stop_reason === "string" &&
+      delta.stop_reason
+    ) {
       return "finish";
     }
     return "pending";
   }
   if (kind === "openai-responses") {
-    if (record.type === "response.completed" || record.type === "response.incomplete") return "finish";
+    if (record.type === "response.completed" || record.type === "response.incomplete")
+      return "finish";
     if (record.type === "response.failed") {
       const nested = asRecord(asRecord(record.response)?.error);
       const message = typeof nested?.message === "string" ? nested.message.trim() : "";
@@ -204,7 +214,8 @@ export function readConnectivityProbeEvent(
     return "pending";
   }
   const choice = asRecord(asArray(record.choices)?.[0]);
-  if (choice && typeof choice.finish_reason === "string" && choice.finish_reason) return "finish";
+  if (choice && typeof choice.finish_reason === "string" && choice.finish_reason)
+    return "finish";
   return "pending";
 }
 
@@ -299,7 +310,10 @@ export function finishOpenAiStream(acc: OpenAiStreamAcc): AgentTurnPlan {
 }
 
 /** Zhipu chat models reject the OpenAI completion budget and think by default. */
-function chatProbeBudget(provider: ProviderConfig, modelId: string): Record<string, unknown> {
+function chatProbeBudget(
+  provider: ProviderConfig,
+  modelId: string,
+): Record<string, unknown> {
   const zhipu = /bigmodel\.cn/i.test(provider.baseURL) || /^glm[-.]/i.test(modelId);
   if (!zhipu) return { max_completion_tokens: 1 };
   return { max_tokens: 16, thinking: { type: "disabled" } };
@@ -338,9 +352,11 @@ function applyReasoningField(
 
 function probeErrorMessage(record: Record<string, unknown>): string | null {
   if (record.type === "error" || record.error) {
-    if (typeof record.error === "string" && record.error.trim()) return record.error.trim();
+    if (typeof record.error === "string" && record.error.trim())
+      return record.error.trim();
     const error = asRecord(record.error);
-    if (typeof error?.message === "string" && error.message.trim()) return error.message.trim();
+    if (typeof error?.message === "string" && error.message.trim())
+      return error.message.trim();
     if (record.type === "error" || error) return "连接失败";
   }
   return null;
@@ -491,7 +507,8 @@ function parseResponses(payload: unknown): AgentTurnPlan {
       if (typeof item.content === "string") text += item.content;
       for (const part of asArray(item.content) ?? []) {
         const block = asRecord(part);
-        if (block?.type === "output_text" && typeof block.text === "string") text += block.text;
+        if (block?.type === "output_text" && typeof block.text === "string")
+          text += block.text;
       }
     }
     if (item.type === "function_call" && typeof item.name === "string") {

@@ -47,10 +47,7 @@ import {
 import { copyCodeBlock } from "../lib/code-copy";
 import { errorMessage } from "../lib/errors";
 import { renderMarkdown } from "../lib/markdown";
-import {
-  externalHrefFromEvent,
-  openExternalUrl,
-} from "../lib/open-external";
+import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { isTauriRuntime } from "../lib/paths";
 import { useDialog } from "../shell/Dialogs";
 import {
@@ -322,10 +319,7 @@ export function NoteEditor({
   }, [blocks]);
 
   const documentText = useMemo(() => joinMdBlocks(blocks), [blocks]);
-  const documentHeadings = useMemo(
-    () => extractMdHeadings(documentText),
-    [documentText],
-  );
+  const documentHeadings = useMemo(() => extractMdHeadings(documentText), [documentText]);
   const rowMetrics = useMemo(
     () => buildRowMetrics(blocks, measuredHeights.current),
     [blocks, measureTick],
@@ -772,7 +766,12 @@ export function NoteEditor({
   };
 
   const tryOpenExternalLink = (
-    event: { ctrlKey: boolean; metaKey: boolean; preventDefault: () => void; stopPropagation: () => void },
+    event: {
+      ctrlKey: boolean;
+      metaKey: boolean;
+      preventDefault: () => void;
+      stopPropagation: () => void;
+    },
     target: EventTarget | null,
   ): boolean => {
     if (!(event.ctrlKey || event.metaKey)) return false;
@@ -1714,10 +1713,7 @@ export function NoteEditor({
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
                     // Ctrl/Cmd+link: swallow here; open once on click.
-                    if (
-                      (e.ctrlKey || e.metaKey) &&
-                      externalHrefFromEvent(e.target)
-                    ) {
+                    if ((e.ctrlKey || e.metaKey) && externalHrefFromEvent(e.target)) {
                       e.preventDefault();
                       e.stopPropagation();
                       return;
@@ -1806,8 +1802,7 @@ export function NoteEditor({
               height: Math.max(
                 0,
                 rowMetrics.total -
-                  ((rowMetrics.offsets[virtualRange.end] ??
-                    rowMetrics.total) as number),
+                  ((rowMetrics.offsets[virtualRange.end] ?? rowMetrics.total) as number),
               ),
             }}
             aria-hidden

@@ -418,9 +418,7 @@ export function DateTimeField({
                   aria-label="时间"
                   value={activeTime}
                   onChange={(e) =>
-                    onChange(
-                      `${activeDay}T${e.target.value || defaultTime}`,
-                    )
+                    onChange(`${activeDay}T${e.target.value || defaultTime}`)
                   }
                 />
                 <button

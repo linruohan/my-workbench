@@ -17,9 +17,8 @@ describe("code-block", () => {
   it("builds a chrome wrapper with gutter", () => {
     const html = renderCodeBlock("a\nb\n", "rust");
     expect(html).toContain("Rust");
-    expect(html).toContain("md-code__gutter");
-    expect(html).toContain(">1</span>");
-    expect(html).toContain(">2</span>");
+    expect(html).toContain('class="md-code__gutter"');
+    expect(html).toContain(">1\n2</pre>");
     expect(html).toContain('data-code="a\nb"');
     expect(html).toContain('class="md-code__copy"');
   });

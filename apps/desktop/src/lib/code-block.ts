@@ -121,10 +121,7 @@ const HLJS_MAX_LINES = 400;
 
 export function highlightCode(code: string, lang: string): string {
   const source = normalizeFenceContent(code);
-  if (
-    source.length > HLJS_MAX_CHARS ||
-    lineCount(source) > HLJS_MAX_LINES
-  ) {
+  if (source.length > HLJS_MAX_CHARS || lineCount(source) > HLJS_MAX_LINES) {
     return escapeHtml(source);
   }
   if (lang && hljs.getLanguage(lang)) {

@@ -115,7 +115,9 @@ export function ModelFormDialog({
               aria-checked={draft.smart}
               aria-label="智能配置"
               className={draft.smart ? "toggle is-on" : "toggle"}
-              onClick={() => setDraft((current) => ({ ...current, smart: !current.smart }))}
+              onClick={() =>
+                setDraft((current) => ({ ...current, smart: !current.smart }))
+              }
             >
               <span className="toggle__thumb" />
             </button>
@@ -177,9 +179,15 @@ export function ModelFormDialog({
             type="button"
             className="model-form__advanced"
             aria-expanded={draft.advanced}
-            onClick={() => setDraft((current) => ({ ...current, advanced: !current.advanced }))}
+            onClick={() =>
+              setDraft((current) => ({ ...current, advanced: !current.advanced }))
+            }
           >
-            <span className={draft.advanced ? "model-form__chevron is-open" : "model-form__chevron"}>
+            <span
+              className={
+                draft.advanced ? "model-form__chevron is-open" : "model-form__chevron"
+              }
+            >
               ›
             </span>
             高级配置
@@ -190,24 +198,33 @@ export function ModelFormDialog({
               <div className="model-form__field">
                 <span className="model-form__label">
                   输入类型
-                  <Hint label="输入类型说明" text="文本始终可用。其余类型记在模型上，供以后调用时参考。" />
+                  <Hint
+                    label="输入类型说明"
+                    text="文本始终可用。其余类型记在模型上，供以后调用时参考。"
+                  />
                 </span>
                 <div className="model-form__chips">
                   <Chip label="文本" checked locked />
                   <Chip
                     label="图片"
                     checked={draft.image}
-                    onClick={() => setDraft((current) => ({ ...current, image: !current.image }))}
+                    onClick={() =>
+                      setDraft((current) => ({ ...current, image: !current.image }))
+                    }
                   />
                   <Chip
                     label="视频"
                     checked={draft.video}
-                    onClick={() => setDraft((current) => ({ ...current, video: !current.video }))}
+                    onClick={() =>
+                      setDraft((current) => ({ ...current, video: !current.video }))
+                    }
                   />
                   <Chip
                     label="PDF"
                     checked={draft.pdf}
-                    onClick={() => setDraft((current) => ({ ...current, pdf: !current.pdf }))}
+                    onClick={() =>
+                      setDraft((current) => ({ ...current, pdf: !current.pdf }))
+                    }
                   />
                 </div>
               </div>
@@ -215,25 +232,35 @@ export function ModelFormDialog({
               <div className="model-form__field">
                 <span className="model-form__label">
                   模型能力
-                  <Hint label="模型能力说明" text="勾选后记在模型上。当前请求仍按所选 API 格式发送。" />
+                  <Hint
+                    label="模型能力说明"
+                    text="勾选后记在模型上。当前请求仍按所选 API 格式发送。"
+                  />
                 </span>
                 <div className="model-form__chips">
                   <Chip
                     label="结构化输出"
                     checked={draft.structured}
                     onClick={() =>
-                      setDraft((current) => ({ ...current, structured: !current.structured }))
+                      setDraft((current) => ({
+                        ...current,
+                        structured: !current.structured,
+                      }))
                     }
                   />
                   <Chip
                     label="原生联网搜索"
                     checked={draft.web}
-                    onClick={() => setDraft((current) => ({ ...current, web: !current.web }))}
+                    onClick={() =>
+                      setDraft((current) => ({ ...current, web: !current.web }))
+                    }
                   />
                   <Chip
                     label="对话中系统消息"
                     checked={draft.system}
-                    onClick={() => setDraft((current) => ({ ...current, system: !current.system }))}
+                    onClick={() =>
+                      setDraft((current) => ({ ...current, system: !current.system }))
+                    }
                   />
                 </div>
               </div>
@@ -241,7 +268,10 @@ export function ModelFormDialog({
               <div className="model-form__field">
                 <span className="model-form__label">
                   推理等级（从低到高）
-                  <Hint label="推理等级说明" text="从上到下是从低到高。名称会随模型保存。" />
+                  <Hint
+                    label="推理等级说明"
+                    text="从上到下是从低到高。名称会随模型保存。"
+                  />
                 </span>
                 {draft.levels.map((level, index) => (
                   <div key={index} className="model-form__level">
@@ -278,7 +308,10 @@ export function ModelFormDialog({
                   className="model-form__add-level"
                   aria-label="添加推理等级"
                   onClick={() =>
-                    setDraft((current) => ({ ...current, levels: [...current.levels, ""] }))
+                    setDraft((current) => ({
+                      ...current,
+                      levels: [...current.levels, ""],
+                    }))
                   }
                 >
                   <IconPlus size={14} />
@@ -298,7 +331,10 @@ export function ModelFormDialog({
                   aria-label="推理参数映射"
                   value={draft.reasoningMap}
                   onChange={(event) =>
-                    setDraft((current) => ({ ...current, reasoningMap: event.target.value }))
+                    setDraft((current) => ({
+                      ...current,
+                      reasoningMap: event.target.value,
+                    }))
                   }
                 />
               </label>
@@ -354,7 +390,12 @@ function parseDraft(draft: Draft): ModelFormValues | string {
   if (!draft.smart) {
     context = Number(draft.context);
     output = Number(draft.output);
-    if (!Number.isFinite(context) || context <= 0 || !Number.isFinite(output) || output <= 0) {
+    if (
+      !Number.isFinite(context) ||
+      context <= 0 ||
+      !Number.isFinite(output) ||
+      output <= 0
+    ) {
       return "请填写大于 0 的上下文窗口和最大输出 Token。";
     }
   }
@@ -408,7 +449,10 @@ function Chip({
       disabled={locked}
       onClick={onClick}
     >
-      <span className={checked ? "model-form__box is-on" : "model-form__box"} aria-hidden />
+      <span
+        className={checked ? "model-form__box is-on" : "model-form__box"}
+        aria-hidden
+      />
       {label}
       {locked ? <LockIcon /> : null}
     </button>
@@ -417,7 +461,15 @@ function Chip({
 
 function LockIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden
+    >
       <rect x="5" y="11" width="14" height="9" rx="2" />
       <path d="M8 11V8a4 4 0 0 1 8 0v3" />
     </svg>
