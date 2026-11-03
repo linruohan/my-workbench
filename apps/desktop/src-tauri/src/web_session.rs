@@ -131,9 +131,16 @@ async fn exchange_launch_token(url: &Url) -> Result<LaunchLogin, String> {
 
 fn plant(webview: &tauri::Webview, cookies: &[String], host: &str) -> Result<(), String> {
     for header in cookies {
-        let baked = cookie_for_host(header, host)?;
+        // dsh omits Domain, so the cookie is host-only. IP addresses like
+        // 127.0.0.1 cannot use a Domain attribute.
+        let mut host_only = cookie_for_host(header, host)?;
+        host_only.unset_domain();
+        if webview.set_cookie(host_only).is_ok() {
+            continue;
+        }
+        let named = cookie_for_host(header, host)?;
         webview
-            .set_cookie(baked)
+            .set_cookie(named)
             .map_err(|err| format!("无法保存登录状态：{err}"))?;
     }
     Ok(())
@@ -258,8 +265,60 @@ pub async fn web_session_close(app: AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cookie_for_host, navigation_target};
+    use super::{cookie_for_host, exchange_launch_token, navigation_target};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use url::Url;
+
+    fn serve_once(response: &'static [u8]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(response);
+        });
+        port
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn exchange_keeps_the_strict_cookie_and_drops_the_token() {
+        let port = serve_once(
+            b"HTTP/1.1 303 See Other\r\nLocation: ./\r\nSet-Cookie: dsh-auth-test=v1.body.sig; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/?token=launch")).unwrap();
+        let login = match block_on(exchange_launch_token(&url)) {
+            Ok(login) => login,
+            Err(err) => panic!("launch exchange failed: {err}"),
+        };
+        assert_eq!(login.url.as_str(), format!("http://127.0.0.1:{port}/"));
+        assert!(login.url.query().is_none());
+        assert_eq!(login.cookies.len(), 1);
+        assert!(login.cookies[0].contains("SameSite=Strict"));
+        assert!(login.cookies[0].contains("HttpOnly"));
+    }
+
+    #[test]
+    fn exchange_rejects_a_spent_launch_token() {
+        let port = serve_once(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 68\r\nConnection: close\r\n\r\ndsh web authentication required; reopen the URL printed by dsh web.\n",
+        );
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/?token=stale")).unwrap();
+        let err = match block_on(exchange_launch_token(&url)) {
+            Err(err) => err,
+            Ok(_) => panic!("spent launch token should be rejected"),
+        };
+        assert!(err.contains("登录地址已失效"));
+    }
 
     #[test]
     fn launch_redirect_drops_the_token() {

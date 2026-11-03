@@ -355,15 +355,22 @@ function composeSystemPrompt(
 export function previewAgentContext(
   env: AgentTurnEnv,
   transcript: AgentMessage[],
-): { used: number; budget: number } | null {
+): { used: number; budget: number; includesSystem: boolean } | null {
   const thread = env.store.getAgentThread(env.threadId);
   if (!thread) return null;
   const providers = env.providers?.length ? env.providers : [builtinProvider()];
   const found = findProvider(providers, thread.modelRef);
   const caps = found?.provider.models[found.modelId];
   const budget = modelContextBudget(caps?.context, caps?.output);
-  const system = composeSystemPrompt(env, transcript, budget, thread);
-  return { used: estimateContextTokens(system, transcript, budget), budget };
+  const includesSystem = !(found && isLocalBuiltin(found.provider, found.modelId));
+  const system = includesSystem
+    ? composeSystemPrompt(env, transcript, budget, thread)
+    : "";
+  return {
+    used: estimateContextTokens(system, transcript, budget),
+    budget,
+    includesSystem,
+  };
 }
 
 async function requestModel(

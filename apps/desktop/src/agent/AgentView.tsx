@@ -2506,7 +2506,12 @@ export function AgentView({
                               ? "agent__context-usage is-tight"
                               : "agent__context-usage"
                           }
-                          title="发给模型的上下文估计。接近上限时会先清空较早的工具结果，再压缩更早的对话。"
+                          title={
+                            contextPreview.includesSystem
+                              ? `发给模型的内容大约 ${contextPreview.used} / ${contextPreview.budget}。含系统提示和对话。接近上限时会先清空较早的工具结果，再压缩更早的对话。`
+                              : `本机模型大约使用 ${contextPreview.used} / ${contextPreview.budget}。只计对话。接近上限时会先清空较早的工具结果，再压缩更早的对话。`
+                          }
+                          aria-label={`上下文大约 ${contextPreview.used} / ${contextPreview.budget}`}
                         >
                           <span className="agent__context-bar" aria-hidden="true">
                             <span
