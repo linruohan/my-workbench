@@ -1,0 +1,16 @@
+---
+description: 提交前必须先通过发版门禁
+alwaysApply: true
+---
+
+# 提交前先过门禁
+
+用户要求提交、打标签或触发 Release 时，先在仓库根目录跑门禁，通过后再提交。
+
+```bash
+npm run check
+```
+
+门禁包含 `format:check`、`lint`、`typecheck`、`test`。任一失败就先改到通过，不要提交，也不要推送或打标签。
+
+本地 `npm run check` 退出码为 0 之后，再 `git add` 与 `git commit`。

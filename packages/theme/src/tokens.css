@@ -52,8 +52,12 @@
   --wb-text-xs: 12px;
   --wb-text-sm: 13px;
   --wb-text-md: 14px;
+  --wb-text-reading: 16px;
   --wb-text-lg: 20px;
   --wb-text-xl: 28px;
+  --wb-blur-xs: 10px;
+  --wb-blur-sm: 14px;
+  --wb-blur-md: 18px;
 
   /* 4px density scale (design §9.2); space-0 for hairline gaps only */
   --wb-space-0: 2px;
@@ -69,6 +73,24 @@
   --wb-titlebar-height: 36px;
   --wb-schedule-width: 320px;
   --wb-row: 36px;
+  --wb-control-xs: 22px;
+  --wb-control-sm: 24px;
+  --wb-control-md: 28px;
+  --wb-control-lg: 32px;
+  --wb-icon-xs: 12px;
+  --wb-icon-sm: 14px;
+  --wb-icon-md: 16px;
+  --wb-icon-lg: 20px;
+  --wb-menu-min: 160px;
+  --wb-menu-md: 200px;
+  --wb-popover-sm: 240px;
+  --wb-popover-md: 280px;
+  --wb-popover-mid: 360px;
+  --wb-popover-lg: 420px;
+  --wb-panel-md: 340px;
+  --wb-panel-lg: 640px;
+  --wb-editor-max: 760px;
+  --wb-content-max: 1024px;
   --wb-radius-xs: 4px;
   --wb-radius-sm: 6px;
   --wb-radius-control: 8px;
