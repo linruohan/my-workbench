@@ -7,7 +7,10 @@ import {
   agentRetryPlan,
   applyMention,
   applySlashToken,
+  chatProviderFor,
   compactMarkerText,
+  estimateTranscriptTokens,
+  modelContextBudget,
   filterAgentThreads,
   findSubagent,
   forgetAgentMemory,
@@ -23,6 +26,7 @@ import {
   manualCompactPlan,
   normalizeAgentWebUrl,
   orderAgentWorkspaceThreads,
+  withLocalOcrContext,
   WEB_AGENT_THREAD_TITLE,
   findProvider,
   imageOnlyCaption,
@@ -30,6 +34,7 @@ import {
   localOcrReply,
   mentionQuery,
   mentionSuggestions,
+  modelCanSeeImages,
   modelSwitchText,
   permissionModeLabel,
   parseModelRef,
@@ -81,6 +86,8 @@ import {
 } from "../shell/icons";
 import { readGitBranch } from "../notes/kb-api";
 import { ModelMenu } from "./ModelMenu";
+import { imageDataUrl } from "./ocr-image";
+import { recognizeLocalImage } from "./ocr-engine";
 import {
   webSessionClose,
   webSessionEmbedded,
@@ -111,6 +118,8 @@ type Props = {
   plugins?: Array<{ name: string; version: string; description: string }>;
   mcpServers?: McpServer[];
   hostTools?: HostToolSnapshot[];
+  /** Open task, note, or timer, already phrased for the prompt. */
+  focus?: string | null;
   activeTimerTaskId: string | null;
   timerStartedAt: number | null;
   onSelectThread: (id: string | null) => void;
@@ -139,6 +148,7 @@ export function AgentView({
   plugins = [],
   mcpServers = [],
   hostTools = [],
+  focus = null,
   activeTimerTaskId,
   timerStartedAt,
   onSelectThread,
@@ -159,12 +169,24 @@ export function AgentView({
     activeThreads[0] ??
     null;
   const messages = thread ? store.listAgentMessages(thread.id) : [];
+  const modelCaps = (() => {
+    const ref = thread?.modelRef ?? readProviderStore().defaultModelRef;
+    const found = findProvider(readProviderStore().providers, ref);
+    return found ? found.provider.models[found.modelId] : undefined;
+  })();
+  const contextBudget = modelContextBudget(modelCaps?.context, modelCaps?.output);
+  const contextUsed = estimateTranscriptTokens(messages, contextBudget);
   const pending = thread
     ? (store.listAgentApprovals(thread.id).find((item) => item.status === "pending") ??
       null)
     : null;
   const [draftThreadId, setDraftThreadId] = useState(thread?.id ?? "");
   const [draft, setDraft] = useState("");
+  const [pendingImage, setPendingImage] = useState<{
+    name: string;
+    url: string;
+    blob: Blob;
+  } | null>(null);
   const [live, setLive] = useState("");
   const [busyThreadId, setBusyThreadId] = useState<string | null>(null);
   const [queues, setQueues] = useState<Record<string, string[]>>({});
@@ -197,6 +219,8 @@ export function AgentView({
   const [titleDraft, setTitleDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageUrlRef = useRef<string | null>(null);
   const approveBtnRef = useRef<HTMLButtonElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const activeHitRef = useRef(0);
@@ -307,6 +331,11 @@ export function AgentView({
     setFindOpen(false);
     setFindQuery("");
     setFindIndex(0);
+    if (imageUrlRef.current) {
+      URL.revokeObjectURL(imageUrlRef.current);
+      imageUrlRef.current = null;
+      setPendingImage(null);
+    }
   }
   if (slashUi.draft !== draft) {
     setSlashUi({ draft, dismissed: false, index: 0 });
@@ -500,6 +529,12 @@ export function AgentView({
       hostTools,
       runHostTool: (args) => runHostTool(hostTools, args),
       timer: { taskId: activeTimerTaskId, startedAt: timerStartedAt },
+      workspaceTitle: store.getAgentWorkspace(thread.workspaceId)?.title,
+      workspacePath:
+        store.getAgentWorkspace(thread.workspaceId)?.rootPath ??
+        workspaces.find((item) => item.id === thread.workspaceId)?.rootPath,
+      gitBranch,
+      focus,
       onStep: onRefresh,
       onDelta: (text) => {
         if (mounted.current && viewingThreadId.current === thread.id) setLive(text);
@@ -615,6 +650,7 @@ export function AgentView({
   const sendPrompt = async (
     content: string,
     subagent?: AgentSubagent,
+    imageDataUrl?: string,
   ): Promise<boolean> => {
     const current = env();
     if (!current || sending.current || busyThreadId || pending) return false;
@@ -629,6 +665,7 @@ export function AgentView({
       const result = await startAgentTurn(
         {
           ...current,
+          imageDataUrl,
           signal: controller.signal,
           subagentPrompt: subagent
             ? `你正在作为子智能体「${subagent.name}」回答。\n${subagent.prompt}`
@@ -785,15 +822,119 @@ export function AgentView({
     say(command, action.text);
   };
 
+  const clearImage = () => {
+    if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
+    imageUrlRef.current = null;
+    setPendingImage(null);
+  };
+
+  const attachImage = (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      setError("只能添加图片");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setError("图片不能超过 8MB");
+      return;
+    }
+    if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
+    const url = URL.createObjectURL(file);
+    imageUrlRef.current = url;
+    setPendingImage({ name: file.name || "图片", url, blob: file });
+    setError("");
+  };
+
+  const sendImage = async (content: string, shot: { name: string; blob: Blob }) => {
+    if (!thread) return;
+    const found = findProvider(readProviderStore().providers, thread.modelRef);
+    const provider = found ? chatProviderFor(found.provider, found.modelId) : null;
+    const caps = found ? found.provider.models[found.modelId] : undefined;
+    if (provider && modelCanSeeImages(provider.kind, caps)) {
+      try {
+        const dataUrl = await imageDataUrl(shot.blob);
+        if (dataUrl.length > 6_500_000) {
+          setError("图片太大，当前模型发不出去");
+          return;
+        }
+        await sendPrompt(content || "请看这张图片", undefined, dataUrl);
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "无法读取图片");
+      }
+      return;
+    }
+    const recognized = await recognizeLocalImage(shot.blob);
+    if (recognized.ok === false) {
+      const now = Date.now();
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "user",
+        content: content
+          ? `${content}\n\n${imageOnlyCaption(shot.name)}`
+          : imageOnlyCaption(shot.name),
+        nowMs: now,
+      });
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "assistant",
+        content: `本地识图失败：${recognized.message}`,
+        nowMs: now,
+      });
+      if (!recognized.message.includes("桌面应用")) {
+        store.pushNotification({
+          kind: "system",
+          title:
+            recognized.message.includes("下载") || recognized.message.includes("配置目录")
+              ? "识图模型下载失败"
+              : "本地识图失败",
+          body: recognized.message,
+        });
+      }
+      onRefresh();
+      return;
+    }
+    const local = !found || isLocalBuiltin(found.provider, found.modelId);
+    if (!content || local) {
+      const now = Date.now();
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "user",
+        content: content
+          ? `${content}\n\n${imageOnlyCaption(shot.name)}`
+          : imageOnlyCaption(shot.name),
+        nowMs: now,
+      });
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "assistant",
+        content: localOcrReply(recognized.lines),
+        nowMs: now,
+      });
+      onRefresh();
+      return;
+    }
+    await sendPrompt(withLocalOcrContext(content, recognized.lines));
+  };
+
   const send = async (text: string) => {
     const content = text.trim();
-    if (!content || !thread) return;
+    const shot = pendingImage;
+    if ((!content && !shot) || !thread) return;
     if (busyThreadId && busyThreadId !== thread.id) {
       setError("另一个会话还在回答");
       return;
     }
-    const action = resolveSlash(content, thread.permissionMode, commands);
+    const action = content
+      ? resolveSlash(content, thread.permissionMode, commands)
+      : null;
+    if (shot && action) {
+      setError("命令不能和图片一起发送");
+      return;
+    }
     if (busyHere) {
+      if (shot) {
+        setError("请等当前回答结束后再发送图片");
+        return;
+      }
       if (action) {
         setError("请等当前回答结束后再使用命令");
         return;
@@ -814,6 +955,11 @@ export function AgentView({
     }
     if (pending) return;
     takeDraft(content);
+    if (shot) {
+      clearImage();
+      await sendImage(content, shot);
+      return;
+    }
     await sendPrompt(content);
   };
 
@@ -2112,6 +2258,26 @@ export function AgentView({
                       ))}
                     </ul>
                   ) : null}
+                  {pendingImage ? (
+                    <div className="agent__composer-shot">
+                      <img src={pendingImage.url} alt="" />
+                      <span>{pendingImage.name}</span>
+                      <button type="button" aria-label="移除图片" onClick={clearImage}>
+                        ×
+                      </button>
+                    </div>
+                  ) : null}
+                  <input
+                    ref={imageInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) attachImage(file);
+                    }}
+                  />
                   <textarea
                     ref={inputRef}
                     aria-label="给 Agent 发消息"
@@ -2133,6 +2299,14 @@ export function AgentView({
                     disabled={!thread}
                     readOnly={Boolean(pending)}
                     rows={2}
+                    onPaste={(event) => {
+                      const file = Array.from(event.clipboardData.files).find((item) =>
+                        item.type.startsWith("image/"),
+                      );
+                      if (!file) return;
+                      event.preventDefault();
+                      attachImage(file);
+                    }}
                     onChange={(event) => {
                       historyNav.current = null;
                       const value = event.target.value;
@@ -2249,6 +2423,7 @@ export function AgentView({
                         }}
                         onOpenMode={() => setPicker("mode")}
                         onOpenModel={() => setPicker("model")}
+                        onAddImage={() => imageInputRef.current?.click()}
                       />
                       {thread ? (
                         <ModeMenu
@@ -2265,6 +2440,19 @@ export function AgentView({
                       ) : null}
                     </div>
                     <div className="agent__composer-actions">
+                      {thread ? (
+                        <span
+                          className={
+                            contextUsed / contextBudget >= 0.85
+                              ? "agent__context-usage is-tight"
+                              : "agent__context-usage"
+                          }
+                          title="发给模型的上下文估计。接近上限时会先清空较早的工具结果，再压缩更早的对话。"
+                        >
+                          上下文 {formatContextTokens(contextUsed)}/
+                          {formatContextTokens(contextBudget)}
+                        </span>
+                      ) : null}
                       <ModelMenu
                         modelRef={thread?.modelRef ?? readProviderStore().defaultModelRef}
                         disabled={Boolean(pending)}
@@ -2304,7 +2492,11 @@ export function AgentView({
                           className="agent__send"
                           aria-label="发送"
                           title="发送"
-                          disabled={!thread || Boolean(pending) || !draft.trim()}
+                          disabled={
+                            !thread ||
+                            Boolean(pending) ||
+                            (!draft.trim() && !pendingImage)
+                          }
                         >
                           <IconArrowUp size={16} />
                         </button>
@@ -2335,6 +2527,7 @@ function ComposerPlusMenu({
   onRun,
   onOpenMode,
   onOpenModel,
+  onAddImage,
 }: {
   disabled: boolean;
   open: boolean;
@@ -2343,6 +2536,7 @@ function ComposerPlusMenu({
   onRun: (value: string) => void;
   onOpenMode: () => void;
   onOpenModel: () => void;
+  onAddImage: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -2383,6 +2577,16 @@ function ComposerPlusMenu({
         <div className="agent__thread-menu agent__composer-plus-menu" role="menu">
           <button type="button" role="menuitem" onClick={() => onInsert("/")}>
             插入 /
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onOpenChange(false);
+              onAddImage();
+            }}
+          >
+            添加图片
           </button>
           {SLASH_COMMANDS.filter(
             (command) => command.name === "today" || command.name === "brief",
@@ -2688,6 +2892,15 @@ function displayContent(message: AgentMessage, nowMs: number): string {
   }
   if (message.role === "user") return text;
   return relativizeScheduleText(text, nowMs);
+}
+
+function formatContextTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 1000)
+    return String(Math.max(0, Math.round(tokens)));
+  const kilo = tokens / 1000;
+  const text =
+    kilo >= 10 ? String(Math.round(kilo)) : kilo.toFixed(1).replace(/\.0$/, "");
+  return `${text}k`;
 }
 
 function modelRefLabel(ref: string): string {

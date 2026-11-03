@@ -1,12 +1,30 @@
 import {
   assembleHostTools,
   parseHostToolRunArgs,
+  type HostToolCategory,
   type HostToolProbe,
   type HostToolSnapshot,
 } from "@wb/domain";
 import { errorMessage } from "../lib/errors";
 import { isTauriRuntime } from "../lib/paths";
 import type { AgentToolResult } from "./execute";
+
+/** How many tool installs may download and extract at once. */
+export const HOST_TOOL_INSTALL_SLOTS = 2;
+
+export function canStartHostToolInstall(
+  running: readonly { id: string; category: HostToolCategory }[],
+  next: { id: string; category: HostToolCategory },
+  slots = HOST_TOOL_INSTALL_SLOTS,
+): boolean {
+  if (running.some((item) => item.id === next.id)) return false;
+  if (running.length >= slots) return false;
+  // Chart libraries share one Python and one package directory.
+  if (next.category === "chart" && running.some((item) => item.category === "chart")) {
+    return false;
+  }
+  return true;
+}
 
 type RunPayload = {
   ok: boolean;

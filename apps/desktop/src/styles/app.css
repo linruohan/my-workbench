@@ -5912,6 +5912,38 @@ input {
   color: color-mix(in srgb, var(--wb-muted) 78%, transparent);
 }
 
+.agent__composer-shot {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-space-2);
+  margin-bottom: var(--wb-space-2);
+  min-width: 0;
+}
+
+.agent__composer-shot img {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: var(--wb-radius-control);
+}
+
+.agent__composer-shot span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--wb-muted);
+  font-size: var(--wb-text-xs);
+}
+
+.agent__composer-shot button {
+  border: 0;
+  background: transparent;
+  color: var(--wb-muted);
+  cursor: pointer;
+  font: inherit;
+}
+
 .agent__composer-bar {
   display: flex;
   align-items: center;
@@ -5988,6 +6020,16 @@ input {
   align-items: center;
   gap: var(--wb-space-1);
   min-width: 0;
+}
+
+.agent__context-usage {
+  color: var(--wb-muted);
+  font-size: var(--wb-text-xs);
+  white-space: nowrap;
+}
+
+.agent__context-usage.is-tight {
+  color: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
 }
 
 .agent__composer-actions .agent__model-trigger {

@@ -55,7 +55,7 @@ async function readModel(name: string): Promise<Uint8Array> {
 }
 
 async function loadRuntime() {
-  const ort = (await import("onnxruntime-web/dist/ort.wasm.min.mjs")) as OrtModule;
+  const ort = (await import("onnxruntime-web/wasm")) as OrtModule;
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.wasmPaths = wasmDir();
   const [detBytes, recBytes, keyBytes] = await Promise.all([

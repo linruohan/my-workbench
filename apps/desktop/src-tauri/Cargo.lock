@@ -92,6 +92,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-fs",
  "tauri-plugin-log",
+ "tokio",
  "url",
  "zip",
 ]

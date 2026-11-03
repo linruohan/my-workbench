@@ -10,6 +10,51 @@ export const ESTIMATED_TOKEN_CHAR_DIVISOR = 3;
 
 export const COMPACT_MARKER = "【上下文已压缩】";
 
+/** Placeholder left when an old tool result is dropped from the model view. */
+export const CLEARED_TOOL_RESULT = "[较早的工具结果已清空]";
+
+export const MICROCOMPACT_KEEP_RECENT = 4;
+const MICROCOMPACT_MIN_CHARS = 240;
+
+/** Tokens reserved for the reply and a small safety margin, same as the turn loop. */
+export function modelContextBudget(
+  contextLimit: number | undefined,
+  outputLimit: number | undefined,
+): number {
+  return Math.max(1024, (contextLimit ?? 8192) - (outputLimit ?? 2048) - 512);
+}
+
+export function estimateTranscriptTokens(
+  messages: AgentMessage[],
+  budgetTokens: number,
+): number {
+  return tokenSum(modelTranscript(messages, budgetTokens));
+}
+
+/**
+ * Shorten tool results older than the most recent few.
+ * The on-screen transcript is unchanged; only the model view is shortened.
+ */
+export function microcompactToolResults(
+  messages: AgentMessage[],
+  keepRecent = MICROCOMPACT_KEEP_RECENT,
+): AgentMessage[] {
+  const toolIndexes: number[] = [];
+  messages.forEach((message, index) => {
+    if (message.role === "tool") toolIndexes.push(index);
+  });
+  const keep = Math.max(0, keepRecent);
+  if (toolIndexes.length <= keep) return messages;
+  const clear = new Set(toolIndexes.slice(0, toolIndexes.length - keep));
+  return messages.map((message, index) => {
+    if (!clear.has(index)) return message;
+    if (message.content.length < MICROCOMPACT_MIN_CHARS) return message;
+    if (message.content.startsWith(CLEARED_TOOL_RESULT)) return message;
+    const name = message.toolName ? ` ${message.toolName}` : "";
+    return { ...message, content: `${CLEARED_TOOL_RESULT}${name}` };
+  });
+}
+
 export function isCompactMarker(message: AgentMessage): boolean {
   return message.role === "system" && message.content.startsWith(COMPACT_MARKER);
 }
@@ -35,7 +80,7 @@ export type CompactPlan = {
 
 /** Messages the model should see, compacted when they exceed `budgetTokens`. */
 export function planCompact(messages: AgentMessage[], budgetTokens: number): CompactPlan {
-  const projected = projectForModel(messages);
+  const projected = microcompactToolResults(projectForModel(messages));
   const budget = Math.max(1, budgetTokens);
   const lastUser = lastIndex(projected, (message) => message.role === "user");
   if (lastUser <= 0) {

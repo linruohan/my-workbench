@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const MAX_ARCHIVE: usize = 450 * 1024 * 1024;
@@ -845,7 +846,13 @@ async fn install_mermaid(tools: &Path, proxy: Option<&str>) -> Result<(), String
         .map_err(|err| format!("安装失败：{err}"))?
 }
 
+fn python_install_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn install_python_pkg(tools: &Path, id: &str, proxy: Option<&str>) -> Result<(), String> {
+    let _guard = python_install_lock().lock().await;
     let package = match id {
         "matplotlib" => "matplotlib",
         "plotly" => "plotly",

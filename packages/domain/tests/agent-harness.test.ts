@@ -3,7 +3,11 @@ import {
   addAgentCommand,
   addAgentMemory,
   applyMention,
+  CLEARED_TOOL_RESULT,
   compactMarkerText,
+  formatActiveSkills,
+  formatSessionContext,
+  microcompactToolResults,
   expandCommandTemplate,
   forgetAgentMemory,
   formatMcpForPrompt,
@@ -64,6 +68,56 @@ describe("agent compact", () => {
     const visible = modelTranscript(messages, 10_000);
     expect(visible.map((item) => item.content)).toEqual([messages[2]!.content, "新问题"]);
     expect(visible[0]?.role).toBe("user");
+  });
+
+  it("clears old tool results and keeps the latest ones", () => {
+    const bulky = "x".repeat(300);
+    const messages = [
+      message("user", "查一下", "u"),
+      { ...message("tool", bulky, "t1"), toolName: "note_get" },
+      { ...message("tool", bulky, "t2"), toolName: "search" },
+      message("assistant", "好", "a"),
+    ];
+    const slim = microcompactToolResults(messages, 1);
+    expect(slim[1]?.content.startsWith(CLEARED_TOOL_RESULT)).toBe(true);
+    expect(slim[1]?.content).toContain("note_get");
+    expect(slim[2]?.content).toBe(bulky);
+    expect(slim[0]?.content).toBe("查一下");
+  });
+});
+
+describe("agent context", () => {
+  it("includes the clock, workspace, and branch", () => {
+    const text = formatSessionContext({
+      nowMs: new Date(2026, 10, 3, 23, 5).getTime(),
+      workspaceTitle: "my-workbench",
+      workspacePath: "D:/codehub/my-workbench",
+      gitBranch: "main",
+    });
+    expect(text).toContain("2026-11-03");
+    expect(text).toContain("23:05");
+    expect(text).toContain("工作区：my-workbench · D:/codehub/my-workbench");
+    expect(text).toContain("当前分支：main");
+  });
+
+  it("keeps a skill named earlier in the visible transcript", () => {
+    const skills = [
+      {
+        id: "skill:weekly",
+        name: "weekly",
+        description: "周报",
+        dirPath: "D:/skills/weekly",
+        sourceDirId: "1",
+        body: "先列本周完成项。",
+      },
+    ];
+    const text = formatActiveSkills(skills, [
+      { role: "user", content: "用 @weekly" },
+      { role: "assistant", content: "好" },
+      { role: "user", content: "继续" },
+    ]);
+    expect(text).toContain("先列本周完成项。");
+    expect(text).toContain("weekly");
   });
 });
 

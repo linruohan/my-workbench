@@ -26,6 +26,7 @@ export * from "./agent-reply.js";
 export * from "./agent-commands.js";
 export * from "./agent-retry.js";
 export * from "./agent-compact.js";
+export * from "./agent-context.js";
 export * from "./agent-memory.js";
 export * from "./agent-hooks.js";
 export * from "./agent-custom-commands.js";

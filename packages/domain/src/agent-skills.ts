@@ -225,6 +225,55 @@ export function invokedSkillsInText(skills: AgentSkill[], text: string): AgentSk
   return found;
 }
 
+type SkillHistoryMessage = {
+  role: string;
+  content: string;
+  toolName?: string | null;
+};
+
+const LOADED_SKILL = /已加载技能「([^」]+)」/;
+
+/** Skills still named in the model-visible transcript, including earlier turns. */
+export function skillsLoadedInTranscript(
+  skills: AgentSkill[],
+  messages: readonly SkillHistoryMessage[],
+): AgentSkill[] {
+  const found: AgentSkill[] = [];
+  const seen = new Set<string>();
+  const add = (skill: AgentSkill | null) => {
+    if (!skill || seen.has(skill.id)) return;
+    seen.add(skill.id);
+    found.push(skill);
+  };
+  for (const message of messages) {
+    if (message.role === "tool" && message.toolName === "skill_load") {
+      const named = LOADED_SKILL.exec(message.content)?.[1] ?? "";
+      add(named ? findSkill(skills, named) : null);
+    }
+    for (const match of message.content.matchAll(SKILL_MENTION)) {
+      add(findSkill(skills, match[1] ?? ""));
+    }
+  }
+  return found;
+}
+
+/** Skill bodies that should stay in the prompt until compact drops their mention. */
+export function formatActiveSkills(
+  skills: AgentSkill[],
+  messages: readonly SkillHistoryMessage[],
+): string {
+  const loaded = skillsLoadedInTranscript(skills, messages);
+  if (loaded.length === 0) return "";
+  return loaded
+    .map((skill) => {
+      const body = skill.body.trim();
+      return [`技能「${skill.name}」仍在这次会话里。继续按它的说明做。`, body]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n\n");
+}
+
 /** Full instructions for skills the user explicitly named in the latest message. */
 export function formatInvokedSkills(skills: AgentSkill[], text: string): string {
   const invoked = invokedSkillsInText(skills, text);

@@ -6,7 +6,7 @@ import { defineConfig, type Plugin } from "vite";
 
 const ORT_ASSETS = ["ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"];
 
-function ortAssets(distDir: string): Plugin {
+function ortAssets(distDir: string, outDir: string): Plugin {
   const serve = (name: string) => {
     if (!ORT_ASSETS.includes(name)) return null;
     const file = path.join(distDir, name);
@@ -33,7 +33,7 @@ function ortAssets(distDir: string): Plugin {
       });
     },
     closeBundle() {
-      const out = path.resolve(rootDir, "dist/ort");
+      const out = path.join(outDir, "ort");
       fs.mkdirSync(out, { recursive: true });
       for (const name of ORT_ASSETS) {
         const file = serve(name);
@@ -50,7 +50,10 @@ const workspaceRoot = path.resolve(rootDir, "../..");
 export default defineConfig({
   plugins: [
     react(),
-    ortAssets(path.join(workspaceRoot, "node_modules/onnxruntime-web/dist")),
+    ortAssets(
+      path.join(workspaceRoot, "node_modules/onnxruntime-web/dist"),
+      path.join(rootDir, "dist"),
+    ),
   ],
   resolve: {
     // Exact matches only: a bare "@wb/theme" -> index.ts alias must not
@@ -76,6 +79,13 @@ export default defineConfig({
         find: /^@wb\/db$/,
         replacement: pkg("../../packages/db/src/index.ts"),
       },
+      {
+        find: "onnxruntime-web/wasm",
+        replacement: path.join(
+          workspaceRoot,
+          "node_modules/onnxruntime-web/dist/ort.wasm.min.mjs",
+        ),
+      },
     ],
   },
   clearScreen: false,
@@ -93,7 +103,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ["@wb/domain", "@wb/db", "@wb/theme"],
+    exclude: ["@wb/domain", "@wb/db", "@wb/theme", "onnxruntime-web"],
   },
   build: {
     // Tauri expects relative asset paths inside the WebView.

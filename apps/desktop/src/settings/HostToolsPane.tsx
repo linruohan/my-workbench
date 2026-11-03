@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   HOST_TOOL_CATEGORY_LABEL,
   setHostToolEnabled,
   type HostToolCategory,
   type HostToolSnapshot,
 } from "@wb/domain";
-import { installHostTool, probeHostTools } from "../agent/host-tools";
+import {
+  canStartHostToolInstall,
+  installHostTool,
+  probeHostTools,
+} from "../agent/host-tools";
 import { errorMessage } from "../lib/errors";
 import type { AppPrefs } from "../lib/prefs";
 
@@ -21,54 +25,79 @@ type Props = {
 export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
   const [tools, setTools] = useState<HostToolSnapshot[]>([]);
   const [scanning, setScanning] = useState(true);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [installing, setInstalling] = useState<
+    { id: string; category: HostToolCategory }[]
+  >([]);
+  const [failures, setFailures] = useState<{ id: string; message: string }[]>([]);
+  const installingRef = useRef(installing);
+  const probeSeq = useRef(0);
   const toolsDir = `${dataDir.replace(/[\\/]+$/, "")}/tools`;
 
-  const load = (disabled: readonly string[]) => {
-    setScanning(true);
+  const load = (disabled: readonly string[], manual: boolean) => {
+    const seq = ++probeSeq.current;
+    if (manual) setScanning(true);
     return probeHostTools(disabled)
       .then((next) => {
+        if (seq !== probeSeq.current) return;
         setTools(next);
-        setError(null);
         onDetected?.(next);
       })
       .catch((err: unknown) => {
+        if (seq !== probeSeq.current) return;
         setTools([]);
-        setError(errorMessage(err, "检测本机工具失败"));
+        setFailures((current) => [
+          ...current.filter((item) => item.id !== "probe"),
+          { id: "probe", message: errorMessage(err, "检测本机工具失败") },
+        ]);
       })
-      .finally(() => setScanning(false));
+      .finally(() => {
+        if (seq === probeSeq.current) setScanning(false);
+      });
   };
 
   useEffect(() => {
+    const seq = ++probeSeq.current;
     let cancelled = false;
     void probeHostTools(prefs.disabledHostTools)
       .then((next) => {
-        if (cancelled) return;
+        if (cancelled || seq !== probeSeq.current) return;
         setTools(next);
-        setError(null);
         onDetected?.(next);
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
+        if (cancelled || seq !== probeSeq.current) return;
         setTools([]);
-        setError(errorMessage(err, "检测本机工具失败"));
+        setFailures((current) => [
+          ...current.filter((item) => item.id !== "probe"),
+          { id: "probe", message: errorMessage(err, "检测本机工具失败") },
+        ]);
       })
       .finally(() => {
-        if (!cancelled) setScanning(false);
+        if (!cancelled && seq === probeSeq.current) setScanning(false);
       });
     return () => {
       cancelled = true;
     };
   }, [onDetected, prefs.disabledHostTools]);
 
-  const install = (id: string) => {
-    setInstalling(id);
-    setError(null);
+  const install = (id: string, category: HostToolCategory) => {
+    const next = { id, category };
+    if (!canStartHostToolInstall(installingRef.current, next)) return;
+    installingRef.current = [...installingRef.current, next];
+    setInstalling(installingRef.current);
+    setFailures((current) => current.filter((item) => item.id !== id));
     void installHostTool(id, prefs.httpProxy)
-      .then(() => load(prefs.disabledHostTools))
-      .catch((err: unknown) => setError(errorMessage(err, "安装失败")))
-      .finally(() => setInstalling(null));
+      .then(() => load(prefs.disabledHostTools, true))
+      .catch((err: unknown) => {
+        setFailures((current) => [
+          ...current.filter((item) => item.id !== id),
+          { id, message: errorMessage(err, "安装失败") },
+        ]);
+      })
+      .finally(() => {
+        installingRef.current = installingRef.current.filter((item) => item.id !== id);
+        setInstalling(installingRef.current);
+      });
   };
 
   const shown = tools.map((tool) => ({
@@ -80,14 +109,18 @@ export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
     <>
       <p className="agent-cap__lead">
         打开设置时检测本机已有的命令和作图库，记下路径与调用方式，供 Agent 用
-        host_tool_run 调用。没有的可以安装到下面的目录。确认模式下运行前会征求同意。
+        host_tool_run 调用。没有的可以安装到下面的目录，同时最多装两个。图表库共用一个
+        Python，会排开安装。确认模式下运行前会征求同意。
       </p>
       <div className="agent-cap__toolbar">
         <button
           type="button"
           className="settings__save"
-          onClick={() => void load(prefs.disabledHostTools)}
-          disabled={scanning || installing !== null}
+          onClick={() => {
+            setFailures((current) => current.filter((item) => item.id !== "probe"));
+            void load(prefs.disabledHostTools, true);
+          }}
+          disabled={scanning || installing.length > 0}
         >
           重新检测
         </button>
@@ -98,7 +131,11 @@ export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
           {scanning ? "正在检测…" : readyCount(shown)}
         </span>
       </div>
-      {error ? <p className="agent-cap__error">{error}</p> : null}
+      {failures.length > 0 ? (
+        <p className="agent-cap__error">
+          {failures.map((item) => item.message).join("；")}
+        </p>
+      ) : null}
       {CATEGORIES.map((category) => {
         const rows = shown.filter((item) => item.category === category);
         if (rows.length === 0) return null;
@@ -112,8 +149,13 @@ export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
                 <ToolRow
                   key={tool.id}
                   tool={tool}
-                  busy={installing === tool.id}
-                  locked={installing !== null}
+                  busy={installing.some((item) => item.id === tool.id)}
+                  locked={
+                    !canStartHostToolInstall(installing, {
+                      id: tool.id,
+                      category: tool.category,
+                    })
+                  }
                   onToggle={(enabled) =>
                     onPatch({
                       disabledHostTools: setHostToolEnabled(
@@ -123,7 +165,7 @@ export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
                       ),
                     })
                   }
-                  onInstall={() => install(tool.id)}
+                  onInstall={() => install(tool.id, tool.category)}
                 />
               ))}
             </div>

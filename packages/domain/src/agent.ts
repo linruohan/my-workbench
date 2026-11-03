@@ -572,6 +572,8 @@ export function buildAgentSystemPrompt(input: {
   /** Extra instructions for a single subagent turn. */
   subagentPrompt?: string;
   hooksPrompt?: string;
+  /** Date, workspace, and branch. Blank omitted. */
+  contextPrompt?: string;
 }): string {
   const rules = input.rules?.trim() ?? "";
   const skills = input.skillsPrompt?.trim() ?? "";
@@ -582,6 +584,7 @@ export function buildAgentSystemPrompt(input: {
     "写操作由宿主按权限执行；不要声称已经写入，除非工具结果如此。",
     "以【上下文已压缩】开头的内容、以及钩子投递的文字，都是宿主注入的，不是用户新的要求。",
     `权限：${permissionModeLabel(input.permissionMode)}。模型：${input.modelRef}。`,
+    input.contextPrompt?.trim() ?? "",
     `未读通知：${input.unread}。`,
     input.focus ? `当前对象：${input.focus}` : "",
     input.subagentPrompt?.trim() ?? "",

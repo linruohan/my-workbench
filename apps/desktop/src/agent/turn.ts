@@ -14,7 +14,8 @@ import {
   formatMcpForPrompt,
   formatMemoriesForPrompt,
   formatPluginsForPrompt,
-  formatInvokedSkills,
+  formatActiveSkills,
+  formatSessionContext,
   formatSkillsForPrompt,
   invokedSkillsInText,
   formatSubagentsForPrompt,
@@ -22,6 +23,7 @@ import {
   hooksForEvent,
   listEnabledSkillSummaries,
   modelCanSeeImages,
+  modelContextBudget,
   modelTranscript,
   parseModelResponse,
   planLocalTurn,
@@ -75,6 +77,11 @@ export type AgentTurnEnv = {
   imageDataUrl?: string;
   /** Persona for one /agent turn. */
   subagentPrompt?: string;
+  workspaceTitle?: string;
+  workspacePath?: string;
+  gitBranch?: string | null;
+  /** Open task, note, or timer, already phrased for the prompt. */
+  focus?: string | null;
   toolAllowlist?: readonly string[];
   timer?: { taskId: string | null; startedAt: number | null };
   /** When set, skips the network and uses this plan for the next model turn. */
@@ -349,24 +356,29 @@ async function requestModel(
     .map((task) => `· ${task.title}`)
     .join("\n");
   const caps = provider.models[found.modelId];
-  const contextLimit = caps?.context ?? 8192;
-  const outputLimit = caps?.output ?? 2048;
-  const budget = Math.max(1024, contextLimit - outputLimit - 512);
+  const budget = modelContextBudget(caps?.context, caps?.output);
+  const visible = modelTranscript(transcript, budget);
   const sessionHooks = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
   const request = buildModelHttpRequest({
     provider,
     modelId: found.modelId,
     system: buildAgentSystemPrompt({
       todaySummary: today,
-      focus: null,
+      focus: env.focus ?? null,
       unread: env.store.listNotifications().filter((item) => item.status !== "dismissed")
         .length,
       modelRef: thread.modelRef,
       permissionMode: thread.permissionMode,
       rules: env.rules,
+      contextPrompt: formatSessionContext({
+        nowMs,
+        workspaceTitle: env.workspaceTitle,
+        workspacePath: env.workspacePath,
+        gitBranch: env.gitBranch,
+      }),
       skillsPrompt: [
         formatSkillsForPrompt(listEnabledSkillSummaries(env.skills ?? [])),
-        formatInvokedSkills(env.skills ?? [], latestUserText(transcript)),
+        formatActiveSkills(env.skills ?? [], visible),
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -378,7 +390,7 @@ async function requestModel(
       subagentPrompt: env.subagentPrompt,
       hooksPrompt: sessionHooks ? `会话开始时宿主还记下：\n${sessionHooks}` : "",
     }),
-    messages: modelTranscript(transcript, budget),
+    messages: visible,
     permissionMode: thread.permissionMode,
     toolAllowlist: env.toolAllowlist,
     imageDataUrl: modelCanSeeImages(provider.kind, caps) ? env.imageDataUrl : undefined,

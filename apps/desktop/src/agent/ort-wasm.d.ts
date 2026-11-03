@@ -1,4 +1,4 @@
-declare module "onnxruntime-web/dist/ort.wasm.min.mjs" {
+declare module "onnxruntime-web/wasm" {
   export const env: { wasm: { wasmPaths?: string; numThreads?: number } };
   export const InferenceSession: {
     create(

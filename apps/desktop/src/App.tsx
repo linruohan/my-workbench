@@ -154,7 +154,8 @@ export default function App() {
     if (!ready) return;
     let cancelled = false;
     void ensurePaddleOcr().then((result) => {
-      if (cancelled || result.ok === true || result.skipped) return;
+      if (cancelled || result.ok === true) return;
+      if (result.skipped) return;
       store.pushNotification({
         kind: "system",
         title: "识图模型下载失败",
@@ -339,6 +340,15 @@ export default function App() {
   }, [allTasks, store, tick]);
 
   const editingTask = editingTaskId ? (store.getTask(editingTaskId) ?? null) : null;
+  const openNote = activeNoteId ? store.getNote(activeNoteId) : null;
+  const timerTask = activeTimerTaskId ? (store.getTask(activeTimerTaskId) ?? null) : null;
+  const agentFocus = [
+    editingTask ? `任务「${editingTask.title}」` : "",
+    openNote ? `笔记「${openNote.title}」` : "",
+    timerTask && timerTask.id !== editingTask?.id ? `正在计时「${timerTask.title}」` : "",
+  ]
+    .filter(Boolean)
+    .join("，");
   const timerElapsedMs =
     activeTimerTaskId && timerStartedAt != null ? Math.max(0, now - timerStartedAt) : 0;
 
@@ -1024,6 +1034,7 @@ export default function App() {
           }))}
         mcpServers={[...prefs.mcpServers, ...pluginCatalog.flatMap((item) => item.mcp)]}
         hostTools={hostTools}
+        focus={agentFocus || null}
         activeTimerTaskId={activeTimerTaskId}
         timerStartedAt={timerStartedAt}
         onSelectThread={setAgentThreadId}
