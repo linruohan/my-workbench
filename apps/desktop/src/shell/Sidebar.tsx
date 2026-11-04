@@ -379,16 +379,15 @@ export function Sidebar({
               <div className="sidebar__group-actions">
                 <button
                   type="button"
-                  className="sidebar__group-add sidebar__group-add--text"
+                  className="sidebar__group-add"
                   title="打开网页"
-                  aria-label="网页"
+                  aria-label="打开网页"
                   onClick={(event) => {
                     event.stopPropagation();
                     onOpenAgentWeb();
                   }}
                 >
                   <IconGlobe size={14} />
-                  <span>网页</span>
                 </button>
                 <button
                   type="button"

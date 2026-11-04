@@ -361,16 +361,6 @@ input {
   flex-shrink: 0;
 }
 
-.sidebar__group-add--text {
-  display: inline-flex;
-  align-items: center;
-  width: auto;
-  gap: var(--wb-space-1);
-  padding: 0 var(--wb-space-2);
-  font: inherit;
-  font-size: var(--wb-text-xs);
-}
-
 .sidebar__chevron {
   margin-left: auto;
   color: var(--wb-muted);
