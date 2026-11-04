@@ -4,10 +4,12 @@ import {
   buildAgentSystemPrompt,
   buildModelHttpRequest,
   applyRuntimeHeaders,
+  buildOcRunPrompt,
   emptyOpenAiStream,
   chatProviderFor,
   findProvider,
   isLocalBuiltin,
+  resolveOcApiKey,
   finishOpenAiStream,
   formatHookNotices,
   formatHostToolsForPrompt,
@@ -55,6 +57,8 @@ import {
   type AgentUiEffect,
 } from "./execute";
 import { hostFetch } from "./host-fetch";
+import { isTauriRuntime } from "../lib/paths";
+import { completeViaOpenCode } from "./oc-runtime";
 
 export type AgentTurnEnv = {
   store: MemoryWorkbenchRepository;
@@ -421,17 +425,35 @@ async function requestModel(
       })),
     });
   }
-  const apiKey = env.readApiKey?.(provider.id) ?? env.apiKey ?? null;
-  if (provider.apiKeyRequired && !apiKey) {
-    throw new Error("缺少模型密钥，请在设置 · 模型中填写。密钥不会写入会话。");
-  }
   const caps = provider.models[found.modelId];
   const budget = modelContextBudget(caps?.context, caps?.output);
   const visible = modelTranscript(transcript, budget);
+  const system = composeSystemPrompt(env, transcript, budget, thread);
+  const ocModel = Boolean(found.provider.models[found.modelId]?.endpoint);
+  let apiKey = env.readApiKey?.(provider.id) ?? env.apiKey ?? null;
+  if (found.provider.kind === "builtin" && ocModel) {
+    if (isTauriRuntime()) {
+      const text = await completeViaOpenCode(
+        found.modelId,
+        buildOcRunPrompt({
+          system,
+          messages: visible.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+        }),
+      );
+      return { text, calls: [] };
+    }
+    apiKey = resolveOcApiKey(apiKey);
+  }
+  if (provider.apiKeyRequired && !apiKey) {
+    throw new Error("缺少模型密钥，请在设置 · 模型中填写。密钥不会写入会话。");
+  }
   const request = buildModelHttpRequest({
     provider,
     modelId: found.modelId,
-    system: composeSystemPrompt(env, transcript, budget, thread),
+    system,
     messages: visible,
     permissionMode: thread.permissionMode,
     toolAllowlist: env.toolAllowlist,

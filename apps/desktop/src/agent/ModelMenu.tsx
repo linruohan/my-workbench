@@ -40,8 +40,7 @@ export function ModelMenu({
     return groups.flatMap((group) => {
       return group.models.map((model) => {
         const catalog = group.kind === "builtin" && model.id !== "local";
-        const missingKey =
-          (group.kind !== "builtin" || catalog) && !credentialExists(group.id);
+        const missingKey = group.kind !== "builtin" && !credentialExists(group.id);
         const name = model.title || model.id;
         return {
           ref: model.ref,

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BUILTIN_PROVIDER_ID, type ProviderConfig, type ProviderKind } from "@wb/domain";
 import { ModelFormDialog, type ModelFormValues } from "./ModelFormDialog";
 import { useDialog } from "../shell/Dialogs";
 import { IconMore, IconPencil, IconPlus, IconRefresh, IconUnplug } from "../shell/icons";
 import { testModelConnectivity } from "./connectivity";
 import { fetchAvailableModels } from "./models-list";
+import { recognizeLocalImage } from "./ocr-engine";
+import { ensurePaddleOcr } from "./ocr-models";
 import { refreshOcFreeModels } from "./oc-models";
 import {
   credentialExists,
@@ -314,15 +316,12 @@ function BuiltinDetail({
   defaultModelRef: string;
   onRefresh: () => void;
 }) {
-  const [apiKey, setApiKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
   const [catalog, setCatalog] = useState<null | { pending: boolean; message: string }>(
     null,
   );
   const [probes, setProbes] = useState<
     Record<string, { pending: boolean; ok: boolean; message: string }>
   >({});
-  const hasKey = credentialExists(provider.id);
   const models = Object.entries(provider.models);
 
   useEffect(() => {
@@ -355,49 +354,18 @@ function BuiltinDetail({
       });
   };
 
-  const saveKey = () => {
-    if (apiKey.trim() || showKey) writeCredential(provider.id, apiKey);
-  };
-
   return (
     <div className="agent-models__card">
       <div className="agent-models__card-head">
         <div>
           <h2 className="agent-models__card-title">本机工作台</h2>
           <p className="agent-models__card-desc">
-            local 离线理解常用指令。其余模型从 OpenCode 目录按价格筛出，调用需要 OpenCode
-            密钥。
+            local 离线理解常用指令。其余模型从 OpenCode 目录按价格动态筛出，由本机
+            OpenCode 的默认配置调用，不需要另填密钥。
           </p>
         </div>
         <span className="settings__pill">内置</span>
       </div>
-      <label className="agent-models__field">
-        <span>OpenCode 密钥</span>
-        <div className="agent-models__key-row">
-          <input
-            className="settings__input settings__input--grow"
-            aria-label="OpenCode 密钥"
-            type={showKey ? "text" : "password"}
-            autoComplete="off"
-            value={apiKey}
-            placeholder={hasKey ? "已保存，输入新密钥可覆盖" : "OPENCODE_API_KEY"}
-            onChange={(event) => setApiKey(event.target.value)}
-            onBlur={saveKey}
-          />
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              if (!showKey && hasKey && !apiKey) {
-                setApiKey(readCredential(provider.id) ?? "");
-              }
-              setShowKey((value) => !value);
-            }}
-          >
-            {showKey ? "隐藏" : "显示"}
-          </button>
-        </div>
-      </label>
       <div className="agent-models__models-head">
         <h3>模型列表</h3>
         <button
@@ -460,7 +428,7 @@ function BuiltinDetail({
                       void testModelConnectivity({
                         provider,
                         modelId,
-                        apiKey: apiKey.trim() || readCredential(provider.id),
+                        apiKey: null,
                       }).then((result) => {
                         const ok = result.success === true;
                         setProbes((current) => ({
@@ -499,6 +467,108 @@ function BuiltinDetail({
             </li>
           );
         })}
+      </ul>
+      <LocalOcrModel />
+    </div>
+  );
+}
+
+function LocalOcrModel() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [status, setStatus] = useState("正在准备识图模型");
+  const [ready, setReady] = useState(false);
+  const [probe, setProbe] = useState<null | {
+    pending: boolean;
+    ok: boolean;
+    message: string;
+  }>(null);
+
+  useEffect(() => {
+    let live = true;
+    void ensurePaddleOcr().then((result) => {
+      if (!live) return;
+      if (result.ok === true) {
+        setReady(true);
+        setStatus("已就绪");
+        return;
+      }
+      setReady(false);
+      setStatus(result.message);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const debugImage = (file: File | undefined) => {
+    if (!file || probe?.pending) return;
+    setProbe({ pending: true, ok: false, message: "正在识图" });
+    void recognizeLocalImage(file).then((result) => {
+      if (result.ok === true) {
+        const text = result.lines.join("\n").trim();
+        setReady(true);
+        setStatus("已就绪");
+        setProbe({
+          pending: false,
+          ok: true,
+          message: text ? `识别到：${text}` : "没有识别到文字",
+        });
+        return;
+      }
+      setProbe({ pending: false, ok: false, message: result.message });
+    });
+  };
+
+  return (
+    <div className="agent-models__local">
+      <div className="agent-models__models-head">
+        <h3>本地模型</h3>
+      </div>
+      <ul className="agent-models__models">
+        <li className="agent-models__model">
+          <div className="agent-models__model-main">
+            <strong>PP-OCRv6 small</strong>
+            <small>本地识图。对话模型看不到图片时，用它识别文字。</small>
+            <small
+              className={ready ? "agent-models__probe is-ok" : "agent-models__probe"}
+            >
+              {status}
+            </small>
+            {probe && !probe.pending ? (
+              <small
+                className={
+                  probe.ok ? "agent-models__probe is-ok" : "agent-models__probe is-bad"
+                }
+              >
+                {probe.message}
+              </small>
+            ) : probe?.pending ? (
+              <small className="agent-models__probe">{probe.message}</small>
+            ) : null}
+          </div>
+          <div className="agent-models__model-actions">
+            <button
+              type="button"
+              className="btn"
+              disabled={probe?.pending}
+              onClick={() => inputRef.current?.click()}
+            >
+              调试
+            </button>
+            <input
+              ref={inputRef}
+              className="sr-only"
+              type="file"
+              accept="image/*"
+              aria-label="调试识图"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                debugImage(file);
+              }}
+            />
+          </div>
+        </li>
       </ul>
     </div>
   );

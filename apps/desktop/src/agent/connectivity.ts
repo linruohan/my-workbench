@@ -2,6 +2,7 @@ import {
   applyRuntimeHeaders,
   chatProviderFor,
   isLocalBuiltin,
+  resolveOcApiKey,
   buildConnectivityProbe,
   connectivityProbeJsonError,
   readConnectivityProbeEvent,
@@ -10,6 +11,8 @@ import {
   type ProviderConfig,
 } from "@wb/domain";
 import { describeTransportError, hostFetch } from "./host-fetch";
+import { isTauriRuntime } from "../lib/paths";
+import { completeViaOpenCode } from "./oc-runtime";
 
 const PROBE_TIMEOUT_MS = 60_000;
 
@@ -31,10 +34,22 @@ export async function testModelConnectivity(input: {
   if (isLocalBuiltin(input.provider, modelId)) {
     return fail("本机模型不需要测试连接");
   }
+  const ocModel =
+    input.provider.kind === "builtin" &&
+    Boolean(input.provider.models[modelId]?.endpoint);
+  if (ocModel && isTauriRuntime()) {
+    try {
+      const text = await completeViaOpenCode(modelId, "Reply with the single word pong.");
+      return text.trim() ? { success: true } : fail("模型没有返回内容");
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : "连接失败");
+    }
+  }
+  const apiKey = ocModel ? resolveOcApiKey(input.apiKey) : input.apiKey;
   if (!provider.enabled) return fail("请先启用供应商");
   if (!provider.models[modelId]) return fail("该模型当前不可用，无法测试连接");
   if (!provider.baseURL.trim()) return fail("未配置 endpoint");
-  if (provider.apiKeyRequired && !input.apiKey?.trim()) return fail("缺少模型密钥");
+  if (provider.apiKeyRequired && !apiKey?.trim()) return fail("缺少模型密钥");
 
   let request;
   try {
@@ -42,8 +57,8 @@ export async function testModelConnectivity(input: {
   } catch (error) {
     return fail(error instanceof Error ? error.message : "连接失败");
   }
-  const headers = applyRuntimeHeaders(request, input.apiKey);
-  const secrets = input.apiKey ? [input.apiKey] : [];
+  const headers = applyRuntimeHeaders(request, apiKey);
+  const secrets = apiKey ? [apiKey] : [];
   const timeoutMs = input.timeoutMs ?? PROBE_TIMEOUT_MS;
   const fetchImpl = input.fetchImpl ?? hostFetch;
   let response: Response;

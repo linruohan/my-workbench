@@ -113,4 +113,31 @@ describe("testModelConnectivity", () => {
     expect(missing).toEqual({ success: false, error: { message: "缺少模型密钥" } });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
+
+  it("calls a builtin free model with OpenCode's public key", async () => {
+    const builtin = builtinProvider();
+    builtin.models["big-pickle"] = {
+      context: 8192,
+      output: 2048,
+      endpoint: "https://opencode.ai/inference/openai/v1",
+    };
+    let authorization = "";
+    const result = await testModelConnectivity({
+      provider: builtin,
+      modelId: "big-pickle",
+      apiKey: null,
+      fetchImpl: (async (_url: string, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        authorization = headers.get("authorization") ?? "";
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "pong" }, finish_reason: "stop" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+    });
+    expect(result).toEqual({ success: true });
+    expect(authorization).toBe("Bearer public");
+  });
 });

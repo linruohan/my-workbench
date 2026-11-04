@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { mergeBuiltinModels, selectOcFreeModels } from "../src/oc-free-models";
+import {
+  buildOcRunPrompt,
+  mergeBuiltinModels,
+  readOcRunOutput,
+  resolveOcApiKey,
+  selectOcFreeModels,
+} from "../src/oc-free-models";
 
 describe("OpenCode free models", () => {
   it("keeps only zero-cost text models from the live catalog", () => {
@@ -101,5 +107,62 @@ describe("OpenCode free models", () => {
     expect(models.local).toEqual({ context: 8192, output: 2048 });
     expect(models["big-pickle"]?.title).toBe("Big Pickle");
     expect(models["big-pickle"]?.inputs).toEqual(["image"]);
+  });
+
+  it("reads the live OpenCode model list, including array prices", () => {
+    const found = selectOcFreeModels({
+      data: [
+        {
+          id: "glm-5.3-flash-free",
+          providerID: "opencode",
+          name: "GLM-5.3-Flash Free",
+          status: "active",
+          cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+          limit: { context: 200000, output: 32000 },
+          capabilities: { input: ["text"], output: ["text"] },
+          settings: { baseURL: "https://opencode.ai/inference/openai/v1" },
+        },
+        {
+          id: "paid-one",
+          providerID: "opencode",
+          name: "Paid",
+          cost: [{ input: 1, output: 1, cache: { read: 0, write: 0 } }],
+          capabilities: { output: ["text"] },
+        },
+        {
+          id: "other",
+          providerID: "openai",
+          name: "Other",
+          cost: [{ input: 0, output: 0 }],
+          capabilities: { output: ["text"] },
+        },
+      ],
+    });
+    expect(found.map((model) => model.id)).toEqual(["glm-5.3-flash-free"]);
+    expect(found[0]?.endpoint).toBe("https://opencode.ai/inference/openai/v1");
+  });
+
+  it("uses the public key unless one is saved", () => {
+    expect(resolveOcApiKey(null)).toBe("public");
+    expect(resolveOcApiKey("  sk-user  ")).toBe("sk-user");
+  });
+
+  it("reads an OpenCode run transcript and keeps the prompt bounded", () => {
+    expect(
+      readOcRunOutput(
+        '{"type":"text","part":{"type":"text","text":"pong"}}\n{"type":"step_finish","part":{"reason":"stop"}}\n',
+      ),
+    ).toEqual({ ok: true, text: "pong" });
+    expect(
+      readOcRunOutput(
+        '{"type":"error","error":{"message":"Free usage limit reached."}}\n',
+      ),
+    ).toEqual({ ok: false, message: "Free usage limit reached." });
+    const prompt = buildOcRunPrompt({
+      system: "sys",
+      messages: [{ role: "user", content: "x".repeat(20_100) }],
+    });
+    expect(prompt.length).toBe(20_000);
+    expect(prompt.endsWith("x")).toBe(true);
   });
 });

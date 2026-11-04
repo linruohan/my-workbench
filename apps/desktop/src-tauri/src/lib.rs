@@ -1,5 +1,6 @@
 mod kb;
 mod model_http;
+mod oc_runtime;
 mod ocr;
 mod open_ext;
 mod tools;
@@ -23,6 +24,7 @@ pub fn run() {
             kb::kb_git_branch,
             open_ext::open_external,
             model_http::model_http,
+            oc_runtime::oc_complete,
             ocr::ocr_ensure_models,
             ocr::ocr_read_model,
             tools::tools_probe,
