@@ -136,8 +136,18 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "收起左视图" }));
     expect(screen.getByRole("button", { name: "展开左视图" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "任务" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "知识库" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Agent" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "今日" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "收件箱" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "已完成" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "计划" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "定时任务" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "添加项目" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "展开左视图" }));
     expect(screen.getByRole("button", { name: "收起左视图" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "今日" })).toBeInTheDocument();
   });
 
   it("opens notification center from the title bar bell", async () => {

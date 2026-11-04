@@ -149,30 +149,18 @@ export function Sidebar({
         >
           <IconSidebar />
         </button>
-        <div className="sidebar__rail" role="group" aria-label="任务">
-          {TASK_NAV.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={
-                nav === item.id && !settingsOpen ? "icon-btn is-active" : "icon-btn"
-              }
-              aria-label={item.label}
-              aria-pressed={nav === item.id && !settingsOpen}
-              title={item.label}
-              onClick={() => onNav(item.id)}
-            >
-              {item.icon}
-            </button>
-          ))}
+        <div className="sidebar__rail" role="group" aria-label="分区">
           <button
             type="button"
-            className="icon-btn"
-            aria-label="添加项目"
-            title="添加项目"
-            onClick={onCreateProject}
+            className={taskGroupActive ? "icon-btn is-active" : "icon-btn"}
+            aria-label="任务"
+            aria-pressed={taskGroupActive}
+            title="任务"
+            onClick={() => {
+              if (!taskGroupActive) onNav("today");
+            }}
           >
-            <IconPlus size={15} />
+            <IconTasks size={15} />
           </button>
           <button
             type="button"

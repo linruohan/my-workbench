@@ -1476,19 +1476,6 @@ export function AgentView({
                   >
                     {thread.pinnedAt != null ? "取消置顶" : "置顶"}
                   </button>
-                  {thread.webUrl ? null : (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setThreadMenuOpen(false);
-                        setFindOpen(true);
-                        setFindTick((tick) => tick + 1);
-                      }}
-                    >
-                      查找
-                    </button>
-                  )}
                 </div>
               ) : null}
             </div>

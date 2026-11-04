@@ -13,6 +13,7 @@ import {
   IconFolderOpen,
   IconMore,
   IconPencil,
+  IconPin,
   IconPlus,
 } from "../shell/icons";
 
@@ -344,6 +345,9 @@ export function AgentWorkspaceRail({
                               title={item.webUrl || undefined}
                               onClick={() => onSelectThread(item.id)}
                             >
+                              {item.pinnedAt != null ? (
+                                <IconPin size={12} className="agent__thread-pin" />
+                              ) : null}
                               <span className="agent__thread-title">
                                 {archived ? "〔归档〕 " : ""}
                                 {item.title}
