@@ -2373,7 +2373,7 @@ input {
   margin: 1.15em 0 0.45em;
   font-weight: 800;
   line-height: 1.25;
-  color: var(--wb-text);
+  color: #111;
 }
 
 .md-body h1 {
@@ -2399,6 +2399,17 @@ input {
 }
 .md-body h8 {
   font-size: calc(var(--md-size) * 1.05);
+}
+
+[data-theme="dark"] .md-body h1,
+[data-theme="dark"] .md-body h2,
+[data-theme="dark"] .md-body h3,
+[data-theme="dark"] .md-body h4,
+[data-theme="dark"] .md-body h5,
+[data-theme="dark"] .md-body h6,
+[data-theme="dark"] .md-body h7,
+[data-theme="dark"] .md-body h8 {
+  color: #111;
 }
 
 /* Numbers live in the markdown source; do not prepend CSS counters (avoids ### 2.3 → 1.1.1 2.3). */
@@ -2437,8 +2448,8 @@ input {
   height: calc(var(--md-size) * 2.75);
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--wb-accent) 55%, transparent),
-    color-mix(in srgb, var(--wb-accent) 55%, transparent) 25%,
+    hsl(270, 65%, 58.8%),
+    hsl(270, 65%, 58.8%) 25%,
     transparent 75%
   );
 }
@@ -2446,8 +2457,8 @@ input {
   height: calc(var(--md-size) * 2.5);
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--wb-accent) 48%, transparent),
-    color-mix(in srgb, var(--wb-accent) 48%, transparent) 25%,
+    hsl(330, 85%, 47.2%),
+    hsl(330, 85%, 47.2%) 25%,
     transparent 75%
   );
 }
@@ -2455,21 +2466,53 @@ input {
   height: calc(var(--md-size) * 2.3);
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--wb-accent) 40%, transparent),
-    color-mix(in srgb, var(--wb-accent) 40%, transparent) 25%,
+    hsl(37, 100%, 50%),
+    hsl(37, 100%, 50%) 25%,
     transparent 75%
   );
 }
-.md-body h4::after,
-.md-body h5::after,
-.md-body h6::after,
-.md-body h7::after,
-.md-body h8::after {
-  height: calc(var(--md-size) * 2);
+.md-body h4::after {
+  height: calc(var(--md-size) * 2.15);
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--wb-accent) 28%, transparent),
-    color-mix(in srgb, var(--wb-accent) 28%, transparent) 25%,
+    hsla(80, 70%, 28.5%, 0.95),
+    hsla(80, 70%, 28.5%, 0.95) 25%,
+    transparent 75%
+  );
+}
+.md-body h5::after {
+  height: calc(var(--md-size) * 1.95);
+  background: linear-gradient(
+    90deg,
+    hsl(165, 100%, 26%),
+    hsl(165, 100%, 26%) 25%,
+    transparent 75%
+  );
+}
+.md-body h6::after {
+  height: calc(var(--md-size) * 1.8);
+  background: linear-gradient(
+    90deg,
+    hsla(175, 45%, 50%, 0.95),
+    hsla(175, 45%, 50%, 0.95) 25%,
+    transparent 75%
+  );
+}
+.md-body h7::after {
+  height: calc(var(--md-size) * 1.7);
+  background: linear-gradient(
+    90deg,
+    hsl(270, 100%, 70%),
+    hsl(270, 100%, 70%) 25%,
+    transparent 75%
+  );
+}
+.md-body h8::after {
+  height: calc(var(--md-size) * 1.55);
+  background: linear-gradient(
+    90deg,
+    hsl(180, 100%, 26%),
+    hsl(180, 100%, 26%) 25%,
     transparent 75%
   );
 }
