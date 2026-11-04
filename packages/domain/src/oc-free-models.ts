@@ -59,7 +59,7 @@ export function readOcRunOutput(
     if (!record) continue;
     if (record.type === "error") {
       const nested = asRecord(record.error);
-      const message = typeof nested?.message === "string" ? nested.message.trim() : "";
+      const message = nested ? ocRunErrorMessage(nested) : "";
       if (message) error = message;
     }
     if (record.type === "text") {
@@ -201,6 +201,25 @@ function listModels(
   }
   found.sort((a, b) => a.id.localeCompare(b.id));
   return found;
+}
+
+function ocRunErrorMessage(error: Record<string, unknown>): string {
+  const message = typeof error.message === "string" ? error.message.trim() : "";
+  const type = typeof error.type === "string" ? error.type : "";
+  if (type === "provider.free-limit" || /free usage limit reached/i.test(message)) {
+    const wait = quotaWait(error.retryAfterMs);
+    return wait
+      ? `OpenCode 免费额度已用完，${wait}。可在设置里接入自己的模型供应商`
+      : "OpenCode 免费额度已用完。可在设置里接入自己的模型供应商";
+  }
+  return message;
+}
+
+function quotaWait(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
+  const minutes = Math.round(value / 60_000);
+  if (minutes < 90) return `大约 ${Math.max(1, minutes)} 分钟后恢复`;
+  return `大约 ${Math.max(1, Math.round(value / 3_600_000))} 小时后恢复`;
 }
 
 function usableId(id: string): boolean {

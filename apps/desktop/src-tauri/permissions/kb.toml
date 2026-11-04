@@ -15,6 +15,7 @@ commands.allow = [
   "kb_git_branch",
   "open_external",
   "model_http",
+  "oc_complete",
   "tools_probe",
   "tools_pick_path",
   "tools_check",

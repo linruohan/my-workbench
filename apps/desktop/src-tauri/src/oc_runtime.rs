@@ -137,15 +137,16 @@ fn run(binary: &Path, dir: &Path, model_id: &str, prompt: &str) -> Result<String
 fn locate_opencode() -> Result<PathBuf, String> {
     if let Some(explicit) = std::env::var_os("WORKBENCH_OPENCODE") {
         let path = PathBuf::from(explicit);
-        if path.is_file() {
+        if is_launchable(&path) {
             return Ok(path);
         }
     }
     let mut candidates = Vec::new();
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
+            // The npm global shim is a shell script named `opencode`. The real
+            // image lives beside it; check that before the extensionless file.
             candidates.push(dir.join("opencode.exe"));
-            candidates.push(dir.join("opencode"));
             candidates.push(
                 dir.join("node_modules")
                     .join("@opencode")
@@ -153,6 +154,7 @@ fn locate_opencode() -> Result<PathBuf, String> {
                     .join("bin")
                     .join("opencode.exe"),
             );
+            candidates.push(dir.join("opencode"));
         }
     }
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
@@ -160,10 +162,37 @@ fn locate_opencode() -> Result<PathBuf, String> {
         candidates.push(home.join(".opencode").join("bin").join("opencode.exe"));
         candidates.push(home.join(".opencode").join("bin").join("opencode"));
     }
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "未找到本机 OpenCode".to_string())
+    first_launchable(candidates).ok_or_else(|| "未找到本机 OpenCode".to_string())
+}
+
+fn first_launchable(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates.into_iter().find(|path| is_launchable(path))
+}
+
+/// `CreateProcess` only accepts a PE image. The npm shim `opencode` is a
+/// `#!/bin/sh` script, and launching it fails with os error 193.
+fn is_launchable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        return is_pe_executable(path);
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+#[cfg(windows)]
+fn is_pe_executable(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut header = [0u8; 2];
+    matches!(file.read(&mut header), Ok(2) if header == *b"MZ")
 }
 
 fn base_env() -> Vec<(&'static str, String)> {
@@ -211,4 +240,28 @@ fn clip(text: &str) -> String {
         return trimmed.to_string();
     }
     trimmed.chars().take(400).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_launchable;
+    use std::io::Write;
+
+    #[cfg(windows)]
+    #[test]
+    fn skips_shell_shim_and_keeps_pe_image() {
+        let dir = std::env::temp_dir().join(format!("wb-oc-locate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("opencode");
+        let exe = dir.join("opencode.exe");
+        std::fs::write(&shim, "#!/bin/sh\nexec echo hi\n").unwrap();
+        {
+            let mut file = std::fs::File::create(&exe).unwrap();
+            file.write_all(b"MZ not a real image").unwrap();
+        }
+        let found = first_launchable([shim, exe.clone()]).unwrap();
+        assert_eq!(found, exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

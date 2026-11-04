@@ -157,7 +157,19 @@ describe("OpenCode free models", () => {
       readOcRunOutput(
         '{"type":"error","error":{"message":"Free usage limit reached."}}\n',
       ),
-    ).toEqual({ ok: false, message: "Free usage limit reached." });
+    ).toEqual({
+      ok: false,
+      message: "OpenCode 免费额度已用完。可在设置里接入自己的模型供应商",
+    });
+    expect(
+      readOcRunOutput(
+        '{"type":"error","error":{"type":"provider.free-limit","message":"Free usage limit reached.","retryAfterMs":33840000}}\n',
+      ),
+    ).toEqual({
+      ok: false,
+      message:
+        "OpenCode 免费额度已用完，大约 9 小时后恢复。可在设置里接入自己的模型供应商",
+    });
     const prompt = buildOcRunPrompt({
       system: "sys",
       messages: [{ role: "user", content: "x".repeat(20_100) }],
