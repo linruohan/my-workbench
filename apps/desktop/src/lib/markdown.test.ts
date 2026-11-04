@@ -45,6 +45,15 @@ describe("renderMarkdown", () => {
     expect(html).toContain("下划线");
   });
 
+  it("does not crash when markers or colored spans appear inside link labels", () => {
+    expect(() => renderMarkdown("[见==这里==](https://example.com)")).not.toThrow();
+    expect(() =>
+      renderMarkdown('[见<span style="color: #e11d48">红</span>](https://example.com)'),
+    ).not.toThrow();
+    const html = renderMarkdown("[见==这里==](https://example.com)");
+    expect(html).toContain("https://example.com");
+  });
+
   it("renders safe text color and background spans", () => {
     const html = renderMarkdown(
       '字<span style="color: #e11d48">红</span>和<span style="background-color: #fef08a">黄底</span>',

@@ -191,6 +191,8 @@ function addInlinePair(name: string, marker: string, tag: string): void {
     if (state.src.slice(start, start + marker.length) !== marker) return false;
     const close = state.src.indexOf(marker, start + marker.length);
     if (close < 0) return false;
+    // markdown-it requires silent matches to still advance pos (e.g. inside link labels).
+    state.pos = close + marker.length;
     if (silent) return true;
     const tokenOpen = state.push(`${name}_open`, tag, 1);
     tokenOpen.markup = marker;
@@ -198,7 +200,6 @@ function addInlinePair(name: string, marker: string, tag: string): void {
     tokenText.content = state.src.slice(start + marker.length, close);
     const tokenClose = state.push(`${name}_close`, tag, -1);
     tokenClose.markup = marker;
-    state.pos = close + marker.length;
     return true;
   });
 }
@@ -249,7 +250,11 @@ md.inline.ruler.before("emphasis", "safe_style_span", (state, silent) => {
   }
   if (depth !== 0) return false;
 
-  if (silent) return true;
+  // Silent mode (link label scan etc.) must still advance pos.
+  if (silent) {
+    state.pos = pos + 7;
+    return true;
+  }
 
   const tokenOpen = state.push("span_open", "span", 1);
   tokenOpen.attrs = [["style", `${prop}: ${color}`]];
@@ -336,7 +341,13 @@ export function renderMarkdown(
       return h;
     });
   }
-  return applyImages(md.render(markdown, env), slots, imageUrls);
+  try {
+    return applyImages(md.render(markdown, env), slots, imageUrls);
+  } catch (err) {
+    // Bad custom inline / pathological input must not blank the whole app.
+    console.error("renderMarkdown failed", err);
+    return `<pre class="md-error">${escapeHtml(raw)}</pre>`;
+  }
 }
 
 /** Chat replies keep single line breaks. Note rendering stays unchanged. */
