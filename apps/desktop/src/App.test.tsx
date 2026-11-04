@@ -114,6 +114,8 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "打开设置" }));
     expect(screen.getByRole("heading", { name: "常规" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "侧栏" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开设置" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("界面语言")).toBeInTheDocument();
     expect(screen.getByLabelText("界面模式")).toBeInTheDocument();
     expect(screen.getByLabelText("HTTP 代理")).toBeInTheDocument();
@@ -125,6 +127,7 @@ describe("App shell", () => {
     expect(screen.getByRole("heading", { name: "外观" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回工作区" }));
     expect(screen.getByLabelText("快速捕获")).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "侧栏" })).toBeInTheDocument();
   });
 
   it("collapses and expands the left sidebar", async () => {

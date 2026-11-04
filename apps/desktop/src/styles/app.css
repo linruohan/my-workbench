@@ -717,9 +717,12 @@ input {
 .settings {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
   display: grid;
   grid-template-columns: var(--wb-sidebar-width) 1fr;
   overflow: hidden;
+  background: var(--wb-bg);
 }
 
 .settings__nav {
