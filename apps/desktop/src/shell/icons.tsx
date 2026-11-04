@@ -116,6 +116,15 @@ export function IconPencil({ size, className }: IconProps) {
   );
 }
 
+export function IconPin({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M9 4h6l-1 5 3 2v1H7v-1l3-2Z" />
+      <path d="M12 12v8" />
+    </Svg>
+  );
+}
+
 export function IconMore({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>

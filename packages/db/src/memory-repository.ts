@@ -625,6 +625,7 @@ export class MemoryWorkbenchRepository {
       queueJson: null,
       webUrl,
       archivedAt: null,
+      pinnedAt: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -665,6 +666,7 @@ export class MemoryWorkbenchRepository {
         | "queueJson"
         | "webUrl"
         | "archivedAt"
+        | "pinnedAt"
       >
     >,
     nowMs = Date.now(),
@@ -696,6 +698,14 @@ export class MemoryWorkbenchRepository {
 
   unarchiveAgentThread(id: string, nowMs = Date.now()): AgentThread {
     return this.updateAgentThread(id, { archivedAt: null }, nowMs);
+  }
+
+  pinAgentThread(id: string, nowMs = Date.now()): AgentThread {
+    return this.updateAgentThread(id, { pinnedAt: nowMs }, nowMs);
+  }
+
+  unpinAgentThread(id: string, nowMs = Date.now()): AgentThread {
+    return this.updateAgentThread(id, { pinnedAt: null }, nowMs);
   }
 
   deleteAgentThread(id: string): void {
@@ -981,6 +991,7 @@ export class MemoryWorkbenchRepository {
             queueJson: thread.queueJson ?? null,
             webUrl: thread.webUrl ?? null,
             archivedAt: thread.archivedAt ?? null,
+            pinnedAt: thread.pinnedAt ?? null,
           },
         ];
       }),

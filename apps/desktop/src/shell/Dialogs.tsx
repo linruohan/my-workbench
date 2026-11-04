@@ -15,6 +15,8 @@ import {
   type DialogApi,
   type PromptOptions,
 } from "./dialog-context";
+import { coverEmbeddedWebSession } from "../agent/web-session";
+import { isTauriRuntime } from "../lib/paths";
 import { IconClose } from "./icons";
 
 export type { AlertOptions, ConfirmOptions, DialogApi, PromptOptions };
@@ -49,6 +51,45 @@ type PromptRequest = {
 
 type DialogRequest = AlertRequest | ConfirmRequest | PromptRequest;
 
+function releaseAfterPaint(release: () => void): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(release);
+  });
+}
+
+/**
+ * Open a modal, hiding the embedded webview first. That window sits above the
+ * shell, so a confirm button drawn under it cannot be clicked.
+ * In the browser the dialog is enqueued immediately, same as before.
+ */
+function presentDialog<T>(
+  enqueue: (request: DialogRequest) => void,
+  finish: () => void,
+  create: (settle: (value: T) => void) => DialogRequest,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const open = (release: () => void) => {
+      let settled = false;
+      enqueue(
+        create((value) => {
+          if (settled) return;
+          settled = true;
+          finish();
+          resolve(value);
+          releaseAfterPaint(release);
+        }),
+      );
+    };
+    if (!isTauriRuntime()) {
+      open(() => {});
+      return;
+    }
+    void coverEmbeddedWebSession().then(open, (error: unknown) => {
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
+}
+
 export function useDialog(): DialogApi {
   const ctx = useContext(DialogContext);
   if (!ctx) {
@@ -71,51 +112,38 @@ export function DialogProvider({ children }: { children: ReactNode }) {
 
   const api = useMemo<DialogApi>(
     () => ({
-      alert: (opts) =>
-        new Promise<void>((resolve) => {
-          const normalized = typeof opts === "string" ? { message: opts } : opts;
-          enqueue({
-            kind: "alert",
-            title: normalized.title ?? "提示",
-            message: normalized.message,
-            confirmLabel: normalized.confirmLabel ?? "知道了",
-            resolve: () => {
-              finish();
-              resolve();
-            },
-          });
-        }),
-      confirm: (opts) =>
-        new Promise<boolean>((resolve) => {
-          const normalized = typeof opts === "string" ? { message: opts } : opts;
-          enqueue({
-            kind: "confirm",
-            title: normalized.title ?? "请确认",
-            message: normalized.message,
-            confirmLabel: normalized.confirmLabel ?? "确定",
-            cancelLabel: normalized.cancelLabel ?? "取消",
-            danger: normalized.danger,
-            resolve: (ok) => {
-              finish();
-              resolve(ok);
-            },
-          });
-        }),
+      alert: (opts) => {
+        const normalized = typeof opts === "string" ? { message: opts } : opts;
+        return presentDialog<void>(enqueue, finish, (settle) => ({
+          kind: "alert",
+          title: normalized.title ?? "提示",
+          message: normalized.message,
+          confirmLabel: normalized.confirmLabel ?? "知道了",
+          resolve: () => settle(undefined),
+        }));
+      },
+      confirm: (opts) => {
+        const normalized = typeof opts === "string" ? { message: opts } : opts;
+        return presentDialog<boolean>(enqueue, finish, (settle) => ({
+          kind: "confirm",
+          title: normalized.title ?? "请确认",
+          message: normalized.message,
+          confirmLabel: normalized.confirmLabel ?? "确定",
+          cancelLabel: normalized.cancelLabel ?? "取消",
+          danger: normalized.danger,
+          resolve: settle,
+        }));
+      },
       prompt: (opts) =>
-        new Promise<string | null>((resolve) => {
-          enqueue({
-            kind: "prompt",
-            title: opts.title,
-            label: opts.label,
-            initialValue: opts.initialValue ?? "",
-            confirmLabel: opts.confirmLabel ?? "确定",
-            cancelLabel: opts.cancelLabel ?? "取消",
-            resolve: (value) => {
-              finish();
-              resolve(value);
-            },
-          });
-        }),
+        presentDialog<string | null>(enqueue, finish, (settle) => ({
+          kind: "prompt",
+          title: opts.title,
+          label: opts.label,
+          initialValue: opts.initialValue ?? "",
+          confirmLabel: opts.confirmLabel ?? "确定",
+          cancelLabel: opts.cancelLabel ?? "取消",
+          resolve: settle,
+        })),
     }),
     [enqueue, finish],
   );

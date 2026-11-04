@@ -130,6 +130,20 @@ describe("agent workspaces", () => {
       }),
     );
     expect(legacy.getAgentThread("t1")?.webUrl).toBeNull();
+    expect(legacy.getAgentThread("t1")?.pinnedAt).toBeNull();
+  });
+
+  it("pins a session and keeps the pin across a snapshot", () => {
+    const store = new MemoryWorkbenchRepository();
+    const thread = store.createAgentThread({ title: "要置顶", nowMs: 1 });
+    expect(thread.pinnedAt).toBeNull();
+    store.pinAgentThread(thread.id, 8);
+    expect(store.getAgentThread(thread.id)?.pinnedAt).toBe(8);
+    const copy = new MemoryWorkbenchRepository();
+    copy.importSnapshot(store.exportSnapshot());
+    expect(copy.getAgentThread(thread.id)?.pinnedAt).toBe(8);
+    copy.unpinAgentThread(thread.id, 9);
+    expect(copy.getAgentThread(thread.id)?.pinnedAt).toBeNull();
   });
 
   it("deletes a workspace together with its sessions", () => {

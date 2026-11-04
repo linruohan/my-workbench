@@ -50,13 +50,24 @@ function loopbackScheme(input: string): "http" | "https" {
   return "https";
 }
 
-/** Web sessions stay above chats. Within each group, newer sessions come first. */
+/**
+ * Pinned sessions stay on top, newest pin first.
+ * When requested, web sessions stay above other chats. Within each group, newer sessions come first.
+ */
 export function orderAgentWorkspaceThreads<
-  T extends { updatedAt: number; webUrl?: string | null },
+  T extends { updatedAt: number; webUrl?: string | null; pinnedAt?: number | null },
 >(threads: readonly T[], pinWebSessions: boolean): T[] {
   const next = [...threads];
-  if (!pinWebSessions) return next;
+  const hasPin = next.some((item) => item.pinnedAt != null);
+  if (!pinWebSessions && !hasPin) return next;
   next.sort((a, b) => {
+    const aPin = a.pinnedAt != null ? 1 : 0;
+    const bPin = b.pinnedAt != null ? 1 : 0;
+    if (aPin !== bPin) return bPin - aPin;
+    if (aPin && bPin && a.pinnedAt !== b.pinnedAt) {
+      return (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
+    }
+    if (!pinWebSessions) return 0;
     const aWeb = a.webUrl ? 1 : 0;
     const bWeb = b.webUrl ? 1 : 0;
     if (aWeb !== bWeb) return bWeb - aWeb;

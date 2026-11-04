@@ -74,7 +74,9 @@ import {
   IconGitBranch,
   IconHand,
   IconMaximize,
+  IconMore,
   IconPencil,
+  IconPin,
   IconRestore,
   IconPlus,
   IconRefresh,
@@ -85,8 +87,10 @@ import { ModelMenu } from "./ModelMenu";
 import { imageDataUrl } from "./ocr-image";
 import { recognizeLocalImage } from "./ocr-engine";
 import {
+  onWebSessionResume,
   webSessionClose,
   webSessionEmbedded,
+  webSessionHeld,
   webSessionHide,
   webSessionReload,
   webSessionShow,
@@ -164,6 +168,7 @@ export function AgentView({
   focus = null,
   activeTimerTaskId,
   timerStartedAt,
+  onSelectThread,
   onCreateThread,
   onCreateFromFolder,
   onOpenModels,
@@ -207,6 +212,7 @@ export function AgentView({
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composerMirrorRef = useRef<HTMLDivElement>(null);
@@ -246,12 +252,14 @@ export function AgentView({
   const webFrameRef = useRef<HTMLDivElement>(null);
   const webCoveredRef = useRef(false);
   const webSyncRef = useRef<() => void>(() => {});
+  const webStateRef = useRef({ id: "", url: "" });
   const webLoginRef = useRef<() => Promise<void>>(async () => {});
   const webEditRef = useRef<() => void>(() => {});
   const webFullscreenRef = useRef(false);
   const webFullscreenApplyRef = useRef<(on: boolean) => void>(() => {});
   const webLoginBusy = useRef(false);
   webSessionRef.current = Boolean(thread?.webUrl);
+  webStateRef.current = { id: thread?.id ?? "", url: thread?.webUrl ?? "" };
   findOpenRef.current = findOpen;
   const viewingThreadId = useRef(thread?.id ?? null);
   viewingThreadId.current = thread?.id ?? null;
@@ -309,6 +317,24 @@ export function AgentView({
   }, [picker]);
 
   useEffect(() => {
+    if (!threadMenuOpen) return;
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".agent__chrome-menu")) return;
+      setThreadMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setThreadMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [threadMenuOpen]);
+
+  useEffect(() => {
     const node = logRef.current;
     if (node && stickRef.current) node.scrollTop = node.scrollHeight;
   }, [messages.length, live, pending?.id]);
@@ -318,6 +344,7 @@ export function AgentView({
     setDraft(thread?.id ? (drafts.current.get(thread.id) ?? "") : "");
     setPicker(null);
     setRenaming(false);
+    setThreadMenuOpen(false);
     setLive("");
     setError("");
     stickRef.current = true;
@@ -506,12 +533,14 @@ export function AgentView({
     };
   }, [dialog, onRefresh, store, thread?.id, thread?.webUrl]);
 
+  useEffect(() => onWebSessionResume(() => webSyncRef.current()), []);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
-    const url = thread?.webUrl ?? "";
-    const threadId = thread?.id ?? "";
     const sync = () => {
-      if (webCoveredRef.current) return;
+      if (webCoveredRef.current || webSessionHeld()) return;
+      const url = webStateRef.current.url;
+      const threadId = webStateRef.current.id;
       if (!url) {
         void webSessionHide();
         return;
@@ -529,13 +558,15 @@ export function AgentView({
         fullscreen: webFullscreenRef.current,
       }).then(
         (opened) => {
+          if (webSessionHeld() || webStateRef.current.id !== threadId) return;
           setWebSessionError("");
-          if (threadId && opened && opened !== url) {
+          if (opened && opened !== url && store.getAgentThread(threadId)?.webUrl) {
             store.updateAgentThread(threadId, { webUrl: opened });
             onRefresh();
           }
         },
         (err) => {
+          if (webSessionHeld() || webStateRef.current.id !== threadId) return;
           const message = errorMessage(err, "无法打开网页");
           setWebSessionError(message);
           if (message.includes("粘贴新打印的地址")) void webLoginRef.current();
@@ -552,7 +583,7 @@ export function AgentView({
       window.removeEventListener("resize", sync);
       webSyncRef.current = () => {};
     };
-  }, [thread?.webUrl]);
+  }, [onRefresh, store, thread?.id, thread?.webUrl]);
 
   useEffect(() => {
     if (thread?.webUrl) return;
@@ -1356,6 +1387,113 @@ export function AgentView({
   return (
     <section className="agent" aria-label="Agent">
       <div className="agent__main">
+        {thread ? (
+          <header className="agent__chrome">
+            {renaming ? (
+              <input
+                className="agent__title-input"
+                aria-label="会话标题"
+                value={titleDraft}
+                autoFocus
+                maxLength={40}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onBlur={(event) => commitTitle(thread.id, event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitTitle(thread.id, event.currentTarget.value);
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    ignoreTitleBlur.current = true;
+                    setRenaming(false);
+                  }
+                }}
+              />
+            ) : (
+              <h1 className="agent__title">
+                {thread.pinnedAt != null ? (
+                  <IconPin size={14} className="agent__title-pin" />
+                ) : null}
+                <span>{thread.title}</span>
+              </h1>
+            )}
+            <div className="agent__chrome-menu">
+              <button
+                type="button"
+                className="agent__chrome-action"
+                title="会话操作"
+                aria-label="会话操作"
+                aria-haspopup="menu"
+                aria-expanded={threadMenuOpen}
+                onClick={() => setThreadMenuOpen((open) => !open)}
+              >
+                <IconMore size={16} />
+              </button>
+              {threadMenuOpen ? (
+                <div className="agent__thread-menu" role="menu" aria-label="会话操作">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setThreadMenuOpen(false);
+                      ignoreTitleBlur.current = false;
+                      setTitleDraft(thread.title);
+                      setRenaming(true);
+                    }}
+                  >
+                    重命名
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setThreadMenuOpen(false);
+                      if (thread.archivedAt != null) {
+                        store.unarchiveAgentThread(thread.id);
+                        onRefresh();
+                        return;
+                      }
+                      store.archiveAgentThread(thread.id);
+                      forgetThreadLocal(thread.id);
+                      onSelectThread(
+                        store.listAgentThreads().find((item) => item.id !== thread.id)
+                          ?.id ?? null,
+                      );
+                      onRefresh();
+                    }}
+                  >
+                    {thread.archivedAt != null ? "取消归档" : "归档"}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setThreadMenuOpen(false);
+                      if (thread.pinnedAt != null) store.unpinAgentThread(thread.id);
+                      else store.pinAgentThread(thread.id);
+                      onRefresh();
+                    }}
+                  >
+                    {thread.pinnedAt != null ? "取消置顶" : "置顶"}
+                  </button>
+                  {thread.webUrl ? null : (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setThreadMenuOpen(false);
+                        setFindOpen(true);
+                        setFindTick((tick) => tick + 1);
+                      }}
+                    >
+                      查找
+                    </button>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          </header>
+        ) : null}
         {thread?.webUrl ? (
           <div
             className={
@@ -1419,54 +1557,6 @@ export function AgentView({
               )}
             </div>
           </div>
-        ) : thread ? (
-          <header className="agent__chrome">
-            {renaming ? (
-              <input
-                className="agent__title-input"
-                aria-label="会话标题"
-                value={titleDraft}
-                autoFocus
-                maxLength={40}
-                onChange={(event) => setTitleDraft(event.target.value)}
-                onBlur={(event) => commitTitle(thread.id, event.currentTarget.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    commitTitle(thread.id, event.currentTarget.value);
-                  } else if (event.key === "Escape") {
-                    event.preventDefault();
-                    ignoreTitleBlur.current = true;
-                    setRenaming(false);
-                  }
-                }}
-              />
-            ) : (
-              <button
-                type="button"
-                className="agent__title agent__title-btn"
-                title="重命名会话"
-                onClick={() => {
-                  ignoreTitleBlur.current = false;
-                  setTitleDraft(thread.title);
-                  setRenaming(true);
-                }}
-              >
-                {thread.title}
-              </button>
-            )}
-            <button
-              type="button"
-              className="agent__chrome-action"
-              title="在会话中查找（Ctrl+F）"
-              onClick={() => {
-                setFindOpen(true);
-                setFindTick((tick) => tick + 1);
-              }}
-            >
-              查找
-            </button>
-          </header>
         ) : null}
 
         {thread?.webUrl ? null : (

@@ -14,6 +14,9 @@ export function migrate(db: Database.Database): void {
   if (!threadColumns.some((column) => column.name === "web_url")) {
     db.exec(`ALTER TABLE agent_threads ADD COLUMN web_url TEXT`);
   }
+  if (!threadColumns.some((column) => column.name === "pinned_at")) {
+    db.exec(`ALTER TABLE agent_threads ADD COLUMN pinned_at INTEGER`);
+  }
 
   if (!row) {
     const now = Date.now();

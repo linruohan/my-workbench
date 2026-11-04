@@ -43,6 +43,8 @@ export interface AgentThread {
   webUrl: string | null;
   /** Set when the session is archived; null while active. */
   archivedAt: number | null;
+  /** Set when the session is pinned to the top of its workspace. */
+  pinnedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }

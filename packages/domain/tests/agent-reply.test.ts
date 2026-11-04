@@ -71,6 +71,15 @@ describe("agent web url", () => {
       true,
     );
     expect(ordered.map((item) => item.title)).toEqual(["另一页", "网页会话", "聊天"]);
+    const pinned = orderAgentWorkspaceThreads(
+      [
+        { updatedAt: 5, title: "聊天", webUrl: null, pinnedAt: null },
+        { updatedAt: 9, title: "置顶", webUrl: null, pinnedAt: 1 },
+        { updatedAt: 4, title: "另一页", webUrl: "https://a.test/", pinnedAt: null },
+      ],
+      true,
+    );
+    expect(pinned.map((item) => item.title)).toEqual(["置顶", "另一页", "聊天"]);
     expect(
       orderAgentWorkspaceThreads(
         [
