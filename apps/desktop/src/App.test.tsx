@@ -183,14 +183,14 @@ describe("App shell", () => {
     const user = userEvent.setup();
     await readyApp();
 
-    expect(screen.queryByRole("heading", { name: "工作区" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("还没有工作区。点「+」选择一个文件夹。"),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Agent" }));
-    expect(screen.getByRole("heading", { name: "工作区" })).toBeInTheDocument();
     expect(screen.getByText("还没有工作区。点「+」选择一个文件夹。")).toBeInTheDocument();
     expect(screen.getByText("选一个文件夹开始对话")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Agent" }));
-    expect(screen.queryByRole("heading", { name: "工作区" })).not.toBeInTheDocument();
     expect(
       screen.queryByText("还没有工作区。点「+」选择一个文件夹。"),
     ).not.toBeInTheDocument();

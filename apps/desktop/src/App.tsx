@@ -1193,7 +1193,6 @@ export default function App() {
                   goNav("agent");
                 }}
                 onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
-                onCreateFromFolder={() => void newAgentChatFromFolder()}
                 onForgetThread={(id) => forgetAgentThreadRef.current(id)}
                 onRefresh={refresh}
               />

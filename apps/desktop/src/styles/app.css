@@ -355,6 +355,22 @@ input {
   color: var(--wb-accent);
 }
 
+.sidebar__group-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.sidebar__group-add--text {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  gap: var(--wb-space-1);
+  padding: 0 var(--wb-space-2);
+  font: inherit;
+  font-size: var(--wb-text-xs);
+}
+
 .sidebar__chevron {
   margin-left: auto;
   color: var(--wb-muted);
@@ -5860,11 +5876,29 @@ input {
   margin: 0.4em 0;
 }
 
-.agent__md p:has(> strong:only-child) {
-  margin-bottom: 0.1em;
+.agent__reply {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-space-2);
+}
+
+.agent__tool {
+  padding: var(--wb-space-2) var(--wb-space-3);
+  border: 1px solid var(--wb-line);
+  border-radius: var(--wb-radius-panel);
+  background: color-mix(in srgb, var(--wb-panel) 72%, var(--wb-bg));
+}
+
+.agent__tool-label {
+  display: block;
+  margin-bottom: var(--wb-space-1);
   color: var(--wb-muted);
   font-size: var(--wb-text-xs);
   letter-spacing: 0.04em;
+}
+
+.agent__tool .agent__md > :first-child {
+  margin-top: 0;
 }
 
 .agent__md ul,

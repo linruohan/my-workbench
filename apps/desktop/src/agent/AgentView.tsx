@@ -1238,19 +1238,29 @@ export function AgentView({
   }, [slashPick, mentionPick, showSlash, showMention]);
   const nowMs = busyHere ? clock : Date.now();
   const turns = conversationBlocks(messages, Boolean(pending));
-  const blockTexts = turns.map((turn) =>
-    turn.kind === "agent" ? presentAgentTurn(turn.messages, nowMs) : turn.message.content,
+  const turnPieces = turns.map((turn) =>
+    turn.kind === "agent" ? agentTurnPieces(turn.messages, nowMs) : null,
   );
   const findNeedle = findOpen ? findQuery : "";
   let findCursor = 0;
-  const findBases = blockTexts.map((text, index) => {
+  const pieceBases: number[][] = [];
+  const findBases = turns.map((turn, index) => {
     const base = findCursor;
-    const turn = turns[index];
-    findCursor += !findNeedle.trim()
-      ? 0
-      : turn?.kind === "agent"
-        ? htmlTextHitCount(renderChatMarkdown(text), findNeedle)
-        : literalHitCount(text, findNeedle);
+    if (!findNeedle.trim()) {
+      pieceBases.push([]);
+      return base;
+    }
+    if (turn.kind !== "agent") {
+      findCursor += literalHitCount(turn.message.content, findNeedle);
+      pieceBases.push([]);
+      return base;
+    }
+    const bases: number[] = [];
+    for (const piece of turnPieces[index] ?? []) {
+      bases.push(findCursor);
+      findCursor += htmlTextHitCount(renderChatMarkdown(piece.text), findNeedle);
+    }
+    pieceBases.push(bases);
     return base;
   });
   const totalHits = findCursor;
@@ -1633,22 +1643,53 @@ export function AgentView({
                           </article>
                         );
                       }
-                      const text = blockTexts[index] ?? "";
-                      if (!text) return null;
+                      const pieces = turnPieces[index] ?? [];
+                      if (!pieces.length) return null;
                       const id = turn.messages[0]!.id;
                       const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
+                      const bases = pieceBases[index] ?? [];
+                      const copyText = pieces
+                        .map((piece) =>
+                          piece.kind === "tool" && piece.label
+                            ? `${piece.label}\n${piece.text}`
+                            : piece.text,
+                        )
+                        .join("\n\n");
                       return (
                         <article
                           key={id}
                           className="agent__msg agent__msg--assistant"
                           aria-label="Agent"
                         >
-                          <AgentMarkdown
-                            text={text}
-                            query={findNeedle}
-                            indexBase={findBase}
-                            active={activeHit}
-                          />
+                          <div className="agent__reply">
+                            {pieces.map((piece, pieceIndex) => {
+                              const body = (
+                                <AgentMarkdown
+                                  text={piece.text}
+                                  query={findNeedle}
+                                  indexBase={bases[pieceIndex] ?? findBase}
+                                  active={activeHit}
+                                />
+                              );
+                              if (piece.kind !== "tool") {
+                                return <div key={piece.id}>{body}</div>;
+                              }
+                              return (
+                                <section
+                                  key={piece.id}
+                                  className="agent__tool"
+                                  aria-label={piece.label || "工具结果"}
+                                >
+                                  {piece.label ? (
+                                    <span className="agent__tool-label">
+                                      {piece.label}
+                                    </span>
+                                  ) : null}
+                                  {body}
+                                </section>
+                              );
+                            })}
+                          </div>
                           <div className="agent__msg-actions">
                             <span className="agent__msg-meta">
                               <MessageTime ms={stamp} nowMs={nowMs} />
@@ -1657,7 +1698,7 @@ export function AgentView({
                             <button
                               type="button"
                               className="agent__copy"
-                              onClick={() => void copyReply(id, text)}
+                              onClick={() => void copyReply(id, copyText)}
                             >
                               {copied === id ? "已复制" : "复制"}
                             </button>
@@ -2685,18 +2726,32 @@ function isStatusMessage(message: AgentMessage): boolean {
   return lines.length > 0 && lines.every((line) => /^(正在|准备)/.test(line));
 }
 
-function presentAgentTurn(messages: AgentMessage[], nowMs: number): string {
-  return messages
-    .map((message) => {
-      const text = displayContent(message, nowMs);
-      if (!text) return "";
-      if (message.role !== "tool") return text;
-      const body = text.replace(/^· /gm, "- ");
-      const label = toolResultLabel(message.toolName ?? "");
-      return label ? `**${label}**\n\n${body}` : body;
-    })
-    .filter(Boolean)
-    .join("\n\n");
+type AgentTurnPiece = {
+  id: string;
+  kind: "prose" | "tool";
+  label: string;
+  text: string;
+};
+
+function agentTurnPieces(messages: AgentMessage[], nowMs: number): AgentTurnPiece[] {
+  const pieces: AgentTurnPiece[] = [];
+  for (const message of messages) {
+    const text = displayContent(message, nowMs);
+    if (!text) continue;
+    if (message.role === "tool") {
+      pieces.push({
+        id: message.id,
+        kind: "tool",
+        label: toolResultLabel(message.toolName ?? ""),
+        text: text.replace(/^· /gm, "- "),
+      });
+      continue;
+    }
+    const last = pieces[pieces.length - 1];
+    if (last?.kind === "prose") last.text = `${last.text}\n\n${text}`;
+    else pieces.push({ id: message.id, kind: "prose", label: "", text });
+  }
+  return pieces;
 }
 
 function displayContent(message: AgentMessage, nowMs: number): string {

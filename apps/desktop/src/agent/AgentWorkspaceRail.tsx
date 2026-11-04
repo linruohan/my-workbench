@@ -2,33 +2,25 @@ import { useEffect, useState } from "react";
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
   DEFAULT_AGENT_WORKSPACE_TITLE,
-  WEB_AGENT_THREAD_TITLE,
-  filterAgentThreads,
   formatAgentRelativeShort,
   groupAgentThreadsByWorkspace,
-  normalizeAgentWebUrl,
   orderAgentWorkspaceThreads,
   type AgentThread,
 } from "@wb/domain";
 import { useDialog } from "../shell/Dialogs";
 import {
-  IconFilter,
   IconFolder,
   IconFolderOpen,
-  IconGlobe,
   IconMore,
   IconPencil,
   IconPlus,
-  IconSearch,
 } from "../shell/icons";
-import { readProviderStore } from "./providers";
 
 type Props = {
   store: MemoryWorkbenchRepository;
   threadId: string | null;
   onSelectThread: (id: string | null) => void;
   onCreateThread: (workspaceId: string) => void;
-  onCreateFromFolder: () => void;
   /** Drop queued prompts kept only in the open chat. */
   onForgetThread?: (id: string) => void;
   onRefresh: () => void;
@@ -39,23 +31,15 @@ export function AgentWorkspaceRail({
   threadId,
   onSelectThread,
   onCreateThread,
-  onCreateFromFolder,
   onForgetThread,
   onRefresh,
 }: Props) {
   const dialog = useDialog();
   const workspaces = store.listAgentWorkspaces();
-  const [showArchived, setShowArchived] = useState(false);
-  const threads = store.listAgentThreads({ includeArchived: showArchived });
-  const activeThreads = store.listAgentThreads();
+  const threads = store.listAgentThreads();
   const thread = threadId
-    ? (threads.find((item) => item.id === threadId) ??
-      activeThreads.find((item) => item.id === threadId) ??
-      null)
-    : (activeThreads[0] ?? null);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [viewMenuOpen, setViewMenuOpen] = useState(false);
-  const [threadQuery, setThreadQuery] = useState("");
+    ? (threads.find((item) => item.id === threadId) ?? null)
+    : (threads[0] ?? null);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>(
     {},
   );
@@ -68,21 +52,18 @@ export function AgentWorkspaceRail({
   const nowMs = Date.now();
 
   useEffect(() => {
-    if (!threadMenuId && !workspaceMenuId && !viewMenuOpen) return;
+    if (!threadMenuId && !workspaceMenuId) return;
     const onPointer = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest(".agent__thread-actions")) return;
       if (target?.closest(".agent__workspace-actions")) return;
-      if (target?.closest(".agent__threads-tool")) return;
       setThreadMenuId(null);
       setWorkspaceMenuId(null);
-      setViewMenuOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setThreadMenuId(null);
       setWorkspaceMenuId(null);
-      setViewMenuOpen(false);
     };
     window.addEventListener("mousedown", onPointer);
     window.addEventListener("keydown", onKey);
@@ -90,7 +71,7 @@ export function AgentWorkspaceRail({
       window.removeEventListener("mousedown", onPointer);
       window.removeEventListener("keydown", onKey);
     };
-  }, [threadMenuId, workspaceMenuId, viewMenuOpen]);
+  }, [threadMenuId, workspaceMenuId]);
 
   const beginRenameThread = (item: AgentThread) => {
     setThreadMenuId(null);
@@ -143,7 +124,7 @@ export function AgentWorkspaceRail({
     store.archiveAgentThread(item.id);
     onForgetThread?.(item.id);
     setThreadMenuId(null);
-    if (thread?.id === item.id && !showArchived) {
+    if (thread?.id === item.id) {
       onSelectThread(store.listAgentThreads()[0]?.id ?? null);
     }
     onRefresh();
@@ -180,151 +161,16 @@ export function AgentWorkspaceRail({
     onRefresh();
   };
 
-  const openWebSession = async () => {
-    const raw = await dialog.prompt({
-      title: "打开网页",
-      label: "网址",
-      confirmLabel: "打开",
-    });
-    if (!raw) return;
-    const webUrl = normalizeAgentWebUrl(raw);
-    if (!webUrl) {
-      await dialog.alert({ title: "无法打开", message: "请输入 http 或 https 网址。" });
-      return;
-    }
-    const existing = store
-      .listAgentWorkspaces()
-      .find((item) => item.title === DEFAULT_AGENT_WORKSPACE_TITLE);
-    const workspace =
-      existing ?? store.createAgentWorkspace({ title: DEFAULT_AGENT_WORKSPACE_TITLE });
-    const created = store.createAgentThread({
-      workspaceId: workspace.id,
-      title: WEB_AGENT_THREAD_TITLE,
-      webUrl,
-      modelRef: readProviderStore().defaultModelRef,
-    });
-    setCollapsedWorkspaces((current) => ({ ...current, [workspace.id]: false }));
-    onSelectThread(created.id);
-    onRefresh();
-  };
-
-  const needle = threadQuery.trim().toLowerCase();
-  const visibleThreads = filterAgentThreads(threads, threadQuery);
-  const workspaceGroups = groupAgentThreadsByWorkspace(workspaces, visibleThreads)
-    .map((group) => ({
-      ...group,
-      titleHit: needle ? group.workspace.title.toLowerCase().includes(needle) : false,
-    }))
-    .filter((group) => !needle || group.titleHit || group.threads.length > 0);
+  const workspaceGroups = groupAgentThreadsByWorkspace(workspaces, threads);
 
   return (
     <aside className="agent__threads" aria-label="工作区">
-      <header className="agent__threads-head">
-        <h2>工作区</h2>
-        <div className="agent__threads-tools">
-          <button
-            type="button"
-            className={
-              filterOpen || threadQuery.trim()
-                ? "agent__threads-tool is-on"
-                : "agent__threads-tool"
-            }
-            title="筛选"
-            aria-label="筛选会话或工作区"
-            aria-pressed={filterOpen}
-            onClick={() => {
-              setFilterOpen((value) => !value);
-              setViewMenuOpen(false);
-            }}
-          >
-            <IconSearch size={14} />
-          </button>
-          <div className="agent__threads-tool-wrap">
-            <button
-              type="button"
-              className={
-                showArchived || viewMenuOpen
-                  ? "agent__threads-tool is-on"
-                  : "agent__threads-tool"
-              }
-              title="视图"
-              aria-label="视图选项"
-              aria-haspopup="menu"
-              aria-expanded={viewMenuOpen}
-              onClick={() => {
-                setViewMenuOpen((value) => !value);
-                setWorkspaceMenuId(null);
-                setThreadMenuId(null);
-              }}
-            >
-              <IconFilter size={14} />
-            </button>
-            {viewMenuOpen ? (
-              <div className="agent__thread-menu" role="menu" aria-label="视图选项">
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-checked={showArchived}
-                  onClick={() => {
-                    setShowArchived((value) => !value);
-                    setViewMenuOpen(false);
-                  }}
-                >
-                  {showArchived ? "隐藏已归档" : "显示已归档"}
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            className="agent__threads-tool agent__threads-tool--text"
-            title="打开网页"
-            aria-label="网页"
-            onClick={() => void openWebSession()}
-          >
-            <IconGlobe size={14} />
-            <span>网页</span>
-          </button>
-          <button
-            type="button"
-            className="agent__threads-tool"
-            title="选择文件夹并新建会话"
-            aria-label="新建会话"
-            onClick={onCreateFromFolder}
-          >
-            <IconPlus size={14} />
-          </button>
-        </div>
-      </header>
-      {filterOpen || threadQuery.trim() ? (
-        <label className="agent__thread-filter">
-          <input
-            aria-label="筛选会话"
-            placeholder="筛选会话或工作区"
-            value={threadQuery}
-            autoFocus={filterOpen}
-            onChange={(event) => setThreadQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                setThreadQuery("");
-                setFilterOpen(false);
-              }
-            }}
-          />
-        </label>
-      ) : null}
       {workspaces.length === 0 ? (
         <p className="agent__hint">还没有工作区。点「+」选择一个文件夹。</p>
-      ) : workspaceGroups.length === 0 ? (
-        <p className="agent__hint">没有匹配的会话。</p>
       ) : (
         <div className="agent__thread-list">
-          {workspaceGroups.map(({ workspace, threads: items, titleHit }) => {
+          {workspaceGroups.map(({ workspace, threads: items }) => {
             const collapsed =
-              !needle &&
-              !titleHit &&
               collapsedWorkspaces[workspace.id] === true &&
               thread?.workspaceId !== workspace.id;
             const totalCount = store.listAgentThreads({
@@ -400,7 +246,6 @@ export function AgentWorkspaceRail({
                       onClick={() => {
                         setWorkspaceMenuId(workspaceMenuOpen ? null : workspace.id);
                         setThreadMenuId(null);
-                        setViewMenuOpen(false);
                       }}
                     >
                       <IconMore size={14} />
@@ -528,7 +373,6 @@ export function AgentWorkspaceRail({
                               onClick={() => {
                                 setThreadMenuId(menuOpen ? null : item.id);
                                 setWorkspaceMenuId(null);
-                                setViewMenuOpen(false);
                               }}
                             >
                               <IconMore size={14} />
