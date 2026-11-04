@@ -1,19 +1,34 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   HOST_TOOL_CATEGORY_LABEL,
+  assembleHostTools,
   setHostToolEnabled,
   type HostToolCategory,
+  type HostToolLane,
+  type HostToolProbe,
   type HostToolSnapshot,
 } from "@wb/domain";
 import {
   canStartHostToolInstall,
+  checkHostTool,
   installHostTool,
+  pickHostToolPath,
   probeHostTools,
 } from "../agent/host-tools";
 import { errorMessage } from "../lib/errors";
 import type { AppPrefs } from "../lib/prefs";
+import { useDialog } from "../shell/Dialogs";
+import { IconClose } from "../shell/icons";
 
-const CATEGORIES: HostToolCategory[] = ["cli", "diagram", "chart"];
+const CATEGORIES: HostToolCategory[] = [
+  "runtime",
+  "browser",
+  "document",
+  "remote",
+  "language",
+  "package",
+  "chart",
+];
 
 type Props = {
   prefs: AppPrefs;
@@ -22,127 +37,284 @@ type Props = {
   onDetected?: (tools: HostToolSnapshot[]) => void;
 };
 
+type InstallJob = { id: string; lane: HostToolLane };
+type Phase = "idle" | "scan" | "fetch";
+type ToolView = "all" | "ready" | "missing";
+
+const VIEWS: { id: ToolView; label: string }[] = [
+  { id: "all", label: "全部" },
+  { id: "ready", label: "可用" },
+  { id: "missing", label: "缺失" },
+];
+
+function savedTools(prefs: AppPrefs): HostToolSnapshot[] {
+  return assembleHostTools(
+    prefs.hostToolsFetched ? prefs.hostToolRecords : [],
+    prefs.disabledHostTools,
+  );
+}
+
+function toRecords(tools: readonly HostToolSnapshot[]): HostToolProbe[] {
+  return tools
+    .filter((tool) => tool.status === "ready" && tool.path.trim())
+    .map((tool) => ({
+      id: tool.id,
+      status: "ready" as const,
+      source: tool.source === "managed" || tool.source === "manual" ? tool.source : "env",
+      path: tool.path,
+      version: tool.version,
+      invoke: tool.invoke.length > 0 ? tool.invoke : [tool.path],
+    }));
+}
+
 export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
-  const [tools, setTools] = useState<HostToolSnapshot[]>([]);
-  const [scanning, setScanning] = useState(true);
-  const [installing, setInstalling] = useState<
-    { id: string; category: HostToolCategory }[]
-  >([]);
+  const [tools, setTools] = useState<HostToolSnapshot[]>(() => savedTools(prefs));
+  const [seen, setSeen] = useState(prefs.hostToolsFetched);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [installing, setInstalling] = useState<InstallJob[]>([]);
+  const [waiting, setWaiting] = useState<InstallJob[]>([]);
+  const [view, setView] = useState<ToolView>("all");
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [failures, setFailures] = useState<{ id: string; message: string }[]>([]);
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const dialog = useDialog();
   const installingRef = useRef(installing);
+  const queueRef = useRef<InstallJob[]>([]);
   const probeSeq = useRef(0);
+  const snapshotRef = useRef<HostToolSnapshot[]>(savedTools(prefs));
+  const prefsRef = useRef(prefs);
+  const onPatchRef = useRef(onPatch);
+  const onDetectedRef = useRef(onDetected);
+  const scanRef = useRef<() => void>(() => undefined);
+  prefsRef.current = prefs;
+  onPatchRef.current = onPatch;
+  onDetectedRef.current = onDetected;
   const toolsDir = `${dataDir.replace(/[\\/]+$/, "")}/tools`;
 
-  const load = (disabled: readonly string[], manual: boolean) => {
+  const commit = () => {
+    onPatchRef.current({
+      hostToolRecords: toRecords(snapshotRef.current),
+      hostToolsFetched: true,
+    });
+  };
+
+  const publish = (next: HostToolSnapshot[]) => {
+    snapshotRef.current = next;
+    setTools(next);
+    setSeen(true);
+    onDetectedRef.current?.(next);
+    if (prefsRef.current.hostToolsFetched) commit();
+  };
+
+  const refresh = (
+    disabled: readonly string[],
+    paths = prefsRef.current.hostToolPaths,
+  ) => {
     const seq = ++probeSeq.current;
-    if (manual) setScanning(true);
-    return probeHostTools(disabled)
+    return probeHostTools(disabled, paths)
       .then((next) => {
         if (seq !== probeSeq.current) return;
-        setTools(next);
-        onDetected?.(next);
+        publish(next);
       })
       .catch((err: unknown) => {
         if (seq !== probeSeq.current) return;
-        setTools([]);
         setFailures((current) => [
           ...current.filter((item) => item.id !== "probe"),
           { id: "probe", message: errorMessage(err, "检测本机工具失败") },
         ]);
-      })
-      .finally(() => {
-        if (seq === probeSeq.current) setScanning(false);
       });
   };
 
-  useEffect(() => {
-    const seq = ++probeSeq.current;
-    let cancelled = false;
-    void probeHostTools(prefs.disabledHostTools)
-      .then((next) => {
-        if (cancelled || seq !== probeSeq.current) return;
-        setTools(next);
-        onDetected?.(next);
+  const settle = (id: string) => {
+    installingRef.current = installingRef.current.filter((item) => item.id !== id);
+    setInstalling(installingRef.current);
+    pump();
+    if (installingRef.current.length === 0 && queueRef.current.length === 0) {
+      setPhase("idle");
+      commit();
+    }
+  };
+
+  const appendLog = (id: string, text: string) => {
+    setLogs((current) => {
+      const next = `${current[id] ?? ""}${text}`;
+      const capped = next.length > 64_000 ? next.slice(next.length - 64_000) : next;
+      return { ...current, [id]: capped };
+    });
+  };
+
+  const begin = (job: InstallJob, confirmName?: string) => {
+    if (!canStartHostToolInstall(installingRef.current, job)) return;
+    installingRef.current = [...installingRef.current, job];
+    setInstalling(installingRef.current);
+    setFailures((current) => current.filter((item) => item.id !== job.id));
+    const proxy = prefsRef.current.httpProxy;
+    const disabled = prefsRef.current.disabledHostTools;
+    void installHostTool(job.id, proxy, (text) => appendLog(job.id, text))
+      .then(() => refresh(disabled))
+      .then(() => {
+        if (!confirmName) return;
+        void dialog.alert({
+          title: "安装已完成",
+          message: `${confirmName} 已安装。`,
+          confirmLabel: "确定",
+        });
       })
       .catch((err: unknown) => {
-        if (cancelled || seq !== probeSeq.current) return;
-        setTools([]);
+        const message = errorMessage(err, "安装失败");
+        appendLog(job.id, `\n${message}\n`);
+        setFailures((current) => [
+          ...current.filter((item) => item.id !== job.id),
+          { id: job.id, message },
+        ]);
+      })
+      .finally(() => settle(job.id));
+  };
+
+  const pump = () => {
+    const disabled = new Set(prefsRef.current.disabledHostTools);
+    const stay: InstallJob[] = [];
+    for (const job of queueRef.current) {
+      if (disabled.has(job.id)) continue;
+      if (installingRef.current.some((item) => item.id === job.id)) continue;
+      if (canStartHostToolInstall(installingRef.current, job)) begin(job);
+      else stay.push(job);
+    }
+    queueRef.current = stay;
+    setWaiting(stay);
+  };
+
+  const scan = () => {
+    if (phase !== "idle" || installingRef.current.length > 0) return;
+    setFailures((current) => current.filter((item) => item.id !== "probe"));
+    setPhase("scan");
+    const seq = ++probeSeq.current;
+    const disabled = prefsRef.current.disabledHostTools;
+    void probeHostTools(disabled, prefsRef.current.hostToolPaths)
+      .then((next) => {
+        if (seq !== probeSeq.current) return;
+        publish(next);
+        queueRef.current = next
+          .filter(
+            (tool) => tool.enabled && tool.install === "auto" && tool.status !== "ready",
+          )
+          .map((tool) => ({ id: tool.id, lane: tool.lane }));
+        if (queueRef.current.length === 0) {
+          setWaiting([]);
+          setPhase("idle");
+          commit();
+          return;
+        }
+        setPhase("fetch");
+        pump();
+        if (installingRef.current.length === 0 && queueRef.current.length === 0) {
+          setPhase("idle");
+          commit();
+        }
+      })
+      .catch((err: unknown) => {
+        if (seq !== probeSeq.current) return;
         setFailures((current) => [
           ...current.filter((item) => item.id !== "probe"),
           { id: "probe", message: errorMessage(err, "检测本机工具失败") },
         ]);
-      })
-      .finally(() => {
-        if (!cancelled && seq === probeSeq.current) setScanning(false);
+        setPhase("idle");
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [onDetected, prefs.disabledHostTools]);
+  };
+  scanRef.current = scan;
 
-  const install = (id: string, category: HostToolCategory) => {
-    const next = { id, category };
-    if (!canStartHostToolInstall(installingRef.current, next)) return;
-    installingRef.current = [...installingRef.current, next];
-    setInstalling(installingRef.current);
-    setFailures((current) => current.filter((item) => item.id !== id));
-    void installHostTool(id, prefs.httpProxy)
-      .then(() => load(prefs.disabledHostTools, true))
-      .catch((err: unknown) => {
-        setFailures((current) => [
-          ...current.filter((item) => item.id !== id),
-          { id, message: errorMessage(err, "安装失败") },
-        ]);
-      })
-      .finally(() => {
-        installingRef.current = installingRef.current.filter((item) => item.id !== id);
-        setInstalling(installingRef.current);
-      });
+  useEffect(() => {
+    if (prefsRef.current.hostToolsFetched) return;
+    scanRef.current();
+    return () => {
+      probeSeq.current += 1;
+    };
+  }, []);
+
+  const install = (id: string, lane: HostToolLane, name: string) => {
+    begin({ id, lane }, name);
+  };
+
+  const savePath = (id: string, path: string) => {
+    const next = { ...prefs.hostToolPaths };
+    const file = path.trim();
+    if (file) next[id] = file;
+    else delete next[id];
+    prefsRef.current = { ...prefsRef.current, hostToolPaths: next };
+    onPatch({ hostToolPaths: next });
+    if (phase === "idle" && installingRef.current.length === 0) {
+      void refresh(prefs.disabledHostTools, next);
+    }
   };
 
   const shown = tools.map((tool) => ({
     ...tool,
     enabled: !prefs.disabledHostTools.includes(tool.id),
   }));
+  const detail = shown.find((item) => item.id === detailId) ?? null;
+
+  const busy = phase !== "idle" || installing.length > 0;
+  const waitingIds = new Set(waiting.map((item) => item.id));
+  const failureById = new Map(failures.map((item) => [item.id, item.message]));
+  const status =
+    phase === "scan"
+      ? "正在扫描本机…"
+      : phase === "fetch"
+        ? fetchStatus(installing.length, waiting.length)
+        : installing.length > 0
+          ? "正在安装所选工具…"
+          : seen
+            ? readyCount(shown)
+            : "正在读取本机…";
 
   return (
     <>
-      <p className="agent-cap__lead">
-        打开设置时检测本机已有的命令和作图库，记下路径与调用方式，供 Agent 用
-        host_tool_run 调用。没有的可以安装到下面的目录，同时最多装两个。图表库共用一个
-        Python，会排开安装。确认模式下运行前会征求同意。
-      </p>
-      <div className="agent-cap__toolbar">
-        <button
-          type="button"
-          className="settings__save"
-          onClick={() => {
-            setFailures((current) => current.filter((item) => item.id !== "probe"));
-            void load(prefs.disabledHostTools, true);
-          }}
-          disabled={scanning || installing.length > 0}
-        >
-          重新检测
+      <div className="agent-cap__scan">
+        <button type="button" className="settings__save" onClick={scan} disabled={busy}>
+          扫描本机
         </button>
-        <code className="agent-cap__path" aria-label="工具目录">
-          {toolsDir}
-        </code>
-        <span className="agent-cap__muted">
-          {scanning ? "正在检测…" : readyCount(shown)}
-        </span>
+        <span className="agent-cap__muted">{status}</span>
+        <div className="agent-cap__filters" role="group" aria-label="筛选工具">
+          {VIEWS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={
+                view === item.id ? "agent-cap__filter is-on" : "agent-cap__filter"
+              }
+              aria-pressed={view === item.id}
+              onClick={() => setView(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
       </div>
-      {failures.length > 0 ? (
-        <p className="agent-cap__error">
-          {failures.map((item) => item.message).join("；")}
-        </p>
+      <p className="agent-cap__lead">
+        第一次打开会自动获取还没装的工具，并记住结果。之后打开直接读这份记录。
+        需要再查本机时点扫描。同时最多两个，共用 Scoop、Node 或 Python 的会排开。
+      </p>
+      <p className="agent-cap__dir">
+        工具目录 <code aria-label="工具目录">{toolsDir}</code>
+      </p>
+      {failureById.get("probe") ? (
+        <p className="agent-cap__error">{failureById.get("probe")}</p>
       ) : null}
       {CATEGORIES.map((category) => {
-        const rows = shown.filter((item) => item.category === category);
+        const all = shown.filter((item) => item.category === category);
+        const rows = all.filter((item) => matchesView(item, view));
         if (rows.length === 0) return null;
+        const ready = all.filter(
+          (item) => item.enabled && item.status === "ready",
+        ).length;
         return (
           <section key={category}>
             <h2 className="agent-cap__section-title">
               {HOST_TOOL_CATEGORY_LABEL[category]}
+              <span className="agent-cap__muted">
+                {" "}
+                {ready}/{all.length}
+              </span>
             </h2>
             <div className="settings__card">
               {rows.map((tool) => (
@@ -150,12 +322,8 @@ export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
                   key={tool.id}
                   tool={tool}
                   busy={installing.some((item) => item.id === tool.id)}
-                  locked={
-                    !canStartHostToolInstall(installing, {
-                      id: tool.id,
-                      category: tool.category,
-                    })
-                  }
+                  queued={waitingIds.has(tool.id)}
+                  failure={failureById.get(tool.id) ?? ""}
                   onToggle={(enabled) =>
                     onPatch({
                       disabledHostTools: setHostToolEnabled(
@@ -165,15 +333,45 @@ export function HostToolsPane({ prefs, dataDir, onPatch, onDetected }: Props) {
                       ),
                     })
                   }
-                  onInstall={() => install(tool.id, tool.category)}
+                  onDetail={() => setDetailId(tool.id)}
                 />
               ))}
             </div>
           </section>
         );
       })}
+      {detail ? (
+        <ToolDetail
+          tool={detail}
+          savedPath={prefs.hostToolPaths[detail.id] ?? ""}
+          busy={installing.some((item) => item.id === detail.id)}
+          queued={waitingIds.has(detail.id)}
+          locked={
+            !canStartHostToolInstall(installing, {
+              id: detail.id,
+              lane: detail.lane,
+            })
+          }
+          log={logs[detail.id] ?? ""}
+          onInstall={() => install(detail.id, detail.lane, detail.name)}
+          onClose={() => setDetailId(null)}
+          onSave={(path) => savePath(detail.id, path)}
+          onClear={() => savePath(detail.id, "")}
+        />
+      ) : null}
     </>
   );
+}
+
+function matchesView(tool: HostToolSnapshot, view: ToolView): boolean {
+  if (view === "ready") return tool.enabled && tool.status === "ready";
+  if (view === "missing") return tool.enabled && tool.status !== "ready";
+  return true;
+}
+
+function fetchStatus(active: number, queued: number): string {
+  if (queued === 0) return `正在自动获取：${active} 个进行中`;
+  return `正在自动获取：${active} 个进行中，还有 ${queued} 个等待`;
 }
 
 function readyCount(tools: HostToolSnapshot[]): string {
@@ -181,62 +379,65 @@ function readyCount(tools: HostToolSnapshot[]): string {
   return `${ready}/${tools.length} 可用`;
 }
 
-function statusText(tool: HostToolSnapshot): string {
-  if (!tool.enabled) return "已停用";
-  if (tool.status !== "ready") return "未安装";
-  return tool.source === "managed" ? "已安装" : "环境中";
+function rowStatus(
+  tool: HostToolSnapshot,
+  busy: boolean,
+  queued: boolean,
+  failure: string,
+): { text: string; ready: boolean } {
+  if (!tool.enabled) return { text: "已停用", ready: false };
+  if (busy) return { text: "正在安装…", ready: false };
+  if (queued) return { text: "等待获取", ready: false };
+  if (tool.status === "ready") return { text: "已安装", ready: true };
+  if (failure) return { text: "获取失败", ready: false };
+  return { text: "未安装", ready: false };
+}
+
+function pathLabel(tool: HostToolSnapshot): string {
+  if (tool.id === "ocr") return "模型目录";
+  if (tool.programs[0] === "python" || tool.id === "cairo" || tool.id === "webview2") {
+    return "路径";
+  }
+  return "二进制路径";
 }
 
 function ToolRow({
   tool,
   busy,
-  locked,
+  queued,
+  failure,
   onToggle,
-  onInstall,
+  onDetail,
 }: {
   tool: HostToolSnapshot;
   busy: boolean;
-  locked: boolean;
+  queued: boolean;
+  failure: string;
   onToggle: (enabled: boolean) => void;
-  onInstall: () => void;
+  onDetail: () => void;
 }) {
-  const probe =
-    tool.versionArgs.length > 0 ? tool.versionArgs.join(" ") : "import 后读取版本";
+  const status = rowStatus(tool, busy, queued, failure);
   return (
-    <div className="settings__row settings__row--stack">
+    <div
+      className={
+        tool.enabled
+          ? "settings__row settings__row--stack agent-tools__row"
+          : "settings__row settings__row--stack agent-tools__row is-disabled"
+      }
+    >
       <div className="settings__row-main">
-        <div>
+        <div className="agent-tools__copy">
           <div className="settings__row-title">{tool.name}</div>
-          <div className="settings__row-desc">{tool.summary}</div>
-          {tool.status === "ready" ? (
-            <>
-              <div className="settings__row-desc agent-cap__path">{tool.path}</div>
-              <div className="settings__row-desc">
-                {tool.version ? `版本 ${tool.version} · ` : ""}探测参数 {probe}
-              </div>
-            </>
-          ) : (
-            <div className="settings__row-desc">调用参数：{tool.usage}</div>
-          )}
-          {tool.status === "ready" ? (
-            <div className="settings__row-desc">调用参数：{tool.usage}</div>
-          ) : null}
-          {tool.install === "manual" && tool.status !== "ready" ? (
-            <div className="settings__row-desc">此工具需要自行安装后重新检测。</div>
-          ) : null}
+          <div className="agent-tools__meta">{tool.summary}</div>
         </div>
         <div className="agent-cap__row-actions">
-          <span className="settings__pill">{busy ? "正在安装…" : statusText(tool)}</span>
-          {tool.install === "auto" && tool.status !== "ready" ? (
-            <button
-              type="button"
-              className="settings__save"
-              onClick={onInstall}
-              disabled={locked}
-            >
-              安装
-            </button>
-          ) : null}
+          <span
+            className={
+              status.ready ? "agent-tools__state is-ready" : "agent-tools__state"
+            }
+          >
+            {status.text}
+          </span>
           <button
             type="button"
             role="switch"
@@ -247,7 +448,205 @@ function ToolRow({
           >
             <span className="toggle__thumb" />
           </button>
+          <button
+            type="button"
+            className="agent-tools__detail"
+            aria-label={`${tool.name} 详情`}
+            onClick={onDetail}
+          >
+            详情
+          </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ToolDetail({
+  tool,
+  savedPath,
+  busy,
+  queued,
+  locked,
+  log,
+  onInstall,
+  onClose,
+  onSave,
+  onClear,
+}: {
+  tool: HostToolSnapshot;
+  savedPath: string;
+  busy: boolean;
+  queued: boolean;
+  locked: boolean;
+  log: string;
+  onInstall: () => void;
+  onClose: () => void;
+  onSave: (path: string) => void;
+  onClear: () => void;
+}) {
+  const inputId = useId();
+  const logRef = useRef<HTMLTextAreaElement>(null);
+  const [path, setPath] = useState(savedPath || tool.path);
+  const [checking, setChecking] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+  const [message, setMessage] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
+  const label = pathLabel(tool);
+  const canInstall = tool.enabled && tool.install === "auto" && tool.status !== "ready";
+  const showLog = busy || queued || log.length > 0;
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [log]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const check = () => {
+    const file = path.trim();
+    if (!file || checking) return;
+    setChecking(true);
+    setMessage("");
+    setOk(null);
+    void checkHostTool(tool.id, file)
+      .then((hit) => {
+        onSave(hit.path || file);
+        setPath(hit.path || file);
+        setOk(true);
+        setMessage(hit.version ? `可以使用。${hit.version}` : "可以使用。");
+      })
+      .catch((err: unknown) => {
+        setOk(false);
+        setMessage(errorMessage(err, "检测失败"));
+      })
+      .finally(() => setChecking(false));
+  };
+
+  const browse = () => {
+    if (browsing) return;
+    setBrowsing(true);
+    void pickHostToolPath(tool.id)
+      .then((picked) => {
+        if (picked) setPath(picked);
+      })
+      .finally(() => setBrowsing(false));
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="modal agent-tools__dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={tool.name}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="modal__header">
+          <h2>{tool.name}</h2>
+          <button type="button" className="icon-btn" aria-label="关闭" onClick={onClose}>
+            <IconClose size={16} />
+          </button>
+        </header>
+        <div className="modal__body">
+          <section>
+            <h3 className="agent-tools__label">功能</h3>
+            <p className="modal__message">{tool.summary}</p>
+          </section>
+          <section>
+            <h3 className="agent-tools__label">使用说明</h3>
+            <p className="modal__message">{tool.usage}</p>
+            <p className="agent-tools__hint">可执行名：{tool.programs.join("、")}</p>
+          </section>
+          <section>
+            <h3 className="agent-tools__label">当前路径</h3>
+            <div className="agent-tools__current">{tool.path || "尚未检测到"}</div>
+            {tool.version ? (
+              <div className="agent-tools__hint">{tool.version}</div>
+            ) : null}
+          </section>
+          <div className="field">
+            <label className="field__label" htmlFor={inputId}>
+              {label}
+            </label>
+            <div className="agent-tools__path-row">
+              <input
+                id={inputId}
+                className="date-input"
+                value={path}
+                placeholder="选择或粘贴绝对路径"
+                spellCheck={false}
+                onChange={(event) => setPath(event.target.value)}
+              />
+              <button type="button" className="btn" onClick={browse} disabled={browsing}>
+                {browsing ? "正在选择…" : "浏览"}
+              </button>
+            </div>
+            <p className="agent-tools__hint">
+              检测通过后，Agent 会改用这个文件。清除后恢复自动检测。
+            </p>
+          </div>
+          {message ? (
+            <p className={ok ? "agent-tools__ok" : "agent-cap__error"}>{message}</p>
+          ) : null}
+          {showLog ? (
+            <div className="field">
+              <label className="field__label" htmlFor={`${inputId}-log`}>
+                安装日志
+              </label>
+              <textarea
+                ref={logRef}
+                id={`${inputId}-log`}
+                className="agent-tools__log"
+                aria-label="安装日志"
+                readOnly
+                value={log}
+                spellCheck={false}
+              />
+            </div>
+          ) : null}
+        </div>
+        <footer className="modal__footer">
+          {savedPath ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setPath("");
+                setMessage("");
+                setOk(null);
+                onClear();
+              }}
+            >
+              清除
+            </button>
+          ) : null}
+          {canInstall ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={onInstall}
+              disabled={busy || queued || locked}
+            >
+              {busy ? "正在安装…" : queued ? "等待获取" : "安装"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={checking || !path.trim()}
+            onClick={check}
+          >
+            {checking ? "正在检测…" : "检测"}
+          </button>
+        </footer>
       </div>
     </div>
   );

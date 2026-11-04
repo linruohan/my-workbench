@@ -438,6 +438,16 @@ export function IconSkill({ size, className }: IconProps) {
   );
 }
 
+export function IconTrash({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M4 7h16" />
+      <path d="M9 7V4.5h6V7" />
+      <path d="M7.5 7l.8 13h7.4l.8-13" />
+    </Svg>
+  );
+}
+
 export function IconCommand({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>

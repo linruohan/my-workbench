@@ -11,6 +11,7 @@
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-set-fullscreen",
     "core:window:allow-start-dragging",
     "core:path:default",
     "fs:default",

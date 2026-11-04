@@ -6,23 +6,123 @@ use url::Url;
 const LABEL: &str = "web-session";
 const AUTH_MARKER: &str = "dsh web authentication required";
 const AUTH_TITLE: &str = "wb-dsh-auth";
+const EDIT_TITLE: &str = "wb-web-edit";
+const FS_ON_TITLE: &str = "wb-web-fs-on";
+const FS_OFF_TITLE: &str = "wb-web-fs-off";
 
-/// dsh answers an unauthenticated document with plain text. Replace that text
-/// and flag the title so the shell can ask for the launch URL. A reload cannot
-/// create the missing SameSite=Strict cookie.
-const AUTH_NOTICE_SCRIPT: &str = r#"
+/// The child webview is a native window over the pane, so the shell buttons
+/// would sit underneath it. Draw the same controls inside the page, and flag
+/// the title when the user wants to change the link. A reload cannot create
+/// dsh's missing SameSite=Strict cookie, so the auth page only asks for the
+/// launch URL.
+const PAGE_CHROME_SCRIPT: &str = r#"
 (() => {
-  const marker = "dsh web authentication required";
-  const title = "wb-dsh-auth";
-  const note = "需要用 dsh web 启动时打印的完整地址登录。";
-  const run = () => {
-    const text = (document.body && document.body.innerText) || "";
-    if (!text.includes(marker)) return;
-    document.title = title;
-    if (document.body) document.body.textContent = note;
+  const authMarker = "dsh web authentication required";
+  const authTitle = "wb-dsh-auth";
+  const editTitle = "wb-web-edit";
+  const authNote = "需要用 dsh web 启动时打印的完整地址登录。";
+  const fsOnTitle = "wb-web-fs-on";
+  const fsOffTitle = "wb-web-fs-off";
+  const buttonStyle = "width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.18);border-radius:8px;background:rgba(22,22,24,.88);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.35);cursor:pointer;padding:0;";
+  const icon = (paths) => '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths + "</svg>";
+  const enterPaths = '<path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M16 21h5v-5"/>';
+  const exitPaths = '<path d="M8 3v5H3"/><path d="M16 3v5h5"/><path d="M8 21v-5H3"/><path d="M16 21v-5h5"/>';
+  let fullOn = false;
+  let fullButton = null;
+  const paintFull = () => {
+    if (!fullButton) return;
+    fullButton.innerHTML = icon(fullOn ? exitPaths : enterPaths);
+    fullButton.title = fullOn ? "退出全屏" : "全屏";
+    fullButton.setAttribute("aria-label", fullButton.title);
+    fullButton.setAttribute("aria-pressed", fullOn ? "true" : "false");
   };
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
-  else run();
+  window.__wbSetFullscreen = (on) => {
+    fullOn = !!on;
+    paintFull();
+  };
+  const signalFull = (on) => {
+    const prev = document.title;
+    document.title = on ? fsOnTitle : fsOffTitle;
+    setTimeout(() => {
+      if (document.title !== fsOnTitle && document.title !== fsOffTitle) return;
+      document.title = prev === authTitle || prev === editTitle || prev === fsOnTitle || prev === fsOffTitle ? "" : prev;
+    }, 30);
+  };
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !fullOn) return;
+    event.preventDefault();
+    window.__wbSetFullscreen(false);
+    signalFull(false);
+  }, true);
+
+  const installTools = () => {
+    if (document.getElementById("wb-web-tools")) return;
+    const root = document.body || document.documentElement;
+    if (!root) return;
+    const bar = document.createElement("div");
+    bar.id = "wb-web-tools";
+    bar.style.cssText = "position:fixed;top:8px;right:8px;z-index:2147483647;display:flex;gap:4px;";
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.title = "刷新";
+    refresh.setAttribute("aria-label", "刷新网页");
+    refresh.style.cssText = buttonStyle;
+    refresh.innerHTML = icon('<path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/>');
+    refresh.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      location.reload();
+    });
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.title = "修改链接";
+    edit.setAttribute("aria-label", "修改链接");
+    edit.style.cssText = buttonStyle;
+    edit.innerHTML = icon('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>');
+    edit.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const prev = document.title;
+      document.title = editTitle;
+      setTimeout(() => {
+        if (document.title !== editTitle) return;
+        document.title = prev === editTitle || prev === authTitle ? "" : prev;
+      }, 30);
+    });
+    const full = document.createElement("button");
+    full.type = "button";
+    full.style.cssText = buttonStyle;
+    fullButton = full;
+    paintFull();
+    full.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.__wbSetFullscreen(!fullOn);
+      signalFull(fullOn);
+    });
+    bar.append(refresh, edit, full);
+    root.appendChild(bar);
+  };
+
+  const showAuth = () => {
+    const text = (document.body && document.body.innerText) || "";
+    if (!text.includes(authMarker)) return;
+    document.title = authTitle;
+    if (document.body) document.body.textContent = authNote;
+  };
+
+  const boot = () => {
+    showAuth();
+    installTools();
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+  const root = document.documentElement;
+  if (root && window.MutationObserver) {
+    new MutationObserver(() => {
+      if (!document.getElementById("wb-web-tools")) installTools();
+    }).observe(root, { childList: true, subtree: true });
+  }
 })();
 "#;
 
@@ -31,6 +131,8 @@ struct Session {
     requested: String,
     /// URL actually opened, with a spent launch token removed.
     opened: String,
+    /// Last fullscreen flag painted into the page button.
+    fullscreen: bool,
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -214,10 +316,12 @@ pub async fn web_session_show(
         let notify = app.clone();
         let builder = tauri::webview::WebviewBuilder::new(LABEL, WebviewUrl::External(login.url))
             .focused(false)
-            .initialization_script(AUTH_NOTICE_SCRIPT)
+            .initialization_script(PAGE_CHROME_SCRIPT)
             .on_document_title_changed(move |_webview, title| {
                 if title == AUTH_TITLE {
                     let _ = notify.emit("web-session-auth", ());
+                } else if title == EDIT_TITLE {
+                    let _ = notify.emit("web-session-edit", ());
                 }
             });
         // add_child waits on the UI thread. This command is async so it is not

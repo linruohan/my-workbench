@@ -1,4 +1,4 @@
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,6 +22,7 @@ function Harness({
     ...readPrefs(),
     agentRules: "",
     skillDirs: [],
+    hostToolsFetched: true,
   });
   return (
     <SettingsView
@@ -115,8 +116,14 @@ describe("Agent capabilities settings", () => {
     expect(screen.getByText("Altair")).toBeInTheDocument();
     expect(screen.getByText("Bokeh")).toBeInTheDocument();
     expect(screen.getByLabelText("工具目录").textContent).toMatch(/my-workbench\/tools$/);
-    expect(screen.getAllByRole("button", { name: "安装" }).length).toBeGreaterThan(0);
-    expect(screen.getByText(/矢量图/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "安装" })).not.toBeInTheDocument();
+    expect(screen.getByText("Cairo")).toBeInTheDocument();
+    expect(screen.getAllByText(/矢量图/).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Go 详情" }));
+    const dialog = await screen.findByRole("dialog", { name: "Go" });
+    expect(within(dialog).getByRole("button", { name: "安装" })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "关闭" }));
 
     await user.click(screen.getByRole("switch", { name: "停用 Go" }));
     expect(screen.getByText("已停用")).toBeInTheDocument();

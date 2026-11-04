@@ -16,6 +16,8 @@ commands.allow = [
   "open_external",
   "model_http",
   "tools_probe",
+  "tools_pick_path",
+  "tools_check",
   "tools_install",
   "tools_run",
   "web_session_show",

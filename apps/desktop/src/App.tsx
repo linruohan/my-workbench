@@ -14,6 +14,7 @@ import {
   selectPlannerTasks,
   dedupeSkillNames,
   formatHookNotices,
+  assembleHostTools,
   type HostToolSnapshot,
   hooksForEvent,
   mergeCustomCommands,
@@ -30,11 +31,11 @@ import { createPersistedStore, hydrateStore, saveStore } from "./lib/persistence
 import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
 import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
 import { AgentView } from "./agent/AgentView";
+import { AgentWorkspaceRail } from "./agent/AgentWorkspaceRail";
 import type { AgentUiEffect } from "./agent/execute";
 import { pickAgentWorkspaceFolder } from "./agent/pick-workspace";
 import { readProviderStore } from "./agent/providers";
 import { ensurePaddleOcr } from "./agent/ocr-models";
-import { probeHostTools } from "./agent/host-tools";
 import { loadAgentPlugins } from "./agent/plugins-loader";
 import { loadAgentSkills } from "./agent/skills-loader";
 import { KnowledgeView } from "./notes/KnowledgeView";
@@ -83,6 +84,8 @@ export default function App() {
   const dialog = useDialog();
   const [store] = useState(() => createPersistedStore());
   const [nav, setNav] = useState<AppNavId>(() => readPrefs().startupView);
+  const [agentSectionOpen, setAgentSectionOpen] = useState(false);
+  const forgetAgentThreadRef = useRef<(id: string) => void>(() => {});
   const [tick, setTick] = useState(0);
   const [draft, setDraft] = useState("");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
@@ -154,7 +157,18 @@ export default function App() {
     if (!ready) return;
     let cancelled = false;
     void ensurePaddleOcr().then((result) => {
-      if (cancelled || result.ok === true) return;
+      if (cancelled) return;
+      if (result.ok === true) {
+        const stale = store
+          .listNotifications()
+          .filter(
+            (item) => item.title === "识图模型下载失败" && item.status !== "dismissed",
+          );
+        if (!stale.length) return;
+        for (const item of stale) store.dismissNotification(item.id);
+        refresh();
+        return;
+      }
       if (result.skipped) return;
       store.pushNotification({
         kind: "system",
@@ -180,19 +194,9 @@ export default function App() {
   }, [prefs.skillDirs]);
 
   useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void probeHostTools(prefs.disabledHostTools)
-      .then((tools) => {
-        if (!cancelled) setHostTools(tools);
-      })
-      .catch(() => {
-        if (!cancelled) setHostTools([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [prefs.disabledHostTools, ready]);
+    if (!ready || !prefs.hostToolsFetched) return;
+    setHostTools(assembleHostTools(prefs.hostToolRecords, prefs.disabledHostTools));
+  }, [prefs.disabledHostTools, prefs.hostToolRecords, prefs.hostToolsFetched, ready]);
 
   useEffect(() => {
     let cancelled = false;
@@ -556,6 +560,7 @@ export default function App() {
     setTimedEditId(null);
     setEditingTaskId(null);
     if (id === "inbox") setFilterProjectId(INBOX_PROJECT_ID);
+    if (id === "agent") setAgentSectionOpen(true);
     setNav(id);
   };
 
@@ -807,6 +812,14 @@ export default function App() {
     goNav("agent");
   };
 
+  const toggleAgentSection = () => {
+    if (settingsOpen || nav !== "agent") {
+      openAgent();
+      return;
+    }
+    setAgentSectionOpen((open) => !open);
+  };
+
   const newAgentChat = (opts: { workspaceId?: string; rootPath?: string }) => {
     const nowMs = Date.now();
     let workspaceId = opts.workspaceId;
@@ -992,10 +1005,14 @@ export default function App() {
         threadId={agentThreadId}
         displayName={prefs.displayName}
         rules={prefs.agentRules}
-        skills={dedupeSkillNames([
-          ...agentSkills,
-          ...pluginCatalog.flatMap((item) => item.skills),
-        ])}
+        skills={dedupeSkillNames(
+          [...agentSkills, ...pluginCatalog.flatMap((item) => item.skills)].map(
+            (skill) => ({
+              ...skill,
+              enabled: !prefs.disabledSkillIds.includes(skill.id),
+            }),
+          ),
+        )}
         memories={prefs.agentMemories}
         onMemories={(next) => {
           setPrefs((current) => {
@@ -1031,6 +1048,7 @@ export default function App() {
         onOpenModels={() => openSettings("models")}
         onEffects={applyAgentEffects}
         onRefresh={refresh}
+        forgetThreadRef={forgetAgentThreadRef}
       />
     );
   } else {
@@ -1131,6 +1149,22 @@ export default function App() {
               goNav("knowledge");
             }}
             onOpenAgent={openAgent}
+            agentOpen={agentSectionOpen}
+            onToggleAgent={toggleAgentSection}
+            agentRail={
+              <AgentWorkspaceRail
+                store={store}
+                threadId={agentThreadId}
+                onSelectThread={(id) => {
+                  setAgentThreadId(id);
+                  goNav("agent");
+                }}
+                onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
+                onCreateFromFolder={() => void newAgentChatFromFolder()}
+                onForgetThread={(id) => forgetAgentThreadRef.current(id)}
+                onRefresh={refresh}
+              />
+            }
             displayName={prefs.displayName || "本地用户"}
           />
           <main className="main">

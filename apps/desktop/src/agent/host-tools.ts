@@ -1,7 +1,7 @@
 import {
   assembleHostTools,
   parseHostToolRunArgs,
-  type HostToolCategory,
+  type HostToolLane,
   type HostToolProbe,
   type HostToolSnapshot,
 } from "@wb/domain";
@@ -13,16 +13,14 @@ import type { AgentToolResult } from "./execute";
 export const HOST_TOOL_INSTALL_SLOTS = 2;
 
 export function canStartHostToolInstall(
-  running: readonly { id: string; category: HostToolCategory }[],
-  next: { id: string; category: HostToolCategory },
+  running: readonly { id: string; lane: HostToolLane }[],
+  next: { id: string; lane: HostToolLane },
   slots = HOST_TOOL_INSTALL_SLOTS,
 ): boolean {
   if (running.some((item) => item.id === next.id)) return false;
   if (running.length >= slots) return false;
-  // Chart libraries share one Python and one package directory.
-  if (next.category === "chart" && running.some((item) => item.category === "chart")) {
+  if (next.lane !== "none" && running.some((item) => item.lane === next.lane))
     return false;
-  }
   return true;
 }
 
@@ -36,17 +34,51 @@ type RunPayload = {
 
 export async function probeHostTools(
   disabledIds: readonly string[],
+  paths: Readonly<Record<string, string>> = {},
 ): Promise<HostToolSnapshot[]> {
   if (!isTauriRuntime()) return assembleHostTools([], disabledIds);
   const { invoke } = await import("@tauri-apps/api/core");
-  const hits = await invoke<HostToolProbe[]>("tools_probe");
+  const hits = await invoke<HostToolProbe[]>("tools_probe", { paths });
   return assembleHostTools(hits ?? [], disabledIds);
 }
 
-export async function installHostTool(id: string, proxy: string): Promise<void> {
+export async function pickHostToolPath(id: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string | null>("tools_pick_path", { id });
+}
+
+export async function checkHostTool(
+  id: string,
+  path: string,
+): Promise<{ path: string; version: string }> {
+  if (!isTauriRuntime()) throw new Error("检测需要桌面版");
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<{ path: string; version: string }>("tools_check", {
+    id,
+    path,
+  });
+}
+
+export async function installHostTool(
+  id: string,
+  proxy: string,
+  onLog?: (text: string) => void,
+): Promise<void> {
   if (!isTauriRuntime()) throw new Error("安装需要桌面版");
   const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("tools_install", { id, proxy: proxy.trim() || null });
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<{ id: string; text: string }>(
+    "host-tool-install-log",
+    (event) => {
+      if (event.payload?.id === id && event.payload.text) onLog?.(event.payload.text);
+    },
+  );
+  try {
+    await invoke("tools_install", { id, proxy: proxy.trim() || null });
+  } finally {
+    unlisten();
+  }
 }
 
 export async function runHostTool(
@@ -66,6 +98,8 @@ export async function runHostTool(
       id: parsed.toolId,
       args: parsed.args,
       cwd: parsed.cwd || null,
+      bin: parsed.bin || null,
+      path: tool.source === "manual" ? tool.path : null,
     });
     return {
       ok: result.ok,

@@ -26,6 +26,8 @@ pub fn run() {
             ocr::ocr_ensure_models,
             ocr::ocr_read_model,
             tools::tools_probe,
+            tools::tools_pick_path,
+            tools::tools_check,
             tools::tools_install,
             tools::tools_run,
             web_session::web_session_show,

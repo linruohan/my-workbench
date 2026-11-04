@@ -54,6 +54,10 @@ type Props = {
   onSelectProject: (projectId: string) => void;
   onSelectNote: (id: string) => void;
   onOpenAgent: () => void;
+  /** Agent 分组是否展开。展开时在该项下方显示工作区。 */
+  agentOpen: boolean;
+  onToggleAgent: () => void;
+  agentRail: ReactNode;
   displayName: string;
 };
 
@@ -83,6 +87,9 @@ export function Sidebar({
   onSelectProject,
   onSelectNote,
   onOpenAgent,
+  agentOpen,
+  onToggleAgent,
+  agentRail,
   displayName,
 }: Props) {
   const [query, setQuery] = useState("");
@@ -342,21 +349,32 @@ export function Sidebar({
         ) : null}
 
         {showAgent ? (
-          <section className="sidebar__section">
-            <button
-              type="button"
+          <section className="sidebar__section" aria-label="Agent">
+            <div
               className={
                 nav === "agent" && !settingsOpen
-                  ? "sidebar__row is-active"
-                  : "sidebar__row"
+                  ? "sidebar__group-head is-active"
+                  : "sidebar__group-head"
               }
-              onClick={onOpenAgent}
             >
-              <span className="sidebar__row-icon" aria-hidden>
-                <IconChat size={15} />
-              </span>
-              <span className="sidebar__row-text">Agent</span>
-            </button>
+              <button
+                type="button"
+                className="sidebar__group-toggle"
+                aria-expanded={agentOpen}
+                onClick={onToggleAgent}
+              >
+                <span className="sidebar__row-icon" aria-hidden>
+                  <IconChat size={15} />
+                </span>
+                <span className="sidebar__row-text">Agent</span>
+                <span className="sidebar__chevron" aria-hidden>
+                  {agentOpen ? "▾" : "▸"}
+                </span>
+              </button>
+            </div>
+            {agentOpen ? (
+              <div className="sidebar__group-body sidebar__agent-rail">{agentRail}</div>
+            ) : null}
           </section>
         ) : null}
 

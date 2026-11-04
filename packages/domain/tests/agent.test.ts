@@ -16,6 +16,8 @@ import {
   agentThreadTitle,
   describeToolArgs,
   describeToolResult,
+  formatReplyElapsed,
+  toolResultLabel,
   relativizeScheduleText,
   toolCallSummary,
   redactSecrets,
@@ -444,6 +446,88 @@ describe("tool replies", () => {
     const shown = relativizeScheduleText(text, new Date(2026, 10, 1, 12).getTime());
     expect(shown).toContain("· 写周报 · 明天 09:00");
     expect(shown).toContain("提醒 明天 08:45");
+    const estimated = describeToolResult(
+      "task_list_today",
+      {
+        tasks: [
+          {
+            title: "写周报",
+            dueWithTime: new Date(2026, 10, 2, 9, 0, 0).getTime(),
+            timeEstimate: 25 * 60_000,
+            projectTitle: "工作",
+          },
+        ],
+      },
+      "今日有 1 项",
+    );
+    expect(estimated).toContain("预计 25 分钟");
+    expect(estimated).toContain("工作");
+  });
+
+  it("shows the contents of memories, skills, agents, hooks, and catalogs", () => {
+    expect(
+      describeToolResult(
+        "memory_list",
+        { memories: [{ text: "周报用短句" }, { text: "先列未完成" }] },
+        "有 2 条记忆",
+      ),
+    ).toBe("有 2 条记忆\n· 周报用短句\n· 先列未完成");
+    expect(
+      describeToolResult(
+        "skill_list",
+        { skills: [{ name: "weekly", description: "写周报" }] },
+        "有 1 个技能",
+      ),
+    ).toContain("· /weekly：写周报");
+    const loaded = describeToolResult(
+      "skill_load",
+      { name: "weekly", description: "写周报", body: "# 周报\n先列完成项" },
+      "已载入技能 weekly",
+    );
+    expect(loaded).toContain("写周报");
+    expect(loaded).toContain("# 周报");
+    expect(
+      describeToolResult(
+        "subagent_list",
+        { subagents: [{ name: "reviewer", description: "只读复查" }] },
+        "有 1 个子智能体",
+      ),
+    ).toContain("· reviewer：只读复查");
+    expect(
+      describeToolResult(
+        "hook_list",
+        { hooks: [{ event: "session_start", title: "开工" }] },
+        "有 1 条钩子",
+      ),
+    ).toContain("· session_start 开工");
+    expect(
+      describeToolResult(
+        "mcp_list",
+        { servers: [{ name: "docs", endpoint: "https://example.test/mcp" }] },
+        "已登记 1 个 MCP",
+      ),
+    ).toContain("· docs · https://example.test/mcp · 尚未连接");
+    expect(
+      describeToolResult(
+        "plugin_list",
+        { plugins: [{ name: "ocr", version: "0.2.0", description: "识别文字" }] },
+        "有 1 个插件",
+      ),
+    ).toContain("· ocr 0.2.0：识别文字");
+    expect(
+      describeToolResult("tag_list", { tags: [{ title: "紧急" }] }, "有 1 个标签"),
+    ).toContain("· 紧急");
+    expect(
+      describeToolResult("settings_get", { displayName: "林" }, "当前设置"),
+    ).toContain("显示名称：林");
+  });
+
+  it("formats how long a reply took", () => {
+    const start = 1_700_000_000_000;
+    expect(formatReplyElapsed(start, start + 400)).toBe("耗时 <1 秒");
+    expect(formatReplyElapsed(start, start + 12_400)).toBe("耗时 12 秒");
+    expect(formatReplyElapsed(start, start + 65_000)).toBe("耗时 1 分 5 秒");
+    expect(formatReplyElapsed(start, start + 120_000)).toBe("耗时 2 分");
   });
 
   it("describes a planned write without internal ids", () => {
@@ -473,5 +557,13 @@ describe("tool replies", () => {
     expect(args).toContain("计划：明天 09:00");
     expect(args).toContain("提醒：提前 15 分钟");
     expect(args).not.toContain("hidden");
+    expect(describeToolArgs({ text: "周五写周报", skillId: "hidden" }, now)).toBe(
+      "内容：周五写周报",
+    );
+    expect(describeToolArgs({ timeEstimateMinutes: 25 }, now)).toBe("预计：25 分钟");
+    expect(toolResultLabel("memory_list")).toBe("记忆");
+    expect(toolResultLabel("project_list")).toBe("项目");
+    expect(toolResultLabel("notification_list")).toBe("通知");
+    expect(toolResultLabel("unknown_tool")).toBe("");
   });
 });

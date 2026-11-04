@@ -15,6 +15,7 @@ import {
   removeSkillSourceDir,
   setAgentHookEnabled,
   setMcpServerEnabled,
+  setSkillEnabled,
   setSkillSourceDirEnabled,
   SLASH_COMMANDS,
   type AgentHookEvent,
@@ -35,6 +36,7 @@ import {
   IconSkill,
   IconSubagents,
   IconTool,
+  IconTrash,
   IconUser,
 } from "../shell/icons";
 import { HostToolsPane } from "./HostToolsPane";
@@ -395,6 +397,7 @@ function PluginsPane({
               <SkillDirRow
                 key={dir.id}
                 dir={dir}
+                icon={<IconPlugins size={15} />}
                 skillCount={found?.skills.length ?? 0}
                 detail={
                   found?.error
@@ -637,18 +640,46 @@ function SkillsPane({
         <>
           <h2 className="agent-cap__section-title">已发现技能</h2>
           <div className="settings__card">
-            {skills.map((skill) => (
-              <div key={skill.id} className="settings__row">
-                <div>
-                  <div className="settings__row-title agent-cap__mono">{skill.name}</div>
-                  <div className="settings__row-desc">{skill.description}</div>
-                  <div className="settings__row-desc agent-cap__path">
-                    {skill.dirPath}
+            {skills.map((skill) => {
+              const enabled = !prefs.disabledSkillIds.includes(skill.id);
+              return (
+                <div
+                  key={skill.id}
+                  className={enabled ? "skill-line" : "skill-line is-off"}
+                  title={skill.dirPath}
+                >
+                  <span className="skill-line__mark">
+                    <IconSkill size={15} />
+                  </span>
+                  <div className="skill-line__copy">
+                    <div className="skill-line__name">{skill.name}</div>
+                    <div className="skill-line__desc" title={skill.description}>
+                      {skill.description}
+                    </div>
+                  </div>
+                  <div className="skill-line__actions">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={enabled}
+                      aria-label={`启用 ${skill.name}`}
+                      className={enabled ? "toggle is-on" : "toggle"}
+                      onClick={() =>
+                        onPatch({
+                          disabledSkillIds: setSkillEnabled(
+                            prefs.disabledSkillIds,
+                            skill.id,
+                            !enabled,
+                          ),
+                        })
+                      }
+                    >
+                      <span className="toggle__thumb" />
+                    </button>
                   </div>
                 </div>
-                <span className="settings__pill">可用</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       ) : null}
@@ -660,46 +691,55 @@ function SkillDirRow({
   dir,
   skillCount,
   detail,
+  icon,
   onToggle,
   onRemove,
 }: {
   dir: SkillSourceDir;
   skillCount: number;
   detail?: string;
+  icon?: ReactNode;
   onToggle: (enabled: boolean) => void;
   onRemove: () => void;
 }) {
+  const summary =
+    detail ??
+    (dir.enabled
+      ? skillCount
+        ? `已发现 ${skillCount} 个技能`
+        : "启用中，尚未发现 SKILL.md"
+      : "已停用");
+  const title = dir.path.split(/[\\/]/).filter(Boolean).pop() || dir.path;
   return (
-    <div className="settings__row settings__row--stack">
-      <div className="settings__row-main">
-        <div>
-          <div className="settings__row-title agent-cap__path" title={dir.path}>
-            {dir.path}
-          </div>
-          <div className="settings__row-desc">
-            {detail ??
-              (dir.enabled
-                ? skillCount
-                  ? `已发现 ${skillCount} 个技能`
-                  : "启用中，尚未发现 SKILL.md"
-                : "已停用")}
-          </div>
+    <div className="skill-line">
+      <span className="skill-line__mark">{icon ?? <IconSkill size={15} />}</span>
+      <div className="skill-line__copy">
+        <div className="skill-line__name" title={dir.path}>
+          {title}
         </div>
-        <div className="agent-cap__row-actions">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={dir.enabled}
-            aria-label={`启用 ${dir.path}`}
-            className={dir.enabled ? "toggle is-on" : "toggle"}
-            onClick={() => onToggle(!dir.enabled)}
-          >
-            <span className="toggle__thumb" />
-          </button>
-          <button type="button" className="settings__save" onClick={onRemove}>
-            移除
-          </button>
+        <div className="skill-line__desc" title={`${summary} · ${dir.path}`}>
+          {summary}
         </div>
+      </div>
+      <div className="skill-line__actions">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={dir.enabled}
+          aria-label={`启用 ${dir.path}`}
+          className={dir.enabled ? "toggle is-on" : "toggle"}
+          onClick={() => onToggle(!dir.enabled)}
+        >
+          <span className="toggle__thumb" />
+        </button>
+        <button
+          type="button"
+          className="skill-line__remove"
+          aria-label={`移除 ${dir.path}`}
+          onClick={onRemove}
+        >
+          <IconTrash size={15} />
+        </button>
       </div>
     </div>
   );

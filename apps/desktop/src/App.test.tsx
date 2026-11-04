@@ -179,6 +179,24 @@ describe("App shell", () => {
     expect(screen.getByText(/每天 · 09:00/)).toBeInTheDocument();
   });
 
+  it("puts the agent workspace under Agent and collapses it from that row", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    expect(screen.queryByRole("heading", { name: "工作区" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Agent" }));
+    expect(screen.getByRole("heading", { name: "工作区" })).toBeInTheDocument();
+    expect(screen.getByText("还没有工作区。点「+」选择一个文件夹。")).toBeInTheDocument();
+    expect(screen.getByText("选一个文件夹开始对话")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Agent" }));
+    expect(screen.queryByRole("heading", { name: "工作区" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("还没有工作区。点「+」选择一个文件夹。"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("选一个文件夹开始对话")).toBeInTheDocument();
+  });
+
   it("creates a task from an agent session only after approval", async () => {
     const user = userEvent.setup();
     await readyApp();

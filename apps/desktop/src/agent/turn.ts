@@ -17,8 +17,10 @@ import {
   estimateContextTokens,
   formatActiveSkills,
   formatSessionContext,
+  formatTodayForPrompt,
   formatSkillsForPrompt,
   invokedSkillsInText,
+  omitInvokedSkillTokens,
   formatSubagentsForPrompt,
   gateTool,
   hooksForEvent,
@@ -314,11 +316,20 @@ function composeSystemPrompt(
   thread: AgentThread,
 ): string {
   const nowMs = env.nowMs ?? Date.now();
-  const today = env.store
-    .listToday(nowMs)
-    .slice(0, 12)
-    .map((task) => `· ${task.title}`)
-    .join("\n");
+  const projectTitle = new Map(
+    env.store.listProjects().map((project) => [project.id, project.title]),
+  );
+  const today = formatTodayForPrompt(
+    env.store.listToday(nowMs).map((task) => ({
+      title: task.title,
+      dueDay: task.dueDay,
+      dueWithTime: task.dueWithTime,
+      remindAt: task.remindAt,
+      timeEstimate: task.timeEstimate,
+      projectTitle: projectTitle.get(task.projectId),
+    })),
+    nowMs,
+  );
   const visible = modelTranscript(transcript, budget);
   const sessionHooks = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
   return buildAgentSystemPrompt({
@@ -386,10 +397,7 @@ async function requestModel(
   if (isLocalBuiltin(found.provider, found.modelId)) {
     const invoked = invokedSkillsInText(env.skills ?? [], userText);
     if (invoked.length > 0) {
-      const request = userText
-        .replace(/(?:^|\s)@[^\s@]+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+      const request = omitInvokedSkillTokens(env.skills ?? [], userText);
       const bodies = invoked
         .map((skill) => `「${skill.name}」\n${skill.body.trim()}`.trim())
         .join("\n\n");

@@ -1,3 +1,4 @@
+import { hostToolById, type HostToolProbe } from "@wb/domain";
 import type {
   AgentCustomCommand,
   AgentHook,
@@ -51,6 +52,14 @@ export type AppPrefs = {
   mcpServers: McpServer[];
   /** Catalog ids the user turned off in Settings → 工具. */
   disabledHostTools: string[];
+  /** Absolute paths the user confirmed in 工具 → 详情. */
+  hostToolPaths: Record<string, string>;
+  /** Saved tool detection. Later opens read this instead of fetching again. */
+  hostToolRecords: HostToolProbe[];
+  /** True after the first automatic fetch has finished. */
+  hostToolsFetched: boolean;
+  /** Skill ids the user turned off in Settings → 技能. */
+  disabledSkillIds: string[];
 };
 
 const DEFAULTS: AppPrefs = {
@@ -80,6 +89,10 @@ const DEFAULTS: AppPrefs = {
   pluginDirs: [],
   mcpServers: [],
   disabledHostTools: [],
+  hostToolPaths: {},
+  hostToolRecords: [],
+  hostToolsFetched: false,
+  disabledSkillIds: [],
 };
 
 function normalizeSkillDirs(value: unknown): SkillSourceDir[] {
@@ -110,7 +123,57 @@ function mergePrefs(partial?: Partial<AppPrefs> | null): AppPrefs {
   next.agentCommands = normalizeCommands(next.agentCommands);
   next.mcpServers = normalizeMcp(next.mcpServers);
   next.disabledHostTools = normalizeDisabledHostTools(next.disabledHostTools);
+  next.disabledSkillIds = normalizeDisabledHostTools(next.disabledSkillIds);
+  next.hostToolPaths = normalizeHostToolPaths(next.hostToolPaths);
+  next.hostToolRecords = normalizeHostToolRecords(next.hostToolRecords);
+  next.hostToolsFetched = next.hostToolsFetched === true;
   return next;
+}
+
+function normalizeHostToolRecords(value: unknown): HostToolProbe[] {
+  if (!Array.isArray(value)) return [];
+  const out: HostToolProbe[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<HostToolProbe>;
+    if (typeof row.id !== "string" || !hostToolById(row.id) || seen.has(row.id)) continue;
+    if (row.status !== "ready" || typeof row.path !== "string") continue;
+    const path = row.path.trim();
+    if (!path || path.includes("\0") || path.length > 1024) continue;
+    const invoke = Array.isArray(row.invoke)
+      ? row.invoke
+          .filter(
+            (part): part is string => typeof part === "string" && part.trim().length > 0,
+          )
+          .slice(0, 8)
+      : [];
+    seen.add(row.id);
+    out.push({
+      id: row.id,
+      status: "ready",
+      source: row.source === "managed" || row.source === "manual" ? row.source : "env",
+      path,
+      version: typeof row.version === "string" ? row.version.slice(0, 200) : "",
+      invoke: invoke.length > 0 ? invoke : [path],
+    });
+  }
+  return out;
+}
+
+function normalizeHostToolPaths(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, path] of Object.entries(value)) {
+    if (typeof path !== "string") continue;
+    const id = key.trim();
+    const file = path.trim();
+    if (!id || !hostToolById(id) || !file || file.includes("\0") || file.length > 1024) {
+      continue;
+    }
+    out[id] = file;
+  }
+  return out;
 }
 
 function normalizeDisabledHostTools(value: unknown): string[] {

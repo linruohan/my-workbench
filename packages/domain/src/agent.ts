@@ -324,7 +324,8 @@ export const AGENT_TOOLS: ToolSpec[] = [
     "write",
     "运行一个已启用的本机工具。args 是字符串数组，不经过 shell",
     {
-      toolId: str("工具 id，例如 go、ripgrep、ffmpeg、mermaid、matplotlib"),
+      toolId: str("工具 id，例如 uv、git、ripgrep、poppler、go"),
+      bin: str("可选。一组工具里的具体命令，例如 uv 或 uvx、node 或 npm、java 或 mvn"),
       args: {
         type: "array",
         items: { type: "string" },

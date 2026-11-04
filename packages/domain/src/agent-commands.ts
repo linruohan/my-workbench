@@ -100,23 +100,37 @@ export type SlashSkillHit = {
   summary: string;
 };
 
+type SlashSkillRef = { name: string; description?: string; enabled?: boolean };
+
+function slashSkillOpen(skill: SlashSkillRef): boolean {
+  return skill.enabled !== false;
+}
+
 /** Skills offered from the same `/` menu as commands. */
 export function slashSkillSuggestions(
   draft: string,
-  skills: readonly { name: string; description: string }[],
+  skills: readonly SlashSkillRef[],
+  reserved: readonly string[] = [],
 ): SlashSkillHit[] {
   const query = slashQuery(draft);
   if (query == null) return [];
+  const taken = new Set(reserved.map((name) => name.toLowerCase()));
   const folded = query.toLowerCase();
   const matched = skills.filter((skill) => {
+    if (!slashSkillOpen(skill)) return false;
+    if (taken.has(skill.name.toLowerCase())) return false;
     if (!folded) return true;
     const name = skill.name.toLowerCase();
     if (name.includes(folded)) return true;
-    return folded.length >= 2 && skill.description.toLowerCase().includes(folded);
+    return folded.length >= 2 && (skill.description ?? "").toLowerCase().includes(folded);
   });
-  return matched.slice(0, folded ? 12 : 8).map((skill) => ({
+  const ranked = matched.slice().sort((a, b) => {
+    const rank = (name: string) => (name.toLowerCase().startsWith(folded) ? 0 : 1);
+    return rank(a.name) - rank(b.name);
+  });
+  return ranked.slice(0, folded ? 12 : 8).map((skill) => ({
     name: skill.name,
-    summary: skill.description,
+    summary: skill.description ?? "",
   }));
 }
 
@@ -132,6 +146,7 @@ export function resolveSlash(
   text: string,
   mode: AgentPermissionMode,
   extras: readonly AgentCustomCommand[] = [],
+  skills: readonly SlashSkillRef[] = [],
 ): SlashAction | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return null;
@@ -139,7 +154,7 @@ export function resolveSlash(
   const splitAt = body.search(/\s/);
   const rawToken = splitAt === -1 ? body : body.slice(0, splitAt);
   const args = splitAt === -1 ? "" : body.slice(splitAt + 1).trim();
-  if (!rawToken) return helpAction("", extras);
+  if (!rawToken) return helpAction("", extras, skills);
   const command = findCommand(rawToken);
   if (!command) {
     const custom = extras.find(
@@ -148,12 +163,23 @@ export function resolveSlash(
     if (custom) {
       return { type: "prompt", text: expandCommandTemplate(custom.body, args) };
     }
+    const folded = rawToken.toLowerCase();
+    const skill = skills.find((item) => item.name.toLowerCase() === folded);
+    if (skill) {
+      if (!slashSkillOpen(skill)) {
+        return {
+          type: "reply",
+          text: `技能「${skill.name}」已关闭。请在设置 · 技能中打开后再使用。`,
+        };
+      }
+      return null;
+    }
     return {
       type: "reply",
       text: `没有「/${rawToken || " "}」这个命令。输入 /help 查看可用命令。`,
     };
   }
-  if (command.name === "help") return helpAction(args, extras);
+  if (command.name === "help") return helpAction(args, extras, skills);
   if (command.name === "new") return { type: "new" };
   if (command.name === "mode") return modeAction(args, mode);
   if (command.name === "model") return modelAction(args);
@@ -164,7 +190,11 @@ export function resolveSlash(
   return { type: "prompt", text: "晨报" };
 }
 
-function helpAction(args: string, extras: readonly AgentCustomCommand[]): SlashAction {
+function helpAction(
+  args: string,
+  extras: readonly AgentCustomCommand[],
+  skills: readonly SlashSkillRef[] = [],
+): SlashAction {
   const token = args.replace(/^\//, "");
   const target = args ? findCommand(token) : null;
   if (args && !target) {
@@ -172,13 +202,41 @@ function helpAction(args: string, extras: readonly AgentCustomCommand[]): SlashA
     if (custom) {
       return { type: "reply", text: `/${custom.name}\n${custom.summary}` };
     }
+    const folded = token.toLowerCase();
+    const skill = skills.find((item) => item.name.toLowerCase() === folded);
+    if (skill && !slashSkillOpen(skill)) {
+      return {
+        type: "reply",
+        text: `技能「${skill.name}」已关闭。请在设置 · 技能中打开后再使用。`,
+      };
+    }
+    if (skill) {
+      return {
+        type: "reply",
+        text: `/${skill.name}\n${skill.description?.trim() || "技能"}`,
+      };
+    }
     return { type: "reply", text: `没有「${args}」这个命令。` };
   }
   if (target) return { type: "reply", text: `${target.usage}\n${target.summary}` };
+  const reserved = new Set(
+    [
+      ...SLASH_COMMANDS.flatMap((command) => [command.name, ...command.aliases]),
+      ...extras.map((command) => command.name),
+    ].map((name) => name.toLowerCase()),
+  );
+  const listed = skills.filter(
+    (skill) => slashSkillOpen(skill) && !reserved.has(skill.name.toLowerCase()),
+  );
   const lines = [
     ...SLASH_COMMANDS.map((command) => `- \`${command.usage}\` ${command.summary}`),
     ...extras.map((command) => `- \`/${command.name}\` ${command.summary}`),
+    ...listed
+      .slice(0, 12)
+      .map((skill) => `- \`/${skill.name}\` ${skill.description?.trim() || "技能"}`),
   ];
+  if (listed.length > 12)
+    lines.push(`- 还有 ${listed.length - 12} 个技能，输入 /名称 点名。`);
   return { type: "reply", text: lines.join("\n") };
 }
 

@@ -13,11 +13,33 @@ describe("host tool catalog", () => {
   it("covers the local commands and chart libraries", () => {
     const ids = HOST_TOOL_CATALOG.map((item) => item.id);
     expect(ids).toEqual([
-      "go",
+      "uv",
+      "node",
+      "git",
       "ripgrep",
-      "ffmpeg",
-      "inkscape",
+      "chromium",
+      "playwright",
+      "browser-mcp",
+      "poppler",
+      "cairo",
       "mermaid",
+      "fontwasm",
+      "ocr",
+      "inkscape",
+      "ffmpeg",
+      "openssh",
+      "sshfs",
+      "go",
+      "java",
+      "rust",
+      "ruby",
+      "php",
+      "dotnet",
+      "webview2",
+      "redis",
+      "nsis",
+      "innosetup",
+      "readelf",
       "matplotlib",
       "plotly",
       "altair",
@@ -94,7 +116,21 @@ describe("host tool catalog", () => {
     expect(parseHostToolRunArgs({ toolId: "bash", args: [] }).ok).toBe(false);
     expect(
       parseHostToolRunArgs({ toolId: "matplotlib", args: ["-c", "print(1)"] }),
-    ).toEqual({ ok: true, toolId: "matplotlib", args: ["-c", "print(1)"], cwd: "" });
+    ).toEqual({
+      ok: true,
+      toolId: "matplotlib",
+      bin: "python",
+      args: ["-c", "print(1)"],
+      cwd: "",
+    });
+    expect(parseHostToolRunArgs({ toolId: "uv", bin: "uvx", args: ["ruff"] })).toEqual({
+      ok: true,
+      toolId: "uv",
+      bin: "uvx",
+      args: ["ruff"],
+      cwd: "",
+    });
+    expect(parseHostToolRunArgs({ toolId: "uv", bin: "pip", args: [] }).ok).toBe(false);
   });
 
   it("asks before running a host tool", () => {

@@ -462,6 +462,9 @@ function runTool(
       if (!query) throw new DomainError("请提供技能 name 或 skillId");
       const skill = findSkill(ctx.skills ?? [], query);
       if (!skill) throw new DomainError(`未找到技能「${query}」`);
+      if (skill.enabled === false) {
+        throw new DomainError(`技能「${skill.name}」已关闭。请在设置 · 技能中打开。`);
+      }
       return ok(`已加载技能「${skill.name}」`, {
         id: skill.id,
         name: skill.name,
@@ -570,6 +573,8 @@ function taskView(store: MemoryWorkbenchRepository, task: Task) {
     remindAt: task.remindAt,
     deadlineDay: task.deadlineDay,
     deadlineWithTime: task.deadlineWithTime,
+    timeEstimate: task.timeEstimate,
+    projectTitle: store.listProjects().find((item) => item.id === task.projectId)?.title,
     notes: task.notes,
     parentId: task.parentId,
     bucket: store.getTaskBucket(task.id),

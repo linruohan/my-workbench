@@ -173,13 +173,37 @@ const ARG_LABEL: Record<string, string> = {
   remindOption: "提醒",
   notes: "备注",
   bodyMd: "正文",
+  body: "内容",
+  text: "内容",
+  name: "名称",
+  description: "说明",
   projectTitle: "项目",
   view: "打开",
   query: "关键词",
   displayName: "显示名",
+  event: "时机",
+  endpoint: "地址",
+  command: "命令",
+  url: "地址",
+  path: "路径",
+  modelRef: "模型",
+  timeEstimateMinutes: "预计",
+  version: "版本",
+  usage: "用法",
+  color: "颜色",
+  status: "状态",
 };
 
-const ARG_SKIP = new Set(["taskId", "noteId", "projectId", "id", "tagId"]);
+const ARG_SKIP = new Set([
+  "taskId",
+  "noteId",
+  "projectId",
+  "id",
+  "tagId",
+  "skillId",
+  "hookId",
+  "serverId",
+]);
 
 export function remindOptionLabel(option: string): string {
   return REMIND_LABEL[option] ?? option;
@@ -222,6 +246,22 @@ export function formatAgentBubbleTime(ms: number, nowMs: number): string {
   const day = formatAgentDay(formatLocalDay(ms), nowMs);
   const clock = formatAgentClock(ms);
   return day === "今天" ? clock : `${day} ${clock}`;
+}
+
+/** How long a reply took, from the user message to the last part of the answer. */
+export function formatReplyElapsed(startMs: number, endMs: number): string {
+  const ms = Math.max(0, endMs - startMs);
+  if (ms < 1000) return "耗时 <1 秒";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `耗时 ${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) {
+    return rest === 0 ? `耗时 ${minutes} 分` : `耗时 ${minutes} 分 ${rest} 秒`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const minuteRest = minutes % 60;
+  return minuteRest === 0 ? `耗时 ${hours} 小时` : `耗时 ${hours} 小时 ${minuteRest} 分`;
 }
 
 function formatAgentClock(ms: number): string {
@@ -278,6 +318,7 @@ function presentArg(key: string, value: unknown, nowMs: number): string {
     return remindOptionLabel(value);
   }
   if (key === "view" && typeof value === "string") return viewLabel(value);
+  if (key === "timeEstimateMinutes" && typeof value === "number") return `${value} 分钟`;
   if (key === "bodyMd" && typeof value === "string") {
     const body = value.trim();
     return body.length > 160 ? `${body.slice(0, 160)}…` : body;
@@ -290,6 +331,27 @@ function dayOffset(day: string, nowMs: number): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
   const delta = parseLocalDay(day) - parseLocalDay(formatLocalDay(nowMs));
   return Math.round(delta / 86_400_000);
+}
+
+/** Short caption for a tool result, so a multi-step reply can be scanned. */
+export function toolResultLabel(name: string): string {
+  if (name.startsWith("timer_")) return "计时";
+  if (name.startsWith("task_")) return "任务";
+  if (name.startsWith("project_")) return "项目";
+  if (name.startsWith("note_")) return "笔记";
+  if (name === "search") return "搜索";
+  if (name.startsWith("notification_")) return "通知";
+  if (name.startsWith("memory_")) return "记忆";
+  if (name.startsWith("skill_")) return "技能";
+  if (name.startsWith("subagent_")) return "子智能体";
+  if (name.startsWith("hook_")) return "钩子";
+  if (name.startsWith("mcp_")) return "MCP";
+  if (name.startsWith("plugin_")) return "插件";
+  if (name.startsWith("tag_")) return "标签";
+  if (name.startsWith("host_tool")) return "本机工具";
+  if (name.startsWith("settings_") || name.startsWith("session_")) return "设置";
+  if (name === "ui_open") return "打开";
+  return "";
 }
 
 /** Turn a tool payload into text a person can read. Raw JSON stays out of the transcript. */
@@ -344,6 +406,19 @@ export function describeToolResult(name: string, data: unknown, summary: string)
     return [summary, body].filter(Boolean).join("\n");
   }
 
+  const listed = firstListed(summary, record);
+  if (listed) return listed;
+
+  if (typeof record.body === "string" && typeof record.name === "string") {
+    const description =
+      typeof record.description === "string" ? record.description.trim() : "";
+    return [summary, description, clipOutput(record.body)].filter(Boolean).join("\n\n");
+  }
+
+  if (typeof record.displayName === "string") {
+    return `${summary}\n显示名称：${record.displayName}`;
+  }
+
   if (name === "host_tool_list") {
     const tools = asArray(record.tools) ?? [];
     return joinList(
@@ -366,6 +441,69 @@ export function describeToolResult(name: string, data: unknown, summary: string)
   }
 
   return summary;
+}
+
+function titledLines(
+  summary: string,
+  items: unknown[] | null,
+  line: (item: Record<string, unknown>) => string,
+): string | null {
+  if (!items) return null;
+  return joinList(
+    summary,
+    items.map((item) => {
+      const record = asRecord(item);
+      return record ? line(record) : "";
+    }),
+  );
+}
+
+function firstListed(summary: string, record: Record<string, unknown>): string | null {
+  return (
+    titledLines(summary, asArray(record.memories), (item) =>
+      typeof item.text === "string" ? `· ${item.text}` : "",
+    ) ??
+    titledLines(summary, asArray(record.skills), (item) => {
+      if (typeof item.name !== "string") return "";
+      const description =
+        typeof item.description === "string" && item.description.trim()
+          ? `：${item.description.trim()}`
+          : "";
+      return `· /${item.name}${description}`;
+    }) ??
+    titledLines(summary, asArray(record.subagents), (item) => {
+      if (typeof item.name !== "string") return "";
+      const description =
+        typeof item.description === "string" && item.description.trim()
+          ? `：${item.description.trim()}`
+          : "";
+      return `· ${item.name}${description}`;
+    }) ??
+    titledLines(summary, asArray(record.hooks), (item) => {
+      const title = typeof item.title === "string" ? item.title : "";
+      const event = typeof item.event === "string" ? item.event : "";
+      if (!title && !event) return "";
+      return `· ${[event, title].filter(Boolean).join(" ")}`;
+    }) ??
+    titledLines(summary, asArray(record.servers), (item) => {
+      if (typeof item.name !== "string") return "";
+      const endpoint = typeof item.endpoint === "string" ? item.endpoint : "";
+      return `· ${item.name}${endpoint ? ` · ${endpoint}` : ""} · 尚未连接`;
+    }) ??
+    titledLines(summary, asArray(record.plugins), (item) => {
+      if (typeof item.name !== "string") return "";
+      const version =
+        typeof item.version === "string" && item.version ? ` ${item.version}` : "";
+      const description =
+        typeof item.description === "string" && item.description.trim()
+          ? `：${item.description.trim()}`
+          : "";
+      return `· ${item.name}${version}${description}`;
+    }) ??
+    titledLines(summary, asArray(record.tags), (item) =>
+      typeof item.title === "string" ? `· ${item.title}` : "",
+    )
+  );
 }
 
 function clipOutput(value: unknown): string {
@@ -399,6 +537,12 @@ function taskLine(value: unknown): string {
   if (typeof task.dueDay === "string") bits.push(task.dueDay);
   if (typeof task.dueWithTime === "number") bits.push(formatStamp(task.dueWithTime));
   if (typeof task.remindAt === "number") bits.push(`提醒 ${formatStamp(task.remindAt)}`);
+  if (typeof task.timeEstimate === "number" && task.timeEstimate >= 60_000) {
+    bits.push(`预计 ${Math.round(task.timeEstimate / 60_000)} 分钟`);
+  }
+  if (typeof task.projectTitle === "string" && task.projectTitle.trim()) {
+    bits.push(task.projectTitle.trim());
+  }
   return `· ${task.title}${bits.length ? ` · ${bits.join(" · ")}` : ""}`;
 }
 

@@ -5,27 +5,27 @@ import {
   agentEditPlan,
   agentEmptyGreeting,
   agentRetryPlan,
+  acceptSkillSlashToken,
   applyMention,
   applySlashToken,
+  collapseSkillTokenOnDelete,
+  skillComposerTokens,
+  stripSkillPickMarks,
+  tidySkillPickMarks,
   chatProviderFor,
   compactMarkerText,
-  filterAgentThreads,
   findSubagent,
   forgetAgentMemory,
   formatAgentBubbleTime,
-  formatAgentRelativeShort,
   formatMemoriesForPrompt,
+  formatReplyElapsed,
   formatSubagentList,
-  DEFAULT_AGENT_WORKSPACE_TITLE,
   describeToolArgs,
   describeToolResult,
   formatAgentMoment,
-  groupAgentThreadsByWorkspace,
   manualCompactPlan,
   normalizeAgentWebUrl,
-  orderAgentWorkspaceThreads,
   withLocalOcrContext,
-  WEB_AGENT_THREAD_TITLE,
   findProvider,
   imageOnlyCaption,
   isLocalBuiltin,
@@ -41,6 +41,8 @@ import {
   SLASH_COMMANDS,
   slashSkillSuggestions,
   slashSuggestions,
+  skillsLoadedInTranscript,
+  toolResultLabel,
   subagentTurnText,
   type AgentCustomCommand,
   type AgentHook,
@@ -49,7 +51,6 @@ import {
   type AgentPermissionMode,
   type AgentSkill,
   type AgentSubagent,
-  type AgentThread,
   type HostToolSnapshot,
   type McpServer,
   type SlashAction,
@@ -69,17 +70,12 @@ import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { useDialog } from "../shell/Dialogs";
 import {
   IconArrowUp,
-  IconFilter,
   IconFolder,
-  IconFolderOpen,
   IconGitBranch,
-  IconGlobe,
   IconHand,
-  IconMore,
   IconPencil,
   IconPlus,
   IconRefresh,
-  IconSearch,
   IconStop,
 } from "../shell/icons";
 import { readGitBranch } from "../notes/kb-api";
@@ -129,6 +125,8 @@ type Props = {
   onOpenModels: () => void;
   onEffects: (effects: AgentUiEffect[]) => void;
   onRefresh: () => void;
+  /** Lets the sidebar workspace rail drop this view's queued prompts. */
+  forgetThreadRef?: { current: (id: string) => void };
 };
 
 const EXAMPLES = ["今天有什么", "创建任务 写周报，排到明天并提前15分钟提醒", "晨报"];
@@ -150,23 +148,18 @@ export function AgentView({
   focus = null,
   activeTimerTaskId,
   timerStartedAt,
-  onSelectThread,
   onCreateThread,
   onCreateFromFolder,
   onOpenModels,
   onEffects,
   onRefresh,
+  forgetThreadRef,
 }: Props) {
   const dialog = useDialog();
   const workspaces = store.listAgentWorkspaces();
-  const [showArchived, setShowArchived] = useState(false);
-  const threads = store.listAgentThreads({ includeArchived: showArchived });
   const activeThreads = store.listAgentThreads();
   const thread =
-    threads.find((item) => item.id === threadId) ??
-    activeThreads.find((item) => item.id === threadId) ??
-    activeThreads[0] ??
-    null;
+    (threadId ? store.getAgentThread(threadId) : null) ?? activeThreads[0] ?? null;
   const messages = thread ? store.listAgentMessages(thread.id) : [];
   const pending = thread
     ? (store.listAgentApprovals(thread.id).find((item) => item.status === "pending") ??
@@ -188,18 +181,6 @@ export function AgentView({
   const [webReload, setWebReload] = useState(0);
   const [webSessionError, setWebSessionError] = useState("");
   const [findQuery, setFindQuery] = useState("");
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [viewMenuOpen, setViewMenuOpen] = useState(false);
-  const [threadQuery, setThreadQuery] = useState("");
-  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string | null>(null);
-  const [workspaceTitleDraft, setWorkspaceTitleDraft] = useState("");
-  const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
-  const [threadTitleDraft, setThreadTitleDraft] = useState("");
-  const [workspaceMenuId, setWorkspaceMenuId] = useState<string | null>(null);
-  const [threadMenuId, setThreadMenuId] = useState<string | null>(null);
   const [findIndex, setFindIndex] = useState(0);
   const [findTick, setFindTick] = useState(0);
   const [error, setError] = useState("");
@@ -211,6 +192,8 @@ export function AgentView({
   const [titleDraft, setTitleDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const composerMirrorRef = useRef<HTMLDivElement>(null);
+  const slashListRef = useRef<HTMLUListElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const imageUrlRef = useRef<string | null>(null);
   const approveBtnRef = useRef<HTMLButtonElement>(null);
@@ -227,16 +210,26 @@ export function AgentView({
   const draining = useRef(false);
   const sendPromptRef = useRef<(content: string) => Promise<boolean>>(async () => false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
   const [slashUi, setSlashUi] = useState({ draft: "", dismissed: false, index: 0 });
   const mounted = useRef(true);
   const sending = useRef(false);
   const busyHere = Boolean(thread && busyThreadId === thread.id);
+
+  useEffect(() => {
+    if (!busyHere) return;
+    const tick = () => setClock(Date.now());
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [busyHere]);
   const findOpenRef = useRef(false);
   const webSessionRef = useRef(false);
   const webHostRef = useRef<HTMLDivElement>(null);
   const webCoveredRef = useRef(false);
   const webSyncRef = useRef<() => void>(() => {});
   const webLoginRef = useRef<() => Promise<void>>(async () => {});
+  const webEditRef = useRef<() => void>(() => {});
   const webLoginBusy = useRef(false);
   webSessionRef.current = Boolean(thread?.webUrl);
   findOpenRef.current = findOpen;
@@ -278,27 +271,14 @@ export function AgentView({
   }, [workspaceRootPath]);
 
   useEffect(() => {
-    if (!threadMenuId && !workspaceMenuId && !viewMenuOpen && picker !== "workspace") {
-      return;
-    }
+    if (picker !== "workspace") return;
     const onPointer = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest(".agent__thread-actions")) return;
-      if (target?.closest(".agent__workspace-actions")) return;
-      if (target?.closest(".agent__threads-tool")) return;
       if (target?.closest(".agent__composer-chip-wrap")) return;
-      setThreadMenuId(null);
-      setWorkspaceMenuId(null);
-      setViewMenuOpen(false);
-      if (picker === "workspace") setPicker(null);
+      setPicker(null);
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setThreadMenuId(null);
-        setWorkspaceMenuId(null);
-        setViewMenuOpen(false);
-        if (picker === "workspace") setPicker(null);
-      }
+      if (event.key === "Escape") setPicker(null);
     };
     window.addEventListener("mousedown", onPointer);
     window.addEventListener("keydown", onKey);
@@ -306,7 +286,7 @@ export function AgentView({
       window.removeEventListener("mousedown", onPointer);
       window.removeEventListener("keydown", onKey);
     };
-  }, [threadMenuId, workspaceMenuId, viewMenuOpen, picker]);
+  }, [picker]);
 
   useEffect(() => {
     const node = logRef.current;
@@ -448,11 +428,21 @@ export function AgentView({
     let unlisten: (() => void) | undefined;
     let alive = true;
     void import("@tauri-apps/api/event").then(async ({ listen }) => {
-      const stop = await listen("web-session-auth", () => {
+      const stopAuth = await listen("web-session-auth", () => {
         void webLoginRef.current();
       });
-      if (!alive) stop();
-      else unlisten = stop;
+      const stopEdit = await listen("web-session-edit", () => {
+        webEditRef.current();
+      });
+      if (!alive) {
+        stopAuth();
+        stopEdit();
+      } else {
+        unlisten = () => {
+          stopAuth();
+          stopEdit();
+        };
+      }
     });
     return () => {
       alive = false;
@@ -596,6 +586,14 @@ export function AgentView({
   };
   const turnEnv = env();
   const contextPreview = turnEnv ? previewAgentContext(turnEnv, messages) : null;
+  const loadedSkills = skillsLoadedInTranscript(
+    skills,
+    messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      toolName: message.toolName,
+    })),
+  );
   const contextRatio =
     contextPreview && contextPreview.budget > 0
       ? contextPreview.used / contextPreview.budget
@@ -975,7 +973,7 @@ export function AgentView({
   };
 
   const send = async (text: string) => {
-    const content = text.trim();
+    const content = stripSkillPickMarks(text).trim();
     const shot = pendingImage;
     if ((!content && !shot) || !thread) return;
     if (busyThreadId && busyThreadId !== thread.id) {
@@ -983,7 +981,7 @@ export function AgentView({
       return;
     }
     const action = content
-      ? resolveSlash(content, thread.permissionMode, commands)
+      ? resolveSlash(content, thread.permissionMode, commands, skills)
       : null;
     if (shot && action) {
       setError("命令不能和图片一起发送");
@@ -1026,7 +1024,7 @@ export function AgentView({
     if (!thread || busyThreadId || pending || sending.current) return;
     const plan = agentRetryPlan(store.listAgentMessages(thread.id));
     if (!plan) return;
-    const action = resolveSlash(plan.text, thread.permissionMode, commands);
+    const action = resolveSlash(plan.text, thread.permissionMode, commands, skills);
     store.deleteAgentMessagesFrom(thread.id, plan.userMessageId);
     onRefresh();
     if (action) {
@@ -1139,108 +1137,14 @@ export function AgentView({
     });
     if (wantDrain.current === id) wantDrain.current = null;
   };
-
-  const removeThread = async (id: string, title: string) => {
-    const ok = await dialog.confirm({
-      title: "删除会话",
-      message: `删除会话「${title}」？对话会从本机移除。`,
-      confirmLabel: "删除",
-      danger: true,
-    });
-    if (!ok) return;
-    store.deleteAgentThread(id);
-    forgetThreadLocal(id);
-    setThreadMenuId(null);
-    if (thread?.id === id) {
-      onSelectThread(store.listAgentThreads()[0]?.id ?? null);
-    }
-    onRefresh();
-  };
-
-  const archiveThread = (item: AgentThread) => {
-    store.archiveAgentThread(item.id);
-    forgetThreadLocal(item.id);
-    setThreadMenuId(null);
-    if (thread?.id === item.id && !showArchived) {
-      onSelectThread(store.listAgentThreads()[0]?.id ?? null);
-    }
-    onRefresh();
-  };
-
-  const unarchiveThread = (item: AgentThread) => {
-    store.unarchiveAgentThread(item.id);
-    setThreadMenuId(null);
-    onRefresh();
-  };
-
-  const beginRenameThread = (item: AgentThread) => {
-    setThreadMenuId(null);
-    setWorkspaceMenuId(null);
-    setRenamingThreadId(item.id);
-    setThreadTitleDraft(item.title);
-  };
-
-  const beginRenameWorkspace = (id: string, title: string) => {
-    setWorkspaceMenuId(null);
-    setThreadMenuId(null);
-    setRenamingWorkspaceId(id);
-    setWorkspaceTitleDraft(title);
-  };
-
-  const commitThreadTitle = (id: string, raw: string) => {
-    const next = raw.trim();
-    const current = store.getAgentThread(id);
-    setRenamingThreadId(null);
-    if (!current) return;
-    if (!next || next === current.title) return;
-    store.updateAgentThread(id, { title: next });
-    onRefresh();
-  };
-
-  const commitWorkspaceTitle = (id: string, raw: string) => {
-    const next = raw.trim();
-    const current = store.getAgentWorkspace(id);
-    if (!current) {
-      setRenamingWorkspaceId(null);
-      return;
-    }
-    if (next && next !== current.title) {
-      store.updateAgentWorkspace(id, { title: next });
-      onRefresh();
-    }
-    setRenamingWorkspaceId(null);
-  };
-
-  const removeWorkspace = async (id: string, title: string, count: number) => {
-    const hint =
-      count > 0
-        ? `删除工作区「${title}」？其中的 ${count} 个会话也会从本机移除。`
-        : `删除工作区「${title}」？`;
-    const ok = await dialog.confirm({
-      title: "删除工作区",
-      message: hint,
-      confirmLabel: "删除",
-      danger: true,
-    });
-    if (!ok) return;
-    const selected = thread?.workspaceId === id ? thread.id : null;
-    store.deleteAgentWorkspace(id);
-    setWorkspaceMenuId(null);
-    setCollapsedWorkspaces((current) => {
-      if (!(id in current)) return current;
-      const next = { ...current };
-      delete next[id];
-      return next;
-    });
-    if (selected) {
-      onSelectThread(store.listAgentThreads()[0]?.id ?? null);
-    }
-    onRefresh();
-  };
+  if (forgetThreadRef) forgetThreadRef.current = forgetThreadLocal;
 
   const mode = thread?.permissionMode ?? "confirm";
   const suggestions = slashSuggestions(draft, commands);
-  const skillHits = slashSkillSuggestions(draft, skills);
+  const skillHits = slashSkillSuggestions(draft, skills, [
+    ...SLASH_COMMANDS.flatMap((command) => [command.name, ...command.aliases]),
+    ...commands.map((command) => command.name),
+  ]);
   const slashRows = [
     ...suggestions.map((command) => ({
       kind: "command" as const,
@@ -1255,30 +1159,32 @@ export function AgentView({
   ];
   const showSlash = !slashUi.dismissed && !busyHere && slashRows.length > 0;
   const slashPick = Math.min(slashUi.index, Math.max(slashRows.length - 1, 0));
-  const mentionItems = mentionSuggestions(draft, [
-    ...skills.map((skill) => ({
-      kind: "skill" as const,
-      name: skill.name,
-      summary: skill.description,
-    })),
-    ...subagents.map((agent) => ({
+  const mentionItems = mentionSuggestions(
+    draft,
+    subagents.map((agent) => ({
       kind: "subagent" as const,
       name: agent.name,
       summary: agent.description,
     })),
-  ]);
+  );
   const showMention =
     !showSlash && mentionQuery(draft) != null && mentionItems.length > 0;
   const mentionPick = Math.min(slashUi.index, Math.max(mentionItems.length - 1, 0));
-  const nowMs = Date.now();
+  useEffect(() => {
+    const list = slashListRef.current;
+    const button = list?.querySelector<HTMLButtonElement>("button.is-active");
+    if (!list || !button) return;
+    const top = button.offsetTop;
+    const bottom = top + button.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) {
+      list.scrollTop = bottom - list.clientHeight;
+    }
+  }, [slashPick, mentionPick, showSlash, showMention]);
+  const nowMs = busyHere ? clock : Date.now();
   const turns = conversationBlocks(messages, Boolean(pending));
   const blockTexts = turns.map((turn) =>
-    turn.kind === "agent"
-      ? turn.messages
-          .map((message) => displayContent(message, nowMs))
-          .filter(Boolean)
-          .join("\n\n")
-      : turn.message.content,
+    turn.kind === "agent" ? presentAgentTurn(turn.messages, nowMs) : turn.message.content,
   );
   const findNeedle = findOpen ? findQuery : "";
   let findCursor = 0;
@@ -1317,18 +1223,18 @@ export function AgentView({
     ?.messages[0]?.id;
   const queued = queueLength(thread?.queueJson ?? null);
   const queuedPrompts = thread ? (queues[thread.id] ?? []) : [];
+  const skillTokens = skillComposerTokens(draft, skills);
   const slashDraft = Boolean(
-    thread && draft.trim() && resolveSlash(draft.trim(), thread.permissionMode, commands),
+    thread &&
+    draft.trim() &&
+    resolveSlash(
+      stripSkillPickMarks(draft).trim(),
+      thread.permissionMode,
+      commands,
+      skills,
+    ),
   );
   const argLines = pending ? describeToolArgs(parseArgs(pending.argsJson), nowMs) : "";
-  const needle = threadQuery.trim().toLowerCase();
-  const visibleThreads = filterAgentThreads(threads, threadQuery);
-  const workspaceGroups = groupAgentThreadsByWorkspace(workspaces, visibleThreads)
-    .map((group) => ({
-      ...group,
-      titleHit: needle ? group.workspace.title.toLowerCase().includes(needle) : false,
-    }))
-    .filter((group) => !needle || group.titleHit || group.threads.length > 0);
   const activeWorkspace = thread
     ? (store.getAgentWorkspace(thread.workspaceId) ??
       workspaces.find((item) => item.id === thread.workspaceId) ??
@@ -1340,33 +1246,6 @@ export function AgentView({
     if (thread) drafts.current.set(thread.id, value);
     setPicker(null);
     requestAnimationFrame(() => inputRef.current?.focus());
-  };
-  const openWebSession = async () => {
-    const raw = await dialog.prompt({
-      title: "打开网页",
-      label: "网址",
-      confirmLabel: "打开",
-    });
-    if (!raw) return;
-    const webUrl = normalizeAgentWebUrl(raw);
-    if (!webUrl) {
-      await dialog.alert({ title: "无法打开", message: "请输入 http 或 https 网址。" });
-      return;
-    }
-    const existing = store
-      .listAgentWorkspaces()
-      .find((item) => item.title === DEFAULT_AGENT_WORKSPACE_TITLE);
-    const workspace =
-      existing ?? store.createAgentWorkspace({ title: DEFAULT_AGENT_WORKSPACE_TITLE });
-    const created = store.createAgentThread({
-      workspaceId: workspace.id,
-      title: WEB_AGENT_THREAD_TITLE,
-      webUrl,
-      modelRef: readProviderStore().defaultModelRef,
-    });
-    setCollapsedWorkspaces((current) => ({ ...current, [workspace.id]: false }));
-    onSelectThread(created.id);
-    onRefresh();
   };
   const editWebSession = async () => {
     if (!thread?.webUrl) return;
@@ -1393,370 +1272,12 @@ export function AgentView({
       webSyncRef.current();
     }
   };
+  webEditRef.current = () => {
+    void editWebSession();
+  };
 
   return (
     <section className="agent" aria-label="Agent">
-      <aside className="agent__threads">
-        <header className="agent__threads-head">
-          <h1>工作区</h1>
-          <div className="agent__threads-tools">
-            <button
-              type="button"
-              className={
-                filterOpen || threadQuery.trim()
-                  ? "agent__threads-tool is-on"
-                  : "agent__threads-tool"
-              }
-              title="筛选"
-              aria-label="筛选会话或工作区"
-              aria-pressed={filterOpen}
-              onClick={() => {
-                setFilterOpen((value) => !value);
-                setViewMenuOpen(false);
-              }}
-            >
-              <IconSearch size={14} />
-            </button>
-            <div className="agent__threads-tool-wrap">
-              <button
-                type="button"
-                className={
-                  showArchived || viewMenuOpen
-                    ? "agent__threads-tool is-on"
-                    : "agent__threads-tool"
-                }
-                title="视图"
-                aria-label="视图选项"
-                aria-haspopup="menu"
-                aria-expanded={viewMenuOpen}
-                onClick={() => {
-                  setViewMenuOpen((value) => !value);
-                  setWorkspaceMenuId(null);
-                  setThreadMenuId(null);
-                }}
-              >
-                <IconFilter size={14} />
-              </button>
-              {viewMenuOpen ? (
-                <div className="agent__thread-menu" role="menu" aria-label="视图选项">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    aria-checked={showArchived}
-                    onClick={() => {
-                      setShowArchived((value) => !value);
-                      setViewMenuOpen(false);
-                    }}
-                  >
-                    {showArchived ? "隐藏已归档" : "显示已归档"}
-                  </button>
-                </div>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              className="agent__threads-tool agent__threads-tool--text"
-              title="打开网页"
-              aria-label="网页"
-              onClick={() => void openWebSession()}
-            >
-              <IconGlobe size={14} />
-              <span>网页</span>
-            </button>
-            <button
-              type="button"
-              className="agent__threads-tool"
-              title="选择文件夹并新建会话"
-              aria-label="新建会话"
-              onClick={onCreateFromFolder}
-            >
-              <IconPlus size={14} />
-            </button>
-          </div>
-        </header>
-        {filterOpen || threadQuery.trim() ? (
-          <label className="agent__thread-filter">
-            <input
-              aria-label="筛选会话"
-              placeholder="筛选会话或工作区"
-              value={threadQuery}
-              autoFocus={filterOpen}
-              onChange={(event) => setThreadQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setThreadQuery("");
-                  setFilterOpen(false);
-                }
-              }}
-            />
-          </label>
-        ) : null}
-        {workspaces.length === 0 ? (
-          <p className="agent__hint">还没有工作区。点「+」选择一个文件夹。</p>
-        ) : workspaceGroups.length === 0 ? (
-          <p className="agent__hint">没有匹配的会话。</p>
-        ) : (
-          <div className="agent__thread-list">
-            {workspaceGroups.map(({ workspace, threads: items, titleHit }) => {
-              const collapsed =
-                !needle &&
-                !titleHit &&
-                collapsedWorkspaces[workspace.id] === true &&
-                thread?.workspaceId !== workspace.id;
-              const totalCount = store.listAgentThreads({
-                workspaceId: workspace.id,
-                includeArchived: true,
-              }).length;
-              const workspaceMenuOpen = workspaceMenuId === workspace.id;
-              return (
-                <section
-                  key={workspace.id}
-                  className="agent__workspace"
-                  aria-label={workspace.title}
-                >
-                  <div
-                    className={
-                      workspaceMenuOpen
-                        ? "agent__workspace-head is-open"
-                        : "agent__workspace-head"
-                    }
-                  >
-                    {renamingWorkspaceId === workspace.id ? (
-                      <input
-                        className="agent__workspace-title-input"
-                        aria-label="工作区名称"
-                        value={workspaceTitleDraft}
-                        autoFocus
-                        maxLength={40}
-                        onChange={(event) => setWorkspaceTitleDraft(event.target.value)}
-                        onBlur={(event) =>
-                          commitWorkspaceTitle(workspace.id, event.currentTarget.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            commitWorkspaceTitle(workspace.id, event.currentTarget.value);
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            setRenamingWorkspaceId(null);
-                          }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className="agent__workspace-title"
-                        title={workspace.rootPath || workspace.title}
-                        aria-expanded={!collapsed}
-                        onClick={() =>
-                          setCollapsedWorkspaces((current) => ({
-                            ...current,
-                            [workspace.id]: !collapsed,
-                          }))
-                        }
-                      >
-                        <span className="agent__workspace-icon" aria-hidden="true">
-                          {collapsed ? (
-                            <IconFolder size={14} />
-                          ) : (
-                            <IconFolderOpen size={14} />
-                          )}
-                        </span>
-                        <span className="agent__workspace-name">{workspace.title}</span>
-                      </button>
-                    )}
-                    <div className="agent__workspace-actions">
-                      <button
-                        type="button"
-                        className="agent__workspace-action"
-                        title="更多"
-                        aria-label={`工作区操作 ${workspace.title}`}
-                        aria-haspopup="menu"
-                        aria-expanded={workspaceMenuOpen}
-                        onClick={() => {
-                          setWorkspaceMenuId(workspaceMenuOpen ? null : workspace.id);
-                          setThreadMenuId(null);
-                          setViewMenuOpen(false);
-                        }}
-                      >
-                        <IconMore size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        className="agent__workspace-action"
-                        title="在此工作区新建会话"
-                        aria-label={`在 ${workspace.title} 新建会话`}
-                        onClick={() => onCreateThread(workspace.id)}
-                      >
-                        <IconPlus size={14} />
-                      </button>
-                      {workspaceMenuOpen ? (
-                        <div
-                          className="agent__thread-menu"
-                          role="menu"
-                          aria-label={`工作区「${workspace.title}」`}
-                        >
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() =>
-                              beginRenameWorkspace(workspace.id, workspace.title)
-                            }
-                          >
-                            重命名
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className="is-danger"
-                            onClick={() =>
-                              void removeWorkspace(
-                                workspace.id,
-                                workspace.title,
-                                totalCount,
-                              )
-                            }
-                          >
-                            删除
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                  {collapsed ? null : items.length === 0 ? (
-                    <p className="agent__workspace-empty">还没有会话</p>
-                  ) : (
-                    <ul className="agent__workspace-threads">
-                      {orderAgentWorkspaceThreads(
-                        items,
-                        workspace.title === DEFAULT_AGENT_WORKSPACE_TITLE,
-                      ).map((item) => {
-                        const archived = item.archivedAt != null;
-                        const menuOpen = threadMenuId === item.id;
-                        const age = formatAgentRelativeShort(item.updatedAt, nowMs);
-                        return (
-                          <li
-                            key={item.id}
-                            className={
-                              menuOpen ? "agent__thread-row is-open" : "agent__thread-row"
-                            }
-                          >
-                            {renamingThreadId === item.id ? (
-                              <input
-                                className="agent__thread-title-input"
-                                aria-label="会话标题"
-                                value={threadTitleDraft}
-                                autoFocus
-                                maxLength={40}
-                                onChange={(event) =>
-                                  setThreadTitleDraft(event.target.value)
-                                }
-                                onBlur={(event) =>
-                                  commitThreadTitle(item.id, event.currentTarget.value)
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    commitThreadTitle(item.id, event.currentTarget.value);
-                                  } else if (event.key === "Escape") {
-                                    event.preventDefault();
-                                    setRenamingThreadId(null);
-                                  }
-                                }}
-                              />
-                            ) : (
-                              <button
-                                type="button"
-                                className={
-                                  thread?.id === item.id
-                                    ? "agent__thread is-active"
-                                    : "agent__thread"
-                                }
-                                title={item.webUrl || undefined}
-                                onClick={() => onSelectThread(item.id)}
-                              >
-                                <span className="agent__thread-title">
-                                  {archived ? "〔归档〕 " : ""}
-                                  {item.title}
-                                </span>
-                                <span className="agent__thread-age">{age}</span>
-                              </button>
-                            )}
-                            <div className="agent__thread-actions">
-                              {renamingThreadId === item.id ? null : (
-                                <button
-                                  type="button"
-                                  className="agent__thread-rename"
-                                  aria-label={`重命名会话 ${item.title}`}
-                                  title="重命名"
-                                  onClick={() => beginRenameThread(item)}
-                                >
-                                  <IconPencil size={14} />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="agent__thread-menu-btn"
-                                aria-label={`会话操作 ${item.title}`}
-                                aria-haspopup="menu"
-                                aria-expanded={menuOpen}
-                                title="更多"
-                                onClick={() => {
-                                  setThreadMenuId(menuOpen ? null : item.id);
-                                  setWorkspaceMenuId(null);
-                                  setViewMenuOpen(false);
-                                }}
-                              >
-                                <IconMore size={14} />
-                              </button>
-                              {menuOpen ? (
-                                <div
-                                  className="agent__thread-menu"
-                                  role="menu"
-                                  aria-label={`会话「${item.title}」`}
-                                >
-                                  {archived ? (
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      onClick={() => unarchiveThread(item)}
-                                    >
-                                      取消归档
-                                    </button>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      onClick={() => archiveThread(item)}
-                                    >
-                                      归档
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="is-danger"
-                                    onClick={() => void removeThread(item.id, item.title)}
-                                  >
-                                    删除
-                                  </button>
-                                </div>
-                              ) : null}
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </section>
-              );
-            })}
-          </div>
-        )}
-      </aside>
-
       <div className="agent__main">
         {thread?.webUrl ? (
           <div className="agent__web-frame">
@@ -2028,10 +1549,7 @@ export function AgentView({
                           </article>
                         );
                       }
-                      const text = turn.messages
-                        .map((message) => displayContent(message, nowMs))
-                        .filter(Boolean)
-                        .join("\n\n");
+                      const text = blockTexts[index] ?? "";
                       if (!text) return null;
                       const id = turn.messages[0]!.id;
                       const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
@@ -2048,7 +1566,10 @@ export function AgentView({
                             active={activeHit}
                           />
                           <div className="agent__msg-actions">
-                            <MessageTime ms={stamp} nowMs={nowMs} />
+                            <span className="agent__msg-meta">
+                              <MessageTime ms={stamp} nowMs={nowMs} />
+                              <ReplyElapsed text={replyElapsed(turns, index, stamp)} />
+                            </span>
                             <button
                               type="button"
                               className="agent__copy"
@@ -2081,6 +1602,12 @@ export function AgentView({
                   {busyHere && !live ? (
                     <p className="agent__thinking" aria-live="polite">
                       正在思考…
+                      {thinkingElapsed(messages, nowMs) ? (
+                        <span className="agent__msg-time">
+                          {" "}
+                          {thinkingElapsed(messages, nowMs)}
+                        </span>
+                      ) : null}
                     </p>
                   ) : null}
                 </div>
@@ -2185,7 +1712,7 @@ export function AgentView({
                   }
                   const picked = showSlash ? slashRows[slashPick] : null;
                   if (picked?.kind === "skill") {
-                    insertComposerText(applySlashToken(draft, `@${picked.name}`));
+                    insertComposerText(acceptSkillSlashToken(draft, picked.name));
                     return;
                   }
                   void send(picked ? `/${picked.name}` : draft);
@@ -2261,7 +1788,7 @@ export function AgentView({
                 ) : null}
                 <div className="agent__composer-shell">
                   {showSlash ? (
-                    <ul className="agent__slash" aria-label="斜杠命令">
+                    <ul ref={slashListRef} className="agent__slash" aria-label="斜杠命令">
                       {slashRows.map((row, index) => (
                         <li key={`${row.kind}-${row.name}`}>
                           {row.kind === "skill" &&
@@ -2275,16 +1802,14 @@ export function AgentView({
                             onClick={() => {
                               if (row.kind === "skill") {
                                 insertComposerText(
-                                  applySlashToken(draft, `@${row.name}`),
+                                  acceptSkillSlashToken(draft, row.name),
                                 );
                                 return;
                               }
                               void send(`/${row.name}`);
                             }}
                           >
-                            <span>
-                              {row.kind === "skill" ? `@${row.name}` : `/${row.name}`}
-                            </span>
+                            <span>/{row.name}</span>
                             <small>
                               {row.kind === "skill"
                                 ? `技能 · ${row.summary}`
@@ -2296,7 +1821,7 @@ export function AgentView({
                     </ul>
                   ) : null}
                   {showMention ? (
-                    <ul className="agent__slash" aria-label="提及">
+                    <ul ref={slashListRef} className="agent__slash" aria-label="提及">
                       {mentionItems.map((item, index) => (
                         <li key={`${item.kind}-${item.name}`}>
                           <button
@@ -2308,10 +1833,7 @@ export function AgentView({
                             }
                           >
                             <span>@{item.name}</span>
-                            <small>
-                              {item.kind === "skill" ? "技能" : "子智能体"} ·{" "}
-                              {item.summary}
-                            </small>
+                            <small>子智能体 · {item.summary}</small>
                           </button>
                         </li>
                       ))}
@@ -2337,134 +1859,193 @@ export function AgentView({
                       if (file) attachImage(file);
                     }}
                   />
-                  <textarea
-                    ref={inputRef}
-                    aria-label="给 Agent 发消息"
-                    placeholder={
-                      busyHere
-                        ? "这条会排在当前回答之后"
-                        : pending
-                          ? "请先处理待确认操作"
-                          : "向工作台提问，使用 / 选择命令或能力"
-                    }
-                    title={
-                      pending
-                        ? "Enter 批准 · Esc 拒绝"
-                        : busyHere
-                          ? "Enter 把这条排到当前回答之后"
-                          : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
-                    }
-                    value={draft}
-                    disabled={!thread}
-                    readOnly={Boolean(pending)}
-                    rows={2}
-                    onPaste={(event) => {
-                      const file = Array.from(event.clipboardData.files).find((item) =>
-                        item.type.startsWith("image/"),
-                      );
-                      if (!file) return;
-                      event.preventDefault();
-                      attachImage(file);
-                    }}
-                    onChange={(event) => {
-                      historyNav.current = null;
-                      const value = event.target.value;
-                      setDraft(value);
-                      if (thread) drafts.current.set(thread.id, value);
-                    }}
-                    onKeyDown={(event) => {
-                      if (pending) {
-                        if (event.key === "Escape") {
+                  <div className="agent__composer-input">
+                    {skillTokens.length > 0 ? (
+                      <div
+                        ref={composerMirrorRef}
+                        className="agent__composer-mirror"
+                        aria-hidden
+                      >
+                        <ComposerSkillText text={draft} tokens={skillTokens} />
+                      </div>
+                    ) : null}
+                    <textarea
+                      ref={inputRef}
+                      className={skillTokens.length > 0 ? "has-skill-token" : undefined}
+                      aria-label="给 Agent 发消息"
+                      placeholder={
+                        busyHere
+                          ? "这条会排在当前回答之后"
+                          : pending
+                            ? "请先处理待确认操作"
+                            : "向工作台提问，使用 / 选择命令或能力"
+                      }
+                      title={
+                        pending
+                          ? "Enter 批准 · Esc 拒绝"
+                          : busyHere
+                            ? "Enter 把这条排到当前回答之后"
+                            : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
+                      }
+                      value={draft}
+                      disabled={!thread}
+                      readOnly={Boolean(pending)}
+                      rows={2}
+                      onPaste={(event) => {
+                        const file = Array.from(event.clipboardData.files).find((item) =>
+                          item.type.startsWith("image/"),
+                        );
+                        if (!file) return;
+                        event.preventDefault();
+                        attachImage(file);
+                      }}
+                      onScroll={(event) => {
+                        const mirror = composerMirrorRef.current;
+                        if (!mirror) return;
+                        mirror.scrollTop = event.currentTarget.scrollTop;
+                        mirror.scrollLeft = event.currentTarget.scrollLeft;
+                      }}
+                      onChange={(event) => {
+                        historyNav.current = null;
+                        const raw = event.target.value;
+                        const value = tidySkillPickMarks(raw, skills);
+                        const caret = event.target.selectionStart ?? value.length;
+                        const removed =
+                          raw.slice(0, caret).length -
+                          tidySkillPickMarks(raw.slice(0, caret), skills).length;
+                        setDraft(value);
+                        if (thread) drafts.current.set(thread.id, value);
+                        if (value !== raw) {
+                          const next = Math.max(0, caret - removed);
+                          requestAnimationFrame(() => {
+                            inputRef.current?.setSelectionRange(next, next);
+                          });
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          (event.key === "Backspace" || event.key === "Delete") &&
+                          !event.altKey &&
+                          !event.ctrlKey &&
+                          !event.metaKey &&
+                          !event.nativeEvent.isComposing
+                        ) {
+                          const field = event.currentTarget;
+                          const collapsed = collapseSkillTokenOnDelete(
+                            draft,
+                            field.selectionStart ?? draft.length,
+                            field.selectionEnd ?? draft.length,
+                            event.key,
+                            skills,
+                          );
+                          if (collapsed) {
+                            event.preventDefault();
+                            historyNav.current = null;
+                            setDraft(collapsed.text);
+                            if (thread) drafts.current.set(thread.id, collapsed.text);
+                            const caret = collapsed.caret;
+                            requestAnimationFrame(() => {
+                              inputRef.current?.setSelectionRange(caret, caret);
+                            });
+                            return;
+                          }
+                        }
+                        if (pending) {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            void decide("denied");
+                            return;
+                          }
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            void decide("approved");
+                            return;
+                          }
+                        }
+                        if (showSlash && event.key === "ArrowDown") {
                           event.preventDefault();
-                          void decide("denied");
+                          setSlashUi((ui) => ({
+                            ...ui,
+                            index: (slashPick + 1) % slashRows.length,
+                          }));
+                          return;
+                        }
+                        if (showSlash && event.key === "ArrowUp") {
+                          event.preventDefault();
+                          setSlashUi((ui) => ({
+                            ...ui,
+                            index: (slashPick - 1 + slashRows.length) % slashRows.length,
+                          }));
+                          return;
+                        }
+                        if (showSlash && event.key === "Tab") {
+                          event.preventDefault();
+                          const row = slashRows[slashPick];
+                          if (!row) return;
+                          insertComposerText(
+                            row.kind === "skill"
+                              ? acceptSkillSlashToken(draft, row.name)
+                              : applySlashToken(draft, `/${row.name}`),
+                          );
+                          return;
+                        }
+                        if (showSlash && event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setSlashUi((ui) => ({ ...ui, dismissed: true }));
+                          return;
+                        }
+                        if (
+                          showMention &&
+                          (event.key === "ArrowDown" || event.key === "ArrowUp")
+                        ) {
+                          event.preventDefault();
+                          const delta = event.key === "ArrowDown" ? 1 : -1;
+                          setSlashUi((ui) => ({
+                            ...ui,
+                            index:
+                              (mentionPick + delta + mentionItems.length) %
+                              mentionItems.length,
+                          }));
+                          return;
+                        }
+                        if (
+                          showMention &&
+                          (event.key === "Tab" || event.key === "Enter")
+                        ) {
+                          event.preventDefault();
+                          const picked = mentionItems[mentionPick];
+                          if (picked)
+                            insertComposerText(applyMention(draft, picked.name));
+                          return;
+                        }
+                        const node = event.currentTarget;
+                        if (event.key === "ArrowUp" && atFirstLine(node)) {
+                          event.preventDefault();
+                          recallHistory(-1);
+                          return;
+                        }
+                        if (
+                          event.key === "ArrowDown" &&
+                          historyNav.current &&
+                          atFirstLine(node)
+                        ) {
+                          event.preventDefault();
+                          recallHistory(1);
                           return;
                         }
                         if (event.key === "Enter" && !event.shiftKey) {
                           event.preventDefault();
-                          void decide("approved");
-                          return;
+                          const picked = showSlash ? slashRows[slashPick] : null;
+                          if (picked?.kind === "skill") {
+                            insertComposerText(acceptSkillSlashToken(draft, picked.name));
+                            return;
+                          }
+                          void send(picked ? `/${picked.name}` : draft);
                         }
-                      }
-                      if (showSlash && event.key === "ArrowDown") {
-                        event.preventDefault();
-                        setSlashUi((ui) => ({
-                          ...ui,
-                          index: (slashPick + 1) % slashRows.length,
-                        }));
-                        return;
-                      }
-                      if (showSlash && event.key === "ArrowUp") {
-                        event.preventDefault();
-                        setSlashUi((ui) => ({
-                          ...ui,
-                          index: (slashPick - 1 + slashRows.length) % slashRows.length,
-                        }));
-                        return;
-                      }
-                      if (showSlash && event.key === "Tab") {
-                        event.preventDefault();
-                        const row = slashRows[slashPick];
-                        if (!row) return;
-                        insertComposerText(
-                          applySlashToken(
-                            draft,
-                            row.kind === "skill" ? `@${row.name}` : `/${row.name}`,
-                          ),
-                        );
-                        return;
-                      }
-                      if (showSlash && event.key === "Escape") {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        setSlashUi((ui) => ({ ...ui, dismissed: true }));
-                        return;
-                      }
-                      if (
-                        showMention &&
-                        (event.key === "ArrowDown" || event.key === "ArrowUp")
-                      ) {
-                        event.preventDefault();
-                        const delta = event.key === "ArrowDown" ? 1 : -1;
-                        setSlashUi((ui) => ({
-                          ...ui,
-                          index:
-                            (mentionPick + delta + mentionItems.length) %
-                            mentionItems.length,
-                        }));
-                        return;
-                      }
-                      if (showMention && (event.key === "Tab" || event.key === "Enter")) {
-                        event.preventDefault();
-                        const picked = mentionItems[mentionPick];
-                        if (picked) insertComposerText(applyMention(draft, picked.name));
-                        return;
-                      }
-                      const node = event.currentTarget;
-                      if (event.key === "ArrowUp" && atFirstLine(node)) {
-                        event.preventDefault();
-                        recallHistory(-1);
-                        return;
-                      }
-                      if (
-                        event.key === "ArrowDown" &&
-                        historyNav.current &&
-                        atFirstLine(node)
-                      ) {
-                        event.preventDefault();
-                        recallHistory(1);
-                        return;
-                      }
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        const picked = showSlash ? slashRows[slashPick] : null;
-                        if (picked?.kind === "skill") {
-                          insertComposerText(applySlashToken(draft, `@${picked.name}`));
-                          return;
-                        }
-                        void send(picked ? `/${picked.name}` : draft);
-                      }
-                    }}
-                  />
+                      }}
+                    />
+                  </div>
                   <div className="agent__composer-bar">
                     <div className="agent__composer-leading">
                       <ComposerPlusMenu
@@ -2499,6 +2080,19 @@ export function AgentView({
                       ) : null}
                     </div>
                     <div className="agent__composer-actions">
+                      {loadedSkills.length > 0 ? (
+                        <span
+                          className="agent__loaded-skills"
+                          title={loadedSkills.map((skill) => `/${skill.name}`).join("、")}
+                        >
+                          技能{" "}
+                          {loadedSkills
+                            .slice(0, 2)
+                            .map((skill) => `/${skill.name}`)
+                            .join(" ")}
+                          {loadedSkills.length > 2 ? ` +${loadedSkills.length - 2}` : ""}
+                        </span>
+                      ) : null}
                       {thread && contextPreview ? (
                         <span
                           className={
@@ -2785,6 +2379,49 @@ function ModeMenu({
   );
 }
 
+function ComposerSkillText({
+  text,
+  tokens,
+}: {
+  text: string;
+  tokens: Array<{ start: number; end: number }>;
+}) {
+  const parts: Array<{ key: string; skill: boolean; value: string }> = [];
+  let cursor = 0;
+  tokens.forEach((token, index) => {
+    if (token.start > cursor) {
+      parts.push({
+        key: `t-${cursor}`,
+        skill: false,
+        value: text.slice(cursor, token.start),
+      });
+    }
+    parts.push({
+      key: `s-${index}`,
+      skill: true,
+      value: text.slice(token.start, token.end),
+    });
+    cursor = token.end;
+  });
+  if (cursor < text.length) {
+    parts.push({ key: `t-${cursor}`, skill: false, value: text.slice(cursor) });
+  }
+  return (
+    <>
+      {parts.map((part) =>
+        part.skill ? (
+          <mark key={part.key} className="agent__skill-token">
+            {part.value}
+          </mark>
+        ) : (
+          <span key={part.key}>{part.value}</span>
+        ),
+      )}
+      {text.endsWith("\n") ? <br /> : null}
+    </>
+  );
+}
+
 function MessageTime({ ms, nowMs }: { ms: number; nowMs: number }) {
   return (
     <time
@@ -2795,6 +2432,25 @@ function MessageTime({ ms, nowMs }: { ms: number; nowMs: number }) {
       {formatAgentBubbleTime(ms, nowMs)}
     </time>
   );
+}
+
+function ReplyElapsed({ text }: { text: string }) {
+  if (!text) return null;
+  return <span className="agent__msg-elapsed">{text}</span>;
+}
+
+function replyElapsed(turns: ConversationBlock[], index: number, endMs: number): string {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const turn = turns[cursor];
+    if (turn?.kind === "user") return formatReplyElapsed(turn.message.createdAt, endMs);
+  }
+  return "";
+}
+
+function thinkingElapsed(messages: AgentMessage[], nowMs: number): string {
+  const start = [...messages].reverse().find((message) => message.role === "user");
+  if (!start) return "";
+  return formatReplyElapsed(start.createdAt, nowMs);
 }
 
 function AgentMarkdown({
@@ -2943,6 +2599,20 @@ function isStatusMessage(message: AgentMessage): boolean {
     .map((line) => line.trim())
     .filter(Boolean);
   return lines.length > 0 && lines.every((line) => /^(正在|准备)/.test(line));
+}
+
+function presentAgentTurn(messages: AgentMessage[], nowMs: number): string {
+  return messages
+    .map((message) => {
+      const text = displayContent(message, nowMs);
+      if (!text) return "";
+      if (message.role !== "tool") return text;
+      const body = text.replace(/^· /gm, "- ");
+      const label = toolResultLabel(message.toolName ?? "");
+      return label ? `**${label}**\n\n${body}` : body;
+    })
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function displayContent(message: AgentMessage, nowMs: number): string {

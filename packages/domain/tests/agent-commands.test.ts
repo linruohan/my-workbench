@@ -28,23 +28,39 @@ describe("slash commands", () => {
     expect(slashSuggestions("今天有什么")).toEqual([]);
   });
 
-  it("lists skills from the slash menu and inserts a mention", () => {
+  it("lists skills from the slash menu and inserts a slash token", () => {
     const skills = [
       { name: "weekly", description: "写周报" },
       { name: "review", description: "代码评审" },
+      { name: "help", description: "不应盖住内置命令" },
     ];
-    expect(slashSkillSuggestions("/", skills).map((item) => item.name)).toEqual([
-      "weekly",
-      "review",
-    ]);
+    expect(slashSkillSuggestions("/", skills, ["help"]).map((item) => item.name)).toEqual(
+      ["weekly", "review"],
+    );
     expect(slashSkillSuggestions("/we", skills).map((item) => item.name)).toEqual([
       "weekly",
     ]);
     expect(slashSkillSuggestions("/周报", skills).map((item) => item.name)).toEqual([
       "weekly",
     ]);
+    expect(
+      slashSkillSuggestions("/re", [
+        { name: "weekly-review", description: "周报复查" },
+        { name: "review", description: "代码评审" },
+      ]).map((item) => item.name),
+    ).toEqual(["review", "weekly-review"]);
     expect(slashSkillSuggestions("/mode 只读", skills)).toEqual([]);
-    expect(applySlashToken("/we", "@weekly")).toBe("@weekly ");
+    expect(applySlashToken("/we", "/weekly")).toBe("/weekly ");
+    expect(resolveSlash("/weekly 写一下", "confirm", [], skills)).toBeNull();
+    expect(resolveSlash("/help", "confirm", [], skills)?.text).toContain("/weekly");
+    expect(resolveSlash("/help weekly", "confirm", [], skills)).toMatchObject({
+      type: "reply",
+      text: expect.stringContaining("写周报"),
+    });
+    const closed = [{ name: "weekly", description: "写周报", enabled: false }];
+    expect(slashSkillSuggestions("/", closed)).toEqual([]);
+    expect(resolveSlash("/weekly", "confirm", [], closed)?.text).toContain("已关闭");
+    expect(resolveSlash("/help", "confirm", [], closed)?.text).not.toContain("/weekly");
   });
 
   it("keeps local commands away from the model", () => {

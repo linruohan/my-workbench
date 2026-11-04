@@ -9,8 +9,16 @@ import {
   formatInvokedSkills,
   formatSkillsForPrompt,
   gateTool,
+  invokedSkillsInText,
+  listEnabledSkillSummaries,
   parseSkillMarkdown,
   removeSkillSourceDir,
+  acceptSkillSlashToken,
+  collapseSkillTokenOnDelete,
+  enabledSkills,
+  setSkillEnabled,
+  skillComposerTokens,
+  stripSkillPickMarks,
   setSkillSourceDirEnabled,
   skillIdFromDirPath,
   toolsForMode,
@@ -37,6 +45,46 @@ describe("skill source dirs", () => {
     expect(dup.reason).toBe("该目录已添加");
 
     const off = setSkillSourceDirEnabled(first.roots, first.added!.id, false);
+    const skill = {
+      id: "skill:weekly",
+      name: "weekly",
+      description: "周报",
+      dirPath: "D:\\skills\\weekly",
+      sourceDirId: first.added!.id,
+      body: "",
+    };
+    const disabled = setSkillEnabled([], skill.id, false);
+    expect(enabledSkills([skill], disabled)).toEqual([]);
+    expect(enabledSkills([skill], setSkillEnabled(disabled, skill.id, true))).toEqual([
+      skill,
+    ]);
+    const closed = { ...skill, enabled: false };
+    expect(listEnabledSkillSummaries([closed])).toEqual([]);
+    expect(invokedSkillsInText([closed], "请用 /weekly")).toEqual([]);
+    expect(
+      invokedSkillsInText([{ ...skill, enabled: true }], "请用 /weekly"),
+    ).toHaveLength(1);
+    const pptx = [{ name: "pptx", description: "幻灯片" }];
+    const picked = acceptSkillSlashToken("", "pptx");
+    expect(skillComposerTokens("/pptx", pptx)).toEqual([]);
+    expect(skillComposerTokens(picked, pptx)).toEqual([{ start: 0, end: 5 }]);
+    expect(stripSkillPickMarks(picked)).toBe("/pptx ");
+    expect(
+      collapseSkillTokenOnDelete(picked, picked.length, picked.length, "Backspace", pptx),
+    ).toBeNull();
+    expect(
+      collapseSkillTokenOnDelete(
+        picked,
+        picked.length - 1,
+        picked.length - 1,
+        "Backspace",
+        pptx,
+      ),
+    ).toEqual({
+      text: "/ ",
+      caret: 1,
+    });
+    expect(collapseSkillTokenOnDelete("/pptx", 5, 5, "Backspace", pptx)).toBeNull();
     expect(off[0]?.enabled).toBe(false);
 
     expect(removeSkillSourceDir(off, first.added!.id)).toEqual([]);
@@ -147,7 +195,7 @@ describe("skills in agent surface", () => {
       },
     ]);
     expect(block).toContain("skill_load");
-    expect(block).toContain("- weekly：周报");
+    expect(block).toContain("- /weekly：周报");
 
     const prompt = buildAgentSystemPrompt({
       todaySummary: "",
@@ -157,7 +205,7 @@ describe("skills in agent surface", () => {
       permissionMode: "confirm",
       skillsPrompt: block,
     });
-    expect(prompt).toContain("- weekly：周报");
+    expect(prompt).toContain("- /weekly：周报");
     expect(
       formatInvokedSkills(
         [
@@ -170,9 +218,23 @@ describe("skills in agent surface", () => {
             body: "先列本周完成项。",
           },
         ],
-        "请用 @weekly 写一下",
+        "请用 /weekly 写一下",
       ),
     ).toContain("先列本周完成项。");
+    const named = [
+      {
+        id: "skill:preview",
+        name: "preview",
+        description: "预览",
+        dirPath: "D:\\skills\\preview",
+        sourceDirId: "1",
+        body: "先看差异。",
+      },
+    ];
+    expect(invokedSkillsInText(named, "请看 /review")).toEqual([]);
+    expect(invokedSkillsInText(named, "请看 /preview").map((item) => item.name)).toEqual([
+      "preview",
+    ]);
 
     expect(gateTool("readonly", "skill_list")).toBe("run");
     expect(gateTool("readonly", "skill_load")).toBe("run");

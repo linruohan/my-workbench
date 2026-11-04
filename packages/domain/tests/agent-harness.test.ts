@@ -7,6 +7,7 @@ import {
   compactMarkerText,
   formatActiveSkills,
   formatSessionContext,
+  formatTodayForPrompt,
   microcompactToolResults,
   expandCommandTemplate,
   forgetAgentMemory,
@@ -106,6 +107,28 @@ describe("agent context", () => {
     expect(named).toContain("工作区：工作台 · D:/codehub/my-workbench");
   });
 
+  it("puts plan, reminder, and estimate on today lines", () => {
+    const nowMs = new Date(2026, 10, 3, 8, 0).getTime();
+    const text = formatTodayForPrompt(
+      [
+        {
+          title: "写周报",
+          dueWithTime: new Date(2026, 10, 3, 9, 0).getTime(),
+          remindAt: new Date(2026, 10, 3, 8, 45).getTime(),
+          timeEstimate: 25 * 60_000,
+          projectTitle: "工作",
+        },
+        {
+          title: "收件",
+          dueDay: "2026-11-02",
+        },
+      ],
+      nowMs,
+    );
+    expect(text).toContain("· 写周报 · 今天 09:00 · 提醒 08:45 · 预计 25 分钟 · 工作");
+    expect(text).toContain("· 收件 · 逾 2026-11-02");
+  });
+
   it("keeps a skill named earlier in the visible transcript", () => {
     const skills = [
       {
@@ -118,7 +141,7 @@ describe("agent context", () => {
       },
     ];
     const text = formatActiveSkills(skills, [
-      { role: "user", content: "用 @weekly" },
+      { role: "user", content: "用 /weekly" },
       { role: "assistant", content: "好" },
       { role: "user", content: "继续" },
     ]);
@@ -183,12 +206,11 @@ describe("agent commands, hooks, plugins, mentions", () => {
     expect(formatMcpForPrompt(servers)).toContain("node srv.js");
   });
 
-  it("suggests an @ skill and inserts it", () => {
-    const suggestions = mentionSuggestions("请看 @we", [
-      { kind: "skill", name: "weekly", summary: "周报" },
+  it("suggests an @ subagent and inserts it", () => {
+    const suggestions = mentionSuggestions("请看 @re", [
       { kind: "subagent", name: "reader", summary: "阅读" },
     ]);
-    expect(suggestions.map((item) => item.name)).toEqual(["weekly"]);
-    expect(applyMention("请看 @we", "weekly")).toBe("请看 @weekly ");
+    expect(suggestions.map((item) => item.name)).toEqual(["reader"]);
+    expect(applyMention("请看 @re", "reader")).toBe("请看 @reader ");
   });
 });

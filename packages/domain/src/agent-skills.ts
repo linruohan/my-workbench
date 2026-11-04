@@ -26,6 +26,8 @@ export type AgentSkill = {
   sourceDirId: string;
   /** Markdown body after frontmatter. */
   body: string;
+  /** False when the user switched this skill off. Omitted means on. */
+  enabled?: boolean;
 };
 
 export type SkillSummary = Pick<AgentSkill, "id" | "name" | "description" | "dirPath">;
@@ -187,8 +189,158 @@ export function dedupeSkillNames(skills: AgentSkill[]): AgentSkill[] {
   });
 }
 
+/** Remember a skill the user switched off. Turning it back on drops the id. */
+export function setSkillEnabled(
+  disabledIds: readonly string[],
+  id: string,
+  enabled: boolean,
+): string[] {
+  const next = disabledIds.filter((item) => item !== id);
+  if (!enabled) next.push(id);
+  return next;
+}
+
+export function skillIsOn(skill: { enabled?: boolean }): boolean {
+  return skill.enabled !== false;
+}
+
+/** Sits after a skill the user picked from the menu. Typing the name does not add it. */
+export const SKILL_PICK_MARK = "\u200b";
+
+export type SkillComposerToken = { start: number; end: number };
+
+/** Insert `/name` as a picked skill, followed by the invisible mark and a space. */
+export function acceptSkillSlashToken(draft: string, name: string): string {
+  const token = `/${name}${SKILL_PICK_MARK}`;
+  if (/\/[^\s/]*$/.test(draft)) return draft.replace(/\/[^\s/]*$/, `${token} `);
+  const gap = draft.length === 0 || /\s$/.test(draft) ? "" : " ";
+  return `${draft}${gap}${token} `;
+}
+
+export function stripSkillPickMarks(text: string): string {
+  return text.split(SKILL_PICK_MARK).join("");
+}
+
+/** Drop marks that no longer sit directly after a complete skill name. */
+export function tidySkillPickMarks(
+  text: string,
+  skills: readonly { name: string; enabled?: boolean }[],
+): string {
+  if (!text.includes(SKILL_PICK_MARK)) return text;
+  const names = new Set(
+    skills
+      .filter((skill) => skillIsOn(skill) && skill.name.trim())
+      .map((skill) => skill.name),
+  );
+  let out = "";
+  for (const ch of text) {
+    if (ch !== SKILL_PICK_MARK) {
+      out += ch;
+      continue;
+    }
+    const kept = [...names].some((name) => {
+      const token = `/${name}`;
+      if (!out.endsWith(token)) return false;
+      const before = out.length - token.length;
+      return before === 0 || /\s/.test(out[before - 1] ?? "");
+    });
+    if (kept) out += ch;
+  }
+  return out;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Picked `/name` tokens. The range includes the slash and excludes the invisible mark. */
+export function skillComposerTokens(
+  text: string,
+  skills: readonly { name: string; enabled?: boolean }[],
+): SkillComposerToken[] {
+  const names = [
+    ...new Set(
+      skills
+        .filter((skill) => skillIsOn(skill) && skill.name.trim())
+        .map((skill) => skill.name),
+    ),
+  ].sort((a, b) => b.length - a.length);
+  if (!names.length || !text) return [];
+  const pattern = new RegExp(
+    `(^|\\s)(/(?:${names.map(escapeRegExp).join("|")}))(?=${SKILL_PICK_MARK})`,
+    "g",
+  );
+  const tokens: SkillComposerToken[] = [];
+  for (const match of text.matchAll(pattern)) {
+    const lead = match[1]?.length ?? 0;
+    const token = match[2] ?? "";
+    const start = (match.index ?? 0) + lead;
+    tokens.push({ start, end: start + token.length });
+  }
+  return tokens;
+}
+
+/**
+ * Backspace or Delete inside a matched skill removes the whole name and leaves `/`.
+ * Returns null when the key does not touch a skill name.
+ */
+export function collapseSkillTokenOnDelete(
+  text: string,
+  selectionStart: number,
+  selectionEnd: number,
+  key: "Backspace" | "Delete",
+  skills: readonly { name: string; enabled?: boolean }[],
+): { text: string; caret: number } | null {
+  const tokens = skillComposerTokens(text, skills);
+  if (!tokens.length) return null;
+  let from = Math.min(selectionStart, selectionEnd);
+  let to = Math.max(selectionStart, selectionEnd);
+  if (from === to) {
+    if (key === "Backspace") {
+      if (from === 0) return null;
+      from -= 1;
+    } else if (to >= text.length) {
+      return null;
+    } else {
+      to += 1;
+    }
+  }
+  const touched = tokens.filter((token) => {
+    const markEnd = text[token.end] === SKILL_PICK_MARK ? token.end + 1 : token.end;
+    return from < markEnd && to > token.start + 1;
+  });
+  if (!touched.length) return null;
+  const skip = new Set<number>();
+  for (let index = from; index < to; index += 1) skip.add(index);
+  for (const token of touched) {
+    skip.delete(token.start);
+    for (let index = token.start + 1; index < token.end; index += 1) skip.add(index);
+    if (text[token.end] === SKILL_PICK_MARK) skip.add(token.end);
+  }
+  let next = "";
+  for (let index = 0; index < text.length; index += 1) {
+    if (!skip.has(index)) next += text[index];
+  }
+  const anchor = touched[0]!;
+  let caret = 0;
+  for (let index = 0; index < anchor.start + 1; index += 1) {
+    if (!skip.has(index)) caret += 1;
+  }
+  return { text: next, caret };
+}
+
+/** Skills that still enter the session. An empty disabled list keeps every skill. */
+export function enabledSkills(
+  skills: readonly AgentSkill[],
+  disabledIds: readonly string[],
+): AgentSkill[] {
+  if (disabledIds.length === 0) return [...skills];
+  const off = new Set(disabledIds);
+  return skills.filter((skill) => !off.has(skill.id));
+}
+
 export function listEnabledSkillSummaries(skills: AgentSkill[]): SkillSummary[] {
-  return skills.map(({ id, name, description, dirPath }) => ({
+  return skills.filter(skillIsOn).map(({ id, name, description, dirPath }) => ({
     id,
     name,
     description,
@@ -209,20 +361,43 @@ export function findSkill(skills: AgentSkill[], query: string): AgentSkill | nul
   );
 }
 
-/** Compact block for the system prompt; empty when no skills. */
-const SKILL_MENTION = /(?:^|\s)@([^\s@]+)/g;
+/** A `/name` token. Skills are invoked with a slash, same as commands. */
+function skillSlashPattern(): RegExp {
+  return /(?:^|\s)\/([^\s/]+)/g;
+}
 
-/** Skills the user named with @ in this message, in first-seen order. */
+/** Exact `/name` match. Partial names stay as ordinary text. */
+export function findSkillBySlashName(
+  skills: readonly AgentSkill[],
+  name: string,
+): AgentSkill | null {
+  const folded = name.trim().toLowerCase();
+  if (!folded) return null;
+  return skills.find((item) => item.name.toLowerCase() === folded) ?? null;
+}
+
+/** Skills the user named with / in this message, in first-seen order. */
 export function invokedSkillsInText(skills: AgentSkill[], text: string): AgentSkill[] {
   const found: AgentSkill[] = [];
   const seen = new Set<string>();
-  for (const match of text.matchAll(SKILL_MENTION)) {
-    const skill = findSkill(skills, match[1] ?? "");
-    if (!skill || seen.has(skill.id)) continue;
+  for (const match of text.matchAll(skillSlashPattern())) {
+    const skill = findSkillBySlashName(skills, match[1] ?? "");
+    if (!skill || !skillIsOn(skill) || seen.has(skill.id)) continue;
     seen.add(skill.id);
     found.push(skill);
   }
   return found;
+}
+
+/** Drop `/name` tokens that name a known skill, leaving the rest of the request. */
+export function omitInvokedSkillTokens(skills: AgentSkill[], text: string): string {
+  return text
+    .replace(skillSlashPattern(), (full, name: string) => {
+      const found = findSkillBySlashName(skills, name);
+      return found && skillIsOn(found) ? " " : full;
+    })
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 type SkillHistoryMessage = {
@@ -241,7 +416,7 @@ export function skillsLoadedInTranscript(
   const found: AgentSkill[] = [];
   const seen = new Set<string>();
   const add = (skill: AgentSkill | null) => {
-    if (!skill || seen.has(skill.id)) return;
+    if (!skill || !skillIsOn(skill) || seen.has(skill.id)) return;
     seen.add(skill.id);
     found.push(skill);
   };
@@ -250,8 +425,8 @@ export function skillsLoadedInTranscript(
       const named = LOADED_SKILL.exec(message.content)?.[1] ?? "";
       add(named ? findSkill(skills, named) : null);
     }
-    for (const match of message.content.matchAll(SKILL_MENTION)) {
-      add(findSkill(skills, match[1] ?? ""));
+    for (const match of message.content.matchAll(skillSlashPattern())) {
+      add(findSkillBySlashName(skills, match[1] ?? ""));
     }
   }
   return found;
@@ -290,11 +465,10 @@ export function formatInvokedSkills(skills: AgentSkill[], text: string): string 
 
 export function formatSkillsForPrompt(skills: SkillSummary[]): string {
   if (skills.length === 0) return "";
-  const lines = skills.map((skill) => `- ${skill.name}：${skill.description}`);
-  return [
-    "已启用技能（需要完整说明时调用 skill_load，参数为技能 name）：",
-    ...lines,
-  ].join("\n");
+  const lines = skills.map((skill) => `- /${skill.name}：${skill.description}`);
+  return ["已启用技能（用 /名称 点名；需要完整说明时调用 skill_load）：", ...lines].join(
+    "\n",
+  );
 }
 
 export function joinSkillFile(dirPath: string, fileName: string): string {
