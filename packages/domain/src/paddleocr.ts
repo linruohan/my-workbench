@@ -60,6 +60,23 @@ export function imageOnlyCaption(name: string): string {
   return `[图片] ${label}`;
 }
 
+/**
+ * Reply when the selected model cannot see the picture.
+ * The recognition itself is the answer; a text model is not asked to read it.
+ */
+export function localOcrTurn(
+  question: string,
+  imageName: string,
+  lines: readonly string[],
+): { user: string; assistant: string } {
+  const caption = imageOnlyCaption(imageName);
+  const asked = question.trim();
+  return {
+    user: asked ? `${asked}\n\n${caption}` : caption,
+    assistant: localOcrReply(lines),
+  };
+}
+
 /** Question plus the local recognition, for a text model that cannot see the picture. */
 export function withLocalOcrContext(question: string, lines: readonly string[]): string {
   const text = lines

@@ -7,6 +7,7 @@ import {
   detInputSize,
   imageOnlyCaption,
   localOcrReply,
+  localOcrTurn,
   missingPaddleOcrFiles,
   modelCanSeeImages,
   PADDLEOCR_FILES,
@@ -40,6 +41,14 @@ describe("paddleocr", () => {
     expect(localOcrReply([" 你好 ", ""])).toBe("你好");
     expect(localOcrReply(["  "])).toBe("没有识别到文字。");
     expect(imageOnlyCaption(" a.png ")).toBe("[图片] a.png");
+    expect(localOcrTurn("识别图片", "shot.png", ["会议纪要", ""])).toEqual({
+      user: "识别图片\n\n[图片] shot.png",
+      assistant: "会议纪要",
+    });
+    expect(localOcrTurn("  ", "a.png", ["  "])).toEqual({
+      user: "[图片] a.png",
+      assistant: "没有识别到文字。",
+    });
     expect(withLocalOcrContext("这是什么", ["发票"])).toContain("发票");
     expect(withLocalOcrContext("这是什么", ["发票"])).toContain("这是什么");
   });

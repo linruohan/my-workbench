@@ -25,11 +25,9 @@ import {
   formatAgentMoment,
   manualCompactPlan,
   normalizeAgentWebUrl,
-  withLocalOcrContext,
   findProvider,
   imageOnlyCaption,
-  isLocalBuiltin,
-  localOcrReply,
+  localOcrTurn,
   mentionQuery,
   mentionSuggestions,
   modelCanSeeImages,
@@ -1035,27 +1033,21 @@ export function AgentView({
       onRefresh();
       return;
     }
-    const local = !found || isLocalBuiltin(found.provider, found.modelId);
-    if (!content || local) {
-      const now = Date.now();
-      store.appendAgentMessage({
-        threadId: thread.id,
-        role: "user",
-        content: content
-          ? `${content}\n\n${imageOnlyCaption(shot.name)}`
-          : imageOnlyCaption(shot.name),
-        nowMs: now,
-      });
-      store.appendAgentMessage({
-        threadId: thread.id,
-        role: "assistant",
-        content: localOcrReply(recognized.lines),
-        nowMs: now,
-      });
-      onRefresh();
-      return;
-    }
-    await sendPrompt(withLocalOcrContext(content, recognized.lines));
+    const turn = localOcrTurn(content, shot.name, recognized.lines);
+    const now = Date.now();
+    store.appendAgentMessage({
+      threadId: thread.id,
+      role: "user",
+      content: turn.user,
+      nowMs: now,
+    });
+    store.appendAgentMessage({
+      threadId: thread.id,
+      role: "assistant",
+      content: turn.assistant,
+      nowMs: now,
+    });
+    onRefresh();
   };
 
   const send = async (text: string) => {
