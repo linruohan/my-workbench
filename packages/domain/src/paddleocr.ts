@@ -9,21 +9,21 @@ export type PaddleOcrFile = {
   minBytes: number;
 };
 
-/** PP-OCRv4 mobile weights. The runtime stays in the app; these files are downloaded. */
+/** PP-OCRv6 small weights. The runtime stays in the app; these files are downloaded. */
 export const PADDLEOCR_FILES: readonly PaddleOcrFile[] = [
   {
-    name: "ch_PP-OCRv4_det_infer.onnx",
-    url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.4.0/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_infer.onnx",
-    minBytes: 4_000_000,
+    name: "PP-OCRv6_det_small.onnx",
+    url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",
+    minBytes: 800_000,
   },
   {
-    name: "ch_PP-OCRv4_rec_infer.onnx",
-    url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.4.0/onnx/PP-OCRv4/rec/ch_PP-OCRv4_rec_infer.onnx",
-    minBytes: 8_000_000,
+    name: "PP-OCRv6_rec_small.onnx",
+    url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+    minBytes: 2_000_000,
   },
   {
-    name: "ppocr_keys_v1.txt",
-    url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.4.0/paddle/PP-OCRv4/rec/ch_PP-OCRv4_rec_infer/ppocr_keys_v1.txt",
+    name: "ppocrv6_dict.txt",
+    url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt",
     minBytes: 10_000,
   },
 ];

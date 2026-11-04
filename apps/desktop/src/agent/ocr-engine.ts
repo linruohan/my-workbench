@@ -54,14 +54,26 @@ async function readModel(name: string): Promise<Uint8Array> {
   throw new Error("识图模型文件无法读取");
 }
 
+async function readFirst(names: readonly string[]): Promise<Uint8Array> {
+  let last: unknown = new Error("识图模型文件无法读取");
+  for (const name of names) {
+    try {
+      return await readModel(name);
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last;
+}
+
 async function loadRuntime() {
   const ort = (await import("onnxruntime-web/wasm")) as OrtModule;
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.wasmPaths = wasmDir();
   const [detBytes, recBytes, keyBytes] = await Promise.all([
-    readModel("ch_PP-OCRv4_det_infer.onnx"),
-    readModel("ch_PP-OCRv4_rec_infer.onnx"),
-    readModel("ppocr_keys_v1.txt"),
+    readFirst(["PP-OCRv6_det_small.onnx", "ch_PP-OCRv4_det_infer.onnx"]),
+    readFirst(["PP-OCRv6_rec_small.onnx", "ch_PP-OCRv4_rec_infer.onnx"]),
+    readFirst(["ppocrv6_dict.txt", "ppocr_keys_v1.txt"]),
   ]);
   const options = { executionProviders: ["wasm"] };
   const [det, rec] = await Promise.all([

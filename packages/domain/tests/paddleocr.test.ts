@@ -23,7 +23,7 @@ describe("paddleocr", () => {
       size: file.name.endsWith(".txt") ? 100 : file.minBytes,
     }));
     const missing = missingPaddleOcrFiles(present);
-    expect(missing.map((file) => file.name)).toEqual(["ppocr_keys_v1.txt"]);
+    expect(missing.map((file) => file.name)).toEqual(["ppocrv6_dict.txt"]);
   });
 
   it("treats only chat and anthropic image models as visual", () => {

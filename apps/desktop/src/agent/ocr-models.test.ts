@@ -27,7 +27,7 @@ describe("ensurePaddleOcr", () => {
       proxy: "",
       invoke: async (_command, args) => {
         const files = args.files as Array<{ name: string }>;
-        expect(files.map((file) => file.name)).toContain("ch_PP-OCRv4_det_infer.onnx");
+        expect(files.map((file) => file.name)).toContain("PP-OCRv6_det_small.onnx");
         return { dir: "D:\\config\\models\\paddleocr", ready: true, error: null };
       },
     });

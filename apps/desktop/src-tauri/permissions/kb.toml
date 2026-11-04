@@ -22,4 +22,6 @@ commands.allow = [
   "web_session_reload",
   "web_session_hide",
   "web_session_close",
+  "ocr_ensure_models",
+  "ocr_read_model",
 ]
