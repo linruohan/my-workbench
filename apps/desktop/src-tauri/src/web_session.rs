@@ -258,6 +258,27 @@ fn place(webview: &tauri::Webview, x: f64, y: f64, width: f64, height: f64) -> R
     webview.show().map_err(|err| err.to_string())
 }
 
+fn eval_fullscreen(webview: &tauri::Webview, on: bool) {
+    let flag = if on { "true" } else { "false" };
+    let _ = webview.eval(format!(
+        "window.__wbSetFullscreen&&window.__wbSetFullscreen({flag})"
+    ));
+}
+
+/// Keep the in-page button matched to the shell. Skips the eval when unchanged.
+fn sync_fullscreen(webview: &tauri::Webview, on: bool) {
+    let mut guard = session_lock();
+    let Some(session) = guard.as_mut() else {
+        return;
+    };
+    if session.fullscreen == on {
+        return;
+    }
+    session.fullscreen = on;
+    drop(guard);
+    eval_fullscreen(webview, on);
+}
+
 /// Show the embedded page over the right-hand pane. Reuses one child webview.
 #[tauri::command]
 pub async fn web_session_show(
@@ -267,10 +288,12 @@ pub async fn web_session_show(
     y: f64,
     width: f64,
     height: f64,
+    fullscreen: Option<bool>,
 ) -> Result<String, String> {
+    let fullscreen = fullscreen.unwrap_or(false);
     #[cfg(not(desktop))]
     {
-        let _ = (app, url, x, y, width, height);
+        let _ = (app, url, x, y, width, height, fullscreen);
         return Err("网页会话只在桌面端内嵌".into());
     }
     #[cfg(desktop)]
@@ -284,6 +307,7 @@ pub async fn web_session_show(
         if let Some(opened) = reused {
             if let Some(webview) = app.get_webview(LABEL) {
                 place(&webview, x, y, width, height)?;
+                sync_fullscreen(&webview, fullscreen);
             }
             return Ok(opened);
         }
@@ -305,7 +329,19 @@ pub async fn web_session_show(
                 *guard = Some(Session {
                     requested,
                     opened: opened.clone(),
+                    fullscreen,
                 });
+                if fullscreen {
+                    eval_fullscreen(&webview, true);
+                }
+            } else if guard.as_mut().is_some_and(|session| {
+                if session.fullscreen == fullscreen {
+                    return false;
+                }
+                session.fullscreen = fullscreen;
+                true
+            }) {
+                eval_fullscreen(&webview, fullscreen);
             }
             return Ok(guard
                 .as_ref()
@@ -322,6 +358,10 @@ pub async fn web_session_show(
                     let _ = notify.emit("web-session-auth", ());
                 } else if title == EDIT_TITLE {
                     let _ = notify.emit("web-session-edit", ());
+                } else if title == FS_ON_TITLE {
+                    let _ = notify.emit("web-session-fullscreen", true);
+                } else if title == FS_OFF_TITLE {
+                    let _ = notify.emit("web-session-fullscreen", false);
                 }
             });
         // add_child waits on the UI thread. This command is async so it is not
@@ -337,7 +377,11 @@ pub async fn web_session_show(
         *guard = Some(Session {
             requested,
             opened: opened.clone(),
+            fullscreen,
         });
+        if fullscreen {
+            eval_fullscreen(&child, true);
+        }
         Ok(opened)
     }
 }

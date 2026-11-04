@@ -73,7 +73,9 @@ import {
   IconFolder,
   IconGitBranch,
   IconHand,
+  IconMaximize,
   IconPencil,
+  IconRestore,
   IconPlus,
   IconRefresh,
   IconStop,
@@ -131,6 +133,20 @@ type Props = {
 
 const EXAMPLES = ["今天有什么", "创建任务 写周报，排到明天并提前15分钟提醒", "晨报"];
 
+async function applyWebFullscreen(on: boolean, frame: HTMLElement | null) {
+  if (isTauriRuntime()) {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setFullscreen(on);
+    return;
+  }
+  if (!frame) return;
+  if (on) {
+    if (document.fullscreenElement !== frame) await frame.requestFullscreen();
+    return;
+  }
+  if (document.fullscreenElement) await document.exitFullscreen();
+}
+
 export function AgentView({
   store,
   threadId,
@@ -179,6 +195,7 @@ export function AgentView({
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
   const [webReload, setWebReload] = useState(0);
+  const [webFullscreen, setWebFullscreen] = useState(false);
   const [webSessionError, setWebSessionError] = useState("");
   const [findQuery, setFindQuery] = useState("");
   const [findIndex, setFindIndex] = useState(0);
@@ -226,10 +243,13 @@ export function AgentView({
   const findOpenRef = useRef(false);
   const webSessionRef = useRef(false);
   const webHostRef = useRef<HTMLDivElement>(null);
+  const webFrameRef = useRef<HTMLDivElement>(null);
   const webCoveredRef = useRef(false);
   const webSyncRef = useRef<() => void>(() => {});
   const webLoginRef = useRef<() => Promise<void>>(async () => {});
   const webEditRef = useRef<() => void>(() => {});
+  const webFullscreenRef = useRef(false);
+  const webFullscreenApplyRef = useRef<(on: boolean) => void>(() => {});
   const webLoginBusy = useRef(false);
   webSessionRef.current = Boolean(thread?.webUrl);
   findOpenRef.current = findOpen;
@@ -434,13 +454,18 @@ export function AgentView({
       const stopEdit = await listen("web-session-edit", () => {
         webEditRef.current();
       });
+      const stopFullscreen = await listen<boolean>("web-session-fullscreen", (event) => {
+        webFullscreenApplyRef.current(Boolean(event.payload));
+      });
       if (!alive) {
         stopAuth();
         stopEdit();
+        stopFullscreen();
       } else {
         unlisten = () => {
           stopAuth();
           stopEdit();
+          stopFullscreen();
         };
       }
     });
@@ -501,6 +526,7 @@ export function AgentView({
         y: rect.top,
         width: rect.width,
         height: rect.height,
+        fullscreen: webFullscreenRef.current,
       }).then(
         (opened) => {
           setWebSessionError("");
@@ -527,6 +553,35 @@ export function AgentView({
       webSyncRef.current = () => {};
     };
   }, [thread?.webUrl]);
+
+  useEffect(() => {
+    if (thread?.webUrl) return;
+    if (!webFullscreenRef.current) return;
+    webFullscreenApplyRef.current(false);
+  }, [thread?.webUrl]);
+
+  useEffect(() => {
+    if (!webFullscreen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (document.querySelector(".modal-backdrop")) return;
+      webFullscreenApplyRef.current(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [webFullscreen]);
+
+  useEffect(() => {
+    if (isTauriRuntime()) return;
+    const onChange = () => {
+      const on = document.fullscreenElement === webFrameRef.current;
+      if (webFullscreenRef.current === on) return;
+      webFullscreenRef.current = on;
+      setWebFullscreen(on);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
 
   useEffect(() => {
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
@@ -1275,12 +1330,29 @@ export function AgentView({
   webEditRef.current = () => {
     void editWebSession();
   };
+  webFullscreenApplyRef.current = (on: boolean) => {
+    const changed = webFullscreenRef.current !== on;
+    webFullscreenRef.current = on;
+    if (changed) setWebFullscreen(on);
+    void applyWebFullscreen(on, webFrameRef.current)
+      .catch(() => undefined)
+      .finally(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => webSyncRef.current());
+        });
+      });
+  };
 
   return (
     <section className="agent" aria-label="Agent">
       <div className="agent__main">
         {thread?.webUrl ? (
-          <div className="agent__web-frame">
+          <div
+            className={
+              webFullscreen ? "agent__web-frame is-fullscreen" : "agent__web-frame"
+            }
+            ref={webFrameRef}
+          >
             <div className="agent__web-tools">
               <button
                 type="button"
@@ -1307,6 +1379,18 @@ export function AgentView({
                 onClick={() => void editWebSession()}
               >
                 <IconPencil size={14} />
+              </button>
+              <button
+                type="button"
+                className={
+                  webFullscreen ? "agent__web-tool is-active" : "agent__web-tool"
+                }
+                title={webFullscreen ? "退出全屏" : "全屏"}
+                aria-label={webFullscreen ? "退出全屏" : "全屏"}
+                aria-pressed={webFullscreen}
+                onClick={() => webFullscreenApplyRef.current(!webFullscreenRef.current)}
+              >
+                {webFullscreen ? <IconRestore size={14} /> : <IconMaximize size={14} />}
               </button>
             </div>
             <div className="agent__web-host" ref={webHostRef}>

@@ -6,6 +6,8 @@ export type WebSessionBounds = {
   y: number;
   width: number;
   height: number;
+  /** When set, the in-page fullscreen button follows this flag. */
+  fullscreen?: boolean;
 };
 
 /** Desktop builds draw the page in its own webview so site cookies can stick. */
@@ -22,7 +24,10 @@ async function invoke(command: string, args?: Record<string, unknown>): Promise<
 export async function webSessionShow(bounds: WebSessionBounds): Promise<string> {
   if (!isTauriRuntime()) return bounds.url;
   const { invoke: call } = await import("@tauri-apps/api/core");
-  return call<string>("web_session_show", { ...bounds });
+  return call<string>("web_session_show", {
+    ...bounds,
+    fullscreen: bounds.fullscreen ?? false,
+  });
 }
 
 export async function webSessionReload(): Promise<void> {

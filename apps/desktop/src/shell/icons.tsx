@@ -272,6 +272,17 @@ export function IconMaximize({ size, className }: IconProps) {
   );
 }
 
+export function IconRestore({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M8 3v5H3" />
+      <path d="M16 3v5h5" />
+      <path d="M8 21v-5H3" />
+      <path d="M16 21v-5h5" />
+    </Svg>
+  );
+}
+
 export function IconClose({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>
