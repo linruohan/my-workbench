@@ -1,7 +1,9 @@
 import {
+  DSH_FREE_PROVIDER_ID,
   applyRuntimeHeaders,
   chatProviderFor,
   isLocalBuiltin,
+  prepareDshFreeChat,
   resolveOcApiKey,
   buildConnectivityProbe,
   connectivityProbeJsonError,
@@ -10,6 +12,7 @@ import {
   takeSseData,
   type ProviderConfig,
 } from "@wb/domain";
+import { dshHostPlatform, dshSessionFor } from "./dsh-session";
 import { describeTransportError, hostFetch } from "./host-fetch";
 import { isTauriRuntime } from "../lib/paths";
 import { completeViaOpenCode } from "./oc-runtime";
@@ -30,6 +33,7 @@ export async function testModelConnectivity(input: {
   timeoutMs?: number;
 }): Promise<ModelConnectivityResult> {
   const { modelId } = input;
+  if (input.provider.id === DSH_FREE_PROVIDER_ID) return testDshFreeModel(input);
   const provider = chatProviderFor(input.provider, modelId);
   if (isLocalBuiltin(input.provider, modelId)) {
     return fail("本机模型不需要测试连接");
@@ -101,6 +105,72 @@ export async function testModelConnectivity(input: {
   return { success: true };
 }
 
+async function testDshFreeModel(input: {
+  provider: ProviderConfig;
+  modelId: string;
+  fetchImpl?: (
+    url: string,
+    init?: RequestInit & { timeoutMs?: number },
+  ) => Promise<Response>;
+  timeoutMs?: number;
+}): Promise<ModelConnectivityResult> {
+  const { modelId } = input;
+  if (!input.provider.enabled) return fail("请先启用供应商");
+  if (!input.provider.models[modelId]) return fail("该模型当前不可用，无法测试连接");
+  const prepared = prepareDshFreeChat({
+    session: dshSessionFor(`probe:${modelId}`),
+    directory: ".",
+    platform: dshHostPlatform(),
+    body: {
+      model: modelId,
+      stream: true,
+      max_tokens: 16,
+      messages: [
+        { role: "system", content: "You are a connectivity probe." },
+        { role: "user", content: "hi" },
+      ],
+    },
+  });
+  const timeoutMs = input.timeoutMs ?? PROBE_TIMEOUT_MS;
+  const fetchImpl = input.fetchImpl ?? hostFetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(prepared.url, {
+      method: "POST",
+      headers: prepared.headers,
+      body: JSON.stringify(prepared.body),
+      signal: AbortSignal.timeout(timeoutMs),
+      timeoutMs,
+    });
+  } catch (error) {
+    return fail(describeTransportError(error, "测试超时"));
+  }
+  if (!response.ok) {
+    const raw = await response.text();
+    return fail(httpFailure(response.status, raw.slice(0, 400)));
+  }
+  const type = response.headers.get("content-type") ?? "";
+  if (type.includes("text/event-stream") && response.body) {
+    return readProbeStream(input.provider.kind, response.body, []);
+  }
+  const raw = await response.text();
+  if (/^\s*(?:data:|event:)/.test(raw)) {
+    return (
+      finishFromEvents(input.provider.kind, takeSseData(`${raw}\n\n`).data, []) ??
+      fail("连接测试在结束前中断")
+    );
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return fail("模型响应不是 JSON");
+  }
+  const message = connectivityProbeJsonError(payload);
+  if (message) return fail(message);
+  return { success: true };
+}
+
 function fail(message: string): ModelConnectivityResult {
   return { success: false, error: { message } };
 }
@@ -137,6 +207,10 @@ function classifyProviderError(text: string): string | null {
     return "认证失败";
   if (/model[_\s-]*not[_\s-]*found|unknown model|模型未找到/.test(haystack))
     return "模型未找到";
+  if (/freeusagelimit|usage limit|free tier.*limit/i.test(text))
+    return "免费额度已用完，稍后再试";
+  if (/freetiererror|free tier can only/i.test(text)) return "免费通道拒绝了这次请求";
+  if (/regionerror|not available in your region/i.test(text)) return "当前网络地区不可用";
   if (/rate[_\s-]*limit|too many requests/.test(haystack)) return "请求频率限制";
   return null;
 }

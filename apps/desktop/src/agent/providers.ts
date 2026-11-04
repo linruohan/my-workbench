@@ -1,8 +1,10 @@
 import {
   BUILTIN_MODEL_REF,
   BUILTIN_PROVIDER_ID,
+  DSH_FREE_PROVIDER_ID,
   builtinProvider,
   createId,
+  dshFreeProvider,
   type ModelCaps,
   type ProviderConfig,
   type ProviderKind,
@@ -90,19 +92,16 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
 
 export function readProviderStore(): ProviderStore {
   const fallback: ProviderStore = {
-    providers: [builtinProvider()],
+    providers: withPinnedProviders([builtinProvider()]),
     defaultModelRef: BUILTIN_MODEL_REF,
   };
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<ProviderStore>;
-    const providers = Array.isArray(parsed.providers)
-      ? parsed.providers.filter(isProvider)
-      : [];
-    if (!providers.some((item) => item.id === BUILTIN_PROVIDER_ID)) {
-      providers.unshift(builtinProvider());
-    }
+    const providers = withPinnedProviders(
+      Array.isArray(parsed.providers) ? parsed.providers.filter(isProvider) : [],
+    );
     const defaultModelRef =
       typeof parsed.defaultModelRef === "string" && parsed.defaultModelRef.includes("/")
         ? parsed.defaultModelRef
@@ -114,10 +113,7 @@ export function readProviderStore(): ProviderStore {
 }
 
 export function writeProviderStore(store: ProviderStore): void {
-  const providers = store.providers.map(stripSecrets);
-  if (!providers.some((item) => item.id === BUILTIN_PROVIDER_ID)) {
-    providers.unshift(builtinProvider());
-  }
+  const providers = withPinnedProviders(store.providers.map(stripSecrets));
   localStorage.setItem(
     KEY,
     JSON.stringify({ providers, defaultModelRef: store.defaultModelRef }),
@@ -173,10 +169,10 @@ export function updateProvider(
     enabled?: boolean;
   },
 ): boolean {
-  if (id === BUILTIN_PROVIDER_ID) return false;
+  if (isPinnedProvider(id)) return false;
   const store = readProviderStore();
   const provider = store.providers.find((item) => item.id === id);
-  if (!provider || provider.kind === "builtin") return false;
+  if (!provider || isPinnedProvider(provider.id)) return false;
   if (patch.name != null) {
     const name = patch.name.trim();
     if (name) provider.name = name;
@@ -190,12 +186,12 @@ export function updateProvider(
 }
 
 export function setProviderEnabled(id: string, enabled: boolean): boolean {
-  if (id === BUILTIN_PROVIDER_ID) return false;
+  if (isPinnedProvider(id)) return false;
   return updateProvider(id, { enabled });
 }
 
 export function removeProvider(id: string): void {
-  if (id === BUILTIN_PROVIDER_ID) return;
+  if (isPinnedProvider(id)) return;
   const store = readProviderStore();
   store.providers = store.providers.filter((item) => item.id !== id);
   if (!store.providers.some((item) => store.defaultModelRef.startsWith(`${item.id}/`))) {
@@ -208,10 +204,10 @@ export function mergeDiscoveredModels(
   providerId: string,
   found: Array<{ id: string; context?: number; output?: number; image?: boolean }>,
 ): { listed: number; added: number } | null {
-  if (providerId === BUILTIN_PROVIDER_ID) return null;
+  if (isPinnedProvider(providerId)) return null;
   const store = readProviderStore();
   const provider = store.providers.find((item) => item.id === providerId);
-  if (!provider || provider.kind === "builtin") return null;
+  if (!provider || isPinnedProvider(provider.id)) return null;
   const models = { ...provider.models };
   const seen = new Set<string>();
   let added = 0;
@@ -253,10 +249,10 @@ export function addModel(
   caps: Partial<ModelCaps> = {},
 ): string | null {
   const id = modelId.trim();
-  if (!id || id.includes("/") || providerId === BUILTIN_PROVIDER_ID) return null;
+  if (!id || id.includes("/") || isPinnedProvider(providerId)) return null;
   const store = readProviderStore();
   const provider = store.providers.find((item) => item.id === providerId);
-  if (!provider || provider.kind === "builtin") return null;
+  if (!provider || isPinnedProvider(provider.id)) return null;
   if (!provider.models[id]) {
     provider.models = {
       ...provider.models,
@@ -272,10 +268,10 @@ export function updateModel(
   modelId: string,
   patch: Partial<ModelCaps>,
 ): boolean {
-  if (providerId === BUILTIN_PROVIDER_ID) return false;
+  if (isPinnedProvider(providerId)) return false;
   const store = readProviderStore();
   const provider = store.providers.find((item) => item.id === providerId);
-  if (!provider || provider.kind === "builtin") return false;
+  if (!provider || isPinnedProvider(provider.id)) return false;
   const current = provider.models[modelId];
   if (!current) return false;
   provider.models = {
@@ -307,10 +303,10 @@ function positiveInt(value: number | undefined, fallback: number): number {
 }
 
 export function removeModel(providerId: string, modelId: string): boolean {
-  if (providerId === BUILTIN_PROVIDER_ID) return false;
+  if (isPinnedProvider(providerId)) return false;
   const store = readProviderStore();
   const provider = store.providers.find((item) => item.id === providerId);
-  if (!provider || provider.kind === "builtin") return false;
+  if (!provider || isPinnedProvider(provider.id)) return false;
   if (!(modelId in provider.models)) return false;
   if (Object.keys(provider.models).length <= 1) return false;
   const next = { ...provider.models };
@@ -343,6 +339,7 @@ export type ModelGroup = {
   id: string;
   name: string;
   kind: ProviderKind;
+  apiKeyRequired: boolean;
   models: Array<{ id: string; ref: string; title?: string }>;
 };
 
@@ -353,6 +350,7 @@ export function modelGroups(store: ProviderStore = readProviderStore()): ModelGr
       id: provider.id,
       name: provider.name,
       kind: provider.kind,
+      apiKeyRequired: provider.apiKeyRequired,
       models: Object.entries(provider.models).map(([id, caps]) => ({
         id,
         ref: `${provider.id}/${id}`,
@@ -383,6 +381,26 @@ export function modelChoices(store: ProviderStore = readProviderStore()): Array<
     }
   }
   return choices;
+}
+
+function isPinnedProvider(id: string): boolean {
+  return id === BUILTIN_PROVIDER_ID || id === DSH_FREE_PROVIDER_ID;
+}
+
+function withPinnedProviders(providers: ProviderConfig[]): ProviderConfig[] {
+  const next = providers.map((provider) =>
+    provider.id === DSH_FREE_PROVIDER_ID
+      ? { ...dshFreeProvider(provider.models), enabled: true }
+      : provider,
+  );
+  if (!next.some((item) => item.id === BUILTIN_PROVIDER_ID)) {
+    next.unshift(builtinProvider());
+  }
+  if (!next.some((item) => item.id === DSH_FREE_PROVIDER_ID)) {
+    const at = next.findIndex((item) => item.id === BUILTIN_PROVIDER_ID);
+    next.splice(at + 1, 0, dshFreeProvider());
+  }
+  return next;
 }
 
 function stripSecrets(provider: ProviderConfig): ProviderConfig {

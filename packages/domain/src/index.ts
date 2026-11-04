@@ -21,6 +21,7 @@ export * from "./agent-plan.js";
 export * from "./agent-model.js";
 export * from "./models-list.js";
 export * from "./oc-free-models.js";
+export * from "./dsh-free.js";
 export * from "./paddleocr.js";
 export * from "./agent-reply.js";
 export * from "./agent-commands.js";

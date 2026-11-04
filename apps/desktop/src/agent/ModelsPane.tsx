@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BUILTIN_PROVIDER_ID, type ProviderConfig, type ProviderKind } from "@wb/domain";
+import {
+  BUILTIN_PROVIDER_ID,
+  DSH_FREE_PROVIDER_ID,
+  type ProviderConfig,
+  type ProviderKind,
+} from "@wb/domain";
 import { ModelFormDialog, type ModelFormValues } from "./ModelFormDialog";
 import { useDialog } from "../shell/Dialogs";
 import { IconMore, IconPencil, IconPlus, IconRefresh, IconUnplug } from "../shell/icons";
@@ -7,6 +12,7 @@ import { testModelConnectivity } from "./connectivity";
 import { fetchAvailableModels } from "./models-list";
 import { recognizeLocalImage } from "./ocr-engine";
 import { ensurePaddleOcr } from "./ocr-models";
+import { refreshDshFreeModels } from "./dsh-models";
 import { refreshOcFreeModels } from "./oc-models";
 import {
   credentialExists,
@@ -39,7 +45,10 @@ export function ModelsPane() {
   void version;
   const providers = store.providers;
   const builtin = providers.find((item) => item.id === BUILTIN_PROVIDER_ID) ?? null;
-  const customs = providers.filter((item) => item.id !== BUILTIN_PROVIDER_ID);
+  const dsh = providers.find((item) => item.id === DSH_FREE_PROVIDER_ID) ?? null;
+  const customs = providers.filter(
+    (item) => item.id !== BUILTIN_PROVIDER_ID && item.id !== DSH_FREE_PROVIDER_ID,
+  );
   const [selectedId, setSelectedId] = useState<string>(
     customs[0]?.id ?? builtin?.id ?? BUILTIN_PROVIDER_ID,
   );
@@ -138,6 +147,16 @@ export function ModelsPane() {
                   setSelectedId(builtin.id);
                 }}
               />
+              {dsh ? (
+                <ProviderNavButton
+                  provider={dsh}
+                  active={selected?.id === dsh.id && !adding}
+                  onSelect={() => {
+                    setAdding(false);
+                    setSelectedId(dsh.id);
+                  }}
+                />
+              ) : null}
             </div>
           ) : null}
           <div className="agent-models__nav-group">
@@ -169,6 +188,12 @@ export function ModelsPane() {
             />
           ) : selected?.kind === "builtin" ? (
             <BuiltinDetail
+              provider={selected}
+              defaultModelRef={store.defaultModelRef}
+              onRefresh={refresh}
+            />
+          ) : selected?.id === DSH_FREE_PROVIDER_ID ? (
+            <DshDetail
               provider={selected}
               defaultModelRef={store.defaultModelRef}
               onRefresh={refresh}
@@ -469,6 +494,170 @@ function BuiltinDetail({
         })}
       </ul>
       <LocalOcrModel />
+    </div>
+  );
+}
+
+function DshDetail({
+  provider,
+  defaultModelRef,
+  onRefresh,
+}: {
+  provider: ProviderConfig;
+  defaultModelRef: string;
+  onRefresh: () => void;
+}) {
+  const [catalog, setCatalog] = useState<null | { pending: boolean; message: string }>(
+    null,
+  );
+  const [probes, setProbes] = useState<
+    Record<string, { pending: boolean; ok: boolean; message: string }>
+  >({});
+  const models = Object.entries(provider.models);
+
+  useEffect(() => {
+    let live = true;
+    void refreshDshFreeModels()
+      .then(() => {
+        if (live) onRefresh();
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+    // Load the catalog once when this provider card opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadCatalog = () => {
+    if (catalog?.pending) return;
+    setCatalog({ pending: true, message: "正在获取 DSH 免费模型" });
+    void refreshDshFreeModels()
+      .then((count) => {
+        onRefresh();
+        setCatalog({ pending: false, message: `获取到 ${count} 个免费模型` });
+      })
+      .catch((error: unknown) => {
+        setCatalog({
+          pending: false,
+          message: error instanceof Error ? error.message : "没有获取到免费模型",
+        });
+      });
+  };
+
+  return (
+    <div className="agent-models__card">
+      <div className="agent-models__card-head">
+        <div>
+          <h2 className="agent-models__card-title">DSH 免费模型</h2>
+          <p className="agent-models__card-desc">
+            直接连接 OpenCode 免费通道，请求格式与 DSH 免费模型一致。不需要 API
+            Key，也不需要本机安装 OpenCode。
+          </p>
+        </div>
+        <span className="settings__pill">免费</span>
+      </div>
+      <div className="agent-models__models-head">
+        <h3>模型列表</h3>
+        <button
+          type="button"
+          className="btn"
+          disabled={catalog?.pending}
+          onClick={loadCatalog}
+        >
+          <IconRefresh size={14} />
+          获取免费模型
+        </button>
+      </div>
+      {catalog ? <p className="agent-models__probe">{catalog.message}</p> : null}
+      {models.length === 0 ? (
+        <p className="agent-models__hint">还没有拉到模型。点击获取免费模型。</p>
+      ) : (
+        <ul className="agent-models__models">
+          {models.map(([modelId, caps]) => {
+            const ref = `${provider.id}/${modelId}`;
+            const isDefault = defaultModelRef === ref;
+            const probe = probes[modelId];
+            return (
+              <li key={modelId} className="agent-models__model">
+                <div className="agent-models__model-main">
+                  <strong>{caps.title || modelId}</strong>
+                  <small>
+                    {modelId}
+                    {caps.inputs?.includes("image") ? " · 可看图" : ""} · 上下文{" "}
+                    {caps.context} · 输出 {caps.output}
+                  </small>
+                  {probe ? (
+                    <small
+                      className={
+                        probe.ok
+                          ? "agent-models__probe is-ok"
+                          : "agent-models__probe is-bad"
+                      }
+                    >
+                      {probe.message}
+                    </small>
+                  ) : null}
+                </div>
+                <div className="agent-models__model-actions">
+                  <button
+                    type="button"
+                    className="agent-models__icon-btn"
+                    aria-label={`测试模型 ${modelId}`}
+                    title="测试模型"
+                    disabled={probe?.pending}
+                    onClick={() => {
+                      setProbes((current) => ({
+                        ...current,
+                        [modelId]: {
+                          pending: true,
+                          ok: false,
+                          message: `正在测试 ${caps.title || modelId}`,
+                        },
+                      }));
+                      void testModelConnectivity({
+                        provider,
+                        modelId,
+                        apiKey: null,
+                      }).then((result) => {
+                        const ok = result.success === true;
+                        setProbes((current) => ({
+                          ...current,
+                          [modelId]: {
+                            pending: false,
+                            ok,
+                            message: ok
+                              ? `${caps.title || modelId} 连接成功`
+                              : `${caps.title || modelId} 连接失败：${
+                                  result.success === false ? result.error.message : ""
+                                }`,
+                          },
+                        }));
+                      });
+                    }}
+                  >
+                    <IconUnplug size={14} />
+                  </button>
+                  {isDefault ? (
+                    <span className="settings__pill">默认</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        setDefaultModel(ref);
+                        onRefresh();
+                      }}
+                    >
+                      设为默认
+                    </button>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

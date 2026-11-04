@@ -1,4 +1,4 @@
-import { builtinProvider, type ProviderConfig } from "@wb/domain";
+import { builtinProvider, dshFreeProvider, type ProviderConfig } from "@wb/domain";
 import { describe, expect, it, vi } from "vitest";
 import { testModelConnectivity } from "./connectivity";
 
@@ -139,5 +139,42 @@ describe("testModelConnectivity", () => {
     });
     expect(result).toEqual({ success: true });
     expect(authorization).toBe("Bearer public");
+  });
+
+  it("sends a DSH free model through the free-lane chat endpoint", async () => {
+    const provider = dshFreeProvider({
+      "deepseek-v4.1-flash-free": {
+        context: 8192,
+        output: 2048,
+        title: "DeepSeek V4.1 Flash",
+      },
+    });
+    let sentUrl = "";
+    let userAgent = "";
+    const result = await testModelConnectivity({
+      provider,
+      modelId: "deepseek-v4.1-flash-free",
+      apiKey: "sk-should-not-be-sent",
+      fetchImpl: (async (url: string, init?: RequestInit) => {
+        sentUrl = url;
+        const headers = init?.headers as Record<string, string>;
+        userAgent = headers["user-agent"] ?? "";
+        expect(headers.authorization).toBe("Bearer public");
+        expect(JSON.stringify(init?.headers)).not.toContain("sk-should-not-be-sent");
+        const body = JSON.parse(String(init?.body)) as {
+          tools?: Array<{ function: { name: string } }>;
+        };
+        expect(body.tools?.map((tool) => tool.function.name)).toEqual(["read", "shell"]);
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "pong" }, finish_reason: "stop" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+    });
+    expect(result).toEqual({ success: true });
+    expect(sentUrl).toBe("https://opencode.ai/inference/v1/chat/completions");
+    expect(userAgent).toBe("opencode/latest/2.0.26/cli");
   });
 });

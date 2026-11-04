@@ -1,9 +1,12 @@
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
+  DSH_FREE_PROVIDER_ID,
   builtinProvider,
   buildAgentSystemPrompt,
   buildModelHttpRequest,
   applyRuntimeHeaders,
+  prepareDshFreeChat,
+  settleDshToolCalls,
   buildOcRunPrompt,
   emptyOpenAiStream,
   chatProviderFor,
@@ -56,6 +59,7 @@ import {
   type AgentToolResult,
   type AgentUiEffect,
 } from "./execute";
+import { dshHostPlatform, dshSessionFor } from "./dsh-session";
 import { hostFetch } from "./host-fetch";
 import { isTauriRuntime } from "../lib/paths";
 import { completeViaOpenCode } from "./oc-runtime";
@@ -459,17 +463,35 @@ async function requestModel(
     toolAllowlist: env.toolAllowlist,
     imageDataUrl: modelCanSeeImages(provider.kind, caps) ? env.imageDataUrl : undefined,
   });
-  const headers = applyRuntimeHeaders(request, apiKey);
+  const dsh = found.provider.id === DSH_FREE_PROVIDER_ID;
   const stream = provider.kind === "openai-chat-completions";
   const body =
     stream && request.body && typeof request.body === "object"
       ? { ...request.body, stream: true }
       : request.body;
+  let url = request.url;
+  let headers = applyRuntimeHeaders(request, dsh ? null : apiKey);
+  let outbound: unknown = body;
+  let aliases = new Map<string, string>();
+  if (dsh && body && typeof body === "object") {
+    const prepared = prepareDshFreeChat({
+      body: body as Record<string, unknown>,
+      session: dshSessionFor(thread.id),
+      directory: env.workspacePath,
+      platform: dshHostPlatform(),
+    });
+    url = prepared.url;
+    headers = prepared.headers;
+    outbound = prepared.body;
+    aliases = prepared.aliases;
+  }
+  const adopt = (plan: AgentTurnPlan): AgentTurnPlan =>
+    dsh ? { ...plan, calls: settleDshToolCalls(plan.calls, aliases) } : plan;
   if (env.signal?.aborted) throw new AgentTurnStopped("");
-  const response = await hostFetch(request.url, {
+  const response = await hostFetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(body),
+    body: JSON.stringify(outbound),
     signal: env.signal,
     timeoutMs: 120_000,
   });
@@ -482,16 +504,22 @@ async function requestModel(
   }
   const type = response.headers.get("content-type") ?? "";
   if (stream && type.includes("text/event-stream") && response.body) {
-    return readOpenAiStream(response.body, secrets, env.onDelta, env.signal);
+    return adopt(await readOpenAiStream(response.body, secrets, env.onDelta, env.signal));
   }
   const raw = await response.text();
+  if (dsh && /^\s*data:/m.test(raw)) {
+    const text = raw.endsWith("\n\n") ? raw : `${raw}\n\n`;
+    const sse = new Response(text).body;
+    if (!sse) throw new Error("模型响应不是 JSON");
+    return adopt(await readOpenAiStream(sse, secrets, env.onDelta, env.signal));
+  }
   let payload: unknown;
   try {
     payload = JSON.parse(raw);
   } catch {
     throw new Error("模型响应不是 JSON");
   }
-  return redactPlan(parseModelResponse(provider.kind, payload), secrets);
+  return adopt(redactPlan(parseModelResponse(provider.kind, payload), secrets));
 }
 
 class AgentTurnStopped extends Error {

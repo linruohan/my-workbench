@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parseModelRef } from "@wb/domain";
 import { credentialExists } from "./credentials";
+import { refreshDshFreeModels } from "./dsh-models";
 import { refreshOcFreeModels } from "./oc-models";
 import { modelGroups } from "./providers";
 
@@ -40,7 +41,8 @@ export function ModelMenu({
     return groups.flatMap((group) => {
       return group.models.map((model) => {
         const catalog = group.kind === "builtin" && model.id !== "local";
-        const missingKey = group.kind !== "builtin" && !credentialExists(group.id);
+        const missingKey =
+          group.kind !== "builtin" && group.apiKeyRequired && !credentialExists(group.id);
         const name = model.title || model.id;
         return {
           ref: model.ref,
@@ -133,9 +135,9 @@ export function ModelMenu({
           const next = !open;
           onOpenChange(next);
           if (next) {
-            void refreshOcFreeModels()
-              .then(() => setVersion((value) => value + 1))
-              .catch(() => undefined);
+            void Promise.allSettled([refreshOcFreeModels(), refreshDshFreeModels()]).then(
+              () => setVersion((value) => value + 1),
+            );
           }
         }}
       >
