@@ -13,7 +13,10 @@ import {
   ReminderUiCooldown,
   selectPlannerTasks,
   dedupeSkillNames,
+  DEFAULT_AGENT_WORKSPACE_TITLE,
   formatHookNotices,
+  normalizeAgentWebUrl,
+  WEB_AGENT_THREAD_TITLE,
   assembleHostTools,
   type HostToolSnapshot,
   hooksForEvent,
@@ -850,6 +853,34 @@ export default function App() {
     newAgentChat({ rootPath });
   };
 
+  const openAgentWebSession = async () => {
+    const raw = await dialog.prompt({
+      title: "打开网页",
+      label: "网址",
+      confirmLabel: "打开",
+    });
+    if (!raw) return;
+    const webUrl = normalizeAgentWebUrl(raw);
+    if (!webUrl) {
+      await dialog.alert({ title: "无法打开", message: "请输入 http 或 https 网址。" });
+      return;
+    }
+    const existing = store
+      .listAgentWorkspaces()
+      .find((item) => item.title === DEFAULT_AGENT_WORKSPACE_TITLE);
+    const workspace =
+      existing ?? store.createAgentWorkspace({ title: DEFAULT_AGENT_WORKSPACE_TITLE });
+    const created = store.createAgentThread({
+      workspaceId: workspace.id,
+      title: WEB_AGENT_THREAD_TITLE,
+      webUrl,
+      modelRef: readProviderStore().defaultModelRef,
+    });
+    setAgentThreadId(created.id);
+    refresh();
+    goNav("agent");
+  };
+
   const applyAgentEffects = (effects: AgentUiEffect[]) => {
     for (const effect of effects) {
       if (effect.type === "navigate") goNav(effect.nav);
@@ -1151,6 +1182,8 @@ export default function App() {
             onOpenAgent={openAgent}
             agentOpen={agentSectionOpen}
             onToggleAgent={toggleAgentSection}
+            onOpenAgentWeb={() => void openAgentWebSession()}
+            onCreateAgentFromFolder={() => void newAgentChatFromFolder()}
             agentRail={
               <AgentWorkspaceRail
                 store={store}

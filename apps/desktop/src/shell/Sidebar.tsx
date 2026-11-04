@@ -4,6 +4,7 @@ import {
   IconChat,
   IconDone,
   IconFolder,
+  IconGlobe,
   IconInbox,
   IconKnowledge,
   IconPlus,
@@ -57,6 +58,8 @@ type Props = {
   /** Agent 分组是否展开。展开时在该项下方显示工作区。 */
   agentOpen: boolean;
   onToggleAgent: () => void;
+  onOpenAgentWeb: () => void;
+  onCreateAgentFromFolder: () => void;
   agentRail: ReactNode;
   displayName: string;
 };
@@ -89,6 +92,8 @@ export function Sidebar({
   onOpenAgent,
   agentOpen,
   onToggleAgent,
+  onOpenAgentWeb,
+  onCreateAgentFromFolder,
   agentRail,
   displayName,
 }: Props) {
@@ -371,6 +376,33 @@ export function Sidebar({
                   {agentOpen ? "▾" : "▸"}
                 </span>
               </button>
+              <div className="sidebar__group-actions">
+                <button
+                  type="button"
+                  className="sidebar__group-add sidebar__group-add--text"
+                  title="打开网页"
+                  aria-label="网页"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenAgentWeb();
+                  }}
+                >
+                  <IconGlobe size={14} />
+                  <span>网页</span>
+                </button>
+                <button
+                  type="button"
+                  className="sidebar__group-add"
+                  title="选择文件夹并新建会话"
+                  aria-label="新建会话"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCreateAgentFromFolder();
+                  }}
+                >
+                  <IconPlus size={14} />
+                </button>
+              </div>
             </div>
             {agentOpen ? (
               <div className="sidebar__group-body sidebar__agent-rail">{agentRail}</div>
