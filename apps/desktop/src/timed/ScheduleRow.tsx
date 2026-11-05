@@ -68,7 +68,7 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
   const timeMenuRef = useRef<HTMLUListElement>(null);
 
   const kindPos = usePortalMenuPos(kindOpen, kindTriggerRef, kindMenuRef, 180);
-  const freqPos = usePortalMenuPos(freqOpen, freqTriggerRef, freqMenuRef, 200);
+  const freqPos = usePortalMenuPos(freqOpen, freqTriggerRef, freqMenuRef, 280);
   const timePos = usePortalMenuPos(timeOpen, timeTriggerRef, timeMenuRef, 260);
 
   const atTime = snapHalfHour(schedule.atTime || DEFAULT_AT_TIME);

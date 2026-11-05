@@ -132,7 +132,7 @@ export function TimedTaskEditor({
           ) : (
             <ul className="list">
               {history.map((h) => (
-                <li key={h.id} className="list__row">
+                <li key={h.id} className="list__row list__row--plain">
                   <div className="list__body">
                     <div className="list__title">{h.title}</div>
                     <div className="list__meta">

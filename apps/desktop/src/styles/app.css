@@ -18,7 +18,9 @@ body,
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -557,6 +559,10 @@ input {
   min-height: var(--wb-row);
   padding: 6px var(--wb-space-1);
   border-bottom: 1px solid var(--wb-line);
+}
+
+.list__row--plain {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .list__title {
@@ -3116,22 +3122,23 @@ input {
 /* Timed tasks */
 .timed__header {
   display: flex;
-  align-items: flex-start;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--wb-space-4);
-  margin-bottom: var(--wb-space-4);
+  gap: var(--wb-space-3);
+  margin-bottom: var(--wb-space-3);
 }
 
 .timed__header h1 {
   margin: 0;
-  font-size: var(--wb-text-xl);
+  font-size: var(--wb-text-lg);
   font-weight: 650;
 }
 
 .timed__lead {
-  margin: var(--wb-space-2) 0 0;
+  margin: var(--wb-space-1) 0 0;
   color: var(--wb-muted);
-  font-size: var(--wb-text-sm);
+  font-size: var(--wb-text-xs);
 }
 
 .timed__header-actions {
@@ -3140,15 +3147,21 @@ input {
 }
 
 .timed-list__header {
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.timed-list__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wb-space-2);
 }
 
 .timed__tabs {
   display: inline-flex;
-  gap: var(--wb-space-1);
-  padding: var(--wb-space-1);
-  border-radius: var(--wb-radius-pill);
-  background: color-mix(in srgb, var(--wb-text) 6%, var(--wb-bg));
+  border: 1px solid var(--wb-line);
+  border-radius: var(--wb-radius-control);
+  overflow: hidden;
   margin-bottom: var(--wb-space-4);
 }
 
@@ -3156,22 +3169,27 @@ input {
   border: 0;
   background: transparent;
   color: var(--wb-muted);
-  border-radius: var(--wb-radius-pill);
-  padding: var(--wb-space-2) var(--wb-space-4);
+  padding: var(--wb-space-2) var(--wb-space-3);
   cursor: pointer;
 }
 
 .timed__tab.is-active {
-  background: var(--wb-panel);
+  background: color-mix(in srgb, var(--wb-text) 8%, transparent);
   color: var(--wb-text);
-  font-weight: 600;
 }
 
 .timed__form {
   display: flex;
   flex-direction: column;
   gap: var(--wb-space-4);
-  max-width: calc(var(--wb-editor-max) - var(--wb-space-5));
+  max-width: var(--wb-editor-max);
+}
+
+.timed .field__control {
+  border-radius: var(--wb-radius-control);
+  background: var(--wb-bg);
+  padding: var(--wb-space-2) var(--wb-space-3);
+  min-height: var(--wb-control-lg);
 }
 
 .field__label {
@@ -3244,9 +3262,11 @@ input {
 }
 
 .schedule-row__summary {
-  color: var(--wb-muted);
-  font-size: var(--wb-text-sm);
+  min-width: 0;
   margin-left: var(--wb-space-1);
+  color: var(--wb-muted);
+  font-size: var(--wb-text-xs);
+  white-space: nowrap;
 }
 
 .schedule-row__delete {
@@ -3274,19 +3294,25 @@ input {
 .pill {
   display: inline-flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--wb-space-2);
+  min-height: var(--wb-control-lg);
   border: 1px solid var(--wb-line);
-  border-radius: var(--wb-radius-pill);
-  background: color-mix(in srgb, var(--wb-text) 5%, var(--wb-bg));
+  border-radius: var(--wb-radius-control);
+  background: var(--wb-bg);
   color: var(--wb-text);
   padding: var(--wb-space-2) var(--wb-space-3);
   cursor: pointer;
   font-size: var(--wb-text-sm);
 }
 
+.pill:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--wb-accent) 40%, var(--wb-line));
+}
+
 .pill:disabled {
-  opacity: 0.75;
-  cursor: default;
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .pill__caret {
@@ -3328,7 +3354,7 @@ input {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--wb-space-0);
-  min-width: 15rem;
+  min-width: var(--wb-popover-sm);
   padding: var(--wb-space-2);
   font-variant-numeric: tabular-nums;
   list-style: none;
@@ -3357,10 +3383,13 @@ input {
 
 .pill-menu__list button:hover,
 .pill-menu__list button.is-active {
-  background: color-mix(in srgb, var(--wb-accent) 16%, transparent);
+  background: color-mix(in srgb, var(--wb-text) 8%, transparent);
 }
 
 .pill-select {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--wb-control-lg);
   border: 1px solid var(--wb-line);
   border-radius: var(--wb-radius-control);
   background: var(--wb-bg);
@@ -3376,13 +3405,15 @@ input {
   display: inline-flex;
   align-items: center;
   width: fit-content;
+  min-height: var(--wb-control-lg);
   gap: var(--wb-space-2);
   border: 1px dashed var(--wb-line);
-  border-radius: var(--wb-radius-panel);
-  background: transparent;
+  border-radius: var(--wb-radius-control);
+  background: var(--wb-bg);
   color: var(--wb-text);
-  padding: var(--wb-space-3) var(--wb-space-4);
+  padding: var(--wb-space-2) var(--wb-space-3);
   cursor: pointer;
+  font-size: var(--wb-text-sm);
 }
 
 .schedule-add:hover {
@@ -3450,7 +3481,7 @@ input {
 
 .schedule-menu--portal button:hover,
 .schedule-menu--portal button:focus-visible {
-  background: color-mix(in srgb, var(--wb-accent) 16%, transparent);
+  background: color-mix(in srgb, var(--wb-text) 8%, transparent);
 }
 
 .btn--ghost {
@@ -3494,6 +3525,9 @@ input {
 }
 
 .timed-list__open {
+  display: block;
+  width: 100%;
+  min-width: 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3751,7 +3785,7 @@ input {
 }
 
 .stepper {
-  width: calc(var(--wb-space-6) + var(--wb-space-5));
+  width: calc(var(--wb-row) * 2);
   border: 1px solid var(--wb-line);
   border-radius: var(--wb-radius-control);
   background: var(--wb-bg);

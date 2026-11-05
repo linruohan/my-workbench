@@ -11,20 +11,21 @@ export function TimedTaskList({ tasks, onCreate, onOpen, onDelete }: Props) {
   return (
     <section className="panel">
       <header className="panel__header timed-list__header">
-        <div>
+        <div className="timed-list__title">
           <h1>定时任务</h1>
-          <p className="timed__lead">按计划自动执行的指令与自动化。</p>
+          <span className="panel__count">{tasks.length}</span>
         </div>
         <button type="button" className="btn btn--primary" onClick={onCreate}>
           新建定时任务
         </button>
       </header>
+      <p className="panel__hint">按计划自动执行的指令与自动化。</p>
       {tasks.length === 0 ? (
         <p className="empty">还没有定时任务。点击右上角新建。</p>
       ) : (
         <ul className="list">
           {tasks.map((t) => (
-            <li key={t.id} className="list__row">
+            <li key={t.id} className="list__row list__row--plain">
               <button
                 type="button"
                 className="list__body timed-list__open"
