@@ -60,19 +60,24 @@ export function imageOnlyCaption(name: string): string {
   return `[图片] ${label}`;
 }
 
+/** User bubble for a picture turn: question and caption only, never OCR text. */
+export function localOcrUserMessage(question: string, imageName: string): string {
+  const caption = imageOnlyCaption(imageName);
+  const asked = question.trim();
+  return asked ? `${asked}\n\n${caption}` : caption;
+}
+
 /**
  * Reply when the selected model cannot see the picture.
- * The recognition itself is the answer; a text model is not asked to read it.
+ * Recognition goes in the assistant reply, not the sent user message.
  */
 export function localOcrTurn(
   question: string,
   imageName: string,
   lines: readonly string[],
 ): { user: string; assistant: string } {
-  const caption = imageOnlyCaption(imageName);
-  const asked = question.trim();
   return {
-    user: asked ? `${asked}\n\n${caption}` : caption,
+    user: localOcrUserMessage(question, imageName),
     assistant: localOcrReply(lines),
   };
 }

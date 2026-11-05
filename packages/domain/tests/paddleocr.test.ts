@@ -8,6 +8,7 @@ import {
   imageOnlyCaption,
   localOcrReply,
   localOcrTurn,
+  localOcrUserMessage,
   missingPaddleOcrFiles,
   modelCanSeeImages,
   PADDLEOCR_FILES,
@@ -41,6 +42,10 @@ describe("paddleocr", () => {
     expect(localOcrReply([" 你好 ", ""])).toBe("你好");
     expect(localOcrReply(["  "])).toBe("没有识别到文字。");
     expect(imageOnlyCaption(" a.png ")).toBe("[图片] a.png");
+    expect(localOcrUserMessage("识别图片", "shot.png")).toBe(
+      "识别图片\n\n[图片] shot.png",
+    );
+    expect(localOcrUserMessage("  ", "a.png")).toBe("[图片] a.png");
     expect(localOcrTurn("识别图片", "shot.png", ["会议纪要", ""])).toEqual({
       user: "识别图片\n\n[图片] shot.png",
       assistant: "会议纪要",
@@ -51,6 +56,9 @@ describe("paddleocr", () => {
     });
     expect(withLocalOcrContext("这是什么", ["发票"])).toContain("发票");
     expect(withLocalOcrContext("这是什么", ["发票"])).toContain("这是什么");
+    expect(withLocalOcrContext("这是什么", ["发票"])).not.toBe(
+      localOcrUserMessage("这是什么", "a.png"),
+    );
   });
 
   it("decodes CTC and drops repeated classes", () => {

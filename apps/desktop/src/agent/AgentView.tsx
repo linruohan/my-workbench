@@ -26,8 +26,8 @@ import {
   manualCompactPlan,
   normalizeAgentWebUrl,
   findProvider,
-  imageOnlyCaption,
-  localOcrTurn,
+  localOcrReply,
+  localOcrUserMessage,
   mentionQuery,
   mentionSuggestions,
   modelCanSeeImages,
@@ -990,7 +990,10 @@ export function AgentView({
     const found = findProvider(readProviderStore().providers, thread.modelRef);
     const provider = found ? chatProviderFor(found.provider, found.modelId) : null;
     const caps = found ? found.provider.models[found.modelId] : undefined;
-    if (provider && modelCanSeeImages(provider.kind, caps)) {
+    // OpenCode's local runner only gets text, so fall back to OCR for those turns.
+    const openCodeLocal =
+      Boolean(found?.provider.kind === "builtin" && caps?.endpoint) && isTauriRuntime();
+    if (provider && modelCanSeeImages(provider.kind, caps) && !openCodeLocal) {
       try {
         const dataUrl = await imageDataUrl(shot.blob);
         if (dataUrl.length > 6_500_000) {
@@ -1003,51 +1006,51 @@ export function AgentView({
       }
       return;
     }
-    const recognized = await recognizeLocalImage(shot.blob);
-    if (recognized.ok === false) {
-      const now = Date.now();
-      store.appendAgentMessage({
-        threadId: thread.id,
-        role: "user",
-        content: content
-          ? `${content}\n\n${imageOnlyCaption(shot.name)}`
-          : imageOnlyCaption(shot.name),
-        nowMs: now,
-      });
-      store.appendAgentMessage({
-        threadId: thread.id,
-        role: "assistant",
-        content: `本地识图失败：${recognized.message}`,
-        nowMs: now,
-      });
-      if (!recognized.message.includes("桌面应用")) {
-        store.pushNotification({
-          kind: "system",
-          title:
-            recognized.message.includes("下载") || recognized.message.includes("配置目录")
-              ? "识图模型下载失败"
-              : "本地识图失败",
-          body: recognized.message,
-        });
-      }
-      onRefresh();
-      return;
-    }
-    const turn = localOcrTurn(content, shot.name, recognized.lines);
-    const now = Date.now();
+    const userText = localOcrUserMessage(content, shot.name);
+    const sentAt = Date.now();
     store.appendAgentMessage({
       threadId: thread.id,
       role: "user",
-      content: turn.user,
-      nowMs: now,
-    });
-    store.appendAgentMessage({
-      threadId: thread.id,
-      role: "assistant",
-      content: turn.assistant,
-      nowMs: now,
+      content: userText,
+      nowMs: sentAt,
     });
     onRefresh();
+    sending.current = true;
+    setBusyThreadId(thread.id);
+    try {
+      const recognized = await recognizeLocalImage(shot.blob);
+      if (recognized.ok === false) {
+        store.appendAgentMessage({
+          threadId: thread.id,
+          role: "assistant",
+          content: `本地识图失败：${recognized.message}`,
+          nowMs: Date.now(),
+        });
+        if (!recognized.message.includes("桌面应用")) {
+          store.pushNotification({
+            kind: "system",
+            title:
+              recognized.message.includes("下载") ||
+              recognized.message.includes("配置目录")
+                ? "识图模型下载失败"
+                : "本地识图失败",
+            body: recognized.message,
+          });
+        }
+        onRefresh();
+        return;
+      }
+      store.appendAgentMessage({
+        threadId: thread.id,
+        role: "assistant",
+        content: localOcrReply(recognized.lines),
+        nowMs: Date.now(),
+      });
+      onRefresh();
+    } finally {
+      sending.current = false;
+      setBusyThreadId(null);
+    }
   };
 
   const send = async (text: string) => {
