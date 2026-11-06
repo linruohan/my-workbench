@@ -6872,6 +6872,13 @@ textarea {
   font-size: var(--wb-text-xs);
 }
 
+.agent__outbox-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: var(--wb-space-1);
+}
+
 .agent__outbox ol {
   list-style: none;
   margin: var(--wb-space-2) 0 0;

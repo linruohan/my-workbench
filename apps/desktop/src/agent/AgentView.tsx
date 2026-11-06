@@ -40,6 +40,7 @@ import {
   slashSuggestions,
   skillsLoadedInTranscript,
   toolActionTitle,
+  toolResultLabel,
   subagentTurnText,
   type AgentCustomCommand,
   type AgentHook,
@@ -213,7 +214,6 @@ export function AgentView({
   const [logScroll, setLogScroll] = useState({ top: 0, height: 480 });
   /** Local transcript bump so tool steps do not re-render the whole shell. */
   const [transcriptRev, setTranscriptRev] = useState(0);
-  void transcriptRev;
   const [queues, setQueues] = useState<Record<string, string[]>>({});
   const [queueRev, setQueueRev] = useState(0);
   const [queuePausedById, setQueuePausedById] = useState<Record<string, boolean>>({});
@@ -221,6 +221,8 @@ export function AgentView({
   const [measureTick, setMeasureTick] = useState(0);
   void measureTick;
   const turnsLenRef = useRef(0);
+  const tipSigRef = useRef("");
+  const wasLiveRef = useRef(false);
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
   const [webReload, setWebReload] = useState(0);
@@ -265,6 +267,9 @@ export function AgentView({
   const queuePaused = Boolean(thread && queuePausedById[thread.id]);
   const queuePausedRef = useRef(queuePaused);
   queuePausedRef.current = queuePaused;
+  const queuePausedByIdRef = useRef(queuePausedById);
+  queuePausedByIdRef.current = queuePausedById;
+  const prevBusyThreadId = useRef(busyThreadId);
   const findOpenRef = useRef(false);
 
   const setQueuePaused = (paused: boolean) => {
@@ -289,6 +294,17 @@ export function AgentView({
   useEffect(() => {
     return () => onBusyThreadChange?.(null);
   }, [onBusyThreadChange]);
+
+  // When the running session finishes, drain this thread's queue if it was only waiting.
+  useEffect(() => {
+    const wasBusy = prevBusyThreadId.current;
+    prevBusyThreadId.current = busyThreadId;
+    if (!wasBusy || busyThreadId || !thread) return;
+    if (queuePausedByIdRef.current[thread.id]) return;
+    if ((queuesRef.current[thread.id] ?? []).length === 0) return;
+    wantDrain.current = thread.id;
+    setQueueRev((rev) => rev + 1);
+  }, [busyThreadId, thread?.id]);
   const webSessionRef = useRef(false);
   const webHostRef = useRef<HTMLDivElement>(null);
   const webFrameRef = useRef<HTMLDivElement>(null);
@@ -315,6 +331,10 @@ export function AgentView({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      // Leaving Agent unmounts this tree — abort so the turn cannot keep writing
+      // while a fresh mount thinks the session is idle.
+      stopRef.current?.abort();
+      wantDrain.current = null;
     };
   }, []);
 
@@ -521,6 +541,21 @@ export function AgentView({
     );
     if (!(node instanceof HTMLElement)) return;
     stickRef.current = false;
+    let parent: HTMLElement | null = node.parentElement;
+    while (parent && parent !== logRef.current) {
+      if (parent instanceof HTMLDetailsElement && !parent.open) {
+        parent.open = true;
+        const turn = parent.closest<HTMLElement>("[data-turn-index]");
+        const raw = turn?.dataset.turnIndex;
+        if (raw != null) {
+          const index = Number(raw);
+          if (Number.isFinite(index) && measuredHeights.current.delete(index)) {
+            setMeasureTick((tick) => tick + 1);
+          }
+        }
+      }
+      parent = parent.parentElement;
+    }
     node.scrollIntoView({ block: "center", inline: "nearest" });
   }, [findOpen, findQuery, findIndex, findTick, messages.length]);
 
@@ -929,6 +964,13 @@ export function AgentView({
         setBusyThreadId(null);
         if (!controller.signal.aborted) {
           setError(caught instanceof Error ? caught.message : "发送失败");
+          if (
+            !queuePausedRef.current &&
+            (queuesRef.current[current.threadId] ?? []).length > 0
+          ) {
+            wantDrain.current = current.threadId;
+            setQueueRev((rev) => rev + 1);
+          }
         }
       }
       // Still true: the prompt was already taken; avoid double-send on retry.
@@ -1190,7 +1232,6 @@ export function AgentView({
         ...current,
         [thread.id]: enqueuePrompt(current[thread.id] ?? [], content),
       }));
-      if (busyElsewhere) setQueuePaused(true);
       setError("");
       return;
     }
@@ -1250,6 +1291,17 @@ export function AgentView({
     setQueueRev((rev) => rev + 1);
   };
 
+  const syncQueuePaused = (id: string, nextQueue: readonly string[]) => {
+    if (nextQueue.length > 0) return;
+    setQueuePausedById((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    if (wantDrain.current === id) wantDrain.current = null;
+  };
+
   const recallQueued = (index: number) => {
     if (!thread) return;
     const recalled = recallQueuedPrompt(queues[thread.id] ?? [], index, draft);
@@ -1259,6 +1311,7 @@ export function AgentView({
     }
     setError("");
     setQueues((current) => ({ ...current, [thread.id]: recalled.queue }));
+    syncQueuePaused(thread.id, recalled.queue);
     placeCaret.current = true;
     setDraft(recalled.draft);
     drafts.current.set(thread.id, recalled.draft);
@@ -1267,10 +1320,29 @@ export function AgentView({
 
   const removeQueued = (index: number) => {
     if (!thread) return;
-    setQueues((current) => ({
-      ...current,
-      [thread.id]: removeQueuedPrompt(current[thread.id] ?? [], index),
-    }));
+    const id = thread.id;
+    const nextQueue = removeQueuedPrompt(queues[id] ?? [], index);
+    setQueues((current) => ({ ...current, [id]: nextQueue }));
+    syncQueuePaused(id, nextQueue);
+  };
+
+  const clearQueued = () => {
+    if (!thread) return;
+    const id = thread.id;
+    setQueues((current) => {
+      if (!(id in current) || (current[id] ?? []).length === 0) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    syncQueuePaused(id, []);
+  };
+
+  const pauseQueue = () => {
+    if (!thread) return;
+    if ((queues[thread.id] ?? []).length === 0) return;
+    wantDrain.current = null;
+    setQueuePaused(true);
   };
 
   const jumpBottom = () => {
@@ -1300,6 +1372,13 @@ export function AgentView({
       if (mounted.current) {
         setBusyThreadId(null);
         setError(caught instanceof Error ? caught.message : "审批失败");
+        if (
+          !queuePausedRef.current &&
+          (queuesRef.current[current.threadId] ?? []).length > 0
+        ) {
+          wantDrain.current = current.threadId;
+          setQueueRev((rev) => rev + 1);
+        }
       }
     } finally {
       sending.current = false;
@@ -1389,9 +1468,19 @@ export function AgentView({
   );
   const findNeedle = findOpen ? findQuery : "";
   if (turnsLenRef.current !== turns.length) {
+    const prevLen = turnsLenRef.current;
     turnsLenRef.current = turns.length;
-    if (measuredHeights.current.size > 0) {
+    // Shrink/edit shifts indices; appends keep earlier measured rows.
+    if (turns.length < prevLen && measuredHeights.current.size > 0) {
       measuredHeights.current.clear();
+      setMeasureTick((tick) => tick + 1);
+    }
+  }
+  const tipSig = `${messages.length}:${messages.at(-1)?.id ?? ""}:${messages.at(-1)?.content.length ?? 0}:${transcriptRev}`;
+  if (tipSigRef.current !== tipSig) {
+    tipSigRef.current = tipSig;
+    const tip = turns.length - 1;
+    if (tip >= 0 && measuredHeights.current.delete(tip)) {
       setMeasureTick((tick) => tick + 1);
     }
   }
@@ -1419,6 +1508,24 @@ export function AgentView({
   const logRange = virtualizeLog
     ? agentLogVisibleRange(logMetrics, logScroll.top, logScroll.height)
     : { start: 0, end: turns.length };
+  useEffect(() => {
+    if (live) {
+      wasLiveRef.current = true;
+      return;
+    }
+    if (!wasLiveRef.current) return;
+    wasLiveRef.current = false;
+    if (!stickRef.current) return;
+    const node = logRef.current;
+    if (!node) return;
+    const pin = () => {
+      if (!stickRef.current || !logRef.current) return;
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    };
+    pin();
+    const raf = window.requestAnimationFrame(pin);
+    return () => window.cancelAnimationFrame(raf);
+  }, [live, virtualizeLog, logMetrics.total]);
   useEffect(() => {
     if (!virtualizeLog) return;
     const root = logRef.current;
@@ -1963,6 +2070,11 @@ export function AgentView({
                                     aria-label={
                                       piece.summary || piece.label || "工具结果"
                                     }
+                                    onToggle={() => {
+                                      if (measuredHeights.current.delete(index)) {
+                                        setMeasureTick((tick) => tick + 1);
+                                      }
+                                    }}
                                   >
                                     <summary className="agent__tool-summary">
                                       <span className="agent__tool-label">
@@ -2120,20 +2232,42 @@ export function AgentView({
                   <div className="agent__outbox-head">
                     <span>
                       {queuePaused && !busyHere
-                        ? `已停止，排队 ${queuedPrompts.length} 未发送`
-                        : busyElsewhere
-                          ? `排队 ${queuedPrompts.length}（等另一个会话结束）`
-                          : `排队 ${queuedPrompts.length}`}
+                        ? `已暂停，排队 ${queuedPrompts.length} 未发送`
+                        : queuePaused && busyHere
+                          ? `排队 ${queuedPrompts.length}（已暂停后续）`
+                          : busyElsewhere
+                            ? `排队 ${queuedPrompts.length}（等另一个会话结束）`
+                            : `排队 ${queuedPrompts.length}`}
                     </span>
-                    {!busyHere && !pending && !busyElsewhere ? (
+                    <div className="agent__outbox-actions">
+                      {busyHere && !queuePaused ? (
+                        <button
+                          type="button"
+                          className="btn"
+                          title="当前回答结束后不再自动发送排队"
+                          onClick={pauseQueue}
+                        >
+                          暂停后续
+                        </button>
+                      ) : null}
+                      {!busyHere && !pending && !busyElsewhere ? (
+                        <button
+                          type="button"
+                          className={queuePaused ? "primary" : "btn"}
+                          onClick={releaseQueue}
+                        >
+                          继续发送
+                        </button>
+                      ) : null}
                       <button
                         type="button"
-                        className={queuePaused ? "primary" : "btn"}
-                        onClick={releaseQueue}
+                        className="btn"
+                        aria-label="清空排队"
+                        onClick={clearQueued}
                       >
-                        继续发送
+                        清空
                       </button>
-                    ) : null}
+                    </div>
                   </div>
                   <ol>
                     {queuedPrompts.map((item, index) => (
@@ -2945,6 +3079,13 @@ function replyElapsed(turns: ConversationBlock[], index: number, endMs: number):
 
 function ThinkingStatus({ messages }: { messages: AgentMessage[] }) {
   const start = [...messages].reverse().find((message) => message.role === "user");
+  const last = messages[messages.length - 1];
+  const toolLabel =
+    last?.role === "tool"
+      ? toolResultLabel(last.toolName ?? "") || "工具"
+      : last?.role === "assistant" && last.toolCallsJson
+        ? "工具"
+        : "";
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const tick = () => setNowMs(Date.now());
@@ -2955,7 +3096,7 @@ function ThinkingStatus({ messages }: { messages: AgentMessage[] }) {
   const elapsed = start ? formatReplyElapsed(start.createdAt, nowMs) : "";
   return (
     <p className="agent__thinking" aria-live="polite">
-      正在思考…
+      {toolLabel ? `正在使用${toolLabel}…` : "正在思考…"}
       {elapsed ? <span className="agent__msg-time"> {elapsed}</span> : null}
     </p>
   );
