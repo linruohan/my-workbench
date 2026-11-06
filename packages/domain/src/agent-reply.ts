@@ -317,6 +317,30 @@ export function describeToolArgs(args: Record<string, unknown>, nowMs: number): 
   return lines.join("\n");
 }
 
+/**
+ * Approval card lines with old → new when a before snapshot is available.
+ * Unchanged fields are omitted. Falls back to describeToolArgs without a before map.
+ */
+export function describeToolArgDiff(
+  args: Record<string, unknown>,
+  before: Record<string, unknown> | null | undefined,
+  nowMs: number,
+): string {
+  if (!before) return describeToolArgs(args, nowMs);
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (ARG_SKIP.has(key) || value == null || value === "") continue;
+    const next = presentArg(key, value, nowMs);
+    if (!next) continue;
+    const prevRaw = before[key];
+    const prev = prevRaw == null || prevRaw === "" ? "" : presentArg(key, prevRaw, nowMs);
+    if (prev && prev === next) continue;
+    const label = ARG_LABEL[key] ?? key;
+    lines.push(prev ? `${label}：${prev} → ${next}` : `${label}：${next}`);
+  }
+  return lines.join("\n");
+}
+
 function presentArg(key: string, value: unknown, nowMs: number): string {
   if (key === "dueWithTime" || key === "deadlineWithTime") {
     return typeof value === "number" ? formatAgentMoment(value, nowMs) : "";
@@ -363,6 +387,16 @@ export function toolResultLabel(name: string): string {
   if (name.startsWith("settings_") || name.startsWith("session_")) return "设置";
   if (name === "ui_open") return "打开";
   return "";
+}
+
+/** One-line peek used when a tool result is collapsed. */
+export function toolResultPreview(text: string, max = 80): string {
+  const line = text
+    .split(/\r?\n/)
+    .map((part) => part.trim().replace(/^[-·•]\s*/, ""))
+    .find(Boolean);
+  if (!line) return "";
+  return line.length > max ? `${line.slice(0, max)}…` : line;
 }
 
 /** Turn a tool payload into text a person can read. Raw JSON stays out of the transcript. */

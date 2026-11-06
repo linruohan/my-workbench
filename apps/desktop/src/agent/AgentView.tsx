@@ -20,8 +20,7 @@ import {
   formatMemoriesForPrompt,
   formatReplyElapsed,
   formatSubagentList,
-  describeToolArgs,
-  describeToolResult,
+  describeToolArgDiff,
   formatAgentMoment,
   manualCompactPlan,
   normalizeAgentWebUrl,
@@ -40,7 +39,7 @@ import {
   slashSkillSuggestions,
   slashSuggestions,
   skillsLoadedInTranscript,
-  toolResultLabel,
+  toolActionTitle,
   subagentTurnText,
   type AgentCustomCommand,
   type AgentHook,
@@ -53,6 +52,13 @@ import {
   type McpServer,
   type SlashAction,
 } from "@wb/domain";
+import {
+  AGENT_LOG_VIRTUAL_MIN,
+  agentLogVisibleRange,
+  buildHeightMetrics,
+  estimateAgentTurnHeight,
+} from "./agent-log-virtual";
+import { agentTurnPieces } from "./agent-turn-pieces";
 import { readCredential } from "./credentials";
 import { runHostTool } from "./host-tools";
 import type { AgentUiEffect } from "./execute";
@@ -127,8 +133,14 @@ type Props = {
   /** Top-level new session: caller opens the folder picker first. */
   onCreateFromFolder: () => void;
   onOpenModels: () => void;
+  /** Open Settings → 技能. */
+  onOpenSkills?: () => void;
   onEffects: (effects: AgentUiEffect[]) => void;
   onRefresh: () => void;
+  /** Persist the store without re-rendering the whole shell (used on tool steps). */
+  onPersist?: () => void;
+  /** Tell the shell which session is currently answering. */
+  onBusyThreadChange?: (threadId: string | null) => void;
   /** Lets the sidebar workspace rail drop this view's queued prompts. */
   forgetThreadRef?: { current: (id: string) => void };
 };
@@ -170,8 +182,11 @@ export function AgentView({
   onCreateThread,
   onCreateFromFolder,
   onOpenModels,
+  onOpenSkills,
   onEffects,
   onRefresh,
+  onPersist,
+  onBusyThreadChange,
   forgetThreadRef,
 }: Props) {
   const dialog = useDialog();
@@ -192,9 +207,20 @@ export function AgentView({
     blob: Blob;
   } | null>(null);
   const [live, setLive] = useState("");
+  const liveBuf = useRef("");
+  const liveRaf = useRef<number | null>(null);
   const [busyThreadId, setBusyThreadId] = useState<string | null>(null);
+  const [logScroll, setLogScroll] = useState({ top: 0, height: 480 });
+  /** Local transcript bump so tool steps do not re-render the whole shell. */
+  const [transcriptRev, setTranscriptRev] = useState(0);
+  void transcriptRev;
   const [queues, setQueues] = useState<Record<string, string[]>>({});
   const [queueRev, setQueueRev] = useState(0);
+  const [queuePausedById, setQueuePausedById] = useState<Record<string, boolean>>({});
+  const measuredHeights = useRef<Map<number, number>>(new Map());
+  const [measureTick, setMeasureTick] = useState(0);
+  void measureTick;
+  const turnsLenRef = useRef(0);
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
   const [webReload, setWebReload] = useState(0);
@@ -231,20 +257,38 @@ export function AgentView({
   const draining = useRef(false);
   const sendPromptRef = useRef<(content: string) => Promise<boolean>>(async () => false);
   const [copied, setCopied] = useState<string | null>(null);
-  const [clock, setClock] = useState(() => Date.now());
   const [slashUi, setSlashUi] = useState({ draft: "", dismissed: false, index: 0 });
   const mounted = useRef(true);
   const sending = useRef(false);
   const busyHere = Boolean(thread && busyThreadId === thread.id);
+  const busyElsewhere = Boolean(busyThreadId && thread && busyThreadId !== thread.id);
+  const queuePaused = Boolean(thread && queuePausedById[thread.id]);
+  const queuePausedRef = useRef(queuePaused);
+  queuePausedRef.current = queuePaused;
+  const findOpenRef = useRef(false);
+
+  const setQueuePaused = (paused: boolean) => {
+    if (!thread) return;
+    const id = thread.id;
+    setQueuePausedById((current) => {
+      if (!paused) {
+        if (!(id in current)) return current;
+        const next = { ...current };
+        delete next[id];
+        return next;
+      }
+      if (current[id]) return current;
+      return { ...current, [id]: true };
+    });
+  };
 
   useEffect(() => {
-    if (!busyHere) return;
-    const tick = () => setClock(Date.now());
-    tick();
-    const timer = window.setInterval(tick, 1000);
-    return () => window.clearInterval(timer);
-  }, [busyHere]);
-  const findOpenRef = useRef(false);
+    onBusyThreadChange?.(busyThreadId);
+  }, [busyThreadId, onBusyThreadChange]);
+
+  useEffect(() => {
+    return () => onBusyThreadChange?.(null);
+  }, [onBusyThreadChange]);
   const webSessionRef = useRef(false);
   const webHostRef = useRef<HTMLDivElement>(null);
   const webFrameRef = useRef<HTMLDivElement>(null);
@@ -334,8 +378,36 @@ export function AgentView({
 
   useEffect(() => {
     const node = logRef.current;
+    if (!node) return;
+    const sync = () => {
+      setLogScroll((current) => {
+        const next = { top: node.scrollTop, height: node.clientHeight };
+        if (current.top === next.top && current.height === next.height) return current;
+        return next;
+      });
+    };
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [thread?.id, thread?.webUrl]);
+
+  useEffect(() => {
+    const node = logRef.current;
     if (node && stickRef.current) node.scrollTop = node.scrollHeight;
-  }, [messages.length, live, pending?.id]);
+  }, [messages.length, pending?.id]);
+
+  useEffect(() => {
+    if (!live || !stickRef.current) return;
+    const node = logRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [live]);
+
+  useEffect(() => {
+    return () => {
+      if (liveRaf.current != null) window.cancelAnimationFrame(liveRaf.current);
+    };
+  }, []);
 
   if ((thread?.id ?? "") !== draftThreadId) {
     setDraftThreadId(thread?.id ?? "");
@@ -343,8 +415,15 @@ export function AgentView({
     setPicker(null);
     setRenaming(false);
     setThreadMenuOpen(false);
+    liveBuf.current = "";
+    if (liveRaf.current != null) {
+      window.cancelAnimationFrame(liveRaf.current);
+      liveRaf.current = null;
+    }
     setLive("");
     setError("");
+    measuredHeights.current.clear();
+    setMeasureTick((tick) => tick + 1);
     stickRef.current = true;
     setPinned(true);
     setFindOpen(false);
@@ -614,6 +693,10 @@ export function AgentView({
 
   useEffect(() => {
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
+    if (queuePausedRef.current) {
+      wantDrain.current = null;
+      return;
+    }
     if (wantDrain.current !== thread.id) return;
     const next = (queuesRef.current[thread.id] ?? [])[0];
     if (!next) {
@@ -635,7 +718,7 @@ export function AgentView({
         [threadId]: [next, ...(current[threadId] ?? [])],
       }));
     });
-  }, [busyThreadId, pending, thread?.id, queueRev]);
+  }, [busyThreadId, pending, thread?.id, queueRev, queuePaused]);
 
   const env = (): AgentTurnEnv | null => {
     if (!thread) return null;
@@ -662,9 +745,19 @@ export function AgentView({
         workspaces.find((item) => item.id === thread.workspaceId)?.rootPath,
       gitBranch,
       focus,
-      onStep: onRefresh,
+      onStep: () => {
+        onPersist?.();
+        if (mounted.current) setTranscriptRev((rev) => rev + 1);
+      },
       onDelta: (text) => {
-        if (mounted.current && viewingThreadId.current === thread.id) setLive(text);
+        if (!mounted.current || viewingThreadId.current !== thread.id) return;
+        liveBuf.current = text;
+        if (liveRaf.current != null) return;
+        liveRaf.current = window.requestAnimationFrame(() => {
+          liveRaf.current = null;
+          if (!mounted.current || viewingThreadId.current !== thread.id) return;
+          setLive(liveBuf.current);
+        });
       },
     };
   };
@@ -686,6 +779,11 @@ export function AgentView({
   const finish = (effects: AgentUiEffect[]) => {
     refocus.current = true;
     if (mounted.current) {
+      liveBuf.current = "";
+      if (liveRaf.current != null) {
+        window.cancelAnimationFrame(liveRaf.current);
+        liveRaf.current = null;
+      }
       setLive("");
       setBusyThreadId(null);
     }
@@ -718,7 +816,7 @@ export function AgentView({
     onRefresh();
     const current = env();
     if (!current) return;
-    if (isRemoteModel(thread.modelRef)) setBusyThreadId(thread.id);
+    setBusyThreadId(thread.id);
     void resumeAgentQueue({ ...current, onDelta: undefined }).then(
       (result) => finish(result.effects),
       (caught: unknown) => {
@@ -801,7 +899,7 @@ export function AgentView({
     setError("");
     const controller = new AbortController();
     stopRef.current = controller;
-    if (isRemoteModel(thread?.modelRef)) setBusyThreadId(current.threadId);
+    setBusyThreadId(current.threadId);
     try {
       const result = await startAgentTurn(
         {
@@ -819,6 +917,7 @@ export function AgentView({
       finish(result.effects);
       if (
         !controller.signal.aborted &&
+        !queuePausedRef.current &&
         (queuesRef.current[current.threadId] ?? []).length > 0
       ) {
         wantDrain.current = current.threadId;
@@ -832,6 +931,7 @@ export function AgentView({
           setError(caught instanceof Error ? caught.message : "发送失败");
         }
       }
+      // Still true: the prompt was already taken; avoid double-send on retry.
       return true;
     } finally {
       if (stopRef.current === controller) stopRef.current = null;
@@ -843,6 +943,10 @@ export function AgentView({
 
   const stop = () => {
     stopRef.current?.abort();
+    wantDrain.current = null;
+    if (thread && (queuesRef.current[thread.id] ?? []).length > 0) {
+      setQueuePaused(true);
+    }
   };
 
   const copyReply = async (id: string, text: string) => {
@@ -1057,10 +1161,6 @@ export function AgentView({
     const content = stripSkillPickMarks(text).trim();
     const shot = pendingImage;
     if ((!content && !shot) || !thread) return;
-    if (busyThreadId && busyThreadId !== thread.id) {
-      setError("另一个会话还在回答");
-      return;
-    }
     const action = content
       ? resolveSlash(content, thread.permissionMode, commands, skills)
       : null;
@@ -1068,13 +1168,21 @@ export function AgentView({
       setError("命令不能和图片一起发送");
       return;
     }
-    if (busyHere) {
+    if (busyHere || busyElsewhere) {
       if (shot) {
-        setError("请等当前回答结束后再发送图片");
+        setError(
+          busyElsewhere
+            ? "另一个会话还在回答，请稍后再发图片"
+            : "请等当前回答结束后再发送图片",
+        );
         return;
       }
       if (action) {
-        setError("请等当前回答结束后再使用命令");
+        setError(
+          busyElsewhere
+            ? "另一个会话还在回答，请稍后再用命令"
+            : "请等当前回答结束后再使用命令",
+        );
         return;
       }
       takeDraft(content);
@@ -1082,6 +1190,8 @@ export function AgentView({
         ...current,
         [thread.id]: enqueuePrompt(current[thread.id] ?? [], content),
       }));
+      if (busyElsewhere) setQueuePaused(true);
+      setError("");
       return;
     }
     if (sending.current) return;
@@ -1135,6 +1245,7 @@ export function AgentView({
   const releaseQueue = () => {
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
     if ((queues[thread.id] ?? []).length === 0) return;
+    setQueuePaused(false);
     wantDrain.current = thread.id;
     setQueueRev((rev) => rev + 1);
   };
@@ -1173,12 +1284,15 @@ export function AgentView({
     const current = env();
     if (!current || sending.current || busyThreadId) return;
     sending.current = true;
-    if (isRemoteModel(thread?.modelRef)) setBusyThreadId(current.threadId);
+    setBusyThreadId(current.threadId);
     setError("");
     try {
       const result = await settleAgentApproval(current, decision);
       finish(result.effects);
-      if ((queuesRef.current[current.threadId] ?? []).length > 0) {
+      if (
+        !queuePausedRef.current &&
+        (queuesRef.current[current.threadId] ?? []).length > 0
+      ) {
         wantDrain.current = current.threadId;
         setQueueRev((rev) => rev + 1);
       }
@@ -1211,6 +1325,12 @@ export function AgentView({
 
   const forgetThreadLocal = (id: string) => {
     setQueues((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setQueuePausedById((current) => {
       if (!(id in current)) return current;
       const next = { ...current };
       delete next[id];
@@ -1262,12 +1382,67 @@ export function AgentView({
       list.scrollTop = bottom - list.clientHeight;
     }
   }, [slashPick, mentionPick, showSlash, showMention]);
-  const nowMs = busyHere ? clock : Date.now();
+  const nowMs = Date.now();
   const turns = conversationBlocks(messages, Boolean(pending));
   const turnPieces = turns.map((turn) =>
     turn.kind === "agent" ? agentTurnPieces(turn.messages, nowMs) : null,
   );
   const findNeedle = findOpen ? findQuery : "";
+  if (turnsLenRef.current !== turns.length) {
+    turnsLenRef.current = turns.length;
+    if (measuredHeights.current.size > 0) {
+      measuredHeights.current.clear();
+      setMeasureTick((tick) => tick + 1);
+    }
+  }
+  const turnHeights = turns.map((turn, index) => {
+    const measured = measuredHeights.current.get(index);
+    if (measured != null && measured > 0) return measured;
+    if (turn.kind === "marker") return estimateAgentTurnHeight("marker", 1);
+    if (turn.kind === "user") {
+      return estimateAgentTurnHeight(
+        "user",
+        Math.max(1, turn.message.content.split(/\r?\n/).length),
+      );
+    }
+    const pieces = turnPieces[index] ?? [];
+    if (!pieces.length) return 0;
+    const toolCount = pieces.filter((piece) => piece.kind === "tool").length;
+    const proseLines = pieces
+      .filter((piece) => piece.kind === "prose")
+      .reduce((sum, piece) => sum + Math.max(1, piece.text.split(/\r?\n/).length), 0);
+    return estimateAgentTurnHeight("agent", 0, toolCount, proseLines);
+  });
+  const logMetrics = buildHeightMetrics(turnHeights);
+  const virtualizeLog =
+    !findNeedle.trim() && turns.length >= AGENT_LOG_VIRTUAL_MIN && !live;
+  const logRange = virtualizeLog
+    ? agentLogVisibleRange(logMetrics, logScroll.top, logScroll.height)
+    : { start: 0, end: turns.length };
+  useEffect(() => {
+    if (!virtualizeLog) return;
+    const root = logRef.current;
+    if (!root) return;
+    const observer = new ResizeObserver((entries) => {
+      let changed = false;
+      for (const entry of entries) {
+        const raw = (entry.target as HTMLElement).dataset.turnIndex;
+        if (raw == null) continue;
+        const index = Number(raw);
+        if (!Number.isFinite(index)) continue;
+        const height = Math.ceil(entry.contentRect.height);
+        if (height <= 0) continue;
+        if (measuredHeights.current.get(index) === height) continue;
+        measuredHeights.current.set(index, height);
+        changed = true;
+      }
+      if (changed) setMeasureTick((tick) => tick + 1);
+    });
+    root.querySelectorAll<HTMLElement>("[data-turn-index]").forEach((node) => {
+      observer.observe(node);
+    });
+    return () => observer.disconnect();
+  }, [virtualizeLog, logRange.start, logRange.end, turns.length, messages.length]);
   let findCursor = 0;
   const pieceBases: number[][] = [];
   const findBases = turns.map((turn, index) => {
@@ -1325,7 +1500,16 @@ export function AgentView({
       skills,
     ),
   );
-  const argLines = pending ? describeToolArgs(parseArgs(pending.argsJson), nowMs) : "";
+  const pendingArgs = pending ? parseArgs(pending.argsJson) : null;
+  const argLines =
+    pending && pendingArgs
+      ? describeToolArgDiff(
+          pendingArgs,
+          approvalBeforeSnapshot(store, pending.toolName, pendingArgs),
+          nowMs,
+        )
+      : "";
+  const approvalTitle = pending ? toolActionTitle(pending.toolName) : "";
   const activeWorkspace = thread
     ? (store.getAgentWorkspace(thread.workspaceId) ??
       workspaces.find((item) => item.id === thread.workspaceId) ??
@@ -1607,16 +1791,28 @@ export function AgentView({
               <div
                 className="agent__log"
                 ref={logRef}
-                aria-live="polite"
                 onScroll={(event) => {
                   const node = event.currentTarget;
                   const next =
                     node.scrollHeight - node.scrollTop - node.clientHeight < 48;
                   stickRef.current = next;
                   setPinned((current) => (current === next ? current : next));
+                  setLogScroll((current) => {
+                    const top = node.scrollTop;
+                    const height = node.clientHeight;
+                    if (current.top === top && current.height === height) return current;
+                    return { top, height };
+                  });
                 }}
               >
-                <div className="agent__log-body">
+                <div
+                  className="agent__log-body"
+                  style={
+                    virtualizeLog
+                      ? { minHeight: Math.max(logMetrics.total, logScroll.height) }
+                      : undefined
+                  }
+                >
                   {!thread ? (
                     <div className="agent__empty">
                       <p className="agent__greeting">选一个文件夹开始对话</p>
@@ -1650,36 +1846,27 @@ export function AgentView({
                       </div>
                     </div>
                   ) : (
-                    turns.map((turn, index) => {
-                      const findBase = findBases[index] ?? 0;
-                      if (turn.kind === "marker") {
-                        return (
-                          <p
-                            key={turn.message.id}
-                            className="agent__marker"
-                            role="status"
-                          >
-                            {findNeedle.trim() ? (
-                              <HighlightedPlain
-                                text={turn.message.content}
-                                query={findNeedle}
-                                indexBase={findBase}
-                                active={activeHit}
-                              />
-                            ) : (
-                              turn.message.content
-                            )}
-                          </p>
-                        );
-                      }
-                      if (turn.kind === "user") {
-                        return (
-                          <article
-                            key={turn.message.id}
-                            className="agent__msg agent__msg--user"
-                            aria-label="你"
-                          >
-                            <div className="agent__bubble">
+                    <>
+                      {virtualizeLog ? (
+                        <div
+                          aria-hidden="true"
+                          style={{
+                            height: logMetrics.offsets[logRange.start] ?? 0,
+                            flex: "none",
+                          }}
+                        />
+                      ) : null}
+                      {turns.slice(logRange.start, logRange.end).map((turn, offset) => {
+                        const index = logRange.start + offset;
+                        const findBase = findBases[index] ?? 0;
+                        if (turn.kind === "marker") {
+                          return (
+                            <p
+                              key={turn.message.id}
+                              className="agent__marker"
+                              role="status"
+                              data-turn-index={index}
+                            >
                               {findNeedle.trim() ? (
                                 <HighlightedPlain
                                   text={turn.message.content}
@@ -1690,123 +1877,159 @@ export function AgentView({
                               ) : (
                                 turn.message.content
                               )}
-                            </div>
-                            <div className="agent__msg-actions">
-                              <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
-                              <button
-                                type="button"
-                                className="agent__copy"
-                                onClick={() =>
-                                  void copyReply(turn.message.id, turn.message.content)
-                                }
-                              >
-                                {copied === turn.message.id ? "已复制" : "复制"}
-                              </button>
-                              {editPlan?.userMessageId === turn.message.id ? (
+                            </p>
+                          );
+                        }
+                        if (turn.kind === "user") {
+                          return (
+                            <article
+                              key={turn.message.id}
+                              className="agent__msg agent__msg--user"
+                              aria-label="你"
+                              data-turn-index={index}
+                            >
+                              <div className="agent__bubble">
+                                {findNeedle.trim() ? (
+                                  <HighlightedPlain
+                                    text={turn.message.content}
+                                    query={findNeedle}
+                                    indexBase={findBase}
+                                    active={activeHit}
+                                  />
+                                ) : (
+                                  turn.message.content
+                                )}
+                              </div>
+                              <div className="agent__msg-actions">
+                                <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
                                 <button
                                   type="button"
                                   className="agent__copy"
-                                  onClick={editLast}
+                                  onClick={() =>
+                                    void copyReply(turn.message.id, turn.message.content)
+                                  }
                                 >
-                                  编辑
+                                  {copied === turn.message.id ? "已复制" : "复制"}
+                                </button>
+                                {editPlan?.userMessageId === turn.message.id ? (
+                                  <button
+                                    type="button"
+                                    className="agent__copy"
+                                    onClick={editLast}
+                                  >
+                                    编辑
+                                  </button>
+                                ) : null}
+                              </div>
+                            </article>
+                          );
+                        }
+                        const pieces = turnPieces[index] ?? [];
+                        if (!pieces.length) return null;
+                        const id = turn.messages[0]!.id;
+                        const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
+                        const bases = pieceBases[index] ?? [];
+                        const copyText = pieces
+                          .map((piece) =>
+                            piece.kind === "tool"
+                              ? `${piece.summary || piece.label}\n${piece.text}`
+                              : piece.text,
+                          )
+                          .join("\n\n");
+                        return (
+                          <article
+                            key={id}
+                            className="agent__msg agent__msg--assistant"
+                            aria-label="Agent"
+                            data-turn-index={index}
+                          >
+                            <div className="agent__reply">
+                              {pieces.map((piece, pieceIndex) => {
+                                const body = (
+                                  <AgentMarkdown
+                                    text={piece.text}
+                                    query={findNeedle}
+                                    indexBase={bases[pieceIndex] ?? findBase}
+                                    active={activeHit}
+                                  />
+                                );
+                                if (piece.kind !== "tool") {
+                                  return <div key={piece.id}>{body}</div>;
+                                }
+                                return (
+                                  <details
+                                    key={piece.id}
+                                    className="agent__tool"
+                                    aria-label={
+                                      piece.summary || piece.label || "工具结果"
+                                    }
+                                  >
+                                    <summary className="agent__tool-summary">
+                                      <span className="agent__tool-label">
+                                        {piece.label || "工具"}
+                                      </span>
+                                      {piece.summary ? (
+                                        <span className="agent__tool-preview">
+                                          {piece.summary}
+                                        </span>
+                                      ) : null}
+                                    </summary>
+                                    <div className="agent__tool-body">{body}</div>
+                                  </details>
+                                );
+                              })}
+                            </div>
+                            <div className="agent__msg-actions">
+                              <span className="agent__msg-meta">
+                                <MessageTime ms={stamp} nowMs={nowMs} />
+                                <ReplyElapsed text={replyElapsed(turns, index, stamp)} />
+                              </span>
+                              <button
+                                type="button"
+                                className="agent__copy"
+                                onClick={() => void copyReply(id, copyText)}
+                              >
+                                {copied === id ? "已复制" : "复制"}
+                              </button>
+                              {retryPlan && id === lastAgentId ? (
+                                <button
+                                  type="button"
+                                  className="agent__copy"
+                                  onClick={retryLast}
+                                >
+                                  重试
                                 </button>
                               ) : null}
                             </div>
                           </article>
                         );
-                      }
-                      const pieces = turnPieces[index] ?? [];
-                      if (!pieces.length) return null;
-                      const id = turn.messages[0]!.id;
-                      const stamp = turn.messages[turn.messages.length - 1]!.createdAt;
-                      const bases = pieceBases[index] ?? [];
-                      const copyText = pieces
-                        .map((piece) =>
-                          piece.kind === "tool" && piece.label
-                            ? `${piece.label}\n${piece.text}`
-                            : piece.text,
-                        )
-                        .join("\n\n");
-                      return (
-                        <article
-                          key={id}
-                          className="agent__msg agent__msg--assistant"
-                          aria-label="Agent"
-                        >
-                          <div className="agent__reply">
-                            {pieces.map((piece, pieceIndex) => {
-                              const body = (
-                                <AgentMarkdown
-                                  text={piece.text}
-                                  query={findNeedle}
-                                  indexBase={bases[pieceIndex] ?? findBase}
-                                  active={activeHit}
-                                />
-                              );
-                              if (piece.kind !== "tool") {
-                                return <div key={piece.id}>{body}</div>;
-                              }
-                              return (
-                                <section
-                                  key={piece.id}
-                                  className="agent__tool"
-                                  aria-label={piece.label || "工具结果"}
-                                >
-                                  {piece.label ? (
-                                    <span className="agent__tool-label">
-                                      {piece.label}
-                                    </span>
-                                  ) : null}
-                                  {body}
-                                </section>
-                              );
-                            })}
-                          </div>
-                          <div className="agent__msg-actions">
-                            <span className="agent__msg-meta">
-                              <MessageTime ms={stamp} nowMs={nowMs} />
-                              <ReplyElapsed text={replyElapsed(turns, index, stamp)} />
-                            </span>
-                            <button
-                              type="button"
-                              className="agent__copy"
-                              onClick={() => void copyReply(id, copyText)}
-                            >
-                              {copied === id ? "已复制" : "复制"}
-                            </button>
-                            {retryPlan && id === lastAgentId ? (
-                              <button
-                                type="button"
-                                className="agent__copy"
-                                onClick={retryLast}
-                              >
-                                重试
-                              </button>
-                            ) : null}
-                          </div>
-                        </article>
-                      );
-                    })
+                      })}
+                      {virtualizeLog ? (
+                        <div
+                          aria-hidden="true"
+                          style={{
+                            height: Math.max(
+                              0,
+                              logMetrics.total -
+                                ((logMetrics.offsets[logRange.end] as
+                                  number | undefined) ?? logMetrics.total),
+                            ),
+                            flex: "none",
+                          }}
+                        />
+                      ) : null}
+                    </>
                   )}
                   {live ? (
                     <article
                       className="agent__msg agent__msg--assistant"
                       aria-label="Agent"
+                      aria-live="polite"
                     >
-                      <AgentMarkdown text={live} />
+                      <pre className="agent__live">{live}</pre>
                     </article>
                   ) : null}
-                  {busyHere && !live ? (
-                    <p className="agent__thinking" aria-live="polite">
-                      正在思考…
-                      {thinkingElapsed(messages, nowMs) ? (
-                        <span className="agent__msg-time">
-                          {" "}
-                          {thinkingElapsed(messages, nowMs)}
-                        </span>
-                      ) : null}
-                    </p>
-                  ) : null}
+                  {busyHere && !live ? <ThinkingStatus messages={messages} /> : null}
                 </div>
               </div>
               {thread && messages.length > 0 && !pinned ? (
@@ -1824,14 +2047,18 @@ export function AgentView({
             <div className="agent__dock">
               {pending ? (
                 <div className="agent__approval" role="region" aria-label="待确认操作">
-                  <div>
-                    <strong>需要确认</strong>
-                    <p>{relativizeScheduleText(pending.summary, nowMs)}</p>
-                    {queued > 1 ? <p>后面还有 {queued - 1} 步。</p> : null}
+                  <div className="agent__approval-head">
+                    <strong>{approvalTitle || "需要确认"}</strong>
+                    <p className="agent__approval-summary">
+                      {relativizeScheduleText(pending.summary, nowMs)}
+                    </p>
+                    {queued > 1 ? (
+                      <p className="agent__approval-queue">后面还有 {queued - 1} 步。</p>
+                    ) : null}
                   </div>
                   {argLines ? (
                     <details className="agent__approval-more">
-                      <summary>详情</summary>
+                      <summary>{argLines.includes(" → ") ? "变更" : "参数"}</summary>
                       <p className="agent__approval-detail">{argLines}</p>
                     </details>
                   ) : null}
@@ -1841,6 +2068,13 @@ export function AgentView({
                       type="button"
                       className="primary"
                       disabled={Boolean(busyThreadId)}
+                      title={
+                        busyElsewhere
+                          ? "另一个会话还在回答，结束后再审批"
+                          : busyHere
+                            ? "当前正在回答"
+                            : undefined
+                      }
                       onClick={() => void decide("approved")}
                     >
                       批准
@@ -1849,23 +2083,54 @@ export function AgentView({
                       type="button"
                       className="btn"
                       disabled={Boolean(busyThreadId)}
+                      title={
+                        busyElsewhere
+                          ? "另一个会话还在回答，结束后再审批"
+                          : busyHere
+                            ? "当前正在回答"
+                            : undefined
+                      }
                       onClick={() => void decide("denied")}
                     >
                       拒绝
                     </button>
-                    <span className="agent__approval-hint">Enter 批准 · Esc 拒绝</span>
+                    <span className="agent__approval-hint">
+                      {busyElsewhere ? "另一个会话结束后可审批" : "Enter 批准 · Esc 拒绝"}
+                    </span>
                   </div>
                 </div>
               ) : null}
 
-              {error ? <p className="agent__error">{error}</p> : null}
+              {error ? (
+                <div className="agent__error" role="alert">
+                  <span>{error}</span>
+                  <button
+                    type="button"
+                    className="agent__error-dismiss"
+                    aria-label="关闭错误提示"
+                    onClick={() => setError("")}
+                  >
+                    关闭
+                  </button>
+                </div>
+              ) : null}
 
               {queuedPrompts.length > 0 ? (
                 <div className="agent__outbox" aria-label="排队消息">
                   <div className="agent__outbox-head">
-                    <span>排队 {queuedPrompts.length}</span>
-                    {!busyHere && !pending ? (
-                      <button type="button" className="btn" onClick={releaseQueue}>
+                    <span>
+                      {queuePaused && !busyHere
+                        ? `已停止，排队 ${queuedPrompts.length} 未发送`
+                        : busyElsewhere
+                          ? `排队 ${queuedPrompts.length}（等另一个会话结束）`
+                          : `排队 ${queuedPrompts.length}`}
+                    </span>
+                    {!busyHere && !pending && !busyElsewhere ? (
+                      <button
+                        type="button"
+                        className={queuePaused ? "primary" : "btn"}
+                        onClick={releaseQueue}
+                      >
                         继续发送
                       </button>
                     ) : null}
@@ -2073,15 +2338,19 @@ export function AgentView({
                       placeholder={
                         busyHere
                           ? "这条会排在当前回答之后"
-                          : pending
-                            ? "请先处理待确认操作"
-                            : "向工作台提问，使用 / 选择命令或能力"
+                          : busyElsewhere
+                            ? "另一个会话还在回答，这条会先排队"
+                            : pending
+                              ? "请先处理待确认操作"
+                              : "向工作台提问，使用 / 选择命令或能力"
                       }
                       title={
                         pending
-                          ? "Enter 批准 · Esc 拒绝"
-                          : busyHere
-                            ? "Enter 把这条排到当前回答之后"
+                          ? busyElsewhere
+                            ? "另一个会话结束后可审批"
+                            : "Enter 批准 · Esc 拒绝"
+                          : busyHere || busyElsewhere
+                            ? "Enter 把这条加入排队"
                             : "Enter 发送，Shift+Enter 换行，↑ 召回上一条"
                       }
                       value={draft}
@@ -2278,9 +2547,14 @@ export function AgentView({
                     </div>
                     <div className="agent__composer-actions">
                       {loadedSkills.length > 0 ? (
-                        <span
+                        <button
+                          type="button"
                           className="agent__loaded-skills"
-                          title={loadedSkills.map((skill) => `/${skill.name}`).join("、")}
+                          title={`本会话已引用：${loadedSkills
+                            .map((skill) => `/${skill.name}`)
+                            .join("、")}。点击打开设置 · 技能。`}
+                          aria-label="打开设置中的技能"
+                          onClick={() => onOpenSkills?.()}
                         >
                           技能{" "}
                           {loadedSkills
@@ -2288,7 +2562,7 @@ export function AgentView({
                             .map((skill) => `/${skill.name}`)
                             .join(" ")}
                           {loadedSkills.length > 2 ? ` +${loadedSkills.length - 2}` : ""}
-                        </span>
+                        </button>
                       ) : null}
                       {thread && contextPreview ? (
                         <span
@@ -2313,6 +2587,17 @@ export function AgentView({
                           </span>
                           上下文 {formatContextTokens(contextPreview.used)}/
                           {formatContextTokens(contextPreview.budget)}
+                          {contextRatio >= 0.85 ? (
+                            <button
+                              type="button"
+                              className="agent__context-compact"
+                              disabled={busyHere || Boolean(pending)}
+                              title="压缩更早的对话"
+                              onClick={() => runSlash({ type: "compact" }, "/compact")}
+                            >
+                              压缩
+                            </button>
+                          ) : null}
                         </span>
                       ) : null}
                       <ModelMenu
@@ -2348,6 +2633,20 @@ export function AgentView({
                             <IconStop size={14} />
                           </button>
                         </>
+                      ) : busyElsewhere ? (
+                        <button
+                          type="button"
+                          className="agent__queue-btn"
+                          disabled={
+                            !thread ||
+                            Boolean(pending) ||
+                            (!draft.trim() && !pendingImage) ||
+                            slashDraft
+                          }
+                          onClick={() => void send(draft)}
+                        >
+                          排队
+                        </button>
                       ) : (
                         <button
                           type="submit"
@@ -2644,10 +2943,22 @@ function replyElapsed(turns: ConversationBlock[], index: number, endMs: number):
   return "";
 }
 
-function thinkingElapsed(messages: AgentMessage[], nowMs: number): string {
+function ThinkingStatus({ messages }: { messages: AgentMessage[] }) {
   const start = [...messages].reverse().find((message) => message.role === "user");
-  if (!start) return "";
-  return formatReplyElapsed(start.createdAt, nowMs);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const tick = () => setNowMs(Date.now());
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const elapsed = start ? formatReplyElapsed(start.createdAt, nowMs) : "";
+  return (
+    <p className="agent__thinking" aria-live="polite">
+      正在思考…
+      {elapsed ? <span className="agent__msg-time"> {elapsed}</span> : null}
+    </p>
+  );
 }
 
 function AgentMarkdown({
@@ -2746,6 +3057,74 @@ function parseArgs(json: string): Record<string, unknown> {
   return {};
 }
 
+/** Current task / note fields for approval diffs. Matching ids stay out of the card. */
+function approvalBeforeSnapshot(
+  store: MemoryWorkbenchRepository,
+  toolName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (
+    toolName.startsWith("task_") &&
+    toolName !== "task_create" &&
+    toolName !== "task_add_subtask" &&
+    toolName !== "task_list" &&
+    toolName !== "task_list_today" &&
+    toolName !== "task_get"
+  ) {
+    const task = resolveTaskSnapshot(store, args);
+    if (!task) return null;
+    return {
+      title: task.title,
+      notes: task.notes,
+      dueDay: task.dueDay,
+      dueWithTime: task.dueWithTime,
+      deadlineDay: task.deadlineDay,
+      deadlineWithTime: task.deadlineWithTime,
+      remindOption: task.remindAt == null ? "none" : undefined,
+      timeEstimateMinutes:
+        task.timeEstimate > 0 ? Math.round(task.timeEstimate / 60_000) : undefined,
+    };
+  }
+  if (toolName === "note_update" || toolName === "note_delete") {
+    const note = resolveNoteSnapshot(store, args);
+    if (!note) return null;
+    return { title: note.title, bodyMd: note.bodyMd };
+  }
+  return null;
+}
+
+function resolveTaskSnapshot(
+  store: MemoryWorkbenchRepository,
+  args: Record<string, unknown>,
+) {
+  const id = typeof args.taskId === "string" ? args.taskId.trim() : "";
+  if (id) return store.getTask(id);
+  const title = typeof args.title === "string" ? args.title.trim() : "";
+  if (!title) return null;
+  const tasks = store.listTasks();
+  return (
+    tasks.find((task) => task.title === title) ??
+    tasks.find((task) => task.title.includes(title)) ??
+    null
+  );
+}
+
+function resolveNoteSnapshot(
+  store: MemoryWorkbenchRepository,
+  args: Record<string, unknown>,
+) {
+  const id = typeof args.noteId === "string" ? args.noteId.trim() : "";
+  if (id) return store.getNote(id);
+  const title = typeof args.title === "string" ? args.title.trim() : "";
+  if (!title) return null;
+  const notes = store.listNotes();
+  return (
+    notes.find((note) => note.title === title) ??
+    notes.find((note) => note.title.includes(title)) ??
+    null
+  );
+}
+
 function queueLength(json: string | null): number {
   if (!json) return 0;
   try {
@@ -2798,54 +3177,6 @@ function isStatusMessage(message: AgentMessage): boolean {
   return lines.length > 0 && lines.every((line) => /^(正在|准备)/.test(line));
 }
 
-type AgentTurnPiece = {
-  id: string;
-  kind: "prose" | "tool";
-  label: string;
-  text: string;
-};
-
-function agentTurnPieces(messages: AgentMessage[], nowMs: number): AgentTurnPiece[] {
-  const pieces: AgentTurnPiece[] = [];
-  for (const message of messages) {
-    const text = displayContent(message, nowMs);
-    if (!text) continue;
-    if (message.role === "tool") {
-      pieces.push({
-        id: message.id,
-        kind: "tool",
-        label: toolResultLabel(message.toolName ?? ""),
-        text: text.replace(/^· /gm, "- "),
-      });
-      continue;
-    }
-    const last = pieces[pieces.length - 1];
-    if (last?.kind === "prose") last.text = `${last.text}\n\n${text}`;
-    else pieces.push({ id: message.id, kind: "prose", label: "", text });
-  }
-  return pieces;
-}
-
-function displayContent(message: AgentMessage, nowMs: number): string {
-  let text = message.content;
-  if (message.role === "tool") {
-    const splitAt = text.indexOf("\n");
-    if (splitAt >= 0) {
-      const summary = text.slice(0, splitAt);
-      const rest = text.slice(splitAt + 1).trim();
-      if (rest.startsWith("{")) {
-        try {
-          text = describeToolResult(message.toolName ?? "", JSON.parse(rest), summary);
-        } catch {
-          text = message.content;
-        }
-      }
-    }
-  }
-  if (message.role === "user") return text;
-  return relativizeScheduleText(text, nowMs);
-}
-
 function formatContextTokens(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens < 1000)
     return String(Math.max(0, Math.round(tokens)));
@@ -2865,11 +3196,4 @@ function modelRefLabel(ref: string): string {
   if (group.kind === "builtin")
     return `${group.name} · ${model?.title || parsed.modelId}`;
   return `${group.name} · ${model?.title || parsed.modelId}`;
-}
-
-function isRemoteModel(modelRef: string | undefined): boolean {
-  if (!modelRef) return false;
-  if (!modelRef.startsWith("builtin:")) return true;
-  const found = findProvider(readProviderStore().providers, modelRef);
-  return Boolean(found?.provider.models[found.modelId]?.endpoint);
 }

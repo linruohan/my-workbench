@@ -353,6 +353,14 @@ export function toolByName(name: string): ToolSpec | null {
   return AGENT_TOOLS.find((item) => item.name === name) ?? null;
 }
 
+/** Short Chinese title for an approval card. Falls back to the raw name. */
+export function toolActionTitle(name: string): string {
+  const description = toolByName(name)?.description?.trim();
+  if (!description) return name;
+  // Tool descriptions often continue after a comma; the card only needs the lead clause.
+  return description.split(/[，,]/)[0]?.trim() || description;
+}
+
 export function toolsForMode(
   mode: AgentPermissionMode,
   allowlist?: readonly string[],

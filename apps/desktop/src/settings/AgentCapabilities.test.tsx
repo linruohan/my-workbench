@@ -15,7 +15,7 @@ function Harness({
   initialSection = "general" as const,
   onPrefs,
 }: {
-  initialSection?: "general" | "personal" | "skills" | "memory" | "tools";
+  initialSection?: "general" | "personal" | "skills" | "memory" | "tools" | "mcp";
   onPrefs?: (prefs: AppPrefs) => void;
 }) {
   const [prefs, setPrefs] = useState<AppPrefs>({
@@ -136,5 +136,19 @@ describe("Agent capabilities settings", () => {
     expect(
       screen.getByText("还没有技能目录。选择包含 SKILL.md 的文件夹即可。"),
     ).toBeInTheDocument();
+  });
+
+  it("marks registered MCP servers as not connected", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Harness initialSection="mcp" />);
+    expect(screen.getByRole("heading", { name: "MCP 服务器" })).toBeInTheDocument();
+    expect(screen.getByText(/只登记、不启动外部进程/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("MCP 名称"), "docs");
+    await user.type(screen.getByLabelText("MCP URL"), "https://example.test/mcp");
+    await user.click(screen.getByRole("button", { name: "登记服务器" }));
+
+    expect(screen.getByText("docs")).toBeInTheDocument();
+    expect(screen.getAllByText("尚未连接").length).toBeGreaterThan(0);
   });
 });

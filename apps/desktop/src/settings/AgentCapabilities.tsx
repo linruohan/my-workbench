@@ -452,8 +452,8 @@ function McpPane({
     <>
       <p className="agent-cap__lead">
         在这里登记 MCP 服务器的命令或
-        URL。这一版只登记、不代为启动外部进程，所以模型不能假装已经调用成功。插件里的
-        .mcp.json 会在启用插件后出现在会话的工具说明里。密钥不要写在这里。
+        URL。当前版本只登记、不启动外部进程，也不能从会话里真正调用；列表里会标「尚未连接」。插件里的
+        .mcp.json 启用后会出现在工具说明里。密钥不要写在这里。
       </p>
       <form
         className="agent-cap__stack"
@@ -496,7 +496,15 @@ function McpPane({
             <div key={server.id} className="settings__row settings__row--stack">
               <div className="settings__row-main">
                 <div>
-                  <div className="settings__row-title">{server.name}</div>
+                  <div className="settings__row-title">
+                    {server.name}
+                    <span className="agent-cap__badge" title="本版不启动外部进程">
+                      尚未连接
+                    </span>
+                    {!server.enabled ? (
+                      <span className="agent-cap__badge is-muted">已停用</span>
+                    ) : null}
+                  </div>
                   <div className="settings__row-desc agent-cap__path">
                     {mcpEndpointLabel(server)}
                   </div>

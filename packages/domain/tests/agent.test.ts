@@ -14,10 +14,13 @@ import {
   parseModelResponse,
   planLocalTurn,
   agentThreadTitle,
+  describeToolArgDiff,
   describeToolArgs,
   describeToolResult,
   formatReplyElapsed,
+  toolActionTitle,
   toolResultLabel,
+  toolResultPreview,
   relativizeScheduleText,
   toolCallSummary,
   redactSecrets,
@@ -561,9 +564,23 @@ describe("tool replies", () => {
       "内容：周五写周报",
     );
     expect(describeToolArgs({ timeEstimateMinutes: 25 }, now)).toBe("预计：25 分钟");
+    expect(
+      describeToolArgDiff(
+        { title: "新标题", notes: "新备注" },
+        { title: "旧标题", notes: "旧备注" },
+        now,
+      ),
+    ).toBe("标题：旧标题 → 新标题\n备注：旧备注 → 新备注");
+    expect(
+      describeToolArgDiff({ title: "同名" }, { title: "同名", notes: "未改" }, now),
+    ).toBe("");
     expect(toolResultLabel("memory_list")).toBe("记忆");
     expect(toolResultLabel("project_list")).toBe("项目");
     expect(toolResultLabel("notification_list")).toBe("通知");
     expect(toolResultLabel("unknown_tool")).toBe("");
+    expect(toolActionTitle("task_create")).toBe("创建任务");
+    expect(toolActionTitle("unknown_tool")).toBe("unknown_tool");
+    expect(toolResultPreview("· 写周报\n还有别的")).toBe("写周报");
+    expect(toolResultPreview(`前缀${"x".repeat(90)}`)).toMatch(/…$/);
   });
 });

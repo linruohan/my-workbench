@@ -121,6 +121,7 @@ export default function App() {
   );
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [agentThreadId, setAgentThreadId] = useState<string | null>(null);
+  const [agentBusyThreadId, setAgentBusyThreadId] = useState<string | null>(null);
   const [cooldown] = useState(() => new ReminderUiCooldown());
   const [timer] = useState(() => new ActiveTimer());
   const [activeTimerTaskId, setActiveTimerTaskId] = useState<string | null>(null);
@@ -132,11 +133,15 @@ export default function App() {
 
   const today = formatLocalDay(now);
 
-  const refresh = useCallback(() => {
+  const persist = useCallback(() => {
     saveStore(store);
+  }, [store]);
+
+  const refresh = useCallback(() => {
+    persist();
     setNow(Date.now());
     setTick((n) => n + 1);
-  }, [store]);
+  }, [persist]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1077,8 +1082,11 @@ export default function App() {
         onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
         onCreateFromFolder={() => void newAgentChatFromFolder()}
         onOpenModels={() => openSettings("models")}
+        onOpenSkills={() => openSettings("skills")}
         onEffects={applyAgentEffects}
         onRefresh={refresh}
+        onPersist={persist}
+        onBusyThreadChange={setAgentBusyThreadId}
         forgetThreadRef={forgetAgentThreadRef}
       />
     );
@@ -1188,6 +1196,7 @@ export default function App() {
               <AgentWorkspaceRail
                 store={store}
                 threadId={agentThreadId}
+                busyThreadId={agentBusyThreadId}
                 onSelectThread={(id) => {
                   setAgentThreadId(id);
                   goNav("agent");

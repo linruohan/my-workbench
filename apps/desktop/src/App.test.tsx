@@ -221,7 +221,7 @@ describe("App shell", () => {
     await user.type(box, "创建任务 验收事项");
     await user.click(screen.getByRole("button", { name: "发送" }));
     await user.click(await screen.findByRole("button", { name: "批准" }));
-    expect(await screen.findByText(/已创建任务/)).toBeInTheDocument();
+    expect((await screen.findAllByText(/已创建任务/)).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: "收件箱" }));
     expect(screen.getByText("验收事项")).toBeInTheDocument();

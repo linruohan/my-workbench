@@ -343,8 +343,7 @@ function GeneralPane({
             <div>
               <div className="settings__row-title">HTTP 代理</div>
               <div className="settings__row-desc">
-                外部模型与后续 MCP /
-                命令工具将使用此代理；不读取系统环境变量。留空为直连，修改后需重启生效。
+                外部模型请求将使用此代理；不读取系统环境变量。留空为直连，修改后需重启生效。
               </div>
             </div>
           </div>
