@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyResolvedTheme,
+  coerceThemeMode,
   cycleThemeMode,
   isThemeMode,
   readStoredThemeMode,
@@ -11,21 +12,19 @@ import {
 } from "../src/index.js";
 
 describe("theme resolve", () => {
-  it("resolves system against prefersDark", () => {
-    expect(resolveThemeMode("system", true)).toBe("dark");
-    expect(resolveThemeMode("system", false)).toBe("light");
-    expect(resolveThemeMode("light", true)).toBe("light");
-    expect(resolveThemeMode("dark", false)).toBe("dark");
+  it("resolves explicit light and dark modes", () => {
+    expect(resolveThemeMode("light")).toBe("light");
+    expect(resolveThemeMode("dark")).toBe("dark");
   });
 
-  it("cycles mode and labels", () => {
-    expect(cycleThemeMode("system")).toBe("light");
+  it("cycles mode and labels between light and dark", () => {
     expect(cycleThemeMode("light")).toBe("dark");
-    expect(cycleThemeMode("dark")).toBe("system");
-    expect(themeModeLabel("system")).toBe("跟随系统");
+    expect(cycleThemeMode("dark")).toBe("light");
+    expect(themeModeLabel("light")).toBe("浅色");
+    expect(themeModeLabel("dark")).toBe("深色");
   });
 
-  it("persists only valid modes", () => {
+  it("persists only light or dark, migrating legacy system", () => {
     const map = new Map<string, string>();
     const storage = {
       getItem: (k: string) => map.get(k) ?? null,
@@ -33,13 +32,15 @@ describe("theme resolve", () => {
         map.set(k, v);
       },
     };
-    expect(readStoredThemeMode(storage)).toBe("system");
+    expect(readStoredThemeMode(storage)).toBe("light");
     writeStoredThemeMode(storage, "dark");
     expect(map.get(THEME_STORAGE_KEY)).toBe("dark");
     expect(readStoredThemeMode(storage)).toBe("dark");
-    map.set(THEME_STORAGE_KEY, "nope");
-    expect(readStoredThemeMode(storage)).toBe("system");
+    map.set(THEME_STORAGE_KEY, "system");
+    expect(readStoredThemeMode(storage)).toBe("light");
+    expect(coerceThemeMode("system")).toBe("light");
     expect(isThemeMode("light")).toBe(true);
+    expect(isThemeMode("system")).toBe(false);
     expect(isThemeMode("neon")).toBe(false);
   });
 

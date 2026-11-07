@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { HostToolSnapshot } from "@wb/domain";
+import type { ThemeMode } from "@wb/theme";
 import { useTheme } from "../theme/ThemeProvider";
 import {
   buildFontOptions,
@@ -389,9 +390,9 @@ function AppearancePane({
   prefs,
   onPatch,
 }: {
-  mode: "system" | "light" | "dark";
+  mode: ThemeMode;
   modeLabel: string;
-  setMode: (m: "system" | "light" | "dark") => void;
+  setMode: (m: ThemeMode) => void;
   prefs: AppPrefs;
   onPatch: (p: Partial<AppPrefs>) => void;
 }) {
@@ -439,7 +440,6 @@ function AppearancePane({
           <div className="settings__segment" role="group" aria-label="主题">
             {(
               [
-                ["system", "系统"],
                 ["light", "浅色"],
                 ["dark", "深色"],
               ] as const

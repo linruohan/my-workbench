@@ -1,6 +1,6 @@
 /** Semantic design tokens — single accent, density aligned with docs/design.md §9.2 */
 
-export type ThemeMode = "system" | "light" | "dark";
+export type ThemeMode = "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "wb.theme.mode";

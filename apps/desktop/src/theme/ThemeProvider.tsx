@@ -29,25 +29,10 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-function getPrefersDark(): boolean {
-  if (typeof window === "undefined" || !window.matchMedia) return false;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-
 export function ThemeProvider(props: { children: ReactNode }) {
   const [mode, setModeState] = useState<ThemeMode>(() =>
     readStoredThemeMode(typeof localStorage === "undefined" ? null : localStorage),
   );
-  const [prefersDark, setPrefersDark] = useState(getPrefersDark);
-
-  useEffect(() => {
-    if (!window.matchMedia) return;
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => setPrefersDark(mq.matches);
-    onChange();
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,10 +48,7 @@ export function ThemeProvider(props: { children: ReactNode }) {
     };
   }, []);
 
-  const resolved = useMemo(
-    () => resolveThemeMode(mode, prefersDark),
-    [mode, prefersDark],
-  );
+  const resolved = useMemo(() => resolveThemeMode(mode), [mode]);
 
   useEffect(() => {
     applyResolvedTheme(document.documentElement, resolved);

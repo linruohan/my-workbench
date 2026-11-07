@@ -164,9 +164,10 @@ describe("App shell", () => {
     const user = userEvent.setup();
     await readyApp();
 
-    const toggle = screen.getByRole("button", { name: /主题：/ });
-    await user.click(toggle);
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    const toggle = screen.getByRole("button", { name: /主题：浅色/ });
+    await user.click(toggle);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 
   it("creates a timed task with daily schedule via editor", async () => {

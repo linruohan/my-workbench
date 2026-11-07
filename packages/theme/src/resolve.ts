@@ -1,24 +1,31 @@
 import { THEME_STORAGE_KEY, type ResolvedTheme, type ThemeMode } from "./tokens.js";
 
 export function isThemeMode(value: unknown): value is ThemeMode {
-  return value === "system" || value === "light" || value === "dark";
+  return value === "light" || value === "dark";
 }
 
-export function resolveThemeMode(mode: ThemeMode, prefersDark: boolean): ResolvedTheme {
-  if (mode === "light") return "light";
-  if (mode === "dark") return "dark";
-  return prefersDark ? "dark" : "light";
+/** Map legacy stored values (e.g. "system") onto the two explicit themes. */
+export function coerceThemeMode(
+  value: unknown,
+  fallback: ThemeMode = "light",
+): ThemeMode {
+  if (isThemeMode(value)) return value;
+  return fallback;
+}
+
+export function resolveThemeMode(mode: ThemeMode): ResolvedTheme {
+  return mode;
 }
 
 export function readStoredThemeMode(
   storage: Pick<Storage, "getItem"> | null | undefined,
 ): ThemeMode {
-  if (!storage) return "system";
+  if (!storage) return "light";
   try {
     const raw = storage.getItem(THEME_STORAGE_KEY);
-    return isThemeMode(raw) ? raw : "system";
+    return coerceThemeMode(raw, "light");
   } catch {
-    return "system";
+    return "light";
   }
 }
 
@@ -35,15 +42,11 @@ export function writeStoredThemeMode(
 }
 
 export function cycleThemeMode(mode: ThemeMode): ThemeMode {
-  if (mode === "system") return "light";
-  if (mode === "light") return "dark";
-  return "system";
+  return mode === "light" ? "dark" : "light";
 }
 
 export function themeModeLabel(mode: ThemeMode): string {
-  if (mode === "system") return "跟随系统";
-  if (mode === "light") return "浅色";
-  return "深色";
+  return mode === "light" ? "浅色" : "深色";
 }
 
 /** Apply resolved theme onto documentElement for CSS `[data-theme]`. */

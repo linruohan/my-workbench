@@ -1,5 +1,5 @@
+import { coerceThemeMode, type ThemeMode } from "@wb/theme";
 import { dataFilePath, ensureDataDir, isTauriRuntime, THEME_FILE } from "./paths";
-import type { ThemeMode } from "@wb/theme";
 
 export async function hydrateThemeMode(fallback: ThemeMode): Promise<ThemeMode> {
   if (!isTauriRuntime()) return fallback;
@@ -8,10 +8,13 @@ export async function hydrateThemeMode(fallback: ThemeMode): Promise<ThemeMode> 
     const { exists, readTextFile, writeTextFile } = await import("@tauri-apps/plugin-fs");
     const path = await dataFilePath(THEME_FILE);
     if (await exists(path)) {
-      const raw = JSON.parse(await readTextFile(path)) as { mode?: ThemeMode };
-      if (raw.mode === "system" || raw.mode === "light" || raw.mode === "dark") {
-        return raw.mode;
+      const raw = JSON.parse(await readTextFile(path)) as { mode?: unknown };
+      const mode = coerceThemeMode(raw.mode, fallback);
+      // Rewrite legacy "system" (or other invalid values) as an explicit theme.
+      if (raw.mode !== mode) {
+        await writeTextFile(path, JSON.stringify({ mode }));
       }
+      return mode;
     }
     await writeTextFile(path, JSON.stringify({ mode: fallback }));
   } catch {
