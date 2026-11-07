@@ -204,7 +204,7 @@ export function VoiceInputPane({ prefs, onPatch }: Props) {
           <div>
             <div className="settings__row-title">启用语音输入</div>
             <div className="settings__row-desc">
-              打开后可在 Agent 输入框使用麦克风，并展开初始化与设置
+              打开后可在输入框旁按住麦克风说话，松开即转写；短按会忽略
             </div>
           </div>
           <button

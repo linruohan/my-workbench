@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendVoiceText, insertVoiceText } from "./text";
+import { appendVoiceText, insertVoiceText, VOICE_HOLD_MIN_MS } from "./text";
 import { resampleTo16k } from "./speech-audio";
 
 describe("insertVoiceText", () => {
@@ -15,6 +15,10 @@ describe("insertVoiceText", () => {
 
   it("avoids double spaces near punctuation", () => {
     expect(appendVoiceText("你好（", "内容")).toBe("你好（内容");
+  });
+
+  it("keeps CapsWriter-style short-press threshold at 500ms", () => {
+    expect(VOICE_HOLD_MIN_MS).toBe(500);
   });
 });
 

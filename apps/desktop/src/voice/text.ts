@@ -1,3 +1,6 @@
+/** Minimum press duration before a hold-to-talk utterance is transcribed (CapsWriter-style). */
+export const VOICE_HOLD_MIN_MS = 500;
+
 /** Append transcribed speech into an existing field value. */
 export function appendVoiceText(current: string, spoken: string): string {
   return insertVoiceText(current, spoken, null).value;
@@ -32,6 +35,47 @@ export function insertVoiceText(
     !CLOSE_EDGE.test(after);
   const value = gap ? `${head} ${after}` : `${head}${after}`;
   return { value, caret: head.length };
+}
+
+/**
+ * CapsWriter-style paste injection: prefer native insertText (undo-friendly),
+ * then fall back to computing the next controlled value for React.
+ */
+export function injectVoiceIntoField(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  spoken: string,
+): { value: string; caret: number } {
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? start;
+  const withoutSel = el.value.slice(0, start) + el.value.slice(end);
+  const result = insertVoiceText(withoutSel, spoken, start);
+  const chunk = result.value.slice(start, result.caret);
+  if (!chunk) return result;
+
+  try {
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(start, end);
+    // Native insert keeps the browser undo stack, similar to clipboard paste.
+    if (document.execCommand("insertText", false, chunk)) {
+      return {
+        value: el.value,
+        caret: el.selectionStart ?? result.caret,
+      };
+    }
+    if (typeof el.setRangeText === "function") {
+      el.setRangeText(chunk, start, end, "end");
+      el.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "insertText", data: chunk }),
+      );
+      return {
+        value: el.value,
+        caret: el.selectionStart ?? result.caret,
+      };
+    }
+  } catch {
+    // fall through to pure value rewrite
+  }
+  return result;
 }
 
 function joinSpoken(before: string, spoken: string): string {

@@ -1,6 +1,6 @@
 import { useRef, type ReactNode } from "react";
 import { VoiceInputButton } from "./VoiceInputButton";
-import { insertVoiceText } from "./text";
+import { injectVoiceIntoField, insertVoiceText } from "./text";
 import { useVoiceInput } from "./VoiceInputContext";
 
 type Props = {
@@ -48,7 +48,7 @@ function focusField(root: HTMLElement | null, caret?: number | null): number | n
   return pos;
 }
 
-/** Wrap a text field and attach a voice button that inserts at the caret. */
+/** Wrap a text field and attach a hold-to-talk mic that pastes at the caret. */
 export function VoiceField({
   value,
   onChange,
@@ -103,7 +103,22 @@ export function VoiceField({
         disabled={disabled}
         onArm={armField}
         onInsert={(text) => {
-          rememberCaret();
+          const el = findField(controlRef.current);
+          if (el) {
+            // Restore caret remembered at arm time, then paste-inject.
+            const pos = caretRef.current ?? el.value.length;
+            try {
+              el.focus({ preventScroll: true });
+              el.setSelectionRange(pos, pos);
+            } catch {
+              // ignore
+            }
+            const result = injectVoiceIntoField(el, text);
+            caretRef.current = result.caret;
+            onChange(result.value);
+            requestAnimationFrame(() => focusField(controlRef.current, result.caret));
+            return;
+          }
           const { value: next, caret } = insertVoiceText(
             valueRef.current,
             text,
@@ -111,10 +126,7 @@ export function VoiceField({
           );
           caretRef.current = caret;
           onChange(next);
-          // Wait for React to commit the new value, then focus + place caret.
-          requestAnimationFrame(() => {
-            focusField(controlRef.current, caret);
-          });
+          requestAnimationFrame(() => focusField(controlRef.current, caret));
         }}
       />
     </div>

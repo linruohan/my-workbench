@@ -1,4 +1,9 @@
-export { appendVoiceText, insertVoiceText } from "./text";
+export {
+  appendVoiceText,
+  insertVoiceText,
+  injectVoiceIntoField,
+  VOICE_HOLD_MIN_MS,
+} from "./text";
 export { VoiceField, VoiceStatusLine } from "./VoiceField";
 export { VoiceInputButton } from "./VoiceInputButton";
 export { VoiceInputProvider, useVoiceInput } from "./VoiceInputContext";

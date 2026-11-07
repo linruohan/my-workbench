@@ -102,7 +102,13 @@ import { ModelMenu } from "./ModelMenu";
 import { readTerminalPanelOpen, writeTerminalPanelOpen } from "./terminal-api";
 import { imageDataUrl } from "./ocr-image";
 import { recognizeLocalImage } from "./ocr-engine";
-import { insertVoiceText, VoiceField, VoiceInputButton, VoiceStatusLine } from "../voice";
+import {
+  injectVoiceIntoField,
+  insertVoiceText,
+  VoiceField,
+  VoiceInputButton,
+  VoiceStatusLine,
+} from "../voice";
 import {
   onWebSessionResume,
   webSessionClose,
@@ -3236,20 +3242,17 @@ export function AgentView({
                         }}
                         onInsert={(text) => {
                           const el = inputRef.current;
-                          const current = el?.value ?? draft;
-                          const { value, caret } = insertVoiceText(
-                            current,
-                            text,
-                            el?.selectionStart ?? current.length,
-                          );
-                          setDraft(value);
-                          if (thread) drafts.current.set(thread.id, value);
+                          const result = el
+                            ? injectVoiceIntoField(el, text)
+                            : insertVoiceText(draft, text, draft.length);
+                          setDraft(result.value);
+                          if (thread) drafts.current.set(thread.id, result.value);
                           setPicker(null);
                           requestAnimationFrame(() => {
                             const node = inputRef.current;
                             if (!node) return;
                             node.focus({ preventScroll: true });
-                            node.setSelectionRange(caret, caret);
+                            node.setSelectionRange(result.caret, result.caret);
                           });
                         }}
                       />

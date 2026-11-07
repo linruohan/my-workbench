@@ -1,4 +1,4 @@
-import {
+﻿import {
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -50,7 +50,7 @@ import { renderMarkdown } from "../lib/markdown";
 import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { isTauriRuntime } from "../lib/paths";
 import { useDialog } from "../shell/Dialogs";
-import { appendVoiceText, insertVoiceText, VoiceInputButton } from "../voice";
+import { appendVoiceText, injectVoiceIntoField, VoiceInputButton } from "../voice";
 import {
   bytesToBase64,
   clipboardFileToPngBytes,
@@ -1424,11 +1424,7 @@ export function NoteEditor({
             onInsert={(text) => {
               if (active != null && editRef.current) {
                 const area = editRef.current;
-                const { value, caret } = insertVoiceText(
-                  area.value,
-                  text,
-                  area.selectionStart,
-                );
+                const { value, caret } = injectVoiceIntoField(area, text);
                 const nextBlocks = [...blocks];
                 nextBlocks[active] = value;
                 commitBlocks(nextBlocks, active, caret);
