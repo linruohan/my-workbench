@@ -94,7 +94,11 @@ export function TimedTaskList({
             </div>
             <div className="timed-missed__head-actions">
               {onRunAllMissed ? (
-                <button type="button" className="btn btn--primary" onClick={onRunAllMissed}>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={onRunAllMissed}
+                >
                   全部立即执行
                 </button>
               ) : null}
