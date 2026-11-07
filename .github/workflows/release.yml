@@ -58,6 +58,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -96,7 +98,8 @@ jobs:
             echo "draft=false" >> "$GITHUB_OUTPUT"
             echo "prerelease=${{ github.event.release.prerelease }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=v__VERSION__" >> "$GITHUB_OUTPUT"
+            VERSION="$(node -p "require('./package.json').version")"
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
             echo "release_id=" >> "$GITHUB_OUTPUT"
             echo "draft=false" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -107,6 +110,17 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          node scripts/release-notes.mjs "${{ steps.meta.outputs.tag }}" --out release-notes.md
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            cat release-notes.md
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and upload Tauri bundles
         uses: tauri-apps/tauri-action@v1
         env:
@@ -116,13 +130,7 @@ jobs:
           tagName: ${{ steps.meta.outputs.tag }}
           releaseId: ${{ steps.meta.outputs.release_id }}
           releaseName: 个人工作台 ${{ steps.meta.outputs.tag }}
-          releaseBody: |
-            ## 安装说明
-            - Windows：下载 `.msi` 或 `.exe` 安装包
-            - macOS：下载对应架构的 `.dmg` / `.app.tar.gz`
-            - Linux：下载 `.AppImage` / `.deb`
-
-            详见仓库 `docs/packaging.md`。
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: ${{ steps.meta.outputs.draft }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
           args: ${{ matrix.args }}

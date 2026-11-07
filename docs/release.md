@@ -58,7 +58,9 @@ npm run pack:win    # Windows 安装包 / 可执行文件
 
 1. 产物路径见 `docs/packaging.md`
 2. 对内测试可用未签名包；对外正式分发应使用代码签名（证书就绪后）
-3. 发布说明需包含：版本号、主要变更、已知问题、数据迁移注意（若有）
+3. 发布说明由 CI 自动生成：推送 `v*` 标签后，`scripts/release-notes.mjs` 会按上一版本标签到本标签的提交归类写入 Release（新增功能 / 问题修复 / 改进优化等），并附安装说明。本地预览：`npm run release:notes -- vX.Y.Z`
+4. 提交信息请尽量使用约定前缀，便于归类：`feat` / `fix` / `improve` / `docs` / `chore`；`chore(release):` 版本号提交会自动跳过
+5. 若有已知问题或数据迁移注意，可在 Release 创建后手工补一句；日常功能与修复不必手写
 
 ## 6. 回滚
 

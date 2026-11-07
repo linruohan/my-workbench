@@ -22,7 +22,8 @@
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "tauri:dev": "npm run tauri:dev -w @wb/desktop",
     "pack:win": "npm run tauri:build -w @wb/desktop",
-    "pack:check": "npm run check && npm run build -w @wb/desktop"
+    "pack:check": "npm run check && npm run build -w @wb/desktop",
+    "release:notes": "node scripts/release-notes.mjs"
   },
   "engines": {
     "node": ">=20"
