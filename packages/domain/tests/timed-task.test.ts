@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTimedTaskPrompt,
   coerceTimedTask,
   computeNextRunAt,
   createTimedTaskDraft,
+  formatTimedTaskOverdue,
+  isTimedTaskAutoDue,
+  isTimedTaskMissed,
   makePresetSchedule,
   patchTimedTask,
+  TIMED_TASK_MISS_GRACE_MS,
   timedFrequencyLabel,
   timedScheduleLabel,
   timedScheduleSummary,
@@ -73,5 +78,38 @@ describe("timed tasks", () => {
     );
     expect(next.schedule).toEqual(makePresetSchedule("hourly"));
     expect(next.nextRunAt).toBe(computeNextRunAt(next.schedule!, 1_700_000_100_000));
+  });
+
+  it("treats long-overdue tasks as missed, recent ones as auto-due", () => {
+    const now = 1_700_000_000_000;
+    const recent = {
+      ...createTimedTaskDraft({
+        title: "近",
+        command: "跑一下",
+        schedule: makePresetSchedule("daily"),
+        nowMs: now,
+      }),
+      nextRunAt: now - 10_000,
+    };
+    const missed = {
+      ...recent,
+      title: "远",
+      nextRunAt: now - TIMED_TASK_MISS_GRACE_MS - 1,
+    };
+    expect(isTimedTaskAutoDue(recent, now)).toBe(true);
+    expect(isTimedTaskMissed(recent, now)).toBe(false);
+    expect(isTimedTaskAutoDue(missed, now)).toBe(false);
+    expect(isTimedTaskMissed(missed, now)).toBe(true);
+    expect(formatTimedTaskOverdue(missed.nextRunAt!, now)).toMatch(/已过期/);
+  });
+
+  it("builds delivery prompts with skill slash tokens", () => {
+    expect(buildTimedTaskPrompt("总结昨日", ["weekly-report"])).toBe(
+      "/weekly-report 总结昨日",
+    );
+    expect(buildTimedTaskPrompt("/weekly-report 总结", ["weekly-report"])).toBe(
+      "/weekly-report 总结",
+    );
+    expect(buildTimedTaskPrompt("", ["a", "b"])).toBe("/a /b");
   });
 });

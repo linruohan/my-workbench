@@ -576,7 +576,7 @@ function runTool(
       if (target === "new" || target === "new_once") {
         const child = store.createAgentThread({
           workspaceId: thread.workspaceId,
-          title: `定时 · ${title}`,
+          title,
           modelRef: thread.modelRef,
           permissionMode: thread.permissionMode,
           nowMs: ctx.nowMs,
@@ -692,7 +692,7 @@ function runTool(
           if (thread) {
             const child = store.createAgentThread({
               workspaceId: thread.workspaceId,
-              title: `定时 · ${title || task.title}`,
+              title: title || task.title,
               modelRef: thread.modelRef,
               permissionMode: thread.permissionMode,
               nowMs: ctx.nowMs,

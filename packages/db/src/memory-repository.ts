@@ -902,11 +902,7 @@ export class MemoryWorkbenchRepository {
   /** Enabled timed tasks whose nextRunAt is due. */
   listDueTimedTasks(nowMs = Date.now()): TimedTask[] {
     return this.listTimedTasks().filter(
-      (task) =>
-        task.enabled &&
-        task.nextRunAt != null &&
-        task.nextRunAt <= nowMs &&
-        Boolean(task.command.trim()),
+      (task) => task.enabled && task.nextRunAt != null && task.nextRunAt <= nowMs,
     );
   }
 

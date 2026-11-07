@@ -83,6 +83,8 @@ type Props = {
   onWidthChange: (width: number) => void;
   /** Persist width after drag / reset. */
   onWidthCommit: (width: number) => void;
+  /** Open the app-wide command palette (Ctrl+P). */
+  onOpenSearch?: () => void;
 };
 
 function NavCount({ value }: { value: number | undefined }) {
@@ -122,6 +124,7 @@ export function Sidebar({
   width,
   onWidthChange,
   onWidthCommit,
+  onOpenSearch,
 }: Props) {
   const [query, setQuery] = useState("");
   const [resizing, setResizing] = useState(false);
@@ -292,13 +295,20 @@ export function Sidebar({
             type="button"
             className="icon-btn"
             aria-label="搜索"
+            title="搜索任务、会话、文档（Ctrl+P）"
             aria-pressed={searchOpen}
-            onClick={() => setSearchOpen((v) => !v)}
+            onClick={() => {
+              if (onOpenSearch) {
+                onOpenSearch();
+                return;
+              }
+              setSearchOpen((v) => !v);
+            }}
           >
             <IconSearch />
           </button>
         </div>
-        {searchOpen ? (
+        {searchOpen && !onOpenSearch ? (
           <input
             className="sidebar__search"
             aria-label="搜索视图"

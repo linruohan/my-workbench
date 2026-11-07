@@ -64,6 +64,11 @@ type Props = {
   notes: Note[];
   activeId: string | null;
   preferLastNote?: boolean;
+  /** Open a knowledge-base disk file after navigating from global search. */
+  pendingOpenPath?: string | null;
+  onPendingOpenPathConsumed?: () => void;
+  /** Bumped when global search focuses an in-app note so disk preview yields. */
+  noteFocusToken?: number;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onChange: (id: string, patch: { title?: string; bodyMd?: string }) => void;
@@ -81,6 +86,9 @@ export function KnowledgeView({
   notes,
   activeId,
   preferLastNote = true,
+  pendingOpenPath = null,
+  onPendingOpenPathConsumed,
+  noteFocusToken = 0,
   onSelect,
   onCreate,
   onChange,
@@ -239,20 +247,14 @@ export function KnowledgeView({
     const onKey = (event: KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey;
       if (!mod) return;
-      const key = event.key.toLowerCase();
-      if (key === "s") {
+      if (event.key.toLowerCase() === "s") {
         event.preventDefault();
         void flushSave();
-        return;
-      }
-      if (key === "p") {
-        event.preventDefault();
-        openQuickOpen();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [flushSave, openQuickOpen]);
+  }, [flushSave]);
 
   useEffect(() => {
     if (!libraryOpen) return;
@@ -386,6 +388,29 @@ export function KnowledgeView({
     }
     setOpenFile({ kind: "other", path: entry.path, title: entry.name });
   };
+
+  useEffect(() => {
+    if (!pendingOpenPath) return;
+    const path = pendingOpenPath;
+    onPendingOpenPathConsumed?.();
+    void openEntry({
+      name: fileNameOf(path),
+      path,
+      isDir: false,
+    });
+    // One-shot intent from global search; openEntry identity is not part of the contract.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenPath]);
+
+  useEffect(() => {
+    if (!activeId || pendingOpenPath) return;
+    setOpenFile(null);
+  }, [activeId, pendingOpenPath]);
+
+  useEffect(() => {
+    if (!noteFocusToken) return;
+    setOpenFile(null);
+  }, [noteFocusToken]);
 
   const saveLabel =
     openFile && (openFile.kind === "md" || openFile.kind === "text")

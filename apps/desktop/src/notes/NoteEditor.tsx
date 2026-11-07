@@ -30,6 +30,8 @@ import {
   locateHeadingBlockIndex,
   locateInBlocks,
   locateLineInBlocks,
+  mergeBlocksRange,
+  mergeBlockToward,
   normalizeMdBlocks,
   outdentMarkdownSelection,
   replaceAllMatches,
@@ -164,6 +166,39 @@ function caretOnFirstLine(text: string, col: number): number {
   return Math.min(Math.max(0, col), lineLen);
 }
 
+type SelectionDirection = "forward" | "backward" | "none";
+
+function selectionAnchorFocus(area: HTMLTextAreaElement): {
+  anchor: number;
+  focus: number;
+  direction: SelectionDirection;
+} {
+  const start = area.selectionStart;
+  const end = area.selectionEnd;
+  const direction = (area.selectionDirection || "none") as SelectionDirection;
+  if (direction === "backward") {
+    return { anchor: end, focus: start, direction };
+  }
+  return {
+    anchor: start,
+    focus: end,
+    direction: start === end ? "none" : direction === "none" ? "forward" : direction,
+  };
+}
+
+function selectionRangeFromAnchorFocus(
+  anchor: number,
+  focus: number,
+): { start: number; end: number; direction: SelectionDirection } {
+  if (focus < anchor) {
+    return { start: focus, end: anchor, direction: "backward" };
+  }
+  if (focus > anchor) {
+    return { start: anchor, end: focus, direction: "forward" };
+  }
+  return { start: anchor, end: focus, direction: "none" };
+}
+
 let measureCtx: CanvasRenderingContext2D | null = null;
 
 function textWidth(text: string, font: string): number {
@@ -295,9 +330,16 @@ export function NoteEditor({
   const [viewportH, setViewportH] = useState(800);
   const [measureTick, setMeasureTick] = useState(0);
   const pendingCaret = useRef<number | null>(null);
-  const pendingSelection = useRef<{ start: number; end: number } | null>(null);
+  const pendingSelection = useRef<{
+    start: number;
+    end: number;
+    direction?: SelectionDirection;
+  } | null>(null);
   const selectionScope = useRef<{ start: number; end: number } | null>(null);
   const suppressBlur = useRef(false);
+  /** Document offset of the selection anchor while Shift-extending or drag-selecting. */
+  const selAnchorDoc = useRef<number | null>(null);
+  const dragSelecting = useRef(false);
   const editMinHeight = useRef<number | null>(null);
   const snippetStops = useRef<MdSnippetRange[] | null>(null);
   const snippetStopIndex = useRef(0);
@@ -486,7 +528,7 @@ export function NoteEditor({
     if (range) {
       const start = Math.min(range.start, area.value.length);
       const end = Math.min(range.end, area.value.length);
-      area.setSelectionRange(start, end);
+      area.setSelectionRange(start, end, range.direction ?? "none");
       pendingSelection.current = null;
       pendingCaret.current = null;
       return;
@@ -848,6 +890,14 @@ export function NoteEditor({
     return () => cancelAnimationFrame(id);
   }, [gotoOpen]);
 
+  useEffect(() => {
+    const endDrag = () => {
+      dragSelecting.current = false;
+    };
+    window.addEventListener("mouseup", endDrag);
+    return () => window.removeEventListener("mouseup", endDrag);
+  }, []);
+
   const updateActiveBlock = (text: string) => {
     if (active == null) return;
     const next = [...blocks];
@@ -862,6 +912,8 @@ export function NoteEditor({
     setColorMenu(null);
     snippetStops.current = null;
     snippetStopIndex.current = 0;
+    selAnchorDoc.current = null;
+    dragSelecting.current = false;
     if (editRef.current) {
       editRef.current.style.minHeight = "";
       editRef.current.style.height = "";
@@ -928,10 +980,60 @@ export function NoteEditor({
   /** Move focus across blocks without renumbering (keeps arrow navigation stable). */
   const moveToBlock = (index: number, caret: number) => {
     suppressBlur.current = true;
+    selAnchorDoc.current = null;
     activate(index, { renumber: false, caret });
     requestAnimationFrame(() => {
       suppressBlur.current = false;
     });
+  };
+
+  const applyMergedSelection = (
+    nextBlocks: string[],
+    focusIndex: number,
+    anchor: number,
+    focus: number,
+  ) => {
+    const range = selectionRangeFromAnchorFocus(anchor, focus);
+    pendingSelection.current = range;
+    pendingCaret.current = null;
+    selAnchorDoc.current = blockDocOffset(nextBlocks, focusIndex) + anchor;
+    suppressBlur.current = true;
+    setBlocks(nextBlocks);
+    setActive(focusIndex);
+    onChange({ bodyMd: joinMdBlocks(nextBlocks) });
+    requestAnimationFrame(() => {
+      const area = editRef.current;
+      if (area) {
+        area.focus({ preventScroll: true });
+        area.setSelectionRange(range.start, range.end, range.direction);
+        lastEditSel.current = { start: range.start, end: range.end };
+        autosize(area, { force: true });
+        scheduleMeasure();
+      }
+      suppressBlur.current = false;
+    });
+  };
+
+  /** Expand the live-edit selection to a document-level anchor/focus pair (may merge blocks). */
+  const focusDocRange = (docAnchor: number, docFocus: number, sourceBlocks = blocks) => {
+    const text = joinMdBlocks(sourceBlocks);
+    const a = Math.max(0, Math.min(Math.floor(docAnchor), text.length));
+    const f = Math.max(0, Math.min(Math.floor(docFocus), text.length));
+    const locA = locateInBlocks(sourceBlocks, a);
+    const locF = locateInBlocks(sourceBlocks, f);
+    const from = Math.min(locA.index, locF.index);
+    const to = Math.max(locA.index, locF.index);
+    const merged = mergeBlocksRange(sourceBlocks, from, to);
+    if (!merged) return;
+    const base = blockDocOffset(sourceBlocks, from);
+    selAnchorDoc.current = a;
+    applyMergedSelection(merged.blocks, merged.index, a - base, f - base);
+  };
+
+  const selectAllDocument = () => {
+    const text = joinMdBlocks(blocks);
+    selAnchorDoc.current = 0;
+    applyMergedSelection([text], 0, 0, text.length);
   };
 
   /** Enter edit mode at the clicked character (no renumber — keeps click snappy). */
@@ -944,6 +1046,7 @@ export function NoteEditor({
     suppressBlur.current = true;
     pendingCaret.current = caret;
     pendingSelection.current = null;
+    selAnchorDoc.current = blockDocOffset(blocks, index) + caret;
     // Lock min-height to the preview box so code/images/headings do not jump on enter.
     // Skip for blank gaps — those must stay exactly one --md-live-row.
     const host = event?.currentTarget as HTMLElement | null | undefined;
@@ -968,6 +1071,20 @@ export function NoteEditor({
       }
       suppressBlur.current = false;
     });
+  };
+
+  /** Shift-click / drag: extend selection to a caret inside another block. */
+  const extendSelectionTo = (index: number, caret: number) => {
+    if (active == null) {
+      beginEditAt(index, caret);
+      return;
+    }
+    const area = editRef.current;
+    const base = blockDocOffset(blocks, active);
+    const anchorDoc =
+      selAnchorDoc.current ?? (area ? base + selectionAnchorFocus(area).anchor : base);
+    const focusDoc = blockDocOffset(blocks, index) + caret;
+    focusDocRange(anchorDoc, focusDoc);
   };
 
   const applyWrap = (prefix: string, suffix = prefix) => {
@@ -1037,6 +1154,11 @@ export function NoteEditor({
       jumpToLine(1);
       return;
     }
+    if (mod && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      selectAllDocument();
+      return;
+    }
     if (mod && event.key.toLowerCase() === "b") {
       event.preventDefault();
       applyWrap("**");
@@ -1078,6 +1200,68 @@ export function NoteEditor({
     const start = area.selectionStart;
     const end = area.selectionEnd;
     const index = active ?? 0;
+    const { anchor, focus } = selectionAnchorFocus(area);
+    const focusLine = caretLineInfo(value, focus);
+
+    // Shift+arrows at block edges: merge the neighbor so native multi-line select continues.
+    if (event.shiftKey && !mod) {
+      if (event.key === "ArrowUp" && focusLine.isFirstLine && index > 0) {
+        event.preventDefault();
+        const prev = blocks[index - 1] ?? "";
+        const merged = mergeBlockToward(blocks, index, "up");
+        if (!merged) return;
+        const adj = merged.offsetAdj;
+        applyMergedSelection(
+          merged.blocks,
+          merged.index,
+          anchor + adj,
+          caretOnLastLine(prev, focusLine.col),
+        );
+        return;
+      }
+      if (
+        event.key === "ArrowDown" &&
+        focusLine.isLastLine &&
+        index < blocks.length - 1
+      ) {
+        event.preventDefault();
+        const next = blocks[index + 1] ?? "";
+        const merged = mergeBlockToward(blocks, index, "down");
+        if (!merged) return;
+        const nextStart = value.length + 1;
+        applyMergedSelection(
+          merged.blocks,
+          merged.index,
+          anchor,
+          nextStart + caretOnFirstLine(next, focusLine.col),
+        );
+        return;
+      }
+      if (event.key === "ArrowLeft" && focus === 0 && index > 0) {
+        event.preventDefault();
+        const merged = mergeBlockToward(blocks, index, "up");
+        if (!merged) return;
+        const adj = merged.offsetAdj;
+        applyMergedSelection(
+          merged.blocks,
+          merged.index,
+          anchor + adj,
+          Math.max(0, adj - 1),
+        );
+        return;
+      }
+      if (
+        event.key === "ArrowRight" &&
+        focus === value.length &&
+        index < blocks.length - 1
+      ) {
+        event.preventDefault();
+        const merged = mergeBlockToward(blocks, index, "down");
+        if (!merged) return;
+        applyMergedSelection(merged.blocks, merged.index, anchor, value.length + 1);
+        return;
+      }
+    }
 
     if (event.key === "Tab") {
       // GitHub markdown snippets: cycle tab stops, or expand trigger (h1/ul/table/…).
@@ -1189,7 +1373,7 @@ export function NoteEditor({
       }
     }
 
-    if (start === end) {
+    if (start === end && !event.shiftKey) {
       const line = caretLineInfo(value, start);
       if (event.key === "ArrowUp" && line.isFirstLine && index > 0) {
         event.preventDefault();
@@ -1633,11 +1817,26 @@ export function NoteEditor({
                       spellCheck={false}
                       value={block}
                       rows={1}
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        dragSelecting.current = true;
+                        const area = e.currentTarget;
+                        // Capture anchor after the browser places the caret.
+                        requestAnimationFrame(() => {
+                          if (active == null) return;
+                          const { anchor } = selectionAnchorFocus(area);
+                          selAnchorDoc.current = blockDocOffset(blocks, active) + anchor;
+                        });
+                      }}
                       onSelect={(e) => {
                         lastEditSel.current = {
                           start: e.currentTarget.selectionStart,
                           end: e.currentTarget.selectionEnd,
                         };
+                        if (!dragSelecting.current && active != null) {
+                          const { anchor } = selectionAnchorFocus(e.currentTarget);
+                          selAnchorDoc.current = blockDocOffset(blocks, active) + anchor;
+                        }
                       }}
                       onKeyUp={(e) => {
                         lastEditSel.current = {
@@ -1711,10 +1910,25 @@ export function NoteEditor({
                     aria-label={`编辑空行（第 ${startLine} 行）`}
                     onMouseDown={(e) => {
                       if (e.button !== 0) return;
+                      if (e.shiftKey && active != null) {
+                        e.preventDefault();
+                        extendSelectionTo(index, 0);
+                        return;
+                      }
+                      if (dragSelecting.current && active != null) {
+                        e.preventDefault();
+                        extendSelectionTo(index, 0);
+                        return;
+                      }
                       beginEditAt(index, 0, {
                         preventDefault: () => e.preventDefault(),
                         currentTarget: e.currentTarget,
                       });
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!dragSelecting.current || active == null) return;
+                      if ((e.buttons & 1) === 0) return;
+                      extendSelectionTo(index, 0);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -1768,10 +1982,31 @@ export function NoteEditor({
                     const caret = target
                       ? caretIndexFromClick(block, e.clientX, e.clientY, target)
                       : 0;
+                    if (e.shiftKey && active != null) {
+                      e.preventDefault();
+                      extendSelectionTo(index, caret);
+                      return;
+                    }
+                    if (dragSelecting.current && active != null) {
+                      e.preventDefault();
+                      extendSelectionTo(index, caret);
+                      return;
+                    }
                     beginEditAt(index, caret, {
                       preventDefault: () => e.preventDefault(),
                       currentTarget: e.currentTarget,
                     });
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!dragSelecting.current || active == null) return;
+                    if ((e.buttons & 1) === 0) return;
+                    const target = e.currentTarget.querySelector(
+                      ".md-live__preview",
+                    ) as HTMLElement | null;
+                    const caret = target
+                      ? caretIndexFromClick(block, e.clientX, e.clientY, target)
+                      : (block ?? "").length;
+                    extendSelectionTo(index, caret);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {

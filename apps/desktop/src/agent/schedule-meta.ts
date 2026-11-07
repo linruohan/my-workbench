@@ -9,6 +9,8 @@ export type ScheduleMeta = {
   /** Session that receives deliveries for this_session / new_once. */
   threadId: string | null;
   workspaceId: string | null;
+  /** Skill ids (or names) to invoke when the schedule fires. */
+  skillIds?: string[];
 };
 
 export type ScheduleDelivery = {

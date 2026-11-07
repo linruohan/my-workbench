@@ -22,6 +22,8 @@ import {
   dedupeSkillNames,
   DEFAULT_AGENT_WORKSPACE_TITLE,
   formatHookNotices,
+  isTimedTaskAutoDue,
+  isTimedTaskMissed,
   normalizeAgentWebUrl,
   WEB_AGENT_THREAD_TITLE,
   assembleHostTools,
@@ -35,7 +37,6 @@ import {
   type Tag,
   type Task,
   type TaskBoardColumnId,
-  type TimedSchedule,
 } from "@wb/domain";
 import { createPersistedStore, hydrateStore, saveStore } from "./lib/persistence";
 import { applyUiFont, prefetchSystemFonts } from "./lib/fonts";
@@ -50,9 +51,15 @@ import { readProviderStore } from "./agent/providers";
 import { ensurePaddleOcr } from "./agent/ocr-models";
 import { loadAgentPlugins } from "./agent/plugins-loader";
 import { loadAgentSkills } from "./agent/skills-loader";
-import { enqueueScheduleDelivery, getScheduleMeta } from "./agent/schedule-meta";
+import {
+  deleteScheduleMeta,
+  getScheduleMeta,
+  setScheduleMeta,
+} from "./agent/schedule-meta";
 import { KnowledgeView } from "./notes/KnowledgeView";
+import { listFilesRecursive, loadKnowledgeRoots, type KbEntry } from "./notes/kb-api";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
+import { CommandPalette, type CommandPaletteResult } from "./shell/CommandPalette";
 import { DialogOutlet, useDialog } from "./shell/Dialogs";
 import { PromptModal } from "./shell/PromptModal";
 import { Sidebar, type AppNavId } from "./shell/Sidebar";
@@ -61,9 +68,19 @@ import { PlannerView } from "./tasks/PlannerView";
 import { TaskEditor, type TaskEditorSave } from "./tasks/TaskEditor";
 import { TaskRow } from "./tasks/TaskRow";
 import { TasksView, type TasksViewMode } from "./tasks/TasksView";
-import { TimedTaskEditor } from "./timed/TimedTaskEditor";
-import { TimedTaskList } from "./timed/TimedTaskList";
+import { TimedTaskEditor, type TimedDraft } from "./timed/TimedTaskEditor";
+import { TimedTaskList, type TimedTaskBindingView } from "./timed/TimedTaskList";
+import { runTimedTaskNow, skipTimedTaskOccurrence } from "./timed/run-timed-task";
 import { VoiceField, VoiceInputProvider } from "./voice";
+
+const EMPTY_TIMED_DRAFT: TimedDraft = {
+  title: "未命名定时任务",
+  command: "",
+  schedule: null,
+  threadId: null,
+  skillIds: [],
+  enabled: true,
+};
 
 const TASKS_VIEW_KEY = "wb.tasks.viewMode";
 
@@ -117,15 +134,7 @@ export default function App() {
   const [ready, setReady] = useState(() => !isTauriRuntime());
   const [timedEditing, setTimedEditing] = useState(false);
   const [timedEditId, setTimedEditId] = useState<string | null>(null);
-  const [timedDraft, setTimedDraft] = useState<{
-    title: string;
-    command: string;
-    schedule: TimedSchedule | null;
-  }>({
-    title: "未命名定时任务",
-    command: "",
-    schedule: null,
-  });
+  const [timedDraft, setTimedDraft] = useState<TimedDraft>(EMPTY_TIMED_DRAFT);
   const [filterProjectId, setFilterProjectId] = useState("inbox");
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const composerRef = useRef<HTMLInputElement>(null);
@@ -135,6 +144,16 @@ export default function App() {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [agentThreadId, setAgentThreadId] = useState<string | null>(null);
   const [agentBusyThreadId, setAgentBusyThreadId] = useState<string | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [pendingKbPath, setPendingKbPath] = useState<string | null>(null);
+  const [noteFocusToken, setNoteFocusToken] = useState(0);
+  const [paletteKbFiles, setPaletteKbFiles] = useState<KbEntry[]>([]);
+  const [paletteKbLoading, setPaletteKbLoading] = useState(false);
+  const paletteKbCacheRef = useRef<{
+    rootsKey: string;
+    at: number;
+    files: KbEntry[];
+  } | null>(null);
   const [cooldown] = useState(() => new ReminderUiCooldown());
   const [timer] = useState(() => new ActiveTimer());
   const [activeTimerTaskId, setActiveTimerTaskId] = useState<string | null>(null);
@@ -241,6 +260,19 @@ export default function App() {
     };
   }, [prefs.pluginDirs]);
 
+  const enabledAgentSkills = useMemo(
+    () =>
+      dedupeSkillNames(
+        [...agentSkills, ...pluginCatalog.flatMap((item) => item.skills)].map(
+          (skill) => ({
+            ...skill,
+            enabled: !prefs.disabledSkillIds.includes(skill.id),
+          }),
+        ),
+      ),
+    [agentSkills, pluginCatalog, prefs.disabledSkillIds],
+  );
+
   useEffect(() => {
     const id = window.setInterval(() => {
       const at = Date.now();
@@ -251,37 +283,13 @@ export default function App() {
       );
       let timedFired = false;
       for (const task of store.listDueTimedTasks(at)) {
-        store.markTimedTaskRan(task.id, at);
-        timedFired = true;
-        store.pushNotification({
-          kind: "system",
-          title: `定时任务 · ${task.title}`,
-          body: task.command.trim().slice(0, 240) || "已到期",
+        // Missed while the app was down: wait for the timed panel "立即执行".
+        if (!isTimedTaskAutoDue(task, at)) continue;
+        runTimedTaskNow(store, task, {
           nowMs: at,
+          skills: enabledAgentSkills,
         });
-        const meta = getScheduleMeta(task.id);
-        let threadId = meta?.threadId ?? null;
-        if (meta?.target === "new") {
-          const workspaceId =
-            meta.workspaceId ?? store.listAgentWorkspaces()[0]?.id ?? null;
-          if (workspaceId) {
-            const child = store.createAgentThread({
-              workspaceId,
-              title: `定时 · ${task.title}`,
-              nowMs: at,
-            });
-            threadId = child.id;
-          }
-        }
-        if (threadId && task.command.trim()) {
-          enqueueScheduleDelivery({
-            scheduleId: task.id,
-            threadId,
-            prompt: task.command.trim(),
-            title: task.title,
-            at,
-          });
-        }
+        timedFired = true;
       }
       if (visible.length) {
         const note = formatHookNotices(
@@ -301,7 +309,7 @@ export default function App() {
       }
     }, 15_000);
     return () => window.clearInterval(id);
-  }, [store, cooldown, refresh, prefs.agentHooks, pluginCatalog]);
+  }, [store, cooldown, refresh, prefs.agentHooks, enabledAgentSkills]);
 
   // Refresh wall clock at next local midnight so 明天 → 今天 flips promptly.
   useEffect(() => {
@@ -340,8 +348,16 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "p" || key === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen(true);
+        return;
+      }
       if (settingsOpen) return;
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+      if (key === "n") {
         e.preventDefault();
         composerRef.current?.focus();
       }
@@ -349,6 +365,54 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    if (!isTauriRuntime()) {
+      setPaletteKbFiles([]);
+      setPaletteKbLoading(false);
+      return;
+    }
+    const roots = loadKnowledgeRoots();
+    const rootsKey = roots.join("\0");
+    if (roots.length === 0) {
+      paletteKbCacheRef.current = null;
+      setPaletteKbFiles([]);
+      setPaletteKbLoading(false);
+      return;
+    }
+    const cached = paletteKbCacheRef.current;
+    const fresh =
+      cached && cached.rootsKey === rootsKey && Date.now() - cached.at < 60_000;
+    if (fresh) {
+      setPaletteKbFiles(cached.files);
+      setPaletteKbLoading(false);
+      return;
+    }
+    if (cached && cached.rootsKey === rootsKey) {
+      setPaletteKbFiles(cached.files);
+      setPaletteKbLoading(false);
+    } else {
+      setPaletteKbLoading(true);
+    }
+    let cancelled = false;
+    void listFilesRecursive(roots)
+      .then((files) => {
+        if (cancelled) return;
+        paletteKbCacheRef.current = { rootsKey, at: Date.now(), files };
+        setPaletteKbFiles(files);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        if (!cached || cached.rootsKey !== rootsKey) setPaletteKbFiles([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPaletteKbLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [commandPaletteOpen]);
 
   void tick;
   const todayTasks = store.listToday(now);
@@ -360,6 +424,19 @@ export default function App() {
   const projects = store.listProjects();
   const timedTasks = store.listTimedTasks();
   const allTags = store.listTags();
+  const timedBindings = useMemo(() => {
+    const map: Record<string, TimedTaskBindingView> = {};
+    for (const task of timedTasks) {
+      const meta = getScheduleMeta(task.id);
+      const thread = meta?.threadId != null ? store.getAgentThread(meta.threadId) : null;
+      map[task.id] = {
+        threadTitle: thread?.title ?? null,
+        skillCount: meta?.skillIds?.length ?? 0,
+        autoSession: !thread,
+      };
+    }
+    return map;
+  }, [timedTasks, store]);
   const doneTasks = useMemo(
     () => allTasks.filter((t) => t.isDone && !t.parentId),
     [allTasks],
@@ -674,15 +751,15 @@ export default function App() {
         return;
       }
       if (cmd === "定时" || cmd === "timed") {
-        store.createTimedTask({
+        const created = store.createTimedTask({
           title: arg || "未命名定时任务",
           command: "",
           schedule: makePresetSchedule("daily"),
           nowMs,
         });
-        goNav("timed");
         setDraft("");
         refresh();
+        openTimedEdit(created.id);
         return;
       }
     }
@@ -700,7 +777,7 @@ export default function App() {
     }
 
     if (nav === "timed") {
-      store.createTimedTask({
+      const created = store.createTimedTask({
         title: text,
         command: "",
         schedule: makePresetSchedule("daily"),
@@ -708,6 +785,7 @@ export default function App() {
       });
       setDraft("");
       refresh();
+      openTimedEdit(created.id);
       return;
     }
 
@@ -802,11 +880,7 @@ export default function App() {
   const openTimedCreate = () => {
     setSettingsOpen(false);
     setTimedEditId(null);
-    setTimedDraft({
-      title: "未命名定时任务",
-      command: "",
-      schedule: null,
-    });
+    setTimedDraft({ ...EMPTY_TIMED_DRAFT });
     setTimedEditing(true);
     setNav("timed");
   };
@@ -814,11 +888,17 @@ export default function App() {
   const openTimedEdit = (id: string) => {
     const task = store.getTimedTask(id);
     if (!task) return;
+    const meta = getScheduleMeta(id);
+    const threadId =
+      meta?.threadId && store.getAgentThread(meta.threadId) ? meta.threadId : null;
     setTimedEditId(id);
     setTimedDraft({
       title: task.title,
       command: task.command,
       schedule: task.schedule,
+      threadId,
+      skillIds: meta?.skillIds ?? [],
+      enabled: task.enabled,
     });
     setTimedEditing(true);
     setNav("timed");
@@ -826,22 +906,108 @@ export default function App() {
 
   const saveTimedTask = () => {
     if (!timedDraft.schedule || !timedDraft.title.trim()) return;
-    if (timedEditId) {
-      store.updateTimedTask(timedEditId, {
-        title: timedDraft.title,
-        command: timedDraft.command,
-        schedule: timedDraft.schedule,
-      });
-    } else {
-      store.createTimedTask({
-        title: timedDraft.title,
-        command: timedDraft.command,
-        schedule: timedDraft.schedule,
-        nowMs: Date.now(),
-      });
+    if (!timedDraft.command.trim() && timedDraft.skillIds.length === 0) return;
+    const nowMs = Date.now();
+    const title = timedDraft.title.trim();
+    const task = timedEditId
+      ? store.updateTimedTask(timedEditId, {
+          title,
+          command: timedDraft.command,
+          schedule: timedDraft.schedule,
+          enabled: timedDraft.enabled,
+        })
+      : store.createTimedTask({
+          title,
+          command: timedDraft.command,
+          schedule: timedDraft.schedule,
+          nowMs,
+        });
+    if (!timedEditId && !timedDraft.enabled) {
+      store.updateTimedTask(task.id, { enabled: false }, nowMs);
     }
+
+    // Defer session creation until first run when unbound.
+    let threadId = timedDraft.threadId;
+    let workspaceId: string | null = null;
+    if (threadId) {
+      const bound = store.getAgentThread(threadId);
+      if (bound) workspaceId = bound.workspaceId;
+      else threadId = null;
+    }
+    if (!threadId) {
+      const prior = getScheduleMeta(task.id);
+      workspaceId =
+        prior?.workspaceId && store.getAgentWorkspace(prior.workspaceId)
+          ? prior.workspaceId
+          : (store
+              .listAgentWorkspaces()
+              .find((item) => item.title === DEFAULT_AGENT_WORKSPACE_TITLE)?.id ?? null);
+    }
+
+    setScheduleMeta(task.id, {
+      target: "this_session",
+      threadId,
+      workspaceId,
+      skillIds: timedDraft.skillIds,
+    });
     setTimedEditing(false);
     setTimedEditId(null);
+    refresh();
+  };
+
+  const runTimedTaskById = (id: string, openSession = true) => {
+    const task = store.getTimedTask(id);
+    if (!task) return;
+    const result = runTimedTaskNow(store, task, { skills: enabledAgentSkills });
+    if (openSession && result.threadId) {
+      setAgentThreadId(result.threadId);
+      setAgentSectionOpen(true);
+      goNav("agent");
+    } else {
+      setNotificationsOpen(true);
+    }
+    refresh();
+  };
+
+  const skipTimedTaskById = (id: string) => {
+    const task = store.getTimedTask(id);
+    if (!task) return;
+    skipTimedTaskOccurrence(store, task);
+    refresh();
+  };
+
+  const runAllMissedTimedTasks = () => {
+    const at = Date.now();
+    const missed = store.listTimedTasks().filter((task) => isTimedTaskMissed(task, at));
+    let lastThread: string | null = null;
+    for (const task of missed) {
+      const result = runTimedTaskNow(store, task, {
+        nowMs: at,
+        skills: enabledAgentSkills,
+      });
+      if (result.threadId) lastThread = result.threadId;
+    }
+    if (lastThread) {
+      setAgentThreadId(lastThread);
+      setAgentSectionOpen(true);
+      goNav("agent");
+    } else {
+      setNotificationsOpen(true);
+    }
+    refresh();
+  };
+
+  const skipAllMissedTimedTasks = () => {
+    const at = Date.now();
+    for (const task of store.listTimedTasks()) {
+      if (!isTimedTaskMissed(task, at)) continue;
+      skipTimedTaskOccurrence(store, task, at);
+    }
+    refresh();
+  };
+
+  const toggleTimedTaskEnabled = (id: string, enabled: boolean) => {
+    store.updateTimedTask(id, { enabled });
     refresh();
   };
 
@@ -856,6 +1022,7 @@ export default function App() {
       if (!ok) return;
     }
     store.deleteTimedTask(id);
+    deleteScheduleMeta(id);
     if (timedEditId === id) {
       setTimedEditing(false);
       setTimedEditId(null);
@@ -971,6 +1138,70 @@ export default function App() {
     refresh();
   };
 
+  const openCommandPaletteResult = (result: CommandPaletteResult) => {
+    setSettingsOpen(false);
+    if (result.kind === "create-task") {
+      const created = store.createTask({
+        title: result.title,
+        projectId: INBOX_PROJECT_ID,
+        nowMs: Date.now(),
+      });
+      refresh();
+      setNav("inbox");
+      setFilterProjectId(INBOX_PROJECT_ID);
+      setEditingTaskId(created.id);
+      return;
+    }
+    if (result.kind === "create-note") {
+      const created = store.createNote({
+        title: result.title,
+        bodyMd: `# ${result.title}\n\n`,
+        nowMs: Date.now(),
+      });
+      refresh();
+      setPendingKbPath(null);
+      setActiveNoteId(created.id);
+      setNoteFocusToken((value) => value + 1);
+      goNav("knowledge");
+      return;
+    }
+    if (result.kind === "nav") {
+      if (result.id === "agent") {
+        openAgent();
+        return;
+      }
+      goNav(result.id);
+      return;
+    }
+    if (result.kind === "project") {
+      openProject(result.id);
+      return;
+    }
+    if (result.kind === "task") {
+      const taskViews = new Set<AppNavId>(["today", "inbox", "done", "planner"]);
+      if (!taskViews.has(nav)) setNav("today");
+      setEditingTaskId(result.id);
+      return;
+    }
+    if (result.kind === "thread") {
+      setAgentThreadId(result.id);
+      setAgentSectionOpen(true);
+      setEditingTaskId(null);
+      setNav("agent");
+      return;
+    }
+    if (result.kind === "note") {
+      setPendingKbPath(null);
+      setActiveNoteId(result.id);
+      setNoteFocusToken((value) => value + 1);
+      goNav("knowledge");
+      return;
+    }
+    setActiveNoteId(null);
+    setPendingKbPath(result.path);
+    goNav("knowledge");
+  };
+
   let body;
   if (nav === "today") {
     const todayEmpty = prefs.showTips
@@ -1069,6 +1300,9 @@ export default function App() {
         notes={notes}
         activeId={activeNoteId}
         preferLastNote={prefs.openLastNote}
+        pendingOpenPath={pendingKbPath}
+        onPendingOpenPathConsumed={() => setPendingKbPath(null)}
+        noteFocusToken={noteFocusToken}
         onSelect={setActiveNoteId}
         onCreate={createNote}
         onChange={updateNote}
@@ -1081,6 +1315,9 @@ export default function App() {
         draft={timedDraft}
         existing={timedEditId ? store.getTimedTask(timedEditId) : null}
         history={timedTasks}
+        skills={enabledAgentSkills}
+        threads={store.listAgentThreads()}
+        workspaces={store.listAgentWorkspaces()}
         onChange={(patch) => setTimedDraft((d) => ({ ...d, ...patch }))}
         onSubmit={saveTimedTask}
         onCancel={() => {
@@ -1091,9 +1328,16 @@ export default function App() {
     ) : (
       <TimedTaskList
         tasks={timedTasks}
+        nowMs={now}
+        bindings={timedBindings}
         onCreate={openTimedCreate}
         onOpen={openTimedEdit}
         onDelete={deleteTimedTask}
+        onRunNow={(id) => runTimedTaskById(id, true)}
+        onSkip={skipTimedTaskById}
+        onRunAllMissed={runAllMissedTimedTasks}
+        onSkipAllMissed={skipAllMissedTimedTasks}
+        onToggleEnabled={toggleTimedTaskEnabled}
       />
     );
   } else if (nav === "agent") {
@@ -1252,6 +1496,7 @@ export default function App() {
               onNav={goNav}
               settingsOpen={settingsOpen}
               onOpenSettings={() => openSettings("general")}
+              onOpenSearch={() => setCommandPaletteOpen(true)}
               projects={projects}
               activeProjectId={filterProjectId}
               taskNavCounts={taskNavCounts}
@@ -1392,6 +1637,19 @@ export default function App() {
             refresh();
             openProject(created.id);
           }}
+        />
+        <CommandPalette
+          open={commandPaletteOpen}
+          tasks={allTasks}
+          projects={projects}
+          threads={store.listAgentThreads({ includeArchived: agentShowArchived })}
+          workspaces={store.listAgentWorkspaces()}
+          notes={notes}
+          kbFiles={paletteKbFiles}
+          kbRoots={loadKnowledgeRoots()}
+          kbLoading={paletteKbLoading}
+          onClose={() => setCommandPaletteOpen(false)}
+          onSelect={openCommandPaletteResult}
         />
         <DialogOutlet />
       </div>

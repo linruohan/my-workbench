@@ -31,6 +31,8 @@ import {
   locateInBlocks,
   locateLineInBlocks,
   countDocLines,
+  mergeBlocksRange,
+  mergeBlockToward,
   replaceAllMatches,
   replaceMatchWithQuery,
   sortSelectedLines,
@@ -333,5 +335,32 @@ describe("knowledge headings", () => {
     expect(locateLineInBlocks(blocks, 1)).toEqual({ index: 0, offset: 0 });
     expect(locateLineInBlocks(blocks, 2)).toEqual({ index: 1, offset: 0 });
     expect(locateLineInBlocks(blocks, 4)).toEqual({ index: 2, offset: 6 });
+  });
+
+  it("merges neighbor blocks for cross-block selection", () => {
+    const blocks = ["alpha", "beta", "gamma"];
+    const up = mergeBlockToward(blocks, 1, "up");
+    expect(up).toEqual({
+      blocks: ["alpha\nbeta", "gamma"],
+      index: 0,
+      offsetAdj: 6,
+    });
+    const down = mergeBlockToward(blocks, 1, "down");
+    expect(down).toEqual({
+      blocks: ["alpha", "beta\ngamma"],
+      index: 1,
+      offsetAdj: 0,
+    });
+    expect(mergeBlockToward(blocks, 0, "up")).toBeNull();
+    expect(mergeBlockToward(blocks, 2, "down")).toBeNull();
+
+    const range = mergeBlocksRange(blocks, 0, 2);
+    expect(range).toEqual({
+      blocks: ["alpha\nbeta\ngamma"],
+      index: 0,
+      text: "alpha\nbeta\ngamma",
+    });
+    expect(joinMdBlocks(range!.blocks)).toBe(joinMdBlocks(blocks));
+    expect(mergeBlocksRange(blocks, 1, 1)?.text).toBe("beta");
   });
 });

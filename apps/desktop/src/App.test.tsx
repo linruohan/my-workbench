@@ -238,4 +238,41 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "收件箱" }));
     expect(screen.getByText("验收事项")).toBeInTheDocument();
   });
+
+  it("opens global search with Ctrl+P and jumps to an agent session", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    await user.click(screen.getByRole("button", { name: "Agent" }));
+    await user.click(screen.getAllByRole("button", { name: "新建会话" })[0]!);
+    const path = await screen.findByLabelText("工作区目录的完整路径");
+    await user.type(path, "D:/tmp/palette-ws");
+    await user.click(screen.getByRole("button", { name: "确定" }));
+    expect(await screen.findByLabelText("给 Agent 发消息")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "今日" }));
+    expect(screen.queryByLabelText("给 Agent 发消息")).not.toBeInTheDocument();
+
+    await user.keyboard("{Control>}p{/Control}");
+    const palette = await screen.findByRole("dialog", { name: "全局搜索" });
+    expect(palette).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText(/搜索任务、会话、文档/), "a:palette");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByLabelText("给 Agent 发消息")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "全局搜索" })).not.toBeInTheDocument();
+  });
+
+  it("creates a task from the command palette", async () => {
+    const user = userEvent.setup();
+    await readyApp();
+
+    await user.keyboard("{Control>}p{/Control}");
+    await screen.findByRole("dialog", { name: "全局搜索" });
+    await user.type(screen.getByPlaceholderText(/搜索任务、会话、文档/), "面板新建事项");
+    await user.click(screen.getByRole("option", { name: /新建任务「面板新建事项」/ }));
+
+    expect(screen.queryByRole("dialog", { name: "全局搜索" })).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("面板新建事项")).toBeInTheDocument();
+  });
 });

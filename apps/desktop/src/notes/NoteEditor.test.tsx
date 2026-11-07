@@ -70,4 +70,38 @@ describe("NoteEditor", () => {
       expect.objectContaining({ bodyMd: expect.stringContaining("!") }),
     );
   });
+
+  it("merges the next block when Shift+ArrowDown crosses a boundary", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
+    );
+    await user.click(screen.getByLabelText("编辑第 1 行"));
+    const area = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    area.setSelectionRange(area.value.length, area.value.length);
+    await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    const merged = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    expect(merged.value).toContain("\n");
+    expect(merged.selectionStart).not.toBe(merged.selectionEnd);
+    expect(merged.value.slice(merged.selectionStart, merged.selectionEnd)).toContain(
+      "\n",
+    );
+  });
+
+  it("selects the whole document with Ctrl/Meta+A", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
+    );
+    await user.click(screen.getByLabelText("编辑第 3 行"));
+    const area = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    area.focus();
+    await user.keyboard("{Control>}a{/Control}");
+    const selected = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    expect(selected.value).toContain("Hello");
+    expect(selected.value).toContain("世界");
+    expect(selected.value.includes("\n")).toBe(true);
+    expect(selected.selectionStart).toBe(0);
+    expect(selected.selectionEnd).toBe(selected.value.length);
+  });
 });

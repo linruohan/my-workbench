@@ -286,6 +286,80 @@ export function computeNextRunAt(
   return d.getTime();
 }
 
+/**
+ * Auto-fire only when overdue within this grace window.
+ * Older due times (e.g. while the app was closed) are treated as missed/expired.
+ */
+export const TIMED_TASK_MISS_GRACE_MS = 90_000;
+
+export function isTimedTaskDue(task: TimedTask, nowMs = Date.now()): boolean {
+  return task.enabled && task.nextRunAt != null && task.nextRunAt <= nowMs;
+}
+
+/** Due long enough that catch-up should wait for an explicit "run now". */
+export function isTimedTaskMissed(
+  task: TimedTask,
+  nowMs = Date.now(),
+  graceMs = TIMED_TASK_MISS_GRACE_MS,
+): boolean {
+  return (
+    isTimedTaskDue(task, nowMs) &&
+    task.nextRunAt != null &&
+    nowMs - task.nextRunAt > graceMs
+  );
+}
+
+/** Due inside the grace window — safe for the background ticker to fire. */
+export function isTimedTaskAutoDue(
+  task: TimedTask,
+  nowMs = Date.now(),
+  graceMs = TIMED_TASK_MISS_GRACE_MS,
+): boolean {
+  return isTimedTaskDue(task, nowMs) && !isTimedTaskMissed(task, nowMs, graceMs);
+}
+
+/** Human-readable overdue label, e.g. "已过期 2 小时". */
+export function formatTimedTaskOverdue(nextRunAt: number, nowMs = Date.now()): string {
+  const overdueMs = Math.max(0, nowMs - nextRunAt);
+  const sec = Math.floor(overdueMs / 1000);
+  if (sec < 60) return `已过期 ${Math.max(1, sec)} 秒`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `已过期 ${min} 分钟`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `已过期 ${hr} 小时`;
+  return `已过期 ${Math.floor(hr / 24)} 天`;
+}
+
+/** Prepend selected skill slash tokens when the command does not already name them. */
+export function buildTimedTaskPrompt(
+  command: string,
+  skillNames: readonly string[],
+): string {
+  const body = command.trim();
+  const names = [
+    ...new Set(
+      skillNames
+        .map((name) => name.trim())
+        .filter(Boolean)
+        .map((name) => name.replace(/^\//, "")),
+    ),
+  ];
+  if (!names.length) return body;
+  const tokens = names
+    .filter((name) => {
+      const token = `/${name}`;
+      const pattern = new RegExp(`(?:^|\\s)${escapeRegExp(token)}(?=\\s|$)`);
+      return !pattern.test(body);
+    })
+    .map((name) => `/${name}`);
+  if (!tokens.length) return body;
+  return body ? `${tokens.join(" ")} ${body}` : tokens.join(" ");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function makePresetSchedule(
   preset: TimedSchedulePreset,
   atTime = DEFAULT_AT_TIME,

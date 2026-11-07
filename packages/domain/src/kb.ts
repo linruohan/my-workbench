@@ -731,6 +731,61 @@ export function blockDocOffset(blocks: string[], index: number): number {
   return offset;
 }
 
+export type MergeBlockResult = {
+  blocks: string[];
+  index: number;
+  /** Add to caret/selection offsets that were relative to the pre-merge active block. */
+  offsetAdj: number;
+};
+
+/**
+ * Merge the neighbor block into `index` (Typora live-preview cross-block select).
+ * Join uses `\n`, matching {@link joinMdBlocks}.
+ */
+export function mergeBlockToward(
+  blocks: string[],
+  index: number,
+  direction: "up" | "down",
+): MergeBlockResult | null {
+  if (blocks.length === 0) return null;
+  if (direction === "up") {
+    if (index <= 0) return null;
+    const prev = blocks[index - 1] ?? "";
+    const curr = blocks[index] ?? "";
+    const next = [...blocks];
+    next[index - 1] = `${prev}\n${curr}`;
+    next.splice(index, 1);
+    return { blocks: next, index: index - 1, offsetAdj: prev.length + 1 };
+  }
+  if (index >= blocks.length - 1) return null;
+  const curr = blocks[index] ?? "";
+  const following = blocks[index + 1] ?? "";
+  const next = [...blocks];
+  next[index] = `${curr}\n${following}`;
+  next.splice(index + 1, 1);
+  return { blocks: next, index, offsetAdj: 0 };
+}
+
+/**
+ * Collapse blocks in `[from, to]` (inclusive) into a single block at `from`.
+ */
+export function mergeBlocksRange(
+  blocks: string[],
+  from: number,
+  to: number,
+): { blocks: string[]; index: number; text: string } | null {
+  if (blocks.length === 0) return null;
+  const start = Math.max(0, Math.min(from, to));
+  const end = Math.min(blocks.length - 1, Math.max(from, to));
+  if (start > end) return null;
+  const text = blocks.slice(start, end + 1).join("\n");
+  if (start === end) {
+    return { blocks: [...blocks], index: start, text };
+  }
+  const next = [...blocks.slice(0, start), text, ...blocks.slice(end + 1)];
+  return { blocks: next, index: start, text };
+}
+
 /** ImagePaste: `{stem}/{stem}{index}.png` beside the markdown file. */
 export function pastedImageRel(
   stem: string,
