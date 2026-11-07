@@ -20,11 +20,18 @@ type ModelChoice = {
   providerId: string;
   providerName: string;
   kind: string;
-  label: string;
+  title: string;
   missingKey: boolean;
 };
 
-/** Compact composer model picker — flat list of configured models only. */
+type ModelSection = {
+  providerId: string;
+  providerName: string;
+  missingKey: boolean;
+  models: ModelChoice[];
+};
+
+/** Compact composer model picker — provider headers with model titles underneath. */
 export function ModelMenu({
   modelRef,
   open,
@@ -35,33 +42,38 @@ export function ModelMenu({
 }: Props) {
   const [version, setVersion] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
-  const choices = useMemo<ModelChoice[]>(() => {
-    const groups = modelGroups();
-    const multi = groups.filter((group) => group.models.length > 0).length > 1;
-    return groups.flatMap((group) => {
-      return group.models.map((model) => {
-        const catalog = group.kind === "builtin" && model.id !== "local";
+  const sections = useMemo<ModelSection[]>(() => {
+    return modelGroups()
+      .map((group) => {
         const missingKey =
           group.kind !== "builtin" && group.apiKeyRequired && !credentialExists(group.id);
-        const name = model.title || model.id;
+        const models = group.models.map((model) => {
+          const titled = model.title?.trim();
+          return {
+            ref: model.ref,
+            id: model.id,
+            providerId: group.id,
+            providerName: group.name,
+            kind: group.kind,
+            missingKey,
+            title:
+              titled ||
+              (group.kind === "builtin" && model.id === "local" ? "本地" : model.id),
+          };
+        });
         return {
-          ref: model.ref,
-          id: model.id,
           providerId: group.id,
           providerName: group.name,
-          kind: group.kind,
           missingKey,
-          label: catalog
-            ? `${group.name} · ${name}`
-            : group.kind === "builtin"
-              ? group.name
-              : multi
-                ? `${group.name} · ${name}`
-                : name,
+          models,
         };
-      });
-    });
+      })
+      .filter((section) => section.models.length > 0);
   }, [version]);
+  const choices = useMemo(
+    () => sections.flatMap((section) => section.models),
+    [sections],
+  );
   const current =
     choices.find((item) => item.ref === modelRef) ??
     choices.find((item) => {
@@ -74,7 +86,7 @@ export function ModelMenu({
     }) ??
     null;
   const missingKey = Boolean(current?.missingKey);
-  const triggerLabel = current?.label ?? (choices.length ? "选择模型" : "未配置模型");
+  const triggerLabel = current?.title ?? (choices.length ? "选择模型" : "未配置模型");
   const openRef = useRef(open);
   const onOpenChangeRef = useRef(onOpenChange);
   openRef.current = open;
@@ -128,7 +140,13 @@ export function ModelMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
         disabled={disabled}
-        title={disabled ? "请先处理待确认操作" : "选择模型（Ctrl+M）"}
+        title={
+          disabled
+            ? "请先处理待确认操作"
+            : current
+              ? `${current.providerName} · ${current.title}（Ctrl+M）`
+              : "选择模型（Ctrl+M）"
+        }
         onClick={() => {
           if (disabled) return;
           setVersion((value) => value + 1);
@@ -151,7 +169,7 @@ export function ModelMenu({
           role="listbox"
           aria-label="选择模型"
         >
-          {choices.length === 0 ? (
+          {sections.length === 0 ? (
             <div className="agent__model-empty">
               <p>还没有可用模型</p>
               <p>请先到设置里配置供应商</p>
@@ -168,31 +186,45 @@ export function ModelMenu({
             </div>
           ) : (
             <>
-              <ul className="agent__model-flat" aria-label="模型列表">
-                {choices.map((model) => {
-                  const active = model.ref === modelRef;
-                  return (
-                    <li key={model.ref}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={active}
-                        className={active ? "is-active" : undefined}
-                        onClick={() => {
-                          onSelect(model.ref);
-                          onOpenChange(false);
-                        }}
-                      >
-                        <span className="agent__model-option-main">
-                          <span>{model.label}</span>
-                          {model.missingKey ? <small>未填密钥</small> : null}
-                        </span>
-                        {active ? <span aria-hidden="true">✓</span> : null}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
+              <div className="agent__model-groups" aria-label="模型列表">
+                {sections.map((section) => (
+                  <section
+                    key={section.providerId}
+                    className="agent__model-section"
+                    aria-label={section.providerName}
+                  >
+                    <div className="agent__model-section-label">
+                      <span>{section.providerName}</span>
+                      {section.missingKey ? <small>未填密钥</small> : null}
+                    </div>
+                    <ul>
+                      {section.models.map((model) => {
+                        const active = model.ref === modelRef;
+                        return (
+                          <li key={model.ref}>
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={active}
+                              className={active ? "is-active" : undefined}
+                              onClick={() => {
+                                onSelect(model.ref);
+                                onOpenChange(false);
+                              }}
+                            >
+                              <span className="agent__model-option-main">
+                                <span>{model.title}</span>
+                                {model.missingKey ? <small>未填密钥</small> : null}
+                              </span>
+                              {active ? <span aria-hidden="true">✓</span> : null}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </section>
+                ))}
+              </div>
               <div className="agent__model-foot agent__model-foot--simple">
                 <button
                   type="button"
