@@ -940,9 +940,29 @@ textarea {
   padding: var(--wb-space-2) var(--wb-space-3);
 }
 
-.settings__select--font {
+.settings__menu-select {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: calc(var(--wb-menu-min) - var(--wb-space-5));
+  max-width: var(--wb-menu-md);
+}
+
+.settings__menu-select--font {
   min-width: var(--wb-menu-md);
   max-width: var(--wb-popover-mid);
+}
+
+.settings__menu-select .menu-select__trigger {
+  min-height: var(--wb-control-lg);
+  padding-inline: var(--wb-space-3);
+  background: color-mix(in srgb, var(--wb-bg) 88%, var(--wb-panel));
+  box-shadow: inset 0 1px 0 var(--wb-elev-inset);
+}
+
+.settings__menu-select .menu-select__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings__inline {
@@ -4991,7 +5011,7 @@ textarea {
   font-size: var(--wb-text-xs);
 }
 
-/* ���� Shared menu select / calendar ���� */
+/* Shared menu select / calendar */
 .menu-select {
   position: relative;
   width: 100%;
@@ -5003,6 +5023,7 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: var(--wb-space-2);
+  min-height: var(--wb-control-md);
   border: 1px solid var(--wb-line);
   border-radius: var(--wb-radius-control);
   background: var(--wb-bg);
@@ -5010,10 +5031,22 @@ textarea {
   padding: var(--wb-space-2) var(--wb-space-3);
   text-align: left;
   cursor: pointer;
+  transition:
+    border-color var(--wb-motion-fast) ease,
+    background-color var(--wb-motion-fast) ease,
+    box-shadow var(--wb-motion-fast) ease;
 }
 
 .menu-select__trigger:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--wb-accent) 40%, var(--wb-line));
+  border-color: color-mix(in srgb, var(--wb-accent) 45%, var(--wb-line));
+  background: color-mix(in srgb, var(--wb-accent-soft) 35%, var(--wb-bg));
+}
+
+.menu-select__trigger.is-open,
+.menu-select__trigger:focus-visible {
+  outline: none;
+  border-color: var(--wb-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wb-accent) 22%, transparent);
 }
 
 .menu-select__trigger:disabled {
@@ -5021,9 +5054,24 @@ textarea {
   cursor: not-allowed;
 }
 
+.menu-select__value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .menu-select__caret {
+  display: inline-flex;
   color: var(--wb-muted);
-  font-size: var(--wb-text-micro);
+  flex-shrink: 0;
+  transition: transform var(--wb-motion-fast) ease;
+}
+
+.menu-select__trigger.is-open .menu-select__caret {
+  transform: rotate(180deg);
+  color: var(--wb-accent);
 }
 
 .menu-select__list {
@@ -5035,9 +5083,9 @@ textarea {
   margin: 0;
   padding: var(--wb-space-2);
   list-style: none;
-  border: 1px solid var(--wb-line);
+  border: 1px solid color-mix(in srgb, var(--wb-line) 80%, var(--wb-accent) 20%);
   border-radius: var(--wb-radius-panel);
-  background: color-mix(in srgb, var(--wb-panel) 92%, transparent);
+  background: color-mix(in srgb, var(--wb-panel) 94%, transparent);
   backdrop-filter: blur(var(--wb-blur-md)) saturate(1.3);
   -webkit-backdrop-filter: blur(var(--wb-blur-md)) saturate(1.3);
   box-shadow:
@@ -5045,6 +5093,7 @@ textarea {
     0 0 0 1px var(--wb-elev-ring);
   max-height: var(--wb-popover-sm);
   overflow: auto;
+  scrollbar-width: thin;
 }
 
 .menu-select__list--portal {
@@ -5054,10 +5103,32 @@ textarea {
   left: 0;
   right: auto;
   overscroll-behavior: contain;
+  animation: menu-select-in var(--wb-motion-fast) ease-out;
+}
+
+@keyframes menu-select-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-select__list--portal {
+    animation: none;
+  }
 }
 
 .menu-select__option {
   width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wb-space-2);
   border: 0;
   background: transparent;
   color: var(--wb-text);
@@ -5065,11 +5136,31 @@ textarea {
   padding: var(--wb-space-2) var(--wb-space-3);
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--wb-motion-fast) ease;
 }
 
-.menu-select__option:hover,
-.menu-select__option.is-active {
+.menu-select__option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-select__check {
+  display: inline-flex;
+  color: var(--wb-accent);
+  flex-shrink: 0;
+}
+
+.menu-select__option:hover {
   background: color-mix(in srgb, var(--wb-text) 8%, transparent);
+}
+
+.menu-select__option.is-active {
+  background: color-mix(in srgb, var(--wb-accent-soft) 70%, transparent);
+  color: var(--wb-text);
+  font-weight: 550;
 }
 
 .cal-field {

@@ -4,6 +4,8 @@ import {
   applyUiFont,
   buildFontOptions,
   fontFamilyLabel,
+  fontMatchesQuery,
+  fontOptionLabel,
   normalizeFontFamily,
   resolveUiFontStack,
   SYSTEM_DEFAULT_LABEL,
@@ -30,11 +32,27 @@ describe("fonts", () => {
   });
 
   it("puts system default first in select options", () => {
-    expect(buildFontOptions(["Zebra", "Arial"])).toEqual([
+    expect(
+      buildFontOptions([
+        { family: "Zebra", aliases: [] },
+        { family: "Arial", aliases: [] },
+      ]),
+    ).toEqual([
       ["", SYSTEM_DEFAULT_LABEL],
       ["Zebra", "Zebra"],
       ["Arial", "Arial"],
     ]);
+  });
+
+  it("matches file-stem aliases against localized family names", () => {
+    const font = {
+      family: "霞鹜文楷 GB",
+      aliases: ["LXGWWenKaiGB"],
+    };
+    expect(fontMatchesQuery(font, "lxgw")).toBe(true);
+    expect(fontMatchesQuery(font, "霞鹜")).toBe(true);
+    expect(fontMatchesQuery(font, "missing")).toBe(false);
+    expect(fontOptionLabel(font)).toContain("LXGWWenKaiGB");
   });
 
   it("applies and clears the CSS variable", () => {

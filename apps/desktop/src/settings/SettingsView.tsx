@@ -5,9 +5,13 @@ import { useTheme } from "../theme/ThemeProvider";
 import {
   buildFontOptions,
   fontFamilyLabel,
-  listSystemFonts,
+  fontMatchesQuery,
+  getFontCatalog,
+  refreshSystemFonts,
   resolveUiFontStack,
+  subscribeFontCatalog,
 } from "../lib/fonts";
+import { MenuSelect } from "../ui/MenuSelect";
 import {
   defaultRemindLabel,
   startupViewLabel,
@@ -396,28 +400,19 @@ function AppearancePane({
   prefs: AppPrefs;
   onPatch: (p: Partial<AppPrefs>) => void;
 }) {
-  const [systemFonts, setSystemFonts] = useState<string[]>([]);
+  const [fontCatalog, setFontCatalog] = useState(getFontCatalog);
   const [fontQuery, setFontQuery] = useState("");
-  const [fontsLoading, setFontsLoading] = useState(true);
 
   useEffect(() => {
-    let cancelled = false;
-    setFontsLoading(true);
-    void listSystemFonts().then((fonts) => {
-      if (cancelled) return;
-      setSystemFonts(fonts);
-      setFontsLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
+    void refreshSystemFonts(true);
+    return subscribeFontCatalog(() => setFontCatalog(getFontCatalog()));
   }, []);
 
+  const systemFonts = fontCatalog.fonts;
+  const fontsLoading = fontCatalog.loading || fontCatalog.source === "pending";
+
   const fontOptions = useMemo(() => {
-    const q = fontQuery.trim().toLowerCase();
-    const filtered = q
-      ? systemFonts.filter((name) => name.toLowerCase().includes(q))
-      : systemFonts;
+    const filtered = systemFonts.filter((font) => fontMatchesQuery(font, fontQuery));
     const options = buildFontOptions(filtered);
     // Keep the current selection visible even when the filter hides it.
     for (const current of [prefs.uiFont, prefs.webFont]) {
@@ -489,16 +484,18 @@ function AppearancePane({
             <div className="settings__row-title">搜索字体</div>
             <div className="settings__row-desc">
               {fontsLoading
-                ? "正在读取本机已安装字体…"
-                : systemFonts.length > 0
-                  ? `共 ${systemFonts.length} 个已安装字体`
-                  : "桌面端可枚举本机字体；浏览器预览仅显示系统默认"}
+                ? "正在后台搜索本机已安装字体…"
+                : fontCatalog.source === "host"
+                  ? `共 ${systemFonts.length} 个系统字体（已按名称排序，可用文件名别名搜索）`
+                  : fontCatalog.error
+                    ? fontCatalog.error
+                    : "请在桌面端打开以扫描本机字体目录"}
             </div>
           </div>
           <input
             className="settings__input"
             aria-label="搜索字体"
-            placeholder="筛选字体名称"
+            placeholder="搜索：微软雅黑 / LXGW / 霞鹜…"
             value={fontQuery}
             onChange={(e) => setFontQuery(e.target.value)}
           />
@@ -660,18 +657,14 @@ function SelectRow({
         <div className="settings__row-title">{title}</div>
         <div className="settings__row-desc">{desc}</div>
       </div>
-      <select
-        className="settings__select"
-        aria-label={ariaLabel}
+      <MenuSelect
+        className="settings__menu-select"
+        label={ariaLabel}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map(([v, text]) => (
-          <option key={v || "__system__"} value={v}>
-            {text}
-          </option>
-        ))}
-      </select>
+        options={options.map(([v, text]) => ({ value: v, label: text }))}
+        onChange={onChange}
+        preferWidth={200}
+      />
     </div>
   );
 }
@@ -697,23 +690,19 @@ function FontSelectRow({
         <div className="settings__row-title">{title}</div>
         <div className="settings__row-desc">{desc}</div>
       </div>
-      <select
-        className="settings__select settings__select--font"
-        aria-label={ariaLabel}
+      <MenuSelect
+        className="settings__menu-select settings__menu-select--font"
+        label={ariaLabel}
         value={value}
-        style={value ? { fontFamily: `"${value}"` } : undefined}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map(([v, text]) => (
-          <option
-            key={v || "__system__"}
-            value={v}
-            style={v ? { fontFamily: `"${v}"` } : undefined}
-          >
-            {text}
-          </option>
-        ))}
-      </select>
+        preferWidth={280}
+        triggerStyle={value ? { fontFamily: `"${value}"` } : undefined}
+        options={options.map(([v, text]) => ({
+          value: v,
+          label: text,
+          style: v ? { fontFamily: `"${v}"` } : undefined,
+        }))}
+        onChange={onChange}
+      />
     </div>
   );
 }

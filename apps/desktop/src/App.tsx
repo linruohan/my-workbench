@@ -31,7 +31,7 @@ import {
   type TimedSchedule,
 } from "@wb/domain";
 import { createPersistedStore, hydrateStore, saveStore } from "./lib/persistence";
-import { applyUiFont } from "./lib/fonts";
+import { applyUiFont, prefetchSystemFonts } from "./lib/fonts";
 import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
 import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
 import { AgentView } from "./agent/AgentView";
@@ -168,6 +168,13 @@ export default function App() {
     applyUiFont(prefs.uiFont);
     void webSessionSetDefaultFont(prefs.webFont);
   }, [prefs.uiFont, prefs.webFont]);
+
+  useEffect(() => {
+    if (!ready) return;
+    // Wait until the shell is ready so Tauri IPC is available; avoid caching a
+    // short browser probe list before the full desktop catalog returns.
+    prefetchSystemFonts();
+  }, [ready]);
 
   useEffect(() => {
     if (!ready) return;
