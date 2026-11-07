@@ -104,4 +104,39 @@ describe("NoteEditor", () => {
     expect(selected.selectionStart).toBe(0);
     expect(selected.selectionEnd).toBe(selected.value.length);
   });
+
+  it("does not emit body changes when a merge only expands the selection", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    // 无标题行，编号同步不会改写正文；只剩打开时的规范化会触发一次 onChange。
+    const plain: Note = { ...note, id: "n2", bodyMd: "甲\n\n乙" };
+    renderWithProviders(
+      <NoteEditor note={plain} onChange={onChange} onDelete={() => undefined} />,
+    );
+    // 打开时会做一次延迟的大纲编号/规范化同步，等它完成后再清零。
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    onChange.mockClear();
+    await user.click(screen.getByLabelText("编辑第 1 行"));
+    const area = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+    await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    expect(screen.getByLabelText("Markdown 源码")).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("extends the selection to the document end with Ctrl+Shift+End", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <NoteEditor note={note} onChange={() => undefined} onDelete={() => undefined} />,
+    );
+    await user.click(screen.getByLabelText("编辑第 3 行"));
+    const area = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    area.focus();
+    area.setSelectionRange(0, 0);
+    await user.keyboard("{Control>}{Shift>}{End}{/Shift}{/Control}");
+    const selected = screen.getByLabelText("Markdown 源码") as HTMLTextAreaElement;
+    expect(selected.value).toContain("世界");
+    expect(selected.selectionEnd).toBe(selected.value.length);
+  });
 });

@@ -199,6 +199,40 @@ function selectionRangeFromAnchorFocus(
   return { start: anchor, end: focus, direction: "none" };
 }
 
+/** 块内最后一行的起始下标。 */
+function lastLineStart(text: string): number {
+  const nl = text.lastIndexOf("\n");
+  return nl < 0 ? 0 : nl + 1;
+}
+
+/** 块内第一行结束后的下标。 */
+function firstLineEnd(text: string): number {
+  const nl = text.indexOf("\n");
+  return nl < 0 ? text.length : nl;
+}
+
+/** 向左跨块查找上一个词边界（Ctrl+ArrowLeft 语义）。 */
+function prevWordBoundary(text: string, pos: number): number {
+  let i = Math.max(0, Math.min(pos, text.length));
+  while (i > 0 && /\s/.test(text[i - 1] ?? "")) i -= 1;
+  while (i > 0 && !/\s/.test(text[i - 1] ?? "")) i -= 1;
+  return i;
+}
+
+/** 向右跨块查找下一个词边界（Ctrl+ArrowRight 语义）。 */
+function nextWordBoundary(text: string, pos: number): number {
+  let i = Math.max(0, Math.min(pos, text.length));
+  while (i < text.length && /\s/.test(text[i] ?? "")) i += 1;
+  while (i < text.length && !/\s/.test(text[i] ?? "")) i += 1;
+  return i;
+}
+
+/** 指定块的文档起始偏移；越界时返回兜底位置。 */
+function indexAtBlockStart(blocks: string[], index: number, fallback: number): number {
+  if (index < 0 || index >= blocks.length) return fallback;
+  return blockDocOffset(blocks, index);
+}
+
 let measureCtx: CanvasRenderingContext2D | null = null;
 
 function textWidth(text: string, font: string): number {
@@ -340,6 +374,19 @@ export function NoteEditor({
   /** Document offset of the selection anchor while Shift-extending or drag-selecting. */
   const selAnchorDoc = useRef<number | null>(null);
   const dragSelecting = useRef(false);
+  /** 最近一次拖拽应用的文档选区；重复命中同一位置时直接跳过。 */
+  const lastAppliedDoc = useRef<{ anchor: number; focus: number; text: string } | null>(
+    null,
+  );
+  /** 预览区拖拽：先记录起点，跨块后才进入编辑态。 */
+  const previewDrag = useRef<{
+    anchorDoc: number;
+    focusDoc: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+    crossed: boolean;
+  } | null>(null);
   const editMinHeight = useRef<number | null>(null);
   const snippetStops = useRef<MdSnippetRange[] | null>(null);
   const snippetStopIndex = useRef(0);
@@ -544,21 +591,26 @@ export function NoteEditor({
     }
   }, [active, note.id, findOpen]);
 
+  /** 提交块数组；正文未变化时跳过 onChange，避免无意义的脏状态。 */
   const commitBlocks = (nextBlocks: string[], focus: number | null, caret?: number) => {
     const normalized = normalizeMdBlocks(nextBlocks);
     if (caret != null) pendingCaret.current = caret;
+    const nextText = joinMdBlocks(normalized);
+    const prevText = joinMdBlocks(blocks);
     setBlocks(normalized);
     setActive(focus);
-    onChange({ bodyMd: joinMdBlocks(normalized) });
+    if (nextText !== prevText) onChange({ bodyMd: nextText });
   };
 
   /** Sync outline numbers into source when leaving edit (keeps render free of CSS counters). */
   const commitNumbered = (nextBlocks: string[], focus: number | null) => {
     const numbered = applyHeadingNumbers(joinMdBlocks(normalizeMdBlocks(nextBlocks)));
     const normalized = normalizeMdBlocks(splitMdBlocks(numbered));
+    const nextText = joinMdBlocks(normalized);
+    const prevText = joinMdBlocks(blocks);
     setBlocks(normalized);
     setActive(focus);
-    onChange({ bodyMd: joinMdBlocks(normalized) });
+    if (nextText !== prevText) onChange({ bodyMd: nextText });
   };
 
   const docText = () => joinMdBlocks(blocks);
@@ -890,14 +942,6 @@ export function NoteEditor({
     return () => cancelAnimationFrame(id);
   }, [gotoOpen]);
 
-  useEffect(() => {
-    const endDrag = () => {
-      dragSelecting.current = false;
-    };
-    window.addEventListener("mouseup", endDrag);
-    return () => window.removeEventListener("mouseup", endDrag);
-  }, []);
-
   const updateActiveBlock = (text: string) => {
     if (active == null) return;
     const next = [...blocks];
@@ -914,6 +958,8 @@ export function NoteEditor({
     snippetStopIndex.current = 0;
     selAnchorDoc.current = null;
     dragSelecting.current = false;
+    previewDrag.current = null;
+    lastAppliedDoc.current = null;
     if (editRef.current) {
       editRef.current.style.minHeight = "";
       editRef.current.style.height = "";
@@ -994,13 +1040,32 @@ export function NoteEditor({
     focus: number,
   ) => {
     const range = selectionRangeFromAnchorFocus(anchor, focus);
+    const nextText = joinMdBlocks(nextBlocks);
+    const structuralSame =
+      nextBlocks.length === blocks.length &&
+      nextBlocks.every((text, i) => text === (blocks[i] ?? ""));
     pendingSelection.current = range;
     pendingCaret.current = null;
     selAnchorDoc.current = blockDocOffset(nextBlocks, focusIndex) + anchor;
     suppressBlur.current = true;
-    setBlocks(nextBlocks);
+    if (!structuralSame) setBlocks(nextBlocks);
     setActive(focusIndex);
-    onChange({ bodyMd: joinMdBlocks(nextBlocks) });
+    // 拖拽重复命中同一选区时，文本域已经处于该状态，无需再排一次 rAF。
+    const area = editRef.current;
+    if (
+      structuralSame &&
+      active === focusIndex &&
+      area &&
+      document.activeElement === area &&
+      area.selectionStart === range.start &&
+      area.selectionEnd === range.end
+    ) {
+      pendingSelection.current = null;
+      suppressBlur.current = false;
+      return;
+    }
+    // 纯选择合并不会改变正文文本：跳过 onChange，避免用户仅拖选就被标记为脏。
+    if (nextText !== documentText) onChange({ bodyMd: nextText });
     requestAnimationFrame(() => {
       const area = editRef.current;
       if (area) {
@@ -1019,6 +1084,12 @@ export function NoteEditor({
     const text = joinMdBlocks(sourceBlocks);
     const a = Math.max(0, Math.min(Math.floor(docAnchor), text.length));
     const f = Math.max(0, Math.min(Math.floor(docFocus), text.length));
+    // mousemove 每秒会触发很多次；同一文档选区重复命中时不再做合并与渲染。
+    const applied = lastAppliedDoc.current;
+    if (applied && applied.anchor === a && applied.focus === f && applied.text === text) {
+      return;
+    }
+    lastAppliedDoc.current = { anchor: a, focus: f, text };
     const locA = locateInBlocks(sourceBlocks, a);
     const locF = locateInBlocks(sourceBlocks, f);
     const from = Math.min(locA.index, locF.index);
@@ -1037,19 +1108,15 @@ export function NoteEditor({
   };
 
   /** Enter edit mode at the clicked character (no renumber — keeps click snappy). */
-  const beginEditAt = (
-    index: number,
-    caret: number,
-    event?: { preventDefault: () => void; currentTarget?: EventTarget | null },
-  ) => {
-    event?.preventDefault();
+  const beginEditAt = (index: number, caret: number, host?: HTMLElement | null) => {
     suppressBlur.current = true;
+    previewDrag.current = null;
+    lastAppliedDoc.current = null;
     pendingCaret.current = caret;
     pendingSelection.current = null;
     selAnchorDoc.current = blockDocOffset(blocks, index) + caret;
     // Lock min-height to the preview box so code/images/headings do not jump on enter.
     // Skip for blank gaps — those must stay exactly one --md-live-row.
-    const host = event?.currentTarget as HTMLElement | null | undefined;
     const enteringEmpty = !(blocks[index] ?? "");
     if (!enteringEmpty && host && typeof host.getBoundingClientRect === "function") {
       editMinHeight.current = Math.ceil(host.getBoundingClientRect().height);
@@ -1086,6 +1153,90 @@ export function NoteEditor({
     const focusDoc = blockDocOffset(blocks, index) + caret;
     focusDocRange(anchorDoc, focusDoc);
   };
+
+  // 文档级拖拽追踪：原生选区在文本域边缘会断开，用 elementFromPoint 命中行后继续合并。
+  useEffect(() => {
+    const rowAt = (x: number, y: number): HTMLElement | null => {
+      if (typeof document.elementFromPoint !== "function") return null;
+      const hit = document.elementFromPoint(x, y);
+      if (!(hit instanceof Element)) return null;
+      return hit.closest("[data-block-index]") as HTMLElement | null;
+    };
+
+    /** 把视口坐标映射成块下标和块内光标位置。 */
+    const caretAt = (x: number, y: number): { index: number; caret: number } | null => {
+      const row = rowAt(x, y);
+      if (!row) return null;
+      const index = Number(row.dataset.blockIndex);
+      if (!Number.isInteger(index) || index < 0 || index >= blocks.length) return null;
+      const area = editRef.current;
+      if (active != null && index === active && area) {
+        return { index, caret: caretIndexFromClick(area.value, x, y, area) };
+      }
+      const preview = row.querySelector(".md-live__preview") as HTMLElement | null;
+      if (!preview) return { index, caret: 0 };
+      return { index, caret: caretIndexFromClick(blocks[index] ?? "", x, y, preview) };
+    };
+
+    const onMove = (event: MouseEvent) => {
+      if ((event.buttons & 1) === 0) return;
+      const preview = previewDrag.current;
+      if (preview) {
+        const dx = event.clientX - preview.startX;
+        const dy = event.clientY - preview.startY;
+        if (!preview.moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+        preview.moved = true;
+        const pos = caretAt(event.clientX, event.clientY);
+        if (!pos) return;
+        preview.focusDoc = blockDocOffset(blocks, pos.index) + pos.caret;
+        if (
+          !preview.crossed &&
+          pos.index !== locateInBlocks(blocks, preview.anchorDoc).index
+        ) {
+          preview.crossed = true;
+        }
+        // 仍在同一块内时保留原生选区（复制粘贴不受影响）。
+        if (preview.crossed) focusDocRange(preview.anchorDoc, preview.focusDoc);
+        return;
+      }
+      if (!dragSelecting.current || active == null) return;
+      const hit =
+        typeof document.elementFromPoint === "function"
+          ? document.elementFromPoint(event.clientX, event.clientY)
+          : null;
+      // 指针还在文本域内部时交给浏览器处理原生选区。
+      if (hit === editRef.current) return;
+      const pos = caretAt(event.clientX, event.clientY);
+      if (!pos) return;
+      extendSelectionTo(pos.index, pos.caret);
+    };
+
+    const onUp = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      dragSelecting.current = false;
+      const drag = previewDrag.current;
+      previewDrag.current = null;
+      if (!drag) return;
+      if (!drag.moved) {
+        // 纯点击：此时才进入编辑态，mousedown 不再阻断预览区文本复制。
+        const loc = locateInBlocks(blocks, drag.anchorDoc);
+        const row = rowAt(event.clientX, event.clientY);
+        const preview = row?.querySelector(".md-live__preview") as HTMLElement | null;
+        beginEditAt(loc.index, loc.offset, preview ?? row);
+        return;
+      }
+      if (drag.crossed) focusDocRange(drag.anchorDoc, drag.focusDoc);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    // `blocks` / `active` 跟随渲染更新，保证命中测试使用当前行数据。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, active]);
 
   const applyWrap = (prefix: string, suffix = prefix) => {
     if (active == null) return;
@@ -1149,7 +1300,39 @@ export function NoteEditor({
       openGoto();
       return;
     }
-    if (mod && event.key === "Home") {
+    // 需要跨越块边界的 Ctrl/Cmd+Shift 选区快捷键。
+    if (mod && event.shiftKey) {
+      const text = joinMdBlocks(blocks);
+      const area = event.currentTarget;
+      const { anchor, focus } = selectionAnchorFocus(area);
+      const base = blockDocOffset(blocks, active ?? 0);
+      const anchorDoc = selAnchorDoc.current ?? base + anchor;
+      const focusDoc = base + focus;
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        focusDocRange(anchorDoc, event.key === "Home" ? 0 : text.length);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const target =
+          event.key === "ArrowLeft"
+            ? prevWordBoundary(text, focusDoc)
+            : nextWordBoundary(text, focusDoc);
+        focusDocRange(anchorDoc, target);
+        return;
+      }
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        const target =
+          event.key === "ArrowUp"
+            ? indexAtBlockStart(blocks, (active ?? 0) - 1, 0)
+            : indexAtBlockStart(blocks, (active ?? 0) + 1, text.length);
+        focusDocRange(anchorDoc, target);
+        return;
+      }
+    }
+    if (mod && !event.shiftKey && event.key === "Home") {
       event.preventDefault();
       jumpToLine(1);
       return;
@@ -1205,6 +1388,21 @@ export function NoteEditor({
 
     // Shift+arrows at block edges: merge the neighbor so native multi-line select continues.
     if (event.shiftKey && !mod) {
+      // Shift+Home / Shift+End 抵达块边缘后继续延伸到相邻块。
+      if (event.key === "Home" && focus === 0 && index > 0) {
+        event.preventDefault();
+        const prev = blocks[index - 1] ?? "";
+        const anchorDoc = selAnchorDoc.current ?? blockDocOffset(blocks, index) + anchor;
+        focusDocRange(anchorDoc, blockDocOffset(blocks, index - 1) + lastLineStart(prev));
+        return;
+      }
+      if (event.key === "End" && focus === value.length && index < blocks.length - 1) {
+        event.preventDefault();
+        const next = blocks[index + 1] ?? "";
+        const anchorDoc = selAnchorDoc.current ?? blockDocOffset(blocks, index) + anchor;
+        focusDocRange(anchorDoc, blockDocOffset(blocks, index + 1) + firstLineEnd(next));
+        return;
+      }
       if (event.key === "ArrowUp" && focusLine.isFirstLine && index > 0) {
         event.preventDefault();
         const prev = blocks[index - 1] ?? "";
@@ -1819,6 +2017,8 @@ export function NoteEditor({
                       rows={1}
                       onMouseDown={(e) => {
                         if (e.button !== 0) return;
+                        previewDrag.current = null;
+                        lastAppliedDoc.current = null;
                         dragSelecting.current = true;
                         const area = e.currentTarget;
                         // Capture anchor after the browser places the caret.
@@ -1915,20 +2115,9 @@ export function NoteEditor({
                         extendSelectionTo(index, 0);
                         return;
                       }
-                      if (dragSelecting.current && active != null) {
-                        e.preventDefault();
-                        extendSelectionTo(index, 0);
-                        return;
-                      }
-                      beginEditAt(index, 0, {
-                        preventDefault: () => e.preventDefault(),
-                        currentTarget: e.currentTarget,
-                      });
-                    }}
-                    onMouseEnter={(e) => {
-                      if (!dragSelecting.current || active == null) return;
-                      if ((e.buttons & 1) === 0) return;
-                      extendSelectionTo(index, 0);
+                      dragSelecting.current = true;
+                      lastAppliedDoc.current = null;
+                      beginEditAt(index, 0, e.currentTarget);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -1987,26 +2176,18 @@ export function NoteEditor({
                       extendSelectionTo(index, caret);
                       return;
                     }
-                    if (dragSelecting.current && active != null) {
-                      e.preventDefault();
-                      extendSelectionTo(index, caret);
-                      return;
-                    }
-                    beginEditAt(index, caret, {
-                      preventDefault: () => e.preventDefault(),
-                      currentTarget: e.currentTarget,
-                    });
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!dragSelecting.current || active == null) return;
-                    if ((e.buttons & 1) === 0) return;
-                    const target = e.currentTarget.querySelector(
-                      ".md-live__preview",
-                    ) as HTMLElement | null;
-                    const caret = target
-                      ? caretIndexFromClick(block, e.clientX, e.clientY, target)
-                      : (block ?? "").length;
-                    extendSelectionTo(index, caret);
+                    // 延迟到 mouseup 才进入编辑态；mousedown 不再阻止原生文本选区，复制保持可用。
+                    dragSelecting.current = false;
+                    lastAppliedDoc.current = null;
+                    const anchorDoc = blockDocOffset(blocks, index) + caret;
+                    previewDrag.current = {
+                      anchorDoc,
+                      focusDoc: anchorDoc,
+                      startX: e.clientX,
+                      startY: e.clientY,
+                      moved: false,
+                      crossed: false,
+                    };
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
