@@ -420,6 +420,12 @@ function runTool(
     }
     case "subagent":
       throw new DomainError("子智能体委派由宿主执行");
+    case "list_agents":
+    case "send_message":
+    case "interrupt_agent":
+      throw new DomainError("托管子智能体控制由宿主执行");
+    case "load_workspace_dependencies":
+      throw new DomainError("运行时路径探测由宿主执行");
     case "get_goal": {
       return ok(ctx.goal ? "已读取 goal" : "当前没有 goal", viewGoal(ctx.goal ?? null));
     }

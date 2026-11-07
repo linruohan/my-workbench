@@ -8,12 +8,6 @@ export const SYSTEM_DEFAULT_LABEL = "系统默认（Mac 风格）";
 
 const FORBIDDEN = /["';{}<>\\\n\r\0]/;
 
-type LocalFontFace = { family: string };
-
-type FontQueryWindow = Window & {
-  queryLocalFonts?: () => Promise<LocalFontFace[]>;
-};
-
 let cachedSystemFonts: string[] | null = null;
 let systemFontsPromise: Promise<string[]> | null = null;
 
@@ -41,32 +35,23 @@ function sanitizeFamilyList(names: string[]): string[] {
   return out;
 }
 
-async function queryBrowserLocalFonts(): Promise<string[]> {
-  const query = (window as FontQueryWindow).queryLocalFonts;
-  if (typeof query !== "function") return [];
-  try {
-    const faces = await query.call(window);
-    return sanitizeFamilyList(faces.map((face) => face.family));
-  } catch {
-    return [];
-  }
-}
-
-/** Installed font families on this machine (cached after first success). */
+/**
+ * Installed font families on this machine (cached after first success).
+ * Desktop builds read via Tauri/font-kit — never via queryLocalFonts, which
+ * would pop a browser permission dialog on localhost.
+ */
 export async function listSystemFonts(): Promise<string[]> {
   if (cachedSystemFonts) return cachedSystemFonts;
   if (!systemFontsPromise) {
     systemFontsPromise = (async () => {
-      if (isTauriRuntime()) {
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const families = await invoke<string[]>("list_system_fonts");
-          return sanitizeFamilyList(families);
-        } catch {
-          // Fall through to browser API when the host command is unavailable.
-        }
+      if (!isTauriRuntime()) return [];
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const families = await invoke<string[]>("list_system_fonts");
+        return sanitizeFamilyList(families);
+      } catch {
+        return [];
       }
-      return queryBrowserLocalFonts();
     })().then((fonts) => {
       cachedSystemFonts = fonts;
       return fonts;

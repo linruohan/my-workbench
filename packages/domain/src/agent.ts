@@ -320,17 +320,48 @@ export const AGENT_TOOLS: ToolSpec[] = [
     { text: str("记忆原文的一部分或 id") },
     ["text"],
   ),
-  tool("subagent_list", "read", "列出可用子智能体", {}),
+  tool("subagent_list", "read", "列出可用子智能体配置（preset）", {}),
   tool(
     "subagent",
     "write",
-    "把任务同步委派给一个已配置的子智能体，返回其最终文字答复（同进程、有轮次上限）。",
+    "委派给已配置子智能体。默认托管启动并立即返回 agentId；wait=true 时同步等待最终答复。",
     {
       name: str("子智能体名称"),
       task: str("要委派的任务说明"),
       prompt: str("同 task"),
+      wait: {
+        type: "boolean",
+        description: "true 同步等待完成；默认 false（托管 activation）",
+      },
     },
     ["name"],
+  ),
+  tool("list_agents", "read", "列出当前会话下可继续的托管子智能体。", {
+    scope: str("children（默认）| descendants"),
+  }),
+  tool(
+    "send_message",
+    "write",
+    "向托管子智能体发送后续消息（不返回子级回复，只确认受理）。",
+    {
+      agent_id: str("子智能体 id"),
+      message: str("要发送的内容"),
+      text: str("同 message"),
+    },
+    ["agent_id"],
+  ),
+  tool(
+    "interrupt_agent",
+    "write",
+    "中断自己的直接托管子智能体当前轮次。",
+    { agent_id: str("子智能体 id") },
+    ["agent_id"],
+  ),
+  tool(
+    "load_workspace_dependencies",
+    "read",
+    "返回本机可用的 Node / Python / pnpm 绝对路径与版本（宿主探测，非 DSH 随包 runtime payload）。",
+    {},
   ),
   tool("get_goal", "read", "读取当前会话的持久 goal；没有则为 null。", {}),
   tool(
@@ -607,6 +638,14 @@ export function toolCallSummary(name: string, args: Record<string, unknown>): st
       return `委派子智能体${
         typeof args.name === "string" && args.name ? `「${args.name}」` : ""
       }`;
+    case "list_agents":
+      return "列出托管子智能体";
+    case "send_message":
+      return "向子智能体发消息";
+    case "interrupt_agent":
+      return "中断子智能体";
+    case "load_workspace_dependencies":
+      return "加载本机运行时路径";
     case "get_goal":
       return "读取 goal";
     case "create_goal":

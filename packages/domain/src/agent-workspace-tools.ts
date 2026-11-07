@@ -656,7 +656,7 @@ export function formatTodosForPrompt(todos: readonly AgentTodoItem[]): string {
 
 export function formatWorkspaceToolsHint(hasRoot: boolean): string {
   const lines = [
-    "web_search / web_fetch 可查网页；todo_write 维护本会话待办；缺信息时用 ask_user_question（可用 mode=timed）。后台任务用 job_list / job_output / job_kill。定时投递用 schedule_*（仅在用户明确要求时创建/修改）。会话 goal 用 get_goal / create_goal / update_goal；历史检索用 session_search / session_event_*。",
+    "web_search / web_fetch 可查网页；todo_write 维护本会话待办；缺信息时用 ask_user_question（可用 mode=timed）。后台任务用 job_list / job_output / job_kill。定时投递用 schedule_*（仅在用户明确要求时创建/修改）。会话 goal 用 get_goal / create_goal / update_goal；历史检索用 session_search / session_event_*。托管子智能体用 subagent / list_agents / send_message / interrupt_agent；本机解释器用 load_workspace_dependencies。",
   ];
   if (hasRoot) {
     lines.unshift(

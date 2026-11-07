@@ -71,6 +71,17 @@ import {
 } from "./execute";
 import { dshHostPlatform, dshSessionFor } from "./dsh-session";
 import { hostFetch } from "./host-fetch";
+import {
+  completeManagedAgent,
+  getManagedAgent,
+  interruptManagedAgent,
+  listManagedAgents,
+  registerManagedAgent,
+  removeManagedAgent,
+  sendManagedAgentMessage,
+  takeManagedAgentInbox,
+  takePendingAgentNotices,
+} from "./agent-registry";
 import { takePendingImageDataUrls } from "./image-attachments";
 import { takePendingJobNotices } from "./job-watch";
 import { isTauriRuntime } from "../lib/paths";
@@ -884,7 +895,10 @@ async function executeCallWithTimeout(
 }
 
 function deliverJobNotices(env: AgentTurnEnv, nowMs: number): void {
-  const notices = takePendingJobNotices(env.threadId);
+  const notices = [
+    ...takePendingJobNotices(env.threadId),
+    ...takePendingAgentNotices(env.threadId),
+  ];
   for (const notice of notices) {
     env.store.appendAgentMessage({
       threadId: env.threadId,
@@ -941,6 +955,16 @@ async function executeCall(
   if (call.name === "subagent") {
     return runSubagentDelegation(env, call.args, nowMs);
   }
+  if (
+    call.name === "list_agents" ||
+    call.name === "send_message" ||
+    call.name === "interrupt_agent"
+  ) {
+    return runSubagentControl(env, call.name, call.args, nowMs);
+  }
+  if (call.name === "load_workspace_dependencies") {
+    return loadWorkspaceDependencies();
+  }
   if (isWorkspaceToolName(call.name)) {
     try {
       const todos = todoPort(env);
@@ -983,6 +1007,169 @@ async function executeCall(
     const message = error instanceof Error ? error.message : "工具执行失败";
     return { ok: false, summary: message, data: { error: message }, effects: [] };
   }
+}
+
+async function loadWorkspaceDependencies(): Promise<AgentToolResult> {
+  if (!isTauriRuntime()) {
+    return {
+      ok: true,
+      summary: "当前环境无本机运行时探测",
+      data: { node: null, python: null, pnpm: null, source: "browser" },
+      effects: [],
+    };
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const hit = await invoke<{
+      node: { path: string; version: string | null } | null;
+      python: { path: string; version: string | null } | null;
+      pnpm: { path: string; version: string | null } | null;
+      source: string;
+    }>("agent_workspace_runtime_paths");
+    const parts = [
+      hit.node ? `node ${hit.node.version ?? ""}`.trim() : null,
+      hit.python ? `python ${hit.python.version ?? ""}`.trim() : null,
+      hit.pnpm ? `pnpm ${hit.pnpm.version ?? ""}`.trim() : null,
+    ].filter(Boolean);
+    return {
+      ok: true,
+      summary: parts.length
+        ? `已探测：${parts.join(" · ")}`
+        : "未探测到 Node/Python/pnpm",
+      data: hit,
+      effects: [],
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "探测失败";
+    return { ok: false, summary: message, data: { error: message }, effects: [] };
+  }
+}
+
+async function runSubagentControl(
+  env: AgentTurnEnv,
+  name: string,
+  args: Record<string, unknown>,
+  nowMs: number,
+): Promise<AgentToolResult> {
+  if (name === "list_agents") {
+    const scopeRaw = typeof args.scope === "string" ? args.scope.trim() : "children";
+    const scope = scopeRaw === "descendants" ? "descendants" : "children";
+    const agents = listManagedAgents(env.threadId, scope);
+    return {
+      ok: true,
+      summary: agents.length ? `有 ${agents.length} 个子智能体` : "没有托管子智能体",
+      data: { agents, scope },
+      effects: [],
+    };
+  }
+  if (name === "interrupt_agent") {
+    const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+    if (!agentId) {
+      return {
+        ok: false,
+        summary: "请提供 agent_id",
+        data: { error: "请提供 agent_id" },
+        effects: [],
+      };
+    }
+    const result = interruptManagedAgent(agentId, env.threadId);
+    if (result.ok === false) {
+      return {
+        ok: false,
+        summary: result.reason,
+        data: { error: result.reason },
+        effects: [],
+      };
+    }
+    return {
+      ok: true,
+      summary: `已请求中断 ${agentId}`,
+      data: { agent: result.agent },
+      effects: [],
+    };
+  }
+  // send_message
+  const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+  const message =
+    (typeof args.message === "string" && args.message.trim()) ||
+    (typeof args.text === "string" && args.text.trim()) ||
+    "";
+  if (!agentId) {
+    return {
+      ok: false,
+      summary: "请提供 agent_id",
+      data: { error: "请提供 agent_id" },
+      effects: [],
+    };
+  }
+  const sent = sendManagedAgentMessage(agentId, env.threadId, message);
+  if (sent.ok === false) {
+    return { ok: false, summary: sent.reason, data: { error: sent.reason }, effects: [] };
+  }
+  const record = getManagedAgent(agentId);
+  if (record && record.status === "inactive") {
+    const parent = requireThread(env);
+    const child = env.store.getAgentThread(agentId);
+    if (child) {
+      const controller = new AbortController();
+      record.controller = controller;
+      record.status = "running";
+      const nested: AgentTurnEnv = {
+        ...env,
+        threadId: agentId,
+        subagentDepth: (env.subagentDepth ?? 0) + 1,
+        signal: controller.signal,
+        nowMs,
+      };
+      void (async () => {
+        try {
+          const followUps = takeManagedAgentInbox(agentId);
+          for (const follow of followUps.length ? followUps : [message]) {
+            await startAgentTurn(nested, follow);
+          }
+          for (let guard = 0; guard < 10; guard += 1) {
+            if (controller.signal.aborted) break;
+            const more = takeManagedAgentInbox(agentId);
+            if (more.length) {
+              for (const follow of more) await startAgentTurn(nested, follow);
+              continue;
+            }
+            const thread = env.store.getAgentThread(agentId);
+            if (!thread?.queueJson) break;
+            const pending = env.store
+              .listAgentApprovals(agentId)
+              .find((item) => item.status === "pending");
+            if (pending) await settleAgentApproval(nested, "denied");
+            else await resumeAgentQueue(nested);
+          }
+          const messages = env.store.listAgentMessages(agentId);
+          const lastAssistant = [...messages]
+            .reverse()
+            .find((item) => item.role === "assistant");
+          const text = lastAssistant?.content?.trim() || "（子智能体无文字答复）";
+          completeManagedAgent(
+            agentId,
+            text,
+            `subagent ${record.name} (${agentId}) finished after message.\n${text.slice(0, 1200)}`,
+          );
+        } catch (error) {
+          const err = error instanceof Error ? error.message : "子智能体失败";
+          completeManagedAgent(
+            agentId,
+            err,
+            `subagent ${record.name} (${agentId}) failed: ${err}`,
+          );
+        }
+      })();
+      void parent;
+    }
+  }
+  return {
+    ok: true,
+    summary: `已受理消息 ${sent.messageId}`,
+    data: { messageId: sent.messageId, agent: sent.agent },
+    effects: [],
+  };
 }
 
 async function runSubagentDelegation(
@@ -1030,52 +1217,119 @@ async function runSubagentDelegation(
     };
   }
   const parent = requireThread(env);
+  const wait = args.wait === true;
   const child = env.store.createAgentThread({
     workspaceId: parent.workspaceId,
     title: `subagent:${agent.name}`,
     modelRef: parent.modelRef,
     permissionMode: parent.permissionMode === "readonly" ? "readonly" : "session_auto",
   });
-  try {
-    const nested: AgentTurnEnv = {
-      ...env,
-      threadId: child.id,
-      subagentDepth: depth + 1,
-      subagentPrompt: `你正在作为子智能体「${agent.name}」回答。\n${agent.prompt}`,
-      toolAllowlist: agent.toolNames.length ? agent.toolNames : undefined,
-      maxRounds: Math.min(env.maxRounds ?? 3, 4),
-      nowMs,
-    };
-    await startAgentTurn(nested, task);
-    for (let guard = 0; guard < 10; guard += 1) {
+  const controller = new AbortController();
+  if (env.signal) {
+    if (env.signal.aborted) controller.abort();
+    else {
+      env.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+  registerManagedAgent({
+    id: child.id,
+    parentThreadId: parent.id,
+    name: agent.name,
+    depth: depth + 1,
+    controller,
+    nowMs,
+  });
+  const nestedBase: AgentTurnEnv = {
+    ...env,
+    threadId: child.id,
+    subagentDepth: depth + 1,
+    subagentPrompt: `你正在作为子智能体「${agent.name}」回答。\n${agent.prompt}`,
+    toolAllowlist: agent.toolNames.length ? agent.toolNames : undefined,
+    maxRounds: Math.min(env.maxRounds ?? 3, 4),
+    signal: controller.signal,
+    nowMs,
+  };
+
+  const runChild = async (): Promise<string> => {
+    await startAgentTurn(nestedBase, task);
+    for (let guard = 0; guard < 12; guard += 1) {
+      if (controller.signal.aborted) break;
+      const followUps = takeManagedAgentInbox(child.id);
+      if (followUps.length) {
+        for (const follow of followUps) {
+          await startAgentTurn({ ...nestedBase, nowMs: Date.now() }, follow);
+        }
+        continue;
+      }
       const thread = env.store.getAgentThread(child.id);
       if (!thread?.queueJson) break;
       const pending = env.store
         .listAgentApprovals(child.id)
         .find((item) => item.status === "pending");
       if (pending) {
-        await settleAgentApproval(nested, "denied");
+        await settleAgentApproval(nestedBase, "denied");
       } else {
-        await resumeAgentQueue(nested);
+        await resumeAgentQueue(nestedBase);
       }
     }
     const messages = env.store.listAgentMessages(child.id);
     const lastAssistant = [...messages]
       .reverse()
       .find((message) => message.role === "assistant");
-    const text = lastAssistant?.content?.trim() || "（子智能体无文字答复）";
-    return {
-      ok: true,
-      summary: `子智能体 ${agent.name} 已完成`,
-      data: { name: agent.name, text },
-      effects: [],
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "子智能体失败";
-    return { ok: false, summary: message, data: { error: message }, effects: [] };
-  } finally {
-    env.store.deleteAgentThread(child.id);
+    return lastAssistant?.content?.trim() || "（子智能体无文字答复）";
+  };
+
+  if (wait) {
+    try {
+      const text = await runChild();
+      completeManagedAgent(
+        child.id,
+        text,
+        `subagent ${agent.name} (${child.id}) finished.\n${text.slice(0, 1200)}`,
+      );
+      removeManagedAgent(child.id);
+      env.store.deleteAgentThread(child.id);
+      return {
+        ok: true,
+        summary: `子智能体 ${agent.name} 已完成`,
+        data: { name: agent.name, agentId: child.id, text },
+        effects: [],
+      };
+    } catch (error) {
+      removeManagedAgent(child.id);
+      env.store.deleteAgentThread(child.id);
+      const message = error instanceof Error ? error.message : "子智能体失败";
+      return { ok: false, summary: message, data: { error: message }, effects: [] };
+    }
   }
+
+  void runChild()
+    .then((text) => {
+      const record = getManagedAgent(child.id);
+      const interrupted = record?.status === "interrupted" || controller.signal.aborted;
+      completeManagedAgent(
+        child.id,
+        text,
+        interrupted
+          ? `subagent ${agent.name} (${child.id}) interrupted.\n${text.slice(0, 800)}`
+          : `subagent ${agent.name} (${child.id}) finished.\n${text.slice(0, 1200)}`,
+      );
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : "子智能体失败";
+      completeManagedAgent(
+        child.id,
+        message,
+        `subagent ${agent.name} (${child.id}) failed: ${message}`,
+      );
+    });
+
+  return {
+    ok: true,
+    summary: `started subagent ${child.id}`,
+    data: { agentId: child.id, name: agent.name, status: "running" },
+    effects: [],
+  };
 }
 
 function say(env: AgentTurnEnv, content: string, nowMs: number): void {

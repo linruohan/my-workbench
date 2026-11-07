@@ -32,8 +32,8 @@
 | `dsh-tool-todo` | `todo_write` | ✅ | 同名 |
 | `dsh-tool-ask-user` | `ask_user_question` | ✅ | 同名；支持 `mode=timed` 倒计时后继续 |
 | `dsh-tool-skill` | `skill` | 🟡 | `skill_list` / `skill_load` + `/name` |
-| `dsh-tool-subagent` | 委派启动工具 | 🟡 | `subagent_list` + 同步 `subagent`（同进程临时会话，非 managed activation） |
-| `dsh-tool-subagent-control` | `list_agents` / `send_message` / `interrupt_agent` | ❌ | 无存活子 agent 注册表 / 消息通道 |
+| `dsh-tool-subagent` | 委派启动工具 | 🟡 | 默认托管 activation（立即返回 agentId）；`wait=true` 可同步 |
+| `dsh-tool-subagent-control` | `list_agents` / `send_message` / `interrupt_agent` | 🟡 | 进程内注册表；父→子消息与中断；无冷恢复/外部后端 |
 | `dsh-tool-str-replace-editor` | `str_replace_editor` | ✅ | 同名（`view`/`create`/`str_replace`/`insert`） |
 | `dsh-tool-present` | `present` | ✅ | 同名；系统默认应用打开 + 可选资源管理器选中 |
 | — | `office_to_pdf` | ✅ | DSH `@deepseek-ai/libreoffice-kit` Node/C++ 桥接（非 Rust 重实现） |
@@ -43,8 +43,8 @@
 | `dsh-tool-workflow` | `workflow`（可改名） | ❌ | 无 PTC/多 subagent 编排运行时 |
 | `dsh-tool-ralph` | `ralph` | ❌ | 实验性；依赖全新子 agent 序列 |
 | `dsh-tool-cordis` | `cordis_inspect_list` / `cordis_inspect_query` | ❌ | 无 Cordis Host/Client |
-| `dsh-tool-workspace-dependencies` | `load_workspace_dependencies` | ❌ | 无 DSH workspace dependency 清单协议 |
-| `dsh-tool-call-timeout-policy` | （策略） | ⚙️🟡 | 分派层预算 + AbortSignal；前台 shell 经 job_kill 硬停；超时 `TOOL_TIMEOUT` |
+| `dsh-tool-workspace-dependencies` | `load_workspace_dependencies` | 🟡 | 宿主 PATH 探测 node/python/pnpm；非 DSH 随包 runtime payload |
+| `dsh-tool-call-timeout-policy` | （策略） | ⚙️🟡 | 分派层预算 + AbortSignal；shell `job_kill`；office 协作取消；超时 `TOOL_TIMEOUT` |
 | `dsh-tool-executor-native` | （执行器） | ⚙️✅ | `turn.ts` 原生 function-call 分派 |
 | `dsh-tool-executor-ptc` | `run_code` | ⚙️❌ | 无 PTC 运行时 / 生成 SDK |
 
@@ -170,19 +170,22 @@ DSH 用按所有者隔离的持久 bash（跨调用保留 cwd/变量）。
 
 | DSH 能力 | 本仓库 | 说明 |
 | --- | --- | --- |
-| 列出可用子智能体 | ✅ `subagent_list` | |
-| 同步委派 | ✅ `subagent` | 同进程临时会话 + 轮次上限；返回最终文字；深度 ≤ 2 |
-| 启动 managed activation id | ❌ | 无后台子进程 / 完成通知路由 |
+| 列出可用子智能体 | ✅ `subagent_list` | preset 列表 |
+| 托管 activation | ✅ `subagent` | 默认立即返回 `agentId`；完成后系统通知唤醒父会话 |
+| 同步委派 | ✅ `wait=true` | 等待最终文字；结束后销毁临时会话 |
+| 深度限制 | ✅ | ≤ 2 |
 
-用户仍可用 `/agent 名称 任务` 切换人格。`subagent` 工具面向模型侧委派。
+未对齐：外部后端（ACP/Codex 等）、子级 preset/model 选择字段、冷恢复。
 
-### `dsh-tool-subagent-control` — ❌ 未接入
+### `dsh-tool-subagent-control` — 🟡 部分接入
 
-| DSH 工具 | 原因 |
-| --- | --- |
-| `list_agents` | 无存活子 agent 注册表（同步委派结束后即销毁临时会话） |
-| `send_message` | 无父子消息通道 |
-| `interrupt_agent` | 无子 agent 生命周期控制 |
+| DSH 工具 | 本仓库 | 说明 |
+| --- | --- | --- |
+| `list_agents` | ✅ | `children` / `descendants`；进程内注册表 |
+| `send_message` | ✅ | 父→子；running 入 inbox，inactive 触发续跑 |
+| `interrupt_agent` | ✅ | 中断直接子级当前轮次 |
+
+未对齐：子→父消息、跨进程/外部 agent、目录冷恢复。
 
 ### `dsh-tool-str-replace-editor` — ✅ 已接入
 
@@ -208,7 +211,7 @@ Rust 无法直接嵌入 LibreOffice Kit，因此通过 Node 桥接调用 `@deeps
 - 命令：`agent_office_to_pdf`（路径 jail 在工作区内）
 - 解析顺序：`WB_LIBREOFFICE_KIT` → 本地 `node_modules` → 本机 DSH 全局安装下的 kit
 
-未对齐：字体元数据缓存调优、`renderImages` / `recalculate`、WASM 回退策略说明。
+未对齐：字体元数据缓存调优、`renderImages` / `recalculate`、WASM 回退、LibreOffice 进程级硬杀（当前为协作取消等待）。
 
 ### `dsh-tool-goal` — 🟡 部分接入
 
@@ -264,17 +267,19 @@ Rust 无法直接嵌入 LibreOffice Kit，因此通过 Node 桥接调用 `@deeps
 | --- | --- |
 | `cordis_inspect_list` / `cordis_inspect_query` | 面向 Cordis 插件运行时自省。本仓库不嵌入 Cordis Host/Client |
 
-### `dsh-tool-workspace-dependencies` — ❌ 未接入
+### `dsh-tool-workspace-dependencies` — 🟡 部分接入
 
-| DSH 工具 | 原因 |
-| --- | --- |
-| `load_workspace_dependencies` | DSH workspace dependency 清单/加载协议；工作台无对应元数据面 |
+| DSH 工具 | 本仓库 | 说明 |
+| --- | --- | --- |
+| `load_workspace_dependencies` | 🟡 | `agent_workspace_runtime_paths` 探测 PATH 上的 node/python/pnpm |
+
+未对齐：DSH `runtime.json` / `dependencies/` 随包 payload、Harness home 安装复制、Office skill 绑定解释器。
 
 ### `dsh-tool-call-timeout-policy` — ⚙️🟡 基础设施
 
 DSH：统一协作式取消 + 超时错误映射。
 
-本仓库：`turn.ts` 对 web/shell/office/subagent/job_output 等声明默认预算；工具执行与 drain 循环协作监听 `AbortSignal`；超时 `TOOL_TIMEOUT`；`web_*` 经 `hostFetch` 竞赛取消；带 signal 的前台 `bash`/`shell`/`pwsh` 走 job 启动并用 `job_kill` 硬停子进程。未做到对任意 Tauri invoke / office 转换的统一硬取消。
+本仓库：`turn.ts` 对 web/shell/office/subagent/job_output 等声明默认预算；工具执行与 drain 循环协作监听 `AbortSignal`；超时 `TOOL_TIMEOUT`；`web_*` / `office_to_pdf` 竞赛取消；前台 shell 经 `job_kill` 硬停。LibreOffice 子进程本身未必随 abort 立刻退出。
 
 ### `dsh-tool-executor-native` — ⚙️✅ 基础设施
 
@@ -304,9 +309,8 @@ DSH：统一协作式取消 + 超时错误映射。
 
 ## 接入优先级备忘（若继续对齐）
 
-1. **高价值、可渐进**：sharp 缩略图规范化、office 硬取消  
-2. **需新子系统**：managed subagent activation + control（`list_agents` / `send_message` / `interrupt_agent`）  
-3. **明确不做 / 低优先**：Cordis 自省、PTC `run_code`、Ralph
+1. **高价值、可渐进**：sharp 缩略图规范化、LibreOffice 进程硬杀  
+2. **明确不做 / 低优先**：Cordis 自省、PTC `run_code`、Ralph、workflow 全编排
 
 ---
 

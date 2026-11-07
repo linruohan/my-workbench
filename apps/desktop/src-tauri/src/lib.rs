@@ -48,6 +48,7 @@ pub fn run() {
             agent_workspace::agent_terminal_close,
             agent_workspace::agent_terminal_signal,
             agent_workspace::agent_office_to_pdf,
+            agent_workspace::agent_workspace_runtime_paths,
             fonts::list_system_fonts,
             web_session::web_session_show,
             web_session::web_session_set_default_font,

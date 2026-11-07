@@ -1196,3 +1196,104 @@ fn find_node_bin() -> Result<PathBuf, String> {
     }
     Err("找不到 node（可设 WB_NODE_BIN）".into())
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeBin {
+    path: String,
+    version: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePathsHit {
+    node: Option<RuntimeBin>,
+    python: Option<RuntimeBin>,
+    pnpm: Option<RuntimeBin>,
+    source: String,
+}
+
+/// Host PATH probe for `load_workspace_dependencies` (not a DSH payload install).
+#[tauri::command]
+pub fn agent_workspace_runtime_paths() -> RuntimePathsHit {
+    RuntimePathsHit {
+        node: probe_bin(
+            &["node", "node.exe"],
+            &["-v"],
+            &[r"C:\software\nodejs\node.exe"],
+        ),
+        python: probe_bin(
+            &["python", "python3", "python.exe"],
+            &["--version"],
+            &[],
+        ),
+        pnpm: probe_bin(&["pnpm", "pnpm.cmd"], &["--version"], &[]),
+        source: "host-path".into(),
+    }
+}
+
+fn probe_bin(names: &[&str], version_args: &[&str], fallbacks: &[&str]) -> Option<RuntimeBin> {
+    for name in names {
+        if let Some(path) = resolve_on_path(name) {
+            let version = read_version(&path, version_args);
+            return Some(RuntimeBin {
+                path: path.display().to_string(),
+                version,
+            });
+        }
+    }
+    for fallback in fallbacks {
+        let path = PathBuf::from(fallback);
+        if path.is_file() {
+            let version = read_version(&path, version_args);
+            return Some(RuntimeBin {
+                path: path.display().to_string(),
+                version,
+            });
+        }
+    }
+    None
+}
+
+fn resolve_on_path(name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Ok(output) = Command::new("where").arg(name).output() {
+            if output.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                    let path = PathBuf::from(line.trim());
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(output) = Command::new("which").arg(name).output() {
+            if output.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                    let path = PathBuf::from(line.trim());
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_version(bin: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new(bin).args(args).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    let line = text.lines().next().or_else(|| err.lines().next())?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}

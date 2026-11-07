@@ -490,7 +490,9 @@ function AppearancePane({
             <div className="settings__row-desc">
               {fontsLoading
                 ? "正在读取本机已安装字体…"
-                : `共 ${systemFonts.length} 个已安装字体`}
+                : systemFonts.length > 0
+                  ? `共 ${systemFonts.length} 个已安装字体`
+                  : "桌面端可枚举本机字体；浏览器预览仅显示系统默认"}
             </div>
           </div>
           <input

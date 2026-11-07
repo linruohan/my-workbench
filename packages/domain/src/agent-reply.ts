@@ -401,7 +401,16 @@ export function toolResultLabel(name: string): string {
   if (name.startsWith("notification_")) return "通知";
   if (name.startsWith("memory_")) return "记忆";
   if (name.startsWith("skill_")) return "技能";
-  if (name.startsWith("subagent") || name === "subagent") return "子智能体";
+  if (
+    name.startsWith("subagent") ||
+    name === "subagent" ||
+    name === "list_agents" ||
+    name === "send_message" ||
+    name === "interrupt_agent"
+  ) {
+    return "子智能体";
+  }
+  if (name === "load_workspace_dependencies") return "运行时";
   if (name === "get_goal" || name === "create_goal" || name === "update_goal") {
     return "Goal";
   }
@@ -625,6 +634,39 @@ export function describeToolResult(name: string, data: unknown, summary: string)
 
   if (name === "subagent" && typeof record.text === "string") {
     return [summary, clipOutput(record.text)].filter(Boolean).join("\n");
+  }
+
+  if (name === "subagent" && typeof record.agentId === "string") {
+    return [summary, `agentId ${record.agentId}`].filter(Boolean).join("\n");
+  }
+
+  if (name === "list_agents") {
+    const agents = asArray(record.agents) ?? [];
+    return joinList(
+      summary,
+      agents.slice(0, 40).map((item) => {
+        const row = asRecord(item);
+        if (!row) return "";
+        const id = typeof row.id === "string" ? row.id : "";
+        const agentName = typeof row.name === "string" ? row.name : "";
+        const status = typeof row.status === "string" ? row.status : "";
+        return `· ${agentName || id} (${status}) ${id}`;
+      }),
+    );
+  }
+
+  if (name === "load_workspace_dependencies") {
+    const node = asRecord(record.node);
+    const python = asRecord(record.python);
+    const pnpm = asRecord(record.pnpm);
+    return [
+      summary,
+      node && typeof node.path === "string" ? `node: ${node.path}` : "",
+      python && typeof python.path === "string" ? `python: ${python.path}` : "",
+      pnpm && typeof pnpm.path === "string" ? `pnpm: ${pnpm.path}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   if (name === "get_goal" || name === "create_goal" || name === "update_goal") {

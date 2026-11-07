@@ -378,8 +378,11 @@ async function runOfficeToPdf(
   const output = resolveWorkspacePath(root, outputRaw, env.cwd);
   if (output.ok === false) return fail(output.reason);
   if (!isTauriRuntime()) return fail("当前环境不能转换 Office 文档");
+  if (env.signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
   const { invoke } = await import("@tauri-apps/api/core");
-  const hit = await invoke<{
+  const invokePromise = invoke<{
     input: string;
     output: string;
     backend?: string | null;
@@ -388,10 +391,34 @@ async function runOfficeToPdf(
     input: input.absolute,
     output: output.absolute,
   });
+  const hit = env.signal
+    ? await raceAbort(invokePromise, env.signal)
+    : await invokePromise;
   return ok(`已转为 PDF ${output.display}`, {
     input: input.display,
     output: output.display,
     backend: hit.backend ?? null,
+  });
+}
+
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () =>
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
   });
 }
 

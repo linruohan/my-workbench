@@ -112,6 +112,7 @@ import {
   webSessionShow,
 } from "./web-session";
 import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
+import { takePendingAgentNotices } from "./agent-registry";
 import {
   listWatchedRunning,
   pollBackgroundJobs,
@@ -345,21 +346,25 @@ export function AgentView({
     setTermRefresh((rev) => rev + 1);
   }, [busyThreadId, transcriptRev]);
 
-  // Poll background jobs; inject notices and wake idle sessions (DSH job notify).
+  // Poll background jobs + managed subagent notices; wake idle sessions.
   useEffect(() => {
-    if (!isTauriRuntime()) return;
     const tick = window.setInterval(() => {
       void (async () => {
-        if (!listWatchedRunning().length) return;
-        let threads: string[] = [];
-        try {
-          threads = await pollBackgroundJobs();
-        } catch {
-          return;
+        const noticed = new Set<string>();
+        if (isTauriRuntime() && listWatchedRunning().length) {
+          try {
+            for (const threadId of await pollBackgroundJobs()) noticed.add(threadId);
+          } catch {
+            /* ignore poll errors */
+          }
         }
-        for (const threadId of threads) {
+        if (thread?.id) noticed.add(thread.id);
+        for (const threadId of noticed) {
           if (busyThreadId === threadId || sending.current) continue;
-          const notices = takePendingJobNotices(threadId);
+          const notices = [
+            ...takePendingJobNotices(threadId),
+            ...takePendingAgentNotices(threadId),
+          ];
           if (!notices.length) continue;
           for (const notice of notices) {
             store.appendAgentMessage({
@@ -371,8 +376,11 @@ export function AgentView({
           onPersist?.();
           if (mounted.current) setTranscriptRev((rev) => rev + 1);
           if (thread?.id === threadId && !pending && !sending.current) {
+            const isAgent = notices.some((item) => item.startsWith("subagent "));
             void sendPromptRef.current(
-              "后台任务已完成，请根据系统通知继续（必要时用 job_output 读取详情）。",
+              isAgent
+                ? "子智能体已结束，请根据系统通知继续（可用 list_agents 查看）。"
+                : "后台任务已完成，请根据系统通知继续（必要时用 job_output 读取详情）。",
             );
           }
         }
