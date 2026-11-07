@@ -406,10 +406,10 @@ export function AgentView({
 
   // Drain due schedule_* deliveries into the owning session.
   useEffect(() => {
-    const tick = window.setInterval(() => {
-      if (!thread || busyThreadId || pending || sending.current) return;
+    const drain = () => {
+      if (!thread || busyThreadId || pending || sending.current) return false;
       const deliveries = takeScheduleDeliveries(thread.id);
-      if (!deliveries.length) return;
+      if (!deliveries.length) return false;
       const first = deliveries[0]!;
       for (const extra of deliveries.slice(1)) {
         store.appendAgentMessage({
@@ -421,7 +421,13 @@ export function AgentView({
       onPersist?.();
       if (mounted.current) setTranscriptRev((rev) => rev + 1);
       void sendPromptRef.current(`【定时任务 · ${first.title}】\n${first.prompt}`);
-    }, 3000);
+      return true;
+    };
+    // Fire immediately when opening the bound session after "立即执行".
+    drain();
+    const tick = window.setInterval(() => {
+      drain();
+    }, 1000);
     return () => window.clearInterval(tick);
   }, [busyThreadId, onPersist, pending, store, thread]);
 
