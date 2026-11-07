@@ -1,7 +1,7 @@
 import type { SpeechLanguage } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
 import { audioBase64, RecordingError } from "./speech-audio";
-import { ensureSenseVoice } from "./speech-models";
+import { ensureSenseVoice, warmSenseVoice } from "./speech-models";
 
 export type TranscribeResult =
   | { ok: true; text: string; audioSeconds: number; inferenceSeconds: number }
@@ -38,6 +38,8 @@ export async function transcribeRecording(
   if (prepared.ok === false) {
     return { ok: false, message: prepared.message };
   }
+  // Best-effort: if warm finished during recording, the worker is already loaded.
+  await warmSenseVoice().catch(() => false);
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const result = await invoke<HostTranscript>("speech_transcribe", {

@@ -8,6 +8,7 @@ import {
   Recording,
   subscribeMicLock,
   systemDefaultOptionLabel,
+  warmSenseVoice,
   type MicrophoneDevice,
 } from "../voice";
 import type { AppPrefs } from "../lib/prefs";
@@ -159,7 +160,8 @@ export function VoiceInputPane({ prefs, onPatch }: Props) {
       setBusy(false);
       if (result.ok === true) {
         setPhase(result.phase);
-        setMessage("本地资源已准备，录音时自动唤醒。");
+        setMessage("本地资源已准备，识别引擎保持热备。");
+        void warmSenseVoice();
         return;
       }
       setPhase(result.phase);
@@ -178,7 +180,8 @@ export function VoiceInputPane({ prefs, onPatch }: Props) {
     setBusy(false);
     if (result.ok === true) {
       setPhase("ready");
-      setMessage("本地资源已准备，录音时自动唤醒。");
+      setMessage("本地资源已准备，识别引擎保持热备。");
+      void warmSenseVoice();
       await refreshStatus();
       return;
     }
@@ -345,7 +348,7 @@ export function VoiceInputPane({ prefs, onPatch }: Props) {
                 <div className="voice-settings__status-body">
                   <p>
                     {phase === "ready"
-                      ? "模型文件已就绪。录音开始时会加载 SenseVoice 工作进程。"
+                      ? "模型文件已就绪。启用后会预热常驻识别进程，避免每次冷启动。"
                       : "需要下载约 240MB 的 INT8 模型与 VAD；若本机已有 DSH 缓存会优先导入。"}
                   </p>
                   <button

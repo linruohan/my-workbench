@@ -117,3 +117,21 @@ export async function readSpeechStatus(): Promise<SpeechStatusResult> {
     };
   }
 }
+
+let warmInflight: Promise<boolean> | null = null;
+
+/** Preload the persistent SenseVoice worker (model stays warm like dsh). */
+export function warmSenseVoice(): Promise<boolean> {
+  if (!isTauriRuntime()) return Promise.resolve(false);
+  warmInflight ??= (async () => {
+    const prepared = await ensureSenseVoice();
+    if (prepared.ok === false) return false;
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<boolean>("speech_warm");
+  })()
+    .catch(() => false)
+    .finally(() => {
+      warmInflight = null;
+    });
+  return warmInflight;
+}

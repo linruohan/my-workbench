@@ -107,6 +107,8 @@ export function VoiceInputButton({
   const startRecording = async () => {
     // Focus the target field first so caret is ready when text lands.
     onArmRef.current?.();
+    // Warm the persistent worker while the user speaks (dsh keeps it loaded).
+    void import("./speech-models").then(({ warmSenseVoice }) => warmSenseVoice());
     if (!voice.ready) {
       report("正在准备语音资源…");
       const { ensureSenseVoice } = await import("./speech-models");

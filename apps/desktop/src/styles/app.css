@@ -6784,12 +6784,23 @@ textarea {
     border-color var(--wb-motion-fast) ease;
 }
 
+.agent__composer-chip--static,
+.agent__composer-chip--pill {
+  max-width: calc(var(--wb-menu-min) - var(--wb-space-5));
+  border: 1px solid color-mix(in srgb, var(--wb-line) 88%, var(--wb-text));
+  background: color-mix(in srgb, var(--wb-panel) 78%, transparent);
+  padding: var(--wb-space-1) var(--wb-space-3);
+  color: color-mix(in srgb, var(--wb-muted) 55%, var(--wb-text));
+}
+
 .agent__composer-chip--static {
   cursor: default;
-  max-width: calc(var(--wb-menu-min) - var(--wb-space-5));
-  border: 1px solid color-mix(in srgb, var(--wb-line) 88%, transparent);
-  background: color-mix(in srgb, var(--wb-panel) 70%, transparent);
-  padding: var(--wb-space-1) var(--wb-space-3);
+}
+
+.agent__composer-chip--pill:hover {
+  color: var(--wb-text);
+  border-color: color-mix(in srgb, var(--wb-line) 60%, var(--wb-text));
+  background: color-mix(in srgb, var(--wb-text) 8%, transparent);
 }
 
 .agent__composer-chip span:nth-child(2) {
@@ -6813,8 +6824,9 @@ textarea {
 }
 
 .agent__composer-chip--static:hover {
-  color: color-mix(in srgb, var(--wb-muted) 82%, var(--wb-text));
-  background: color-mix(in srgb, var(--wb-panel) 70%, transparent);
+  color: color-mix(in srgb, var(--wb-muted) 55%, var(--wb-text));
+  border-color: color-mix(in srgb, var(--wb-line) 88%, var(--wb-text));
+  background: color-mix(in srgb, var(--wb-panel) 78%, transparent);
 }
 
 .agent__composer-chip-add {
@@ -6873,11 +6885,11 @@ textarea {
 
 .agent__slash {
   list-style: none;
-  margin: 0;
+  margin: 0 calc(var(--wb-space-1) * -1);
   max-height: 20rem;
   overflow: auto;
-  padding: 0 0 var(--wb-space-1);
-  border-bottom: 1px solid var(--wb-line);
+  padding: 0 0 var(--wb-space-2);
+  border-bottom: 1px solid color-mix(in srgb, var(--wb-line) 80%, transparent);
 }
 
 .agent__slash-label {
@@ -6951,9 +6963,10 @@ textarea {
 .agent__composer-shell textarea {
   width: 100%;
   resize: none;
-  min-height: calc(var(--wb-titlebar-height) + var(--wb-space-5));
+  min-height: calc(var(--wb-text-md) * 1.55);
   max-height: var(--wb-sidebar-width);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0 var(--wb-space-1);
   border: 0;
   outline: none;
@@ -7302,11 +7315,13 @@ textarea {
   overflow: hidden;
   border: 0;
   margin: 0;
-  padding: 0;
+  padding: var(--wb-space-1) var(--wb-space-2);
+  border-radius: var(--wb-radius-pill);
   background: transparent;
-  color: var(--wb-muted);
+  color: color-mix(in srgb, var(--wb-muted) 88%, var(--wb-text));
   font: inherit;
   font-size: var(--wb-text-xs);
+  font-weight: 500;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7315,63 +7330,86 @@ textarea {
 
 .agent__loaded-skills:hover {
   color: var(--wb-text);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  background: color-mix(in srgb, var(--wb-text) 7%, transparent);
+  text-decoration: none;
 }
 
 .agent__context-usage {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--wb-space-1);
   color: var(--wb-muted);
   font-size: var(--wb-text-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.agent__context-bar {
-  width: 2.75rem;
-  height: 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--wb-muted) 28%, transparent);
-  overflow: hidden;
+.agent__context-ring-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--wb-control-sm);
+  height: var(--wb-control-sm);
+  border-radius: var(--wb-radius-pill);
+  cursor: default;
 }
 
-.agent__context-bar > span {
+.agent__context-ring {
+  width: 16px;
+  height: 16px;
   display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--wb-muted);
+  transform: rotate(-90deg);
 }
 
-.agent__context-usage.is-tight {
-  color: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
+.agent__context-ring-track,
+.agent__context-ring-value {
+  fill: none;
+  stroke-width: 2.25;
+  stroke-linecap: butt;
 }
 
-.agent__context-usage.is-tight .agent__context-bar > span {
-  background: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
+.agent__context-ring-track {
+  stroke: color-mix(in srgb, var(--wb-muted) 32%, transparent);
+}
+
+.agent__context-ring-value {
+  stroke: color-mix(in srgb, var(--wb-text) 88%, var(--wb-muted));
+  transition: stroke-dasharray var(--wb-motion-normal) ease;
+}
+
+.agent__context-usage.is-tight .agent__context-ring-value {
+  stroke: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
+}
+
+.agent__context-usage.is-tight .agent__context-ring-track {
+  stroke: color-mix(
+    in srgb,
+    var(--wb-warning, var(--wb-danger, var(--wb-muted))) 28%,
+    transparent
+  );
 }
 
 .agent__context-compact {
   border: 0;
   margin: 0;
-  padding: 0 var(--wb-space-1);
+  padding: var(--wb-space-1) var(--wb-space-2);
+  border-radius: var(--wb-radius-pill);
   background: transparent;
-  color: inherit;
+  color: var(--wb-warning, var(--wb-danger, var(--wb-muted)));
   font: inherit;
+  font-size: var(--wb-text-xs);
+  font-weight: 500;
   cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
 .agent__context-compact:hover:not(:disabled) {
   color: var(--wb-text);
+  background: color-mix(in srgb, var(--wb-text) 7%, transparent);
 }
 
 .agent__context-compact:disabled {
   opacity: 0.5;
   cursor: default;
-  text-decoration: none;
 }
 
 .agent__composer-actions .agent__model-trigger {

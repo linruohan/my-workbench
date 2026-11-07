@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { SpeechLanguage } from "@wb/domain";
-import { ensureSenseVoice, readSpeechStatus } from "./speech-models";
+import { ensureSenseVoice, readSpeechStatus, warmSenseVoice } from "./speech-models";
 
 export type VoiceInputConfig = {
   enabled: boolean;
@@ -69,11 +69,15 @@ export function VoiceInputProvider({
       if (!live) return;
       if (statusResult.ready) {
         setReady(true);
+        void warmSenseVoice();
         return;
       }
       const prepared = await ensureSenseVoice();
       if (!live) return;
-      if (prepared.ok === true) setReady(true);
+      if (prepared.ok === true) {
+        setReady(true);
+        void warmSenseVoice();
+      }
     })();
     return () => {
       live = false;

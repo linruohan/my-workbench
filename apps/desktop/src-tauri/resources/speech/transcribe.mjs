@@ -1,24 +1,32 @@
 /**
- * One-shot SenseVoice transcription worker.
- * Usage: node transcribe.mjs <config.json>
- * config: { model, tokens, vad, language, wavPath, threads? }
- * Prints one JSON line: { text, audioSeconds, inferenceSeconds }
+ * Persistent SenseVoice worker (dsh-style).
+ * Usage: WB_SPEECH_TOKEN=<64-hex> node transcribe.mjs <config.json>
+ * config: { model, tokens, vad, threads?, modulePaths?, maxAudioBytes? }
+ *
+ * Loads ONNX once, listens on 127.0.0.1, then prints one stdout line:
+ *   {"port":N}
+ * POST /transcribe?language=auto  Authorization: Bearer <token>  body: WAV bytes
+ * → {"text","audioSeconds","inferenceSeconds"}
  */
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const SAMPLE_RATE = 16_000;
 const WINDOW = 512;
+const LANGUAGES = new Set(["auto", "zh", "en", "yue", "ja", "ko"]);
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exit(1);
 }
 
-function validateWave(audio) {
+function validateWave(audio, maxAudioBytes) {
+  if (audio.length < 46 || audio.length > maxAudioBytes) {
+    throw new Error("录音数据无效");
+  }
   if (
-    audio.length < 46 ||
     audio.toString("ascii", 0, 4) !== "RIFF" ||
     audio.toString("ascii", 8, 12) !== "WAVE" ||
     audio.toString("ascii", 12, 16) !== "fmt " ||
@@ -92,7 +100,8 @@ function createTranscriber(sherpa, config) {
   );
 
   return (audio, language) => {
-    const audioSeconds = validateWave(audio);
+    if (!LANGUAGES.has(language)) throw new Error("不支持的识别语言");
+    const audioSeconds = validateWave(audio, config.maxAudioBytes);
     const pcm = new DataView(audio.buffer, audio.byteOffset + 44, audio.byteLength - 44);
     const samples = Float32Array.from(
       { length: pcm.byteLength / 2 },
@@ -140,19 +149,94 @@ function createTranscriber(sherpa, config) {
   };
 }
 
-function main() {
+function startRecognitionServer(token, maxAudioBytes, transcribe) {
+  const expected = Buffer.from(`Bearer ${token}`);
+  const server = createServer((request, response) => {
+    const reply = (status, value) => {
+      response
+        .writeHead(status, { "content-type": "application/json" })
+        .end(JSON.stringify(value));
+    };
+    const authorization = Buffer.from(request.headers.authorization ?? "");
+    if (
+      authorization.length !== expected.length ||
+      !timingSafeEqual(authorization, expected)
+    ) {
+      request.resume();
+      reply(401, { error: "Unauthorized" });
+      return;
+    }
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (request.method === "GET" && url.pathname === "/health") {
+      reply(200, { ok: true });
+      return;
+    }
+    if (request.method !== "POST" || url.pathname !== "/transcribe") {
+      request.resume();
+      reply(404, { error: "Unknown endpoint" });
+      return;
+    }
+    const length = Number(request.headers["content-length"]);
+    if (!Number.isSafeInteger(length) || length < 46 || length > maxAudioBytes) {
+      request.resume();
+      reply(413, { error: "录音数据无效" });
+      return;
+    }
+    const chunks = [];
+    let received = 0;
+    request.on("data", (chunk) => {
+      received += chunk.length;
+      if (received > maxAudioBytes) {
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      try {
+        const audio = Buffer.concat(chunks);
+        const language = url.searchParams.get("language") || "auto";
+        reply(200, transcribe(audio, language));
+      } catch (error) {
+        reply(400, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+    request.on("error", () => {
+      reply(400, { error: "录音读取失败" });
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      resolve({ server, port: address.port });
+    });
+  });
+}
+
+async function main() {
   const raw = process.argv[2];
   if (!raw) fail("缺少配置参数");
   const config = JSON.parse(raw);
-  for (const key of ["model", "tokens", "vad", "wavPath"]) {
+  for (const key of ["model", "tokens", "vad"]) {
     if (typeof config[key] !== "string" || !config[key]) {
       fail(`配置缺少 ${key}`);
     }
   }
-  const language =
-    typeof config.language === "string" && config.language ? config.language : "auto";
+  const token = process.env.WB_SPEECH_TOKEN;
+  delete process.env.WB_SPEECH_TOKEN;
+  if (typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) {
+    fail("缺少有效的 WB_SPEECH_TOKEN");
+  }
   const threads =
     Number.isFinite(config.threads) && config.threads >= 1 ? Math.floor(config.threads) : 2;
+  const maxAudioBytes =
+    Number.isFinite(config.maxAudioBytes) && config.maxAudioBytes >= 46
+      ? Math.floor(config.maxAudioBytes)
+      : 4 * 1024 * 1024;
   const modulePaths = Array.isArray(config.modulePaths)
     ? config.modulePaths.filter((item) => typeof item === "string" && item)
     : [];
@@ -162,10 +246,14 @@ function main() {
     tokens: config.tokens,
     vad: config.vad,
     threads,
+    maxAudioBytes,
   });
-  const audio = readFileSync(config.wavPath);
-  const result = transcribe(audio, language);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const { port } = await startRecognitionServer(token, maxAudioBytes, transcribe);
+  process.stdout.write(`${JSON.stringify({ port })}\n`);
 }
 
-main();
+main().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`, () => {
+    process.exit(1);
+  });
+});

@@ -1,13 +1,19 @@
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
+use tokio::sync::Mutex;
 
 const MAX_BYTES: u64 = 1_200 * 1024 * 1024;
 const MAX_WAV_BYTES: usize = 4 * 1024 * 1024;
+/** Keep the warmed recognizer around like dsh (5 minutes). */
+const WORKER_IDLE_MS: u64 = 300_000;
+const WORKER_START_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -418,7 +424,7 @@ pub fn speech_status(app: tauri::AppHandle) -> Result<SpeechStatus, String> {
             model: model.display().to_string(),
             tokens: tokens.display().to_string(),
             vad: vad.display().to_string(),
-            message: "本地资源已准备，录音时自动唤醒。".into(),
+            message: "本地资源已准备，识别引擎可热备。".into(),
         }),
         Err(_) => {
             if dsh_sensevoice_root().is_some() {
@@ -446,14 +452,236 @@ pub fn speech_status(app: tauri::AppHandle) -> Result<SpeechStatus, String> {
     }
 }
 
-/// Transcribe one canonical 16 kHz mono PCM16 WAV via the Node SenseVoice worker.
+struct SpeechWorker {
+    child: Child,
+    port: u16,
+    token: String,
+    last_used: Instant,
+}
+
+fn worker_slot() -> &'static Mutex<Option<SpeechWorker>> {
+    static SLOT: OnceLock<Mutex<Option<SpeechWorker>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+fn speech_token() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(uuid_like().as_bytes());
+    hasher.update(format!("{:?}", Instant::now()).as_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hex_sha256(hasher.finalize().as_slice())
+}
+
+fn stop_worker(worker: &mut Option<SpeechWorker>) {
+    if let Some(mut current) = worker.take() {
+        let _ = current.child.kill();
+        let _ = current.child.wait();
+    }
+}
+
+fn worker_alive(child: &mut Child) -> bool {
+    match child.try_wait() {
+        Ok(None) => true,
+        _ => false,
+    }
+}
+
+fn spawn_worker(app: &tauri::AppHandle) -> Result<SpeechWorker, String> {
+    let dir = model_dir(app)?;
+    let (model, tokens, vad) = resolved_paths(&dir)?;
+    let script = worker_script(app)?;
+    let node = find_node()?;
+    let token = speech_token();
+    let config = serde_json::json!({
+        "model": model,
+        "tokens": tokens,
+        "vad": vad,
+        "threads": 2,
+        "maxAudioBytes": MAX_WAV_BYTES,
+        "modulePaths": sherpa_module_paths(),
+    });
+    let mut child = Command::new(&node)
+        .arg(&script)
+        .arg(config.to_string())
+        .env("WB_SPEECH_TOKEN", &token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("转写进程启动失败：{err}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "转写进程输出不可用".to_string())?;
+    let stderr = child.stderr.take();
+    if let Some(stderr) = stderr {
+        std::thread::spawn(move || {
+            let mut sink = String::new();
+            let mut reader = BufReader::new(stderr);
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if sink.len() < 8 * 1024 {
+                            sink.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = sink;
+        });
+    }
+
+    let ready = std::thread::spawn(move || -> Result<u16, String> {
+        let started = Instant::now();
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            if started.elapsed() > WORKER_START_TIMEOUT {
+                return Err("语音模型加载超时".into());
+            }
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|_| "读取转写进程就绪信号失败".to_string())?;
+            if read == 0 {
+                return Err("转写进程在就绪前退出".into());
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|_| format!("转写进程就绪信号无效：{trimmed}"))?;
+            let port = parsed
+                .get("port")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0 && *v <= u16::MAX as u64)
+                .ok_or_else(|| "转写进程未返回端口".to_string())?;
+            return Ok(port as u16);
+        }
+    });
+
+    let port = match ready.join() {
+        Ok(Ok(port)) => port,
+        Ok(Err(message)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(message);
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("转写进程启动失败".into());
+        }
+    };
+
+    if !worker_alive(&mut child) {
+        return Err("转写进程在就绪后退出".into());
+    }
+
+    Ok(SpeechWorker {
+        child,
+        port,
+        token,
+        last_used: Instant::now(),
+    })
+}
+
+async fn ensure_worker(app: &tauri::AppHandle) -> Result<(u16, String), String> {
+    let mut guard = worker_slot().lock().await;
+    if let Some(worker) = guard.as_mut() {
+        let idle = worker.last_used.elapsed() >= Duration::from_millis(WORKER_IDLE_MS);
+        if idle || !worker_alive(&mut worker.child) {
+            stop_worker(&mut guard);
+        }
+    }
+    if guard.is_none() {
+        let app_handle = app.clone();
+        let worker = tokio::task::spawn_blocking(move || spawn_worker(&app_handle))
+            .await
+            .map_err(|_| "转写进程启动失败".to_string())??;
+        *guard = Some(worker);
+    }
+    let worker = guard.as_mut().ok_or_else(|| "转写进程不可用".to_string())?;
+    worker.last_used = Instant::now();
+    Ok((worker.port, worker.token.clone()))
+}
+
+async fn post_transcribe(
+    port: u16,
+    token: &str,
+    audio: &[u8],
+    language: &str,
+) -> Result<SpeechTranscript, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|_| "无法连接转写进程".to_string())?;
+    let url = format!("http://127.0.0.1:{port}/transcribe?language={language}");
+    let response = client
+        .post(url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(audio.to_vec())
+        .send()
+        .await
+        .map_err(|err| format!("转写请求失败：{err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| "转写结果无效".to_string())?;
+    if !status.is_success() {
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        let message = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(body.trim());
+        return Err(if message.is_empty() {
+            "语音转写失败".into()
+        } else {
+            message.to_string()
+        });
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| "转写结果无效".to_string())?;
+    Ok(SpeechTranscript {
+        text: parsed
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        audio_seconds: parsed
+            .get("audioSeconds")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        inference_seconds: parsed
+            .get("inferenceSeconds")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    })
+}
+
+/// Preload the persistent SenseVoice worker so the first dictation skips cold start.
+#[tauri::command]
+pub async fn speech_warm(app: tauri::AppHandle) -> Result<bool, String> {
+    let dir = model_dir(&app)?;
+    resolved_paths(&dir)?;
+    let _ = ensure_worker(&app).await?;
+    Ok(true)
+}
+
+/// Transcribe one canonical 16 kHz mono PCM16 WAV via the warm SenseVoice worker.
 #[tauri::command]
 pub async fn speech_transcribe(
     app: tauri::AppHandle,
     request: SpeechTranscribeRequest,
 ) -> Result<SpeechTranscript, String> {
-    let dir = model_dir(&app)?;
-    let (model, tokens, vad) = resolved_paths(&dir)?;
     let language = request
         .language
         .as_deref()
@@ -472,66 +700,42 @@ pub async fn speech_transcribe(
         return Err("录音数据无效".into());
     }
 
-    let temp_dir = std::env::temp_dir().join("my-workbench-speech");
-    std::fs::create_dir_all(&temp_dir).map_err(|_| "无法创建临时目录".to_string())?;
-    let wav_path = temp_dir.join(format!("rec-{}.wav", uuid_like()));
-    std::fs::write(&wav_path, &bytes).map_err(|_| "无法写入录音".to_string())?;
-
-    let script = worker_script(&app)?;
-    let node = find_node()?;
-    let config = serde_json::json!({
-        "model": model,
-        "tokens": tokens,
-        "vad": vad,
-        "language": language,
-        "wavPath": wav_path,
-        "threads": 2,
-        "modulePaths": sherpa_module_paths(),
-    });
-
-    let output = tokio::task::spawn_blocking(move || {
-        Command::new(node)
-            .arg(&script)
-            .arg(config.to_string())
-            .output()
-    })
-    .await
-    .map_err(|_| "转写进程启动失败".to_string())?
-    .map_err(|err| format!("转写进程启动失败：{err}"))?;
-
-    let _ = std::fs::remove_file(&wav_path);
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if err.is_empty() {
-            "语音转写失败".into()
-        } else {
-            err
-        });
+    // Serialize inference on one native recognizer (same as dsh).
+    let mut guard = worker_slot().lock().await;
+    if let Some(worker) = guard.as_mut() {
+        let idle = worker.last_used.elapsed() >= Duration::from_millis(WORKER_IDLE_MS);
+        if idle || !worker_alive(&mut worker.child) {
+            stop_worker(&mut guard);
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .rev()
-        .find(|line| line.trim().starts_with('{'))
-        .ok_or_else(|| "转写结果无效".to_string())?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(line).map_err(|_| "转写结果无效".to_string())?;
-    Ok(SpeechTranscript {
-        text: parsed
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        audio_seconds: parsed
-            .get("audioSeconds")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-        inference_seconds: parsed
-            .get("inferenceSeconds")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-    })
+    if guard.is_none() {
+        let app_handle = app.clone();
+        let worker = tokio::task::spawn_blocking(move || spawn_worker(&app_handle))
+            .await
+            .map_err(|_| "转写进程启动失败".to_string())??;
+        *guard = Some(worker);
+    }
+    let (port, token) = {
+        let worker = guard.as_mut().ok_or_else(|| "转写进程不可用".to_string())?;
+        worker.last_used = Instant::now();
+        (worker.port, worker.token.clone())
+    };
+
+    match post_transcribe(port, &token, &bytes, &language).await {
+        Ok(result) => {
+            if let Some(worker) = guard.as_mut() {
+                worker.last_used = Instant::now();
+            }
+            Ok(result)
+        }
+        Err(message) => {
+            // Drop a broken worker so the next call cold-starts cleanly.
+            if message.contains("转写请求失败") || message.contains("连接") {
+                stop_worker(&mut guard);
+            }
+            Err(message)
+        }
+    }
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, String> {

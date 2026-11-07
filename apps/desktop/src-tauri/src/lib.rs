@@ -43,6 +43,7 @@ pub fn run() {
             ocr::ocr_read_model,
             speech::speech_ensure_models,
             speech::speech_status,
+            speech::speech_warm,
             speech::speech_transcribe,
             tools::tools_probe,
             tools::tools_pick_path,

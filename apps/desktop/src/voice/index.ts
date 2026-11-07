@@ -11,6 +11,6 @@ export {
   type MicrophoneDevice,
   type MicrophoneChoices,
 } from "./speech-audio";
-export { ensureSenseVoice, readSpeechStatus } from "./speech-models";
+export { ensureSenseVoice, readSpeechStatus, warmSenseVoice } from "./speech-models";
 export { recordingErrorMessage, transcribeRecording } from "./speech-engine";
 export { micLockOwnerId, subscribeMicLock } from "./mic-lock";

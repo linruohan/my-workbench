@@ -586,8 +586,9 @@ export function AgentView({
   useEffect(() => {
     const node = inputRef.current;
     if (!node) return;
+    const maxHeight = Number.parseFloat(getComputedStyle(node).maxHeight) || 220;
     node.style.height = "auto";
-    node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
+    node.style.height = `${Math.min(node.scrollHeight, maxHeight)}px`;
     if (!placeCaret.current) return;
     placeCaret.current = false;
     const end = node.value.length;
@@ -2826,6 +2827,27 @@ export function AgentView({
                         <span>{gitBranch}</span>
                       </span>
                     ) : null}
+                    {loadedSkills.slice(0, 2).map((skill) => (
+                      <button
+                        key={skill.name}
+                        type="button"
+                        className="agent__composer-chip agent__composer-chip--pill"
+                        title={`本会话已引用 /${skill.name}。点击打开设置 · 技能。`}
+                        onClick={() => onOpenSkills?.()}
+                      >
+                        <span>/{skill.name}</span>
+                      </button>
+                    ))}
+                    {loadedSkills.length > 2 ? (
+                      <button
+                        type="button"
+                        className="agent__composer-chip agent__composer-chip--pill"
+                        title={`还有 ${loadedSkills.length - 2} 个技能。点击打开设置 · 技能。`}
+                        onClick={() => onOpenSkills?.()}
+                      >
+                        <span>+{loadedSkills.length - 2}</span>
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="agent__composer-chip-add"
@@ -2945,7 +2967,7 @@ export function AgentView({
                       value={draft}
                       disabled={!thread}
                       readOnly={Boolean(pending)}
-                      rows={2}
+                      rows={1}
                       onPaste={(event) => {
                         const file = Array.from(event.clipboardData.files).find((item) =>
                           item.type.startsWith("image/"),
@@ -3135,24 +3157,6 @@ export function AgentView({
                       ) : null}
                     </div>
                     <div className="agent__composer-actions">
-                      {loadedSkills.length > 0 ? (
-                        <button
-                          type="button"
-                          className="agent__loaded-skills"
-                          title={`本会话已引用：${loadedSkills
-                            .map((skill) => `/${skill.name}`)
-                            .join("、")}。点击打开设置 · 技能。`}
-                          aria-label="打开设置中的技能"
-                          onClick={() => onOpenSkills?.()}
-                        >
-                          技能{" "}
-                          {loadedSkills
-                            .slice(0, 2)
-                            .map((skill) => `/${skill.name}`)
-                            .join(" ")}
-                          {loadedSkills.length > 2 ? ` +${loadedSkills.length - 2}` : ""}
-                        </button>
-                      ) : null}
                       {thread && contextPreview ? (
                         <span
                           className={
@@ -3160,22 +3164,38 @@ export function AgentView({
                               ? "agent__context-usage is-tight"
                               : "agent__context-usage"
                           }
-                          title={
-                            contextPreview.includesSystem
-                              ? `发给模型的内容大约 ${contextPreview.used} / ${contextPreview.budget}。含系统提示和对话。接近上限时会先清空较早的工具结果，再压缩更早的对话。`
-                              : `本机模型大约使用 ${contextPreview.used} / ${contextPreview.budget}。只计对话。接近上限时会先清空较早的工具结果，再压缩更早的对话。`
-                          }
-                          aria-label={`上下文大约 ${contextPreview.used} / ${contextPreview.budget}`}
                         >
-                          <span className="agent__context-bar" aria-hidden="true">
-                            <span
-                              style={{
-                                width: `${Math.min(100, Math.round(contextRatio * 100))}%`,
-                              }}
-                            />
+                          <span
+                            className="agent__context-ring-wrap"
+                            title={
+                              contextPreview.includesSystem
+                                ? `上下文 ${formatContextTokens(contextPreview.used)} / ${formatContextTokens(contextPreview.budget)}（${Math.min(100, Math.round(contextRatio * 100))}%）\n发给模型的内容大约 ${contextPreview.used} / ${contextPreview.budget}。含系统提示和对话。接近上限时会先清空较早的工具结果，再压缩更早的对话。`
+                                : `上下文 ${formatContextTokens(contextPreview.used)} / ${formatContextTokens(contextPreview.budget)}（${Math.min(100, Math.round(contextRatio * 100))}%）\n本机模型大约使用 ${contextPreview.used} / ${contextPreview.budget}。只计对话。接近上限时会先清空较早的工具结果，再压缩更早的对话。`
+                            }
+                            aria-label={`上下文大约 ${formatContextTokens(contextPreview.used)} / ${formatContextTokens(contextPreview.budget)}`}
+                          >
+                            <svg
+                              className="agent__context-ring"
+                              viewBox="0 0 20 20"
+                              aria-hidden="true"
+                            >
+                              <circle
+                                className="agent__context-ring-track"
+                                cx="10"
+                                cy="10"
+                                r="7.25"
+                              />
+                              <circle
+                                className="agent__context-ring-value"
+                                cx="10"
+                                cy="10"
+                                r="7.25"
+                                style={{
+                                  strokeDasharray: `${Math.min(1, Math.max(0, contextRatio)) * CONTEXT_RING_LEN} ${CONTEXT_RING_LEN}`,
+                                }}
+                              />
+                            </svg>
                           </span>
-                          上下文 {formatContextTokens(contextPreview.used)}/
-                          {formatContextTokens(contextPreview.budget)}
                           {contextRatio >= 0.85 ? (
                             <button
                               type="button"
@@ -3815,6 +3835,9 @@ function isStatusMessage(message: AgentMessage): boolean {
     .filter(Boolean);
   return lines.length > 0 && lines.every((line) => /^(正在|准备)/.test(line));
 }
+
+/** Circumference for context ring (r = 7.25 in 20×20 viewBox). */
+const CONTEXT_RING_LEN = 2 * Math.PI * 7.25;
 
 function formatContextTokens(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens < 1000)
