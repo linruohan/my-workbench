@@ -43,15 +43,23 @@ import {
   toolResultLabel,
   subagentTurnText,
   type AgentCustomCommand,
+  type AgentGoal,
   type AgentHook,
   type AgentMemory,
   type AgentMessage,
   type AgentPermissionMode,
   type AgentSkill,
   type AgentSubagent,
+  type AgentTodoItem,
+  type AskUserQuestion,
   type HostToolSnapshot,
   type McpServer,
   type SlashAction,
+  parseAskUserQuestions,
+  applyGoalSlash,
+  formatGoalRoundPrompt,
+  parseGoalSlash,
+  shouldContinueGoal,
 } from "@wb/domain";
 import {
   AGENT_LOG_VIRTUAL_MIN,
@@ -75,6 +83,7 @@ import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { useDialog } from "../shell/Dialogs";
 import {
   IconArrowUp,
+  IconCommand,
   IconFolder,
   IconGitBranch,
   IconHand,
@@ -88,7 +97,9 @@ import {
   IconStop,
 } from "../shell/icons";
 import { readGitBranch } from "../notes/kb-api";
+import { AgentTerminalPanel } from "./AgentTerminalPanel";
 import { ModelMenu } from "./ModelMenu";
+import { readTerminalPanelOpen, writeTerminalPanelOpen } from "./terminal-api";
 import { imageDataUrl } from "./ocr-image";
 import { recognizeLocalImage } from "./ocr-engine";
 import {
@@ -102,9 +113,18 @@ import {
 } from "./web-session";
 import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
 import {
+  listWatchedRunning,
+  pollBackgroundJobs,
+  takePendingJobNotices,
+} from "./job-watch";
+import { takeScheduleDeliveries } from "./schedule-meta";
+import {
+  askUserTimedConfig,
   previewAgentContext,
   resumeAgentQueue,
   settleAgentApproval,
+  settleAgentQuestion,
+  settleAgentQuestionTimeout,
   startAgentTurn,
   type AgentTurnEnv,
 } from "./turn";
@@ -215,6 +235,17 @@ export function AgentView({
   /** Local transcript bump so tool steps do not re-render the whole shell. */
   const [transcriptRev, setTranscriptRev] = useState(0);
   const [queues, setQueues] = useState<Record<string, string[]>>({});
+  const [todosByThread, setTodosByThread] = useState<Record<string, AgentTodoItem[]>>({});
+  const [goalsByThread, setGoalsByThread] = useState<Record<string, AgentGoal | null>>(
+    {},
+  );
+  const goalsByThreadRef = useRef(goalsByThread);
+  goalsByThreadRef.current = goalsByThread;
+  const [cwdByThread, setCwdByThread] = useState<Record<string, string>>({});
+  const [questionAnswers, setQuestionAnswers] = useState<
+    Record<string, string | string[]>
+  >({});
+  const [askTimedLeft, setAskTimedLeft] = useState<number | null>(null);
   const [queueRev, setQueueRev] = useState(0);
   const [queuePausedById, setQueuePausedById] = useState<Record<string, boolean>>({});
   const measuredHeights = useRef<Map<number, number>>(new Map());
@@ -225,6 +256,8 @@ export function AgentView({
   const wasLiveRef = useRef(false);
   const [pinned, setPinned] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
+  const [termOpen, setTermOpen] = useState(() => readTerminalPanelOpen());
+  const [termRefresh, setTermRefresh] = useState(0);
   const [webReload, setWebReload] = useState(0);
   const [webFullscreen, setWebFullscreen] = useState(false);
   const [webSessionError, setWebSessionError] = useState("");
@@ -256,6 +289,7 @@ export function AgentView({
   const stopRef = useRef<AbortController | null>(null);
   const queuesRef = useRef(queues);
   const wantDrain = useRef<string | null>(null);
+  const wantGoalContinue = useRef<string | null>(null);
   const draining = useRef(false);
   const sendPromptRef = useRef<(content: string) => Promise<boolean>>(async () => false);
   const [copied, setCopied] = useState<string | null>(null);
@@ -305,6 +339,72 @@ export function AgentView({
     wantDrain.current = thread.id;
     setQueueRev((rev) => rev + 1);
   }, [busyThreadId, thread?.id]);
+
+  useEffect(() => {
+    if (busyThreadId != null) return;
+    setTermRefresh((rev) => rev + 1);
+  }, [busyThreadId, transcriptRev]);
+
+  // Poll background jobs; inject notices and wake idle sessions (DSH job notify).
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const tick = window.setInterval(() => {
+      void (async () => {
+        if (!listWatchedRunning().length) return;
+        let threads: string[] = [];
+        try {
+          threads = await pollBackgroundJobs();
+        } catch {
+          return;
+        }
+        for (const threadId of threads) {
+          if (busyThreadId === threadId || sending.current) continue;
+          const notices = takePendingJobNotices(threadId);
+          if (!notices.length) continue;
+          for (const notice of notices) {
+            store.appendAgentMessage({
+              threadId,
+              role: "system",
+              content: notice,
+            });
+          }
+          onPersist?.();
+          if (mounted.current) setTranscriptRev((rev) => rev + 1);
+          if (thread?.id === threadId && !pending && !sending.current) {
+            void sendPromptRef.current(
+              "后台任务已完成，请根据系统通知继续（必要时用 job_output 读取详情）。",
+            );
+          }
+        }
+      })();
+    }, 2000);
+    return () => window.clearInterval(tick);
+  }, [busyThreadId, onPersist, pending, store, thread?.id]);
+
+  // Drain due schedule_* deliveries into the owning session.
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      if (!thread || busyThreadId || pending || sending.current) return;
+      const deliveries = takeScheduleDeliveries(thread.id);
+      if (!deliveries.length) return;
+      const first = deliveries[0]!;
+      for (const extra of deliveries.slice(1)) {
+        store.appendAgentMessage({
+          threadId: thread.id,
+          role: "system",
+          content: `定时任务「${extra.title}」已排队：${extra.prompt}`,
+        });
+      }
+      onPersist?.();
+      if (mounted.current) setTranscriptRev((rev) => rev + 1);
+      void sendPromptRef.current(`【定时任务 · ${first.title}】\n${first.prompt}`);
+    }, 3000);
+    return () => window.clearInterval(tick);
+  }, [busyThreadId, onPersist, pending, store, thread]);
+
+  useEffect(() => {
+    writeTerminalPanelOpen(termOpen);
+  }, [termOpen]);
   const webSessionRef = useRef(false);
   const webHostRef = useRef<HTMLDivElement>(null);
   const webFrameRef = useRef<HTMLDivElement>(null);
@@ -516,6 +616,7 @@ export function AgentView({
   }, []);
 
   useEffect(() => {
+    setQuestionAnswers({});
     if (!pending) return;
     setPicker(null);
     const frame = requestAnimationFrame(() => {
@@ -730,28 +831,39 @@ export function AgentView({
     if (!thread || busyThreadId || pending || sending.current || draining.current) return;
     if (queuePausedRef.current) {
       wantDrain.current = null;
+      wantGoalContinue.current = null;
       return;
     }
-    if (wantDrain.current !== thread.id) return;
-    const next = (queuesRef.current[thread.id] ?? [])[0];
-    if (!next) {
-      wantDrain.current = null;
-      return;
+    if (wantDrain.current === thread.id) {
+      const next = (queuesRef.current[thread.id] ?? [])[0];
+      if (!next) {
+        wantDrain.current = null;
+      } else {
+        const threadId = thread.id;
+        draining.current = true;
+        setQueues((current) => ({
+          ...current,
+          [threadId]: (current[threadId] ?? []).slice(1),
+        }));
+        void sendPromptRef.current(next).then((started) => {
+          if (started) return;
+          draining.current = false;
+          wantDrain.current = null;
+          setQueues((current) => ({
+            ...current,
+            [threadId]: [next, ...(current[threadId] ?? [])],
+          }));
+        });
+        return;
+      }
     }
-    const threadId = thread.id;
+    if (wantGoalContinue.current !== thread.id) return;
+    const goal = goalsByThreadRef.current[thread.id];
+    wantGoalContinue.current = null;
+    if (!shouldContinueGoal(goal) || !goal) return;
     draining.current = true;
-    setQueues((current) => ({
-      ...current,
-      [threadId]: (current[threadId] ?? []).slice(1),
-    }));
-    void sendPromptRef.current(next).then((started) => {
-      if (started) return;
-      draining.current = false;
-      wantDrain.current = null;
-      setQueues((current) => ({
-        ...current,
-        [threadId]: [next, ...(current[threadId] ?? [])],
-      }));
+    void sendPromptRef.current(formatGoalRoundPrompt(goal)).then((started) => {
+      if (!started) draining.current = false;
     });
   }, [busyThreadId, pending, thread?.id, queueRev, queuePaused]);
 
@@ -773,6 +885,22 @@ export function AgentView({
       mcpServers,
       hostTools,
       runHostTool: (args) => runHostTool(hostTools, args),
+      todos: todosByThread[thread.id] ?? [],
+      onTodos: (next) => {
+        setTodosByThread((current) => ({ ...current, [thread.id]: next }));
+      },
+      goal: goalsByThread[thread.id] ?? null,
+      onGoal: (next) => {
+        goalsByThreadRef.current = {
+          ...goalsByThreadRef.current,
+          [thread.id]: next,
+        };
+        setGoalsByThread((current) => ({ ...current, [thread.id]: next }));
+      },
+      cwd: cwdByThread[thread.id] ?? undefined,
+      onCwd: (next) => {
+        setCwdByThread((current) => ({ ...current, [thread.id]: next }));
+      },
       timer: { taskId: activeTimerTaskId, startedAt: timerStartedAt },
       workspaceTitle: store.getAgentWorkspace(thread.workspaceId)?.title,
       workspacePath:
@@ -950,13 +1078,14 @@ export function AgentView({
         content,
       );
       finish(result.effects);
-      if (
-        !controller.signal.aborted &&
-        !queuePausedRef.current &&
-        (queuesRef.current[current.threadId] ?? []).length > 0
-      ) {
-        wantDrain.current = current.threadId;
-        setQueueRev((rev) => rev + 1);
+      if (!controller.signal.aborted && !queuePausedRef.current) {
+        if ((queuesRef.current[current.threadId] ?? []).length > 0) {
+          wantDrain.current = current.threadId;
+          setQueueRev((rev) => rev + 1);
+        } else if (shouldContinueGoal(goalsByThreadRef.current[current.threadId])) {
+          wantGoalContinue.current = current.threadId;
+          setQueueRev((rev) => rev + 1);
+        }
       }
       return true;
     } catch (caught) {
@@ -986,6 +1115,7 @@ export function AgentView({
   const stop = () => {
     stopRef.current?.abort();
     wantDrain.current = null;
+    wantGoalContinue.current = null;
     if (thread && (queuesRef.current[thread.id] ?? []).length > 0) {
       setQueuePaused(true);
     }
@@ -1104,6 +1234,30 @@ export function AgentView({
         return;
       }
       void sendPrompt(subagentTurnText(found, action.task), found);
+      return;
+    }
+    if (action.type === "goal") {
+      const request = parseGoalSlash(action.args);
+      const result = applyGoalSlash(goalsByThreadRef.current[thread.id] ?? null, request);
+      if (result.ok) {
+        goalsByThreadRef.current = {
+          ...goalsByThreadRef.current,
+          [thread.id]: result.goal,
+        };
+        setGoalsByThread((current) => ({ ...current, [thread.id]: result.goal }));
+        if (
+          request.kind === "resume" &&
+          result.goal &&
+          shouldContinueGoal(result.goal) &&
+          !busyThreadId &&
+          !pending &&
+          !sending.current
+        ) {
+          wantGoalContinue.current = thread.id;
+          setQueueRev((rev) => rev + 1);
+        }
+      }
+      say(command, result.text);
       return;
     }
     say(command, action.text);
@@ -1355,6 +1509,7 @@ export function AgentView({
   const decide = async (decision: "approved" | "denied") => {
     const current = env();
     if (!current || sending.current || busyThreadId) return;
+    if (pending?.toolName === "ask_user_question" && decision === "approved") return;
     sending.current = true;
     setBusyThreadId(current.threadId);
     setError("");
@@ -1387,6 +1542,104 @@ export function AgentView({
   decideRef.current = (decision) => {
     void decide(decision);
   };
+
+  const answerQuestionsTimeout = async () => {
+    const current = env();
+    if (!current || sending.current || busyThreadId) return;
+    if (pending?.toolName !== "ask_user_question") return;
+    sending.current = true;
+    setBusyThreadId(current.threadId);
+    setError("");
+    try {
+      const result = await settleAgentQuestionTimeout(current);
+      setQuestionAnswers({});
+      setAskTimedLeft(null);
+      finish(result.effects);
+      if (
+        !queuePausedRef.current &&
+        (queuesRef.current[current.threadId] ?? []).length > 0
+      ) {
+        wantDrain.current = current.threadId;
+        setQueueRev((rev) => rev + 1);
+      }
+    } catch (caught) {
+      if (mounted.current) {
+        setBusyThreadId(null);
+        setError(caught instanceof Error ? caught.message : "提问超时处理失败");
+      }
+    } finally {
+      sending.current = false;
+    }
+  };
+
+  const answerQuestions = async () => {
+    const current = env();
+    if (!current || sending.current || busyThreadId) return;
+    if (pending?.toolName !== "ask_user_question") return;
+    sending.current = true;
+    setBusyThreadId(current.threadId);
+    setError("");
+    try {
+      const result = await settleAgentQuestion(current, questionAnswers);
+      setQuestionAnswers({});
+      setAskTimedLeft(null);
+      finish(result.effects);
+      if (
+        !queuePausedRef.current &&
+        (queuesRef.current[current.threadId] ?? []).length > 0
+      ) {
+        wantDrain.current = current.threadId;
+        setQueueRev((rev) => rev + 1);
+      }
+    } catch (caught) {
+      if (mounted.current) {
+        setBusyThreadId(null);
+        setError(caught instanceof Error ? caught.message : "提交回答失败");
+      }
+    } finally {
+      sending.current = false;
+    }
+  };
+
+  useEffect(() => {
+    if (!pending || pending.toolName !== "ask_user_question") {
+      setAskTimedLeft(null);
+      return;
+    }
+    let args: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(pending.argsJson);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      setAskTimedLeft(null);
+      return;
+    }
+    const timed = askUserTimedConfig(args);
+    if (!timed.timed || timed.timeoutSec < 0) {
+      setAskTimedLeft(null);
+      return;
+    }
+    const totalMs = Math.max(1, timed.timeoutSec) * 1000;
+    const started = Date.now();
+    setAskTimedLeft(Math.ceil(totalMs / 1000));
+    const tick = window.setInterval(() => {
+      const left = Math.max(0, Math.ceil((totalMs - (Date.now() - started)) / 1000));
+      setAskTimedLeft(left);
+    }, 250);
+    const timer = window.setTimeout(() => {
+      window.clearInterval(tick);
+      setAskTimedLeft(0);
+      void answerQuestionsTimeout();
+    }, totalMs);
+    return () => {
+      window.clearInterval(tick);
+      window.clearTimeout(timer);
+    };
+    // Restart only when the pending ask call changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending?.id, pending?.toolCallId, pending?.toolName]);
 
   const commitTitle = (id: string, raw: string) => {
     if (ignoreTitleBlur.current) {
@@ -1608,15 +1861,35 @@ export function AgentView({
     ),
   );
   const pendingArgs = pending ? parseArgs(pending.argsJson) : null;
+  const pendingQuestions: AskUserQuestion[] =
+    pending?.toolName === "ask_user_question" && pendingArgs
+      ? (() => {
+          const parsed = parseAskUserQuestions(pendingArgs);
+          return parsed.ok ? parsed.questions : [];
+        })()
+      : [];
+  const isAskPending = pendingQuestions.length > 0;
+  const askTimed = askUserTimedConfig(pendingArgs);
   const argLines =
-    pending && pendingArgs
+    pending && pendingArgs && !isAskPending
       ? describeToolArgDiff(
           pendingArgs,
           approvalBeforeSnapshot(store, pending.toolName, pendingArgs),
           nowMs,
         )
       : "";
-  const approvalTitle = pending ? toolActionTitle(pending.toolName) : "";
+  const approvalTitle = pending
+    ? isAskPending
+      ? "需要你的回答"
+      : toolActionTitle(pending.toolName)
+    : "";
+  const questionsReady = pendingQuestions.every((question) => {
+    const value = questionAnswers[question.id];
+    if (question.multiSelect) {
+      return Array.isArray(value) && value.length > 0;
+    }
+    return typeof value === "string" && value.trim().length > 0;
+  });
   const activeWorkspace = thread
     ? (store.getAgentWorkspace(thread.workspaceId) ??
       workspaces.find((item) => item.id === thread.workspaceId) ??
@@ -1704,6 +1977,20 @@ export function AgentView({
               </h1>
             )}
             <div className="agent__chrome-menu">
+              {workspaceRootPath && isTauriRuntime() ? (
+                <button
+                  type="button"
+                  className={
+                    termOpen ? "agent__chrome-action is-on" : "agent__chrome-action"
+                  }
+                  title="终端"
+                  aria-label="终端面板"
+                  aria-pressed={termOpen}
+                  onClick={() => setTermOpen((open) => !open)}
+                >
+                  <IconCommand size={16} />
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="agent__chrome-action"
@@ -2157,17 +2444,112 @@ export function AgentView({
             </div>
 
             <div className="agent__dock">
+              {workspaceRootPath && isTauriRuntime() ? (
+                <AgentTerminalPanel
+                  open={termOpen}
+                  onOpenChange={setTermOpen}
+                  rootPath={workspaceRootPath}
+                  cwd={(thread ? cwdByThread[thread.id] : null) || workspaceRootPath}
+                  refreshKey={termRefresh}
+                />
+              ) : null}
               {pending ? (
-                <div className="agent__approval" role="region" aria-label="待确认操作">
+                <div
+                  className="agent__approval"
+                  role="region"
+                  aria-label={isAskPending ? "待回答问题" : "待确认操作"}
+                >
                   <div className="agent__approval-head">
                     <strong>{approvalTitle || "需要确认"}</strong>
-                    <p className="agent__approval-summary">
-                      {relativizeScheduleText(pending.summary, nowMs)}
-                    </p>
+                    {!isAskPending ? (
+                      <p className="agent__approval-summary">
+                        {relativizeScheduleText(pending.summary, nowMs)}
+                      </p>
+                    ) : null}
+                    {isAskPending && askTimed.timed ? (
+                      <p className="agent__approval-queue">
+                        {askTimed.timeoutSec < 0
+                          ? "限时提问（无截止）"
+                          : askTimedLeft == null
+                            ? `限时提问 · ${askTimed.timeoutSec}s`
+                            : askTimedLeft > 0
+                              ? `限时提问 · ${askTimedLeft}s 后继续`
+                              : "限时已到，正在继续…"}
+                      </p>
+                    ) : null}
                     {queued > 1 ? (
                       <p className="agent__approval-queue">后面还有 {queued - 1} 步。</p>
                     ) : null}
                   </div>
+                  {isAskPending ? (
+                    <div className="agent__approval-questions">
+                      {pendingQuestions.map((question) => (
+                        <div key={question.id} className="agent__approval-question">
+                          {question.header ? (
+                            <p className="agent__approval-q-head">{question.header}</p>
+                          ) : null}
+                          <p className="agent__approval-summary">{question.question}</p>
+                          {question.options?.length ? (
+                            <div className="agent__approval-options">
+                              {question.options.map((option) => {
+                                const selected = question.multiSelect
+                                  ? Array.isArray(questionAnswers[question.id]) &&
+                                    (questionAnswers[question.id] as string[]).includes(
+                                      option.label,
+                                    )
+                                  : questionAnswers[question.id] === option.label;
+                                return (
+                                  <button
+                                    key={option.label}
+                                    type="button"
+                                    className={selected ? "primary" : "btn"}
+                                    disabled={Boolean(busyThreadId)}
+                                    onClick={() => {
+                                      setQuestionAnswers((current) => {
+                                        if (!question.multiSelect) {
+                                          return {
+                                            ...current,
+                                            [question.id]: option.label,
+                                          };
+                                        }
+                                        const prev = Array.isArray(current[question.id])
+                                          ? [...(current[question.id] as string[])]
+                                          : [];
+                                        const next = prev.includes(option.label)
+                                          ? prev.filter((item) => item !== option.label)
+                                          : [...prev, option.label];
+                                        return { ...current, [question.id]: next };
+                                      });
+                                    }}
+                                  >
+                                    {option.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <input
+                              className="agent__approval-input"
+                              value={
+                                typeof questionAnswers[question.id] === "string"
+                                  ? (questionAnswers[question.id] as string)
+                                  : ""
+                              }
+                              disabled={Boolean(busyThreadId)}
+                              placeholder="输入回答"
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setQuestionAnswers((current) => ({
+                                  ...current,
+                                  [question.id]: value,
+                                }));
+                              }}
+                            />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   {argLines ? (
                     <details className="agent__approval-more">
                       <summary>{argLines.includes(" → ") ? "变更" : "参数"}</summary>
@@ -2175,39 +2557,67 @@ export function AgentView({
                     </details>
                   ) : null}
                   <div className="agent__approval-actions">
-                    <button
-                      ref={approveBtnRef}
-                      type="button"
-                      className="primary"
-                      disabled={Boolean(busyThreadId)}
-                      title={
-                        busyElsewhere
-                          ? "另一个会话还在回答，结束后再审批"
-                          : busyHere
-                            ? "当前正在回答"
-                            : undefined
-                      }
-                      onClick={() => void decide("approved")}
-                    >
-                      批准
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={Boolean(busyThreadId)}
-                      title={
-                        busyElsewhere
-                          ? "另一个会话还在回答，结束后再审批"
-                          : busyHere
-                            ? "当前正在回答"
-                            : undefined
-                      }
-                      onClick={() => void decide("denied")}
-                    >
-                      拒绝
-                    </button>
+                    {isAskPending ? (
+                      <>
+                        <button
+                          ref={approveBtnRef}
+                          type="button"
+                          className="primary"
+                          disabled={Boolean(busyThreadId) || !questionsReady}
+                          onClick={() => void answerQuestions()}
+                        >
+                          提交回答
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={Boolean(busyThreadId)}
+                          onClick={() => void decide("denied")}
+                        >
+                          跳过
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          ref={approveBtnRef}
+                          type="button"
+                          className="primary"
+                          disabled={Boolean(busyThreadId)}
+                          title={
+                            busyElsewhere
+                              ? "另一个会话还在回答，结束后再审批"
+                              : busyHere
+                                ? "当前正在回答"
+                                : undefined
+                          }
+                          onClick={() => void decide("approved")}
+                        >
+                          批准
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={Boolean(busyThreadId)}
+                          title={
+                            busyElsewhere
+                              ? "另一个会话还在回答，结束后再审批"
+                              : busyHere
+                                ? "当前正在回答"
+                                : undefined
+                          }
+                          onClick={() => void decide("denied")}
+                        >
+                          拒绝
+                        </button>
+                      </>
+                    )}
                     <span className="agent__approval-hint">
-                      {busyElsewhere ? "另一个会话结束后可审批" : "Enter 批准 · Esc 拒绝"}
+                      {busyElsewhere
+                        ? "另一个会话结束后可继续"
+                        : isAskPending
+                          ? "填写后提交"
+                          : "Enter 批准 · Esc 拒绝"}
                     </span>
                   </div>
                 </div>

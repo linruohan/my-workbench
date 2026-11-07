@@ -140,6 +140,14 @@ export async function revealInExplorer(path: string): Promise<void> {
   await call("kb_reveal_in_explorer", { path });
 }
 
+/** Open a local path with the OS default application. */
+export async function openLocalPath(path: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("打开本地文件需要在桌面应用中使用。");
+  }
+  await call("kb_open_path", { path });
+}
+
 export async function listDirectory(path: string): Promise<KbEntry[]> {
   return call<KbEntry[]>("kb_list_dir", { path });
 }
@@ -190,6 +198,13 @@ export async function kbExists(path: string): Promise<boolean> {
 
 export async function kbMkdir(path: string): Promise<void> {
   await call("kb_mkdir", { path });
+}
+
+export async function kbRemove(path: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("删除文件需要在桌面应用中使用。");
+  }
+  await call("kb_remove", { path });
 }
 
 export async function renameKbPath(from: string, to: string): Promise<void> {

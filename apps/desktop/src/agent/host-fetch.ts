@@ -20,7 +20,7 @@ export async function hostFetch(
   const proxy = readPrefs().httpProxy.trim();
   let result: HostResponse;
   try {
-    result = await invoke<HostResponse>("model_http", {
+    const invokePromise = invoke<HostResponse>("model_http", {
       method: init.method ?? "GET",
       url,
       headers: headersToRecord(init.headers),
@@ -28,7 +28,12 @@ export async function hostFetch(
       timeoutMs: init.timeoutMs ?? 60_000,
       proxy: proxy || null,
     });
+    result = init.signal
+      ? await raceAbort(invokePromise, init.signal)
+      : await invokePromise;
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (error instanceof Error && error.name === "AbortError") throw error;
     const message =
       typeof error === "string"
         ? error.trim()
@@ -37,11 +42,33 @@ export async function hostFetch(
           : "";
     throw new Error(message || "网络错误");
   }
+  if (init.signal?.aborted)
+    throw new DOMException("The operation was aborted.", "AbortError");
   const contentType =
     result.contentType || result.content_type || "application/octet-stream";
   return new Response(result.body, {
     status: result.status,
     headers: { "content-type": contentType },
+  });
+}
+
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted)
+    return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () =>
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
   });
 }
 

@@ -1,5 +1,6 @@
 import { fileNameOf } from "./kb.js";
 import { formatLocalDay, parseLocalDay } from "./date.js";
+import { stripAnsiEscapes } from "./agent-workspace-tools.js";
 
 const LIST_LIMIT = 12;
 
@@ -197,6 +198,27 @@ const ARG_LABEL: Record<string, string> = {
   command: "命令",
   url: "地址",
   path: "路径",
+  file_path: "路径",
+  old_string: "原文",
+  new_string: "替换为",
+  replace_all: "全部替换",
+  pattern: "模式",
+  include: "文件过滤",
+  workdir: "工作目录",
+  timeout: "超时",
+  content: "内容",
+  offset: "起始行",
+  limit: "行数",
+  patch: "补丁",
+  queries: "查询",
+  job_id: "任务",
+  session_id: "终端",
+  background: "后台",
+  wait: "等待",
+  reason: "原因",
+  cd: "目录",
+  submit: "回车",
+  signal: "信号",
   modelRef: "模型",
   timeEstimateMinutes: "预计",
   version: "版本",
@@ -358,6 +380,7 @@ function presentArg(key: string, value: unknown, nowMs: number): string {
     const body = value.trim();
     return body.length > 160 ? `${body.slice(0, 160)}…` : body;
   }
+  if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "string" || typeof value === "number") return String(value);
   return "";
 }
@@ -378,7 +401,20 @@ export function toolResultLabel(name: string): string {
   if (name.startsWith("notification_")) return "通知";
   if (name.startsWith("memory_")) return "记忆";
   if (name.startsWith("skill_")) return "技能";
-  if (name.startsWith("subagent_")) return "子智能体";
+  if (name.startsWith("subagent") || name === "subagent") return "子智能体";
+  if (name === "get_goal" || name === "create_goal" || name === "update_goal") {
+    return "Goal";
+  }
+  if (
+    name === "session_search" ||
+    name === "session_trace" ||
+    name === "session_event_search" ||
+    name === "session_event_read" ||
+    name === "session_event_trace"
+  ) {
+    return "会话检索";
+  }
+  if (name.startsWith("schedule_")) return "定时任务";
   if (name.startsWith("hook_")) return "钩子";
   if (name.startsWith("mcp_")) return "MCP";
   if (name.startsWith("plugin_")) return "插件";
@@ -386,12 +422,32 @@ export function toolResultLabel(name: string): string {
   if (name.startsWith("host_tool")) return "本机工具";
   if (name.startsWith("settings_") || name.startsWith("session_")) return "设置";
   if (name === "ui_open") return "打开";
+  if (
+    name === "read" ||
+    name === "read_image" ||
+    name === "write" ||
+    name === "edit" ||
+    name === "apply_patch" ||
+    name === "str_replace_editor"
+  ) {
+    return "工作区文件";
+  }
+  if (name === "glob" || name === "grep") return "工作区搜索";
+  if (name === "pwsh" || name === "bash" || name === "shell") return "终端";
+  if (name === "web_fetch" || name === "web_search") return "网页";
+  if (name === "todo_write") return "待办";
+  if (name.startsWith("job_")) return "后台任务";
+  if (name === "ask_user_question") return "提问";
+  if (name === "working_directory") return "工作目录";
+  if (name.startsWith("terminal_")) return "终端";
+  if (name === "present") return "交付";
+  if (name === "office_to_pdf") return "文档转换";
   return "";
 }
 
 /** One-line peek used when a tool result is collapsed. */
 export function toolResultPreview(text: string, max = 80): string {
-  const line = text
+  const line = stripAnsiEscapes(text)
     .split(/\r?\n/)
     .map((part) => part.trim().replace(/^[-·•]\s*/, ""))
     .find(Boolean);
@@ -478,11 +534,276 @@ export function describeToolResult(name: string, data: unknown, summary: string)
     );
   }
 
-  if (name === "host_tool_run") {
+  if (
+    name === "host_tool_run" ||
+    name === "pwsh" ||
+    name === "bash" ||
+    name === "shell"
+  ) {
     const stdout = clipOutput(record.stdout);
     const stderr = clipOutput(record.stderr);
     const truncated = record.truncated === true ? "输出已截断" : "";
     return [summary, stdout, stderr, truncated].filter(Boolean).join("\n");
+  }
+
+  if (name.startsWith("terminal_")) {
+    if (typeof record.output === "string" && record.output.trim()) {
+      return [summary, clipOutput(record.output)].filter(Boolean).join("\n");
+    }
+    const terminals = asArray(record.terminals) ?? [];
+    if (terminals.length) {
+      return joinList(
+        summary,
+        terminals.map((item) => {
+          const term = asRecord(item);
+          if (!term || typeof term.id !== "string") return "";
+          const nameLabel = typeof term.name === "string" ? term.name : "";
+          const alive = term.alive === false ? "已结束" : "运行中";
+          return `· ${term.id}${nameLabel ? ` (${nameLabel})` : ""} · ${alive}`;
+        }),
+      );
+    }
+    return summary;
+  }
+
+  if (name === "ask_user_question") {
+    if (record.timedOut === true) return summary;
+    const answers = asRecord(record.answers);
+    if (!answers) return summary;
+    return joinList(
+      summary,
+      Object.entries(answers).map(([id, value]) => {
+        const text = Array.isArray(value) ? value.join("、") : String(value ?? "");
+        return `· ${id}: ${text}`;
+      }),
+    );
+  }
+
+  if (name === "present") {
+    const files = asArray(record.files) ?? [];
+    return joinList(
+      summary,
+      files.map((item) => {
+        const file = asRecord(item);
+        if (!file || typeof file.path !== "string") return "";
+        const desc =
+          typeof file.description === "string" && file.description
+            ? ` — ${file.description}`
+            : "";
+        return `· ${file.path}${desc}`;
+      }),
+    );
+  }
+
+  if (name === "read_image") {
+    const path = typeof record.path === "string" ? record.path : "";
+    const mediaType = typeof record.mediaType === "string" ? record.mediaType : "";
+    const image = asRecord(record.image);
+    const attachmentId =
+      image && typeof image.attachmentId === "string" ? image.attachmentId : "";
+    const dims =
+      image &&
+      typeof image.width === "number" &&
+      typeof image.height === "number" &&
+      image.width > 0 &&
+      image.height > 0
+        ? `${image.width}×${image.height}`
+        : "";
+    return [
+      summary,
+      path && mediaType ? `${path} (${mediaType}${dims ? ` · ${dims}` : ""})` : path,
+      attachmentId ? `attachment ${attachmentId}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (name === "office_to_pdf") {
+    const output = typeof record.output === "string" ? record.output : "";
+    return output ? `${summary}\n${output}` : summary;
+  }
+
+  if (name === "subagent" && typeof record.text === "string") {
+    return [summary, clipOutput(record.text)].filter(Boolean).join("\n");
+  }
+
+  if (name === "get_goal" || name === "create_goal" || name === "update_goal") {
+    const goal = asRecord(record.goal);
+    if (!goal) return summary;
+    const objective = typeof goal.objective === "string" ? goal.objective : "";
+    const phase = typeof goal.phase === "string" ? goal.phase : "";
+    return [summary, phase && objective ? `${phase} · ${objective}` : objective]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (name === "session_search") {
+    const hits = asArray(record.hits) ?? [];
+    return joinList(
+      summary,
+      hits.slice(0, 40).map((item) => {
+        const hit = asRecord(item);
+        if (!hit || typeof hit.snippet !== "string") return "";
+        const title = typeof hit.title === "string" ? hit.title : "";
+        return `· ${title}: ${hit.snippet}`;
+      }),
+    );
+  }
+
+  if (name === "session_trace") {
+    const events = asArray(record.events) ?? [];
+    return joinList(
+      summary,
+      events.slice(0, 40).map((item) => {
+        const row = asRecord(item);
+        if (!row || typeof row.snippet !== "string") return "";
+        const role = typeof row.role === "string" ? row.role : "";
+        return `· ${role}: ${row.snippet}`;
+      }),
+    );
+  }
+
+  if (name === "session_event_search") {
+    const hits = asArray(record.hits) ?? [];
+    return joinList(
+      summary,
+      hits.slice(0, 40).map((item) => {
+        const hit = asRecord(item);
+        if (!hit || typeof hit.snippet !== "string") return "";
+        const seq = typeof hit.seq === "number" ? hit.seq : "?";
+        const type = typeof hit.type === "string" ? hit.type : "";
+        return `· #${seq} ${type}: ${hit.snippet}`;
+      }),
+    );
+  }
+
+  if (name === "session_event_read") {
+    const event = asRecord(record.event);
+    if (!event) return summary;
+    const seq = typeof event.seq === "number" ? event.seq : "?";
+    const type = typeof event.type === "string" ? event.type : "";
+    const content = typeof event.content === "string" ? clipOutput(event.content) : "";
+    return [summary, `#${seq} ${type}`, content].filter(Boolean).join("\n");
+  }
+
+  if (name === "session_event_trace") {
+    const event = asRecord(record.event);
+    const related = asArray(record.related) ?? [];
+    const seq = event && typeof event.seq === "number" ? event.seq : "?";
+    return joinList(
+      `${summary}（#${seq}）`,
+      related.slice(0, 20).map((item) => {
+        const row = asRecord(item);
+        if (!row) return "";
+        const rSeq = typeof row.seq === "number" ? row.seq : "?";
+        const type = typeof row.type === "string" ? row.type : "";
+        return `· #${rSeq} ${type}`;
+      }),
+    );
+  }
+
+  if (name.startsWith("schedule_")) {
+    if (record.code === "schedule_not_found" || record.code === "schedule_conflict") {
+      return summary;
+    }
+    const one = asRecord(record.schedule);
+    if (one && typeof one.title === "string") {
+      return `${summary}\n${one.title}${typeof one.id === "string" ? ` (${one.id})` : ""}`;
+    }
+    const schedules = asArray(record.schedules) ?? [];
+    return joinList(
+      summary,
+      schedules.map((item) => {
+        const row = asRecord(item);
+        if (!row || typeof row.title !== "string") return "";
+        const id = typeof row.id === "string" ? row.id : "";
+        const active = row.active === false ? "paused" : "active";
+        return `· ${id} [${active}] ${row.title}`;
+      }),
+    );
+  }
+
+  if (name === "working_directory" && typeof record.cwd === "string") {
+    return `${summary}\n${record.cwd}`;
+  }
+
+  if (name === "read" || name === "web_fetch") {
+    const body = typeof record.text === "string" ? clipOutput(record.text) : "";
+    return [summary, body].filter(Boolean).join("\n");
+  }
+
+  if (
+    name === "write" ||
+    name === "edit" ||
+    name === "apply_patch" ||
+    name === "str_replace_editor"
+  ) {
+    if (typeof record.text === "string" && record.text.trim()) {
+      return [summary, clipOutput(record.text)].filter(Boolean).join("\n");
+    }
+    return summary;
+  }
+
+  if (name === "web_search") {
+    const hits = asArray(record.results) ?? [];
+    return joinList(
+      summary,
+      hits.map((item) => {
+        const hit = asRecord(item);
+        if (!hit || typeof hit.title !== "string") return "";
+        const url = typeof hit.url === "string" ? hit.url : "";
+        return `· ${hit.title}${url ? ` — ${url}` : ""}`;
+      }),
+    );
+  }
+
+  if (name === "job_list" || name === "job_output" || name === "job_kill") {
+    if (typeof record.output === "string" && record.output.trim()) {
+      return [summary, clipOutput(record.output)].filter(Boolean).join("\n");
+    }
+    const jobs = asArray(record.jobs) ?? [];
+    if (jobs.length) {
+      return joinList(
+        summary,
+        jobs.map((item) => {
+          const job = asRecord(item);
+          if (!job || typeof job.id !== "string") return "";
+          const status = typeof job.status === "string" ? job.status : "";
+          const desc = typeof job.description === "string" ? job.description : "";
+          return `· ${job.id} [${status}] ${desc}`.trim();
+        }),
+      );
+    }
+    return summary;
+  }
+
+  if (name === "glob" || name === "grep") {
+    const hits = asArray(record.paths) ?? asArray(record.matches) ?? [];
+    return joinList(
+      summary,
+      hits.slice(0, 40).map((item) => {
+        if (typeof item === "string") return `· ${item}`;
+        const row = asRecord(item);
+        if (!row) return "";
+        if (typeof row.path === "string" && typeof row.line === "number") {
+          return `· ${row.path}:${row.line} ${typeof row.text === "string" ? row.text : ""}`.trim();
+        }
+        return typeof row.path === "string" ? `· ${row.path}` : "";
+      }),
+    );
+  }
+
+  if (name === "todo_write") {
+    const todos = asArray(record.todos) ?? [];
+    return joinList(
+      summary,
+      todos.map((item) => {
+        const todo = asRecord(item);
+        if (!todo || typeof todo.content !== "string") return "";
+        const status = typeof todo.status === "string" ? todo.status : "";
+        return `· [${status}] ${todo.content}`;
+      }),
+    );
   }
 
   return summary;
@@ -553,7 +874,7 @@ function firstListed(summary: string, record: Record<string, unknown>): string |
 
 function clipOutput(value: unknown): string {
   if (typeof value !== "string") return "";
-  const text = value.trim();
+  const text = stripAnsiEscapes(value).trim();
   if (!text) return "";
   return text.length > 8000 ? `${text.slice(0, 8000)}…` : text;
 }

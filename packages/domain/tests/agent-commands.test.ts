@@ -18,11 +18,13 @@ describe("slash commands", () => {
       "compact",
       "memory",
       "agent",
+      "goal",
     ]);
     expect(slashSuggestions("/mo").map((command) => command.name)).toEqual([
       "mode",
       "model",
     ]);
+    expect(slashSuggestions("/go").map((command) => command.name)).toEqual(["goal"]);
     expect(slashSuggestions("/晨").map((command) => command.name)).toEqual(["brief"]);
     expect(slashSuggestions("/mode 只读")).toEqual([]);
     expect(slashSuggestions("今天有什么")).toEqual([]);
@@ -99,6 +101,15 @@ describe("slash commands", () => {
     expect(resolveSlash("/nope", "confirm")).toMatchObject({
       type: "reply",
       text: expect.stringContaining("/help"),
+    });
+    expect(resolveSlash("/goal", "confirm")).toEqual({ type: "goal", args: "" });
+    expect(resolveSlash("/goal pause", "confirm")).toEqual({
+      type: "goal",
+      args: "pause",
+    });
+    expect(resolveSlash("/goal 修好登录", "confirm")).toEqual({
+      type: "goal",
+      args: "修好登录",
     });
   });
 });

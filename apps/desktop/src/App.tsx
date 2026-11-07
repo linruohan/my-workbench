@@ -43,6 +43,7 @@ import { readProviderStore } from "./agent/providers";
 import { ensurePaddleOcr } from "./agent/ocr-models";
 import { loadAgentPlugins } from "./agent/plugins-loader";
 import { loadAgentSkills } from "./agent/skills-loader";
+import { enqueueScheduleDelivery, getScheduleMeta } from "./agent/schedule-meta";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
 import { useDialog } from "./shell/Dialogs";
@@ -231,6 +232,40 @@ export default function App() {
       const visible = delivered.filter(
         (d) => !cooldown.isSuppressed(d.taskId, d.remindAt, at),
       );
+      let timedFired = false;
+      for (const task of store.listDueTimedTasks(at)) {
+        store.markTimedTaskRan(task.id, at);
+        timedFired = true;
+        store.pushNotification({
+          kind: "system",
+          title: `定时任务 · ${task.title}`,
+          body: task.command.trim().slice(0, 240) || "已到期",
+          nowMs: at,
+        });
+        const meta = getScheduleMeta(task.id);
+        let threadId = meta?.threadId ?? null;
+        if (meta?.target === "new") {
+          const workspaceId =
+            meta.workspaceId ?? store.listAgentWorkspaces()[0]?.id ?? null;
+          if (workspaceId) {
+            const child = store.createAgentThread({
+              workspaceId,
+              title: `定时 · ${task.title}`,
+              nowMs: at,
+            });
+            threadId = child.id;
+          }
+        }
+        if (threadId && task.command.trim()) {
+          enqueueScheduleDelivery({
+            scheduleId: task.id,
+            threadId,
+            prompt: task.command.trim(),
+            title: task.title,
+            at,
+          });
+        }
+      }
       if (visible.length) {
         const note = formatHookNotices(
           hooksForEvent(
@@ -241,6 +276,9 @@ export default function App() {
         setActiveReminders((prev) =>
           [...visible.map((item) => ({ ...item, note })), ...prev].slice(0, 5),
         );
+        setNotificationsOpen(true);
+        refresh();
+      } else if (timedFired) {
         setNotificationsOpen(true);
         refresh();
       }

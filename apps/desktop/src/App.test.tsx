@@ -1,8 +1,15 @@
 import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { THEME_STORAGE_KEY } from "@wb/theme";
 import App from "./App";
 import { renderWithProviders } from "./test/render";
+
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem(THEME_STORAGE_KEY, "light");
+  document.documentElement.setAttribute("data-theme", "light");
+});
 
 afterEach(() => {
   cleanup();
@@ -164,10 +171,14 @@ describe("App shell", () => {
     const user = userEvent.setup();
     await readyApp();
 
-    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    await waitFor(() => {
+      expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    });
     const toggle = screen.getByRole("button", { name: /主题：浅色/ });
     await user.click(toggle);
-    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    await waitFor(() => {
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    });
   });
 
   it("creates a timed task with daily schedule via editor", async () => {

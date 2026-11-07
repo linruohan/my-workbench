@@ -58,6 +58,41 @@ pub fn kb_list_dir(path: String) -> Result<Vec<KbEntry>, String> {
     Ok(out)
 }
 
+/// Open a local file or folder with the OS default application.
+#[tauri::command]
+pub fn kb_open_path(path: String) -> Result<(), String> {
+    let target = Path::new(path.trim());
+    if !target.exists() {
+        return Err("路径不存在".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &target.to_string_lossy()])
+            .spawn()
+            .map_err(|err| format!("无法打开：{err}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(target)
+            .spawn()
+            .map_err(|err| format!("无法打开：{err}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|err| format!("无法打开：{err}"))?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("当前平台不支持打开本地路径".into())
+}
+
 /// Reveal a file or folder in the OS file manager.
 #[tauri::command]
 pub fn kb_reveal_in_explorer(path: String) -> Result<(), String> {
@@ -149,6 +184,19 @@ pub fn kb_exists(path: String) -> bool {
 #[tauri::command]
 pub fn kb_mkdir(path: String) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|err| format!("无法创建目录：{err}"))
+}
+
+#[tauri::command]
+pub fn kb_remove(path: String) -> Result<(), String> {
+    let target = Path::new(&path);
+    if !target.exists() {
+        return Err("路径不存在".into());
+    }
+    if target.is_dir() {
+        fs::remove_dir_all(target).map_err(|err| format!("无法删除目录：{err}"))
+    } else {
+        fs::remove_file(target).map_err(|err| format!("无法删除文件：{err}"))
+    }
 }
 
 #[tauri::command]

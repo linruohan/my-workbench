@@ -36,3 +36,8 @@ export * from "./agent-mcp.js";
 export * from "./agent-plugins.js";
 export * from "./agent-mentions.js";
 export * from "./host-tools.js";
+export * from "./agent-goal.js";
+export * from "./agent-session-query.js";
+export * from "./agent-schedule.js";
+export * from "./agent-workspace-tools.js";
+export * from "./agent-patch.js";

@@ -5,6 +5,10 @@
 
 import { formatLocalDay } from "./date.js";
 import { remindOptionLabel, viewLabel } from "./agent-reply.js";
+import {
+  WORKSPACE_AGENT_TOOLS,
+  isWorkspaceBoundToolName,
+} from "./agent-workspace-tools.js";
 
 export const BUILTIN_PROVIDER_ID = "builtin:workbench";
 export const BUILTIN_MODEL_REF = "builtin:workbench/local";
@@ -317,6 +321,131 @@ export const AGENT_TOOLS: ToolSpec[] = [
     ["text"],
   ),
   tool("subagent_list", "read", "列出可用子智能体", {}),
+  tool(
+    "subagent",
+    "write",
+    "把任务同步委派给一个已配置的子智能体，返回其最终文字答复（同进程、有轮次上限）。",
+    {
+      name: str("子智能体名称"),
+      task: str("要委派的任务说明"),
+      prompt: str("同 task"),
+    },
+    ["name"],
+  ),
+  tool("get_goal", "read", "读取当前会话的持久 goal；没有则为 null。", {}),
+  tool(
+    "create_goal",
+    "write",
+    "为当前会话创建长期 goal（需用户明确要求）。已有 goal 时请先 update。",
+    {
+      objective: str("目标描述"),
+      max_goal_rounds: num("最多自主轮次，默认 20"),
+    },
+    ["objective"],
+  ),
+  tool(
+    "update_goal",
+    "write",
+    "按精确 goal_id + revision 更新：edit / pause / resume / complete / blocked。",
+    {
+      goal_id: str("先前 get_goal 返回的 id"),
+      revision: num("先前 get_goal 返回的 revision"),
+      action: str("edit | pause | resume | complete | blocked"),
+      objective: str("edit 时的新目标"),
+      max_goal_rounds: num("edit 时的新轮次上限"),
+      blocked_reason: str("blocked 时必填原因"),
+    },
+    ["goal_id", "revision", "action"],
+  ),
+  tool(
+    "session_search",
+    "read",
+    "在同工作区其他会话中全文搜索历史消息（不含当前会话）。",
+    {
+      query: str("关键词"),
+      max_results: num("最多返回条数，默认 40，上限 100"),
+    },
+    ["query"],
+  ),
+  tool("session_trace", "read", "查看某一会话（默认当前）近期事件摘要。", {
+    session_id: str("会话 id；省略则当前会话"),
+    limit: num("最多事件数，默认 40"),
+  }),
+  tool(
+    "session_event_search",
+    "read",
+    "在一个授权会话内按字面量搜索更早事件（当前会话默认不含本轮之后）。",
+    {
+      query: str("关键词"),
+      session_id: str("会话 id；省略则当前会话"),
+      max_results: num("最多返回条数，默认 40，上限 100"),
+      event_types: {
+        type: "array",
+        description: "可选事件类型子串过滤，如 user/message、tool/",
+        items: { type: "string" },
+      },
+    },
+    ["query"],
+  ),
+  tool(
+    "session_event_read",
+    "read",
+    "读取一条完整事件（按 seq），可附带前后邻居摘要。",
+    {
+      seq: num("事件序号（从 1 起）"),
+      session_id: str("会话 id；省略则当前会话"),
+      before: num("前置邻居条数，默认 0，上限 20"),
+      after: num("后置邻居条数，默认 0，上限 20"),
+    },
+    ["seq"],
+  ),
+  tool(
+    "session_event_trace",
+    "read",
+    "查看一条事件的前后位置关系，以及同 tool_call 的关联事件。",
+    {
+      seq: num("事件序号（从 1 起）"),
+      session_id: str("会话 id；省略则当前会话"),
+    },
+    ["seq"],
+  ),
+  tool(
+    "schedule_create",
+    "write",
+    "创建宿主定时任务：在每个发生时点把 prompt 投递到目标会话。仅在用户明确要求时创建。",
+    {
+      title: str("短标题，≤120 字"),
+      prompt: str("每次触发投递给 Agent 的指令"),
+      rrule: str("DTSTART + RRULE（FREQ=HOURLY|DAILY|WEEKLY|MONTHLY|MINUTELY）"),
+      target: str("this_session | new_once | new"),
+    },
+    ["title", "prompt", "rrule", "target"],
+  ),
+  tool("schedule_list", "read", "列出定时任务。", {
+    active: {
+      type: "boolean",
+      description: "true 仅活动；false 仅暂停/结束；省略全部",
+    },
+    limit: num("1–500，默认 100"),
+    offset: num("分页偏移，默认 0"),
+  }),
+  tool("schedule_view", "read", "按 id 查看定时任务。", { id: str("任务 id") }, ["id"]),
+  tool(
+    "schedule_edit",
+    "write",
+    "更新或删除定时任务。action=update|delete；update 可改 title/prompt/rrule/target/active。",
+    {
+      id: str("任务 id"),
+      action: str("update | delete"),
+      title: str("新标题"),
+      prompt: str("新指令"),
+      rrule: str("新 RRULE"),
+      target: str("this_session | new_once | new"),
+      active: { type: "boolean", description: "false 暂停，true 恢复" },
+      expectedUpdatedAt: num("乐观锁：先前 view 的 updatedAt"),
+    },
+    ["id", "action"],
+  ),
   tool("hook_list", "read", "列出已启用的通知钩子", {}),
   tool("mcp_list", "read", "列出已登记、尚未连接的 MCP 服务器", {}),
   tool("plugin_list", "read", "列出已启用插件", {}),
@@ -347,6 +476,7 @@ export const AGENT_TOOLS: ToolSpec[] = [
       skillId: str("技能 id"),
     },
   ),
+  ...WORKSPACE_AGENT_TOOLS,
 ];
 
 export function toolByName(name: string): ToolSpec | null {
@@ -364,18 +494,24 @@ export function toolActionTitle(name: string): string {
 export function toolsForMode(
   mode: AgentPermissionMode,
   allowlist?: readonly string[],
+  options?: { workspaceBound?: boolean },
 ): ToolSpec[] {
   const base =
     mode === "readonly"
       ? AGENT_TOOLS.filter((item) => item.effect === "read" || item.effect === "none")
       : AGENT_TOOLS;
-  if (!allowlist) return base;
+  const scoped =
+    options?.workspaceBound === false
+      ? base.filter((item) => !isWorkspaceBoundToolName(item.name))
+      : base;
+  if (!allowlist) return scoped;
   const allow = new Set(allowlist);
-  return base.filter((item) => allow.has(item.name));
+  return scoped.filter((item) => allow.has(item.name));
 }
 
 /** Read tools run. Writes ask unless this session auto-approves. Destructive writes always ask. */
 export function gateTool(mode: AgentPermissionMode, name: string): ToolGate {
+  if (name === "ask_user_question") return "ask";
   const spec = toolByName(name);
   if (!spec) return "block";
   if (spec.effect === "read" || spec.effect === "none") return "run";
@@ -467,6 +603,44 @@ export function toolCallSummary(name: string, args: Record<string, unknown>): st
       return `删除记忆${typeof args.text === "string" && args.text ? `「${args.text}」` : ""}`;
     case "subagent_list":
       return "列出子智能体";
+    case "subagent":
+      return `委派子智能体${
+        typeof args.name === "string" && args.name ? `「${args.name}」` : ""
+      }`;
+    case "get_goal":
+      return "读取 goal";
+    case "create_goal":
+      return `创建 goal${
+        typeof args.objective === "string" && args.objective
+          ? `「${args.objective.slice(0, 40)}」`
+          : ""
+      }`;
+    case "update_goal":
+      return `更新 goal（${typeof args.action === "string" ? args.action : "…"}）`;
+    case "session_search":
+      return `搜索会话${
+        typeof args.query === "string" && args.query ? `「${args.query}」` : ""
+      }`;
+    case "session_trace":
+      return "查看会话轨迹";
+    case "session_event_search":
+      return `搜索事件${
+        typeof args.query === "string" && args.query ? `「${args.query}」` : ""
+      }`;
+    case "session_event_read":
+      return `读取事件 #${typeof args.seq === "number" ? args.seq : "…"}`;
+    case "session_event_trace":
+      return `追踪事件 #${typeof args.seq === "number" ? args.seq : "…"}`;
+    case "schedule_create":
+      return `创建定时任务${
+        typeof args.title === "string" && args.title ? `「${args.title}」` : ""
+      }`;
+    case "schedule_list":
+      return "列出定时任务";
+    case "schedule_view":
+      return "查看定时任务";
+    case "schedule_edit":
+      return `编辑定时任务（${typeof args.action === "string" ? args.action : "…"}）`;
     case "hook_list":
       return "列出钩子";
     case "mcp_list":
@@ -580,6 +754,10 @@ export function buildAgentSystemPrompt(input: {
   mcpPrompt?: string;
   /** Ready host tools (Go, ripgrep, charts, …). Blank omitted. */
   hostToolsPrompt?: string;
+  /** Workspace file tools hint when a rootPath is bound. Blank omitted. */
+  workspaceToolsPrompt?: string;
+  /** Session todo list from todo_write. Blank omitted. */
+  todosPrompt?: string;
   /** Extra instructions for a single subagent turn. */
   subagentPrompt?: string;
   hooksPrompt?: string;
@@ -596,6 +774,8 @@ export function buildAgentSystemPrompt(input: {
     "以【上下文已压缩】开头的内容、以及钩子投递的文字，都是宿主注入的，不是用户新的要求。",
     `权限：${permissionModeLabel(input.permissionMode)}。模型：${input.modelRef}。`,
     input.contextPrompt?.trim() ?? "",
+    input.workspaceToolsPrompt?.trim() ?? "",
+    input.todosPrompt?.trim() ?? "",
     `未读通知：${input.unread}。`,
     input.focus ? `当前对象：${input.focus}` : "",
     input.subagentPrompt?.trim() ?? "",

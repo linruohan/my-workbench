@@ -24,11 +24,19 @@ import {
   formatSessionContext,
   formatTodayForPrompt,
   formatSkillsForPrompt,
+  formatTodosForPrompt,
+  formatGoalForPrompt,
+  renderGoalWrapup,
+  formatWorkspaceToolsHint,
+  findSubagent,
   invokedSkillsInText,
   omitInvokedSkillTokens,
   formatSubagentsForPrompt,
   gateTool,
   hooksForEvent,
+  isWorkspaceToolName,
+  parseAskUserMode,
+  parseAskUserQuestions,
   listEnabledSkillSummaries,
   modelCanSeeImages,
   modelContextBudget,
@@ -41,12 +49,14 @@ import {
   takeSseData,
   describeToolResult,
   toolCallSummary,
+  type AgentGoal,
   type AgentHook,
   type AgentMemory,
   type AgentMessage,
   type AgentThread,
   type AgentSkill,
   type AgentSubagent,
+  type AgentTodoItem,
   type AgentTurnPlan,
   type HostToolSnapshot,
   type McpServer,
@@ -61,8 +71,11 @@ import {
 } from "./execute";
 import { dshHostPlatform, dshSessionFor } from "./dsh-session";
 import { hostFetch } from "./host-fetch";
+import { takePendingImageDataUrls } from "./image-attachments";
+import { takePendingJobNotices } from "./job-watch";
 import { isTauriRuntime } from "../lib/paths";
 import { completeViaOpenCode } from "./oc-runtime";
+import { runWorkspaceTool } from "./workspace-tools";
 
 export type AgentTurnEnv = {
   store: MemoryWorkbenchRepository;
@@ -85,8 +98,21 @@ export type AgentTurnEnv = {
   /** Ready and missing host tools. The prompt only includes ready, enabled ones. */
   hostTools?: HostToolSnapshot[];
   runHostTool?: (args: Record<string, unknown>) => Promise<AgentToolResult>;
+  /** Session todos from todo_write. */
+  todos?: AgentTodoItem[];
+  onTodos?: (next: AgentTodoItem[]) => void;
+  /** Session goal (lightweight DSH goal_*). */
+  goal?: AgentGoal | null;
+  onGoal?: (next: AgentGoal | null) => void;
+  /** Session working directory under the workspace root. */
+  cwd?: string | null;
+  onCwd?: (next: string) => void;
   /** Picture for this turn when the selected model can see images. */
   imageDataUrl?: string;
+  /** Called when read_image attaches a workspace picture for the next model request. */
+  onImage?: (dataUrl: string) => void;
+  /** Nested subagent depth (0 = top-level). */
+  subagentDepth?: number;
   /** Persona for one /agent turn. */
   subagentPrompt?: string;
   workspaceTitle?: string;
@@ -157,6 +183,16 @@ export async function settleAgentApproval(
     .find((item) => item.status === "pending" && item.toolCallId === call?.id);
   if (!call || !pending) return { effects: [] };
 
+  if (call.name === "ask_user_question") {
+    if (decision === "denied") {
+      env.store.resolveAgentApproval(pending.id, "denied", nowMs);
+      sayTool(env, call, "用户跳过了提问。", nowMs);
+      shiftQueue(env, nowMs);
+      return drain(env, 0, true);
+    }
+    return { effects: [] };
+  }
+
   if (decision === "denied" || gateTool(thread.permissionMode, call.name) === "block") {
     env.store.resolveAgentApproval(pending.id, "denied", nowMs);
     sayTool(
@@ -172,11 +208,105 @@ export async function settleAgentApproval(
   }
 
   env.store.resolveAgentApproval(pending.id, "approved", nowMs);
-  const result = await executeCall(env, call, nowMs);
+  const result = await executeCallWithTimeout(env, call, nowMs);
   sayTool(env, call, toolContent(call.name, result), nowMs);
   shiftQueue(env, nowMs);
   const rest = await drain(env, 0, true);
   return { effects: [...result.effects, ...rest.effects] };
+}
+
+/** Submit answers for a pending ask_user_question and continue the queue. */
+export async function settleAgentQuestion(
+  env: AgentTurnEnv,
+  answers: Record<string, string | string[]>,
+): Promise<{ effects: AgentUiEffect[] }> {
+  const thread = requireThread(env);
+  const nowMs = env.nowMs ?? Date.now();
+  const queue = readQueue(thread.queueJson);
+  const call = queue[0];
+  const pending = env.store
+    .listAgentApprovals(thread.id)
+    .find((item) => item.status === "pending" && item.toolCallId === call?.id);
+  if (!call || !pending || call.name !== "ask_user_question") return { effects: [] };
+  const parsed = parseAskUserQuestions(call.args);
+  if (parsed.ok === false) {
+    env.store.resolveAgentApproval(pending.id, "denied", nowMs);
+    sayTool(env, call, parsed.reason, nowMs);
+    shiftQueue(env, nowMs);
+    return drain(env, 0, true);
+  }
+  const normalized: Record<string, string | string[]> = {};
+  for (const question of parsed.questions) {
+    const raw = answers[question.id];
+    if (question.multiSelect) {
+      const list = Array.isArray(raw)
+        ? raw
+            .map(String)
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : typeof raw === "string" && raw.trim()
+          ? [raw.trim()]
+          : [];
+      if (!list.length) {
+        return { effects: [] };
+      }
+      normalized[question.id] = list;
+    } else {
+      const text = Array.isArray(raw) ? raw[0] : raw;
+      if (typeof text !== "string" || !text.trim()) return { effects: [] };
+      normalized[question.id] = text.trim();
+    }
+  }
+  env.store.resolveAgentApproval(pending.id, "approved", nowMs);
+  sayTool(
+    env,
+    call,
+    toolContent(call.name, {
+      summary: `已收到 ${parsed.questions.length} 个回答`,
+      data: { answers: normalized },
+    }),
+    nowMs,
+  );
+  shiftQueue(env, nowMs);
+  return drain(env, 0, true);
+}
+
+/** Timed ask_user_question expired — continue without answers. */
+export async function settleAgentQuestionTimeout(
+  env: AgentTurnEnv,
+): Promise<{ effects: AgentUiEffect[] }> {
+  const thread = requireThread(env);
+  const nowMs = env.nowMs ?? Date.now();
+  const queue = readQueue(thread.queueJson);
+  const call = queue[0];
+  const pending = env.store
+    .listAgentApprovals(thread.id)
+    .find((item) => item.status === "pending" && item.toolCallId === call?.id);
+  if (!call || !pending || call.name !== "ask_user_question") return { effects: [] };
+  const mode = parseAskUserMode(call.args);
+  if (mode.mode !== "timed") return { effects: [] };
+  env.store.resolveAgentApproval(pending.id, "approved", nowMs);
+  sayTool(
+    env,
+    call,
+    toolContent(call.name, {
+      summary: "提问已超时，用户尚未回答；可继续并在需要时再次询问。",
+      data: { timedOut: true, answers: {} },
+    }),
+    nowMs,
+  );
+  shiftQueue(env, nowMs);
+  return drain(env, 0, true);
+}
+
+/** Read timed-ask settings from pending ask_user_question args. */
+export function askUserTimedConfig(args: Record<string, unknown> | null | undefined): {
+  timed: boolean;
+  timeoutSec: number;
+} {
+  if (!args) return { timed: false, timeoutSec: 120 };
+  const mode = parseAskUserMode(args);
+  return { timed: mode.mode === "timed", timeoutSec: mode.timeoutSec };
 }
 
 /** Re-evaluate the queued call after the permission mode changes. */
@@ -197,6 +327,7 @@ async function continueFromModel(
     return { effects: [] };
   }
   const thread = requireThread(env);
+  deliverJobNotices(env, nowMs);
   const transcript = env.store.listAgentMessages(thread.id).slice(-40);
   let plan: AgentTurnPlan;
   try {
@@ -229,6 +360,7 @@ async function continueFromModel(
     nowMs,
   });
   if (!plan.calls.length) {
+    bumpGoalRound(env, nowMs);
     env.onStep?.();
     return { effects: [] };
   }
@@ -249,71 +381,93 @@ async function drain(
   const effects: AgentUiEffect[] = [];
   const nowMs = env.nowMs ?? Date.now();
   let ranTool = false;
-  while (true) {
-    const thread = requireThread(env);
-    const queue = readQueue(thread.queueJson);
-    const call = queue[0];
-    if (!call) {
-      if (allowFollowUp && ranTool && !env.plan && remoteEnabled(env)) {
-        const next = await continueFromModel(env, round + 1);
-        return { effects: [...effects, ...next.effects] };
+  try {
+    while (true) {
+      if (env.signal?.aborted) throw new AgentTurnStopped("");
+      const thread = requireThread(env);
+      const queue = readQueue(thread.queueJson);
+      const call = queue[0];
+      if (!call) {
+        if (allowFollowUp && ranTool && !env.plan && remoteEnabled(env)) {
+          const next = await continueFromModel(env, round + 1);
+          return { effects: [...effects, ...next.effects] };
+        }
+        return { effects };
       }
+      if (env.toolAllowlist && !env.toolAllowlist.includes(call.name)) {
+        closePending(env, call.id, "denied", nowMs);
+        sayTool(env, call, `当前子智能体不能使用 ${call.name}`, nowMs);
+        shiftQueue(env, nowMs);
+        continue;
+      }
+      const gate = gateTool(thread.permissionMode, call.name);
+      if (gate === "block") {
+        closePending(env, call.id, "denied", nowMs);
+        sayTool(
+          env,
+          call,
+          `只读会话不能执行：${toolCallSummary(call.name, call.args)}`,
+          nowMs,
+        );
+        shiftQueue(env, nowMs);
+        continue;
+      }
+      if (gate === "ask") {
+        const existing = env.store
+          .listAgentApprovals(thread.id)
+          .find((item) => item.status === "pending" && item.toolCallId === call.id);
+        if (!existing) {
+          env.store.addAgentApproval({
+            threadId: thread.id,
+            toolCallId: call.id,
+            toolName: call.name,
+            argsJson: JSON.stringify(call.args),
+            summary: toolCallSummary(call.name, call.args),
+            nowMs,
+          });
+        }
+        env.onStep?.();
+        return { effects };
+      }
+      closePending(env, call.id, "approved", nowMs);
+      const result = await executeCallWithTimeout(env, call, nowMs);
+      effects.push(...result.effects);
+      let content = toolContent(call.name, result);
+      if (result.ok && call.name === "task_complete") {
+        const notice = formatHookNotices(
+          hooksForEvent(env.hooks ?? [], "task_completed"),
+        );
+        if (notice) {
+          content = `${content}\n钩子：${notice}`;
+          env.store.appendAgentMessage({
+            threadId: env.threadId,
+            role: "system",
+            content: notice,
+            nowMs,
+          });
+        }
+      }
+      sayTool(env, call, content, nowMs);
+      if (result.ok && call.name === "update_goal") {
+        const goal = goalPort(env).get();
+        if (goal && (goal.phase === "completed" || goal.phase === "blocked")) {
+          env.store.appendAgentMessage({
+            threadId: env.threadId,
+            role: "system",
+            content: renderGoalWrapup(goal.objective, goal.blockedReason),
+            nowMs,
+          });
+        }
+      }
+      shiftQueue(env, nowMs);
+      ranTool = true;
+    }
+  } catch (error) {
+    if (isStopped(error)) {
+      say(env, "已停止。", nowMs);
       return { effects };
     }
-    if (env.toolAllowlist && !env.toolAllowlist.includes(call.name)) {
-      closePending(env, call.id, "denied", nowMs);
-      sayTool(env, call, `当前子智能体不能使用 ${call.name}`, nowMs);
-      shiftQueue(env, nowMs);
-      continue;
-    }
-    const gate = gateTool(thread.permissionMode, call.name);
-    if (gate === "block") {
-      closePending(env, call.id, "denied", nowMs);
-      sayTool(
-        env,
-        call,
-        `只读会话不能执行：${toolCallSummary(call.name, call.args)}`,
-        nowMs,
-      );
-      shiftQueue(env, nowMs);
-      continue;
-    }
-    if (gate === "ask") {
-      const existing = env.store
-        .listAgentApprovals(thread.id)
-        .find((item) => item.status === "pending" && item.toolCallId === call.id);
-      if (!existing) {
-        env.store.addAgentApproval({
-          threadId: thread.id,
-          toolCallId: call.id,
-          toolName: call.name,
-          argsJson: JSON.stringify(call.args),
-          summary: toolCallSummary(call.name, call.args),
-          nowMs,
-        });
-      }
-      env.onStep?.();
-      return { effects };
-    }
-    closePending(env, call.id, "approved", nowMs);
-    const result = await executeCall(env, call, nowMs);
-    effects.push(...result.effects);
-    let content = toolContent(call.name, result);
-    if (result.ok && call.name === "task_complete") {
-      const notice = formatHookNotices(hooksForEvent(env.hooks ?? [], "task_completed"));
-      if (notice) {
-        content = `${content}\n钩子：${notice}`;
-        env.store.appendAgentMessage({
-          threadId: env.threadId,
-          role: "system",
-          content: notice,
-          nowMs,
-        });
-      }
-    }
-    sayTool(env, call, content, nowMs);
-    shiftQueue(env, nowMs);
-    ranTool = true;
+    throw error;
   }
 }
 
@@ -357,6 +511,7 @@ function composeSystemPrompt(
     skillsPrompt: [
       formatSkillsForPrompt(listEnabledSkillSummaries(env.skills ?? [])),
       formatActiveSkills(env.skills ?? [], visible),
+      formatGoalForPrompt(env.goal ?? null),
     ]
       .filter(Boolean)
       .join("\n\n"),
@@ -365,6 +520,13 @@ function composeSystemPrompt(
     pluginsPrompt: formatPluginsForPrompt(env.plugins ?? []),
     mcpPrompt: formatMcpForPrompt(env.mcpServers ?? []),
     hostToolsPrompt: formatHostToolsForPrompt(env.hostTools ?? []),
+    workspaceToolsPrompt: [
+      formatWorkspaceToolsHint(Boolean(env.workspacePath?.trim())),
+      cwdPort(env).get() ? `会话 cwd：${cwdPort(env).get()}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    todosPrompt: formatTodosForPrompt(todoPort(env).list()),
     subagentPrompt: env.subagentPrompt,
     hooksPrompt: sessionHooks ? `会话开始时宿主还记下：\n${sessionHooks}` : "",
   });
@@ -454,6 +616,10 @@ async function requestModel(
   if (provider.apiKeyRequired && !apiKey) {
     throw new Error("缺少模型密钥，请在设置 · 模型中填写。密钥不会写入会话。");
   }
+  const canSee = modelCanSeeImages(provider.kind, caps);
+  const pendingImages = canSee ? takePendingImageDataUrls(thread.id) : [];
+  if (canSee && env.imageDataUrl) pendingImages.push(env.imageDataUrl);
+  env.imageDataUrl = undefined;
   const request = buildModelHttpRequest({
     provider,
     modelId: found.modelId,
@@ -461,7 +627,8 @@ async function requestModel(
     messages: visible,
     permissionMode: thread.permissionMode,
     toolAllowlist: env.toolAllowlist,
-    imageDataUrl: modelCanSeeImages(provider.kind, caps) ? env.imageDataUrl : undefined,
+    workspaceBound: Boolean(env.workspacePath?.trim()),
+    imageDataUrls: canSee ? pendingImages : undefined,
   });
   const dsh = found.provider.id === DSH_FREE_PROVIDER_ID;
   const stream = provider.kind === "openai-chat-completions";
@@ -577,6 +744,9 @@ function remoteEnabled(env: AgentTurnEnv): boolean {
 }
 
 const memoryBoxes = new WeakMap<AgentTurnEnv, AgentMemory[]>();
+const todoBoxes = new WeakMap<AgentTurnEnv, AgentTodoItem[]>();
+const goalBoxes = new WeakMap<AgentTurnEnv, AgentGoal | null>();
+const cwdBoxes = new WeakMap<AgentTurnEnv, string>();
 
 function memoryPort(env: AgentTurnEnv): {
   list: () => AgentMemory[];
@@ -592,7 +762,159 @@ function memoryPort(env: AgentTurnEnv): {
   };
 }
 
+function todoPort(env: AgentTurnEnv): {
+  list: () => AgentTodoItem[];
+  replace: (next: AgentTodoItem[]) => void;
+} {
+  if (!todoBoxes.has(env)) todoBoxes.set(env, [...(env.todos ?? [])]);
+  return {
+    list: () => todoBoxes.get(env) ?? [],
+    replace: (next) => {
+      todoBoxes.set(env, next);
+      env.onTodos?.(next);
+    },
+  };
+}
+
+function goalPort(env: AgentTurnEnv): {
+  get: () => AgentGoal | null;
+  set: (next: AgentGoal | null) => void;
+} {
+  if (!goalBoxes.has(env)) goalBoxes.set(env, env.goal ?? null);
+  return {
+    get: () => goalBoxes.get(env) ?? null,
+    set: (next) => {
+      goalBoxes.set(env, next);
+      env.goal = next;
+      env.onGoal?.(next);
+    },
+  };
+}
+
+/** Count a completed top-level model round against the session goal. */
+function bumpGoalRound(env: AgentTurnEnv, nowMs: number): void {
+  if ((env.subagentDepth ?? 0) > 0) return;
+  const goals = goalPort(env);
+  const goal = goals.get();
+  if (!goal || goal.phase !== "active" || !goal.continuationArmed) return;
+  const next: AgentGoal = {
+    ...goal,
+    roundsStarted: goal.roundsStarted + 1,
+    revision: goal.revision + 1,
+    updatedAt: nowMs,
+  };
+  if (next.roundsStarted >= next.maxRounds) {
+    next.phase = "blocked";
+    next.continuationArmed = false;
+    next.blockedReason = "reached max_goal_rounds";
+  }
+  goals.set(next);
+}
+
+/** Declared cooperative budgets (DSH call-timeout-policy style). */
+const TOOL_TIMEOUT_MS: Record<string, number> = {
+  web_fetch: 60_000,
+  web_search: 60_000,
+  bash: 180_000,
+  shell: 180_000,
+  pwsh: 180_000,
+  office_to_pdf: 180_000,
+  grep: 60_000,
+  glob: 60_000,
+  subagent: 300_000,
+  job_output: 120_000,
+};
+
+async function executeCallWithTimeout(
+  env: AgentTurnEnv,
+  call: PlannedCall,
+  nowMs: number,
+): Promise<AgentToolResult> {
+  if (env.signal?.aborted) throw new AgentTurnStopped("");
+  const budget = TOOL_TIMEOUT_MS[call.name];
+  const run = () => executeCall(env, call, nowMs);
+  if (!budget && !env.signal) return run();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abortListeners: Array<{ signal: AbortSignal; fn: () => void }> = [];
+  try {
+    const racers: Promise<AgentToolResult>[] = [run()];
+    if (budget) {
+      racers.push(
+        new Promise<AgentToolResult>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`tool call timed out after ${budget}ms`));
+          }, budget);
+        }),
+      );
+    }
+    if (env.signal) {
+      racers.push(
+        new Promise<AgentToolResult>((_, reject) => {
+          const signal = env.signal!;
+          if (signal.aborted) {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+            return;
+          }
+          const fn = () =>
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          signal.addEventListener("abort", fn, { once: true });
+          abortListeners.push({ signal, fn });
+        }),
+      );
+    }
+    return await Promise.race(racers);
+  } catch (error) {
+    if (isStopped(error)) throw new AgentTurnStopped("");
+    const message = error instanceof Error ? error.message : "工具超时";
+    if (/timed out after \d+ms/.test(message)) {
+      return {
+        ok: false,
+        summary: message,
+        data: { error: message, code: "TOOL_TIMEOUT" },
+        effects: [],
+      };
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    for (const { signal, fn } of abortListeners) {
+      signal.removeEventListener("abort", fn);
+    }
+  }
+}
+
+function deliverJobNotices(env: AgentTurnEnv, nowMs: number): void {
+  const notices = takePendingJobNotices(env.threadId);
+  for (const notice of notices) {
+    env.store.appendAgentMessage({
+      threadId: env.threadId,
+      role: "system",
+      content: notice,
+      nowMs,
+    });
+  }
+  if (notices.length) env.onStep?.();
+}
+
+function cwdPort(env: AgentTurnEnv): {
+  get: () => string | null;
+  set: (next: string) => void;
+} {
+  if (!cwdBoxes.has(env)) {
+    const initial = env.cwd?.trim() || env.workspacePath?.trim() || "";
+    if (initial) cwdBoxes.set(env, initial);
+  }
+  return {
+    get: () => cwdBoxes.get(env) ?? env.cwd?.trim() ?? env.workspacePath?.trim() ?? null,
+    set: (next) => {
+      cwdBoxes.set(env, next);
+      env.onCwd?.(next);
+    },
+  };
+}
+
 function runtime(env: AgentTurnEnv, nowMs: number): AgentRuntimeContext {
+  const goals = goalPort(env);
   return {
     nowMs,
     threadId: env.threadId,
@@ -606,6 +928,8 @@ function runtime(env: AgentTurnEnv, nowMs: number): AgentRuntimeContext {
     mcpServers: env.mcpServers ?? [],
     hostTools: env.hostTools ?? [],
     toolAllowlist: env.toolAllowlist,
+    goal: goals.get(),
+    onGoal: goals.set,
   };
 }
 
@@ -614,6 +938,34 @@ async function executeCall(
   call: PlannedCall,
   nowMs: number,
 ): Promise<AgentToolResult> {
+  if (call.name === "subagent") {
+    return runSubagentDelegation(env, call.args, nowMs);
+  }
+  if (isWorkspaceToolName(call.name)) {
+    try {
+      const todos = todoPort(env);
+      const cwd = cwdPort(env);
+      return await runWorkspaceTool(call.name, call.args, {
+        rootPath: env.workspacePath,
+        cwd: cwd.get(),
+        onCwd: cwd.set,
+        hostTools: env.hostTools,
+        todos: todos.list(),
+        onTodos: todos.replace,
+        readApiKey: env.readApiKey,
+        threadId: env.threadId,
+        signal: env.signal,
+        onImage: (dataUrl) => {
+          env.imageDataUrl = dataUrl;
+          env.onImage?.(dataUrl);
+        },
+      });
+    } catch (error) {
+      if (isStopped(error)) throw error;
+      const message = error instanceof Error ? error.message : "工具执行失败";
+      return { ok: false, summary: message, data: { error: message }, effects: [] };
+    }
+  }
   if (call.name !== "host_tool_run") {
     return executeAgentTool(env.store, call.name, call.args, runtime(env, nowMs));
   }
@@ -630,6 +982,99 @@ async function executeCall(
   } catch (error) {
     const message = error instanceof Error ? error.message : "工具执行失败";
     return { ok: false, summary: message, data: { error: message }, effects: [] };
+  }
+}
+
+async function runSubagentDelegation(
+  env: AgentTurnEnv,
+  args: Record<string, unknown>,
+  nowMs: number,
+): Promise<AgentToolResult> {
+  const depth = env.subagentDepth ?? 0;
+  if (depth >= 2) {
+    return {
+      ok: false,
+      summary: "子智能体嵌套过深",
+      data: { error: "子智能体嵌套过深" },
+      effects: [],
+    };
+  }
+  const name = typeof args.name === "string" ? args.name.trim() : "";
+  const task =
+    (typeof args.task === "string" && args.task.trim()) ||
+    (typeof args.prompt === "string" && args.prompt.trim()) ||
+    "";
+  if (!name) {
+    return {
+      ok: false,
+      summary: "请提供 name",
+      data: { error: "请提供 name" },
+      effects: [],
+    };
+  }
+  if (!task) {
+    return {
+      ok: false,
+      summary: "请提供 task",
+      data: { error: "请提供 task" },
+      effects: [],
+    };
+  }
+  const agent = findSubagent(env.subagents ?? [], name);
+  if (!agent) {
+    return {
+      ok: false,
+      summary: `未找到子智能体「${name}」`,
+      data: { error: `未找到子智能体「${name}」` },
+      effects: [],
+    };
+  }
+  const parent = requireThread(env);
+  const child = env.store.createAgentThread({
+    workspaceId: parent.workspaceId,
+    title: `subagent:${agent.name}`,
+    modelRef: parent.modelRef,
+    permissionMode: parent.permissionMode === "readonly" ? "readonly" : "session_auto",
+  });
+  try {
+    const nested: AgentTurnEnv = {
+      ...env,
+      threadId: child.id,
+      subagentDepth: depth + 1,
+      subagentPrompt: `你正在作为子智能体「${agent.name}」回答。\n${agent.prompt}`,
+      toolAllowlist: agent.toolNames.length ? agent.toolNames : undefined,
+      maxRounds: Math.min(env.maxRounds ?? 3, 4),
+      nowMs,
+    };
+    await startAgentTurn(nested, task);
+    for (let guard = 0; guard < 10; guard += 1) {
+      const thread = env.store.getAgentThread(child.id);
+      if (!thread?.queueJson) break;
+      const pending = env.store
+        .listAgentApprovals(child.id)
+        .find((item) => item.status === "pending");
+      if (pending) {
+        await settleAgentApproval(nested, "denied");
+      } else {
+        await resumeAgentQueue(nested);
+      }
+    }
+    const messages = env.store.listAgentMessages(child.id);
+    const lastAssistant = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    const text = lastAssistant?.content?.trim() || "（子智能体无文字答复）";
+    return {
+      ok: true,
+      summary: `子智能体 ${agent.name} 已完成`,
+      data: { name: agent.name, text },
+      effects: [],
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "子智能体失败";
+    return { ok: false, summary: message, data: { error: message }, effects: [] };
+  } finally {
+    env.store.deleteAgentThread(child.id);
   }
 }
 

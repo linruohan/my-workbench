@@ -880,6 +880,7 @@ export class MemoryWorkbenchRepository {
       /** @deprecated use schedule */
       schedules?: TimedSchedule[];
       enabled?: boolean;
+      lastRunAt?: number | null;
     },
     nowMs = Date.now(),
   ): TimedTask {
@@ -890,8 +891,23 @@ export class MemoryWorkbenchRepository {
     return next;
   }
 
+  markTimedTaskRan(id: string, nowMs = Date.now()): TimedTask {
+    return this.updateTimedTask(id, { lastRunAt: nowMs }, nowMs);
+  }
+
   deleteTimedTask(id: string): void {
     this.timedTasks.delete(id);
+  }
+
+  /** Enabled timed tasks whose nextRunAt is due. */
+  listDueTimedTasks(nowMs = Date.now()): TimedTask[] {
+    return this.listTimedTasks().filter(
+      (task) =>
+        task.enabled &&
+        task.nextRunAt != null &&
+        task.nextRunAt <= nowMs &&
+        Boolean(task.command.trim()),
+    );
   }
 
   /** Persist snapshot to a local JSON string (for localStorage). */

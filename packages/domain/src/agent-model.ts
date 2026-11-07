@@ -31,10 +31,17 @@ export function buildModelHttpRequest(input: {
   permissionMode: AgentPermissionMode;
   /** When set, only these tool names are offered. */
   toolAllowlist?: readonly string[];
+  /** Offer workspace file/shell tools. Defaults to true. */
+  workspaceBound?: boolean;
   /** Data URL attached to the latest user message when that model can see images. */
   imageDataUrl?: string;
+  /** Additional data URLs (e.g. read_image attachment queue) on the latest user message. */
+  imageDataUrls?: readonly string[];
 }): ModelHttpRequest {
-  const tools = toolsForMode(input.permissionMode, input.toolAllowlist).map((spec) => ({
+  const imageDataUrls = mergeImageUrls(input.imageDataUrl, input.imageDataUrls);
+  const tools = toolsForMode(input.permissionMode, input.toolAllowlist, {
+    workspaceBound: input.workspaceBound,
+  }).map((spec) => ({
     name: spec.name,
     description: spec.description,
     parameters: spec.parameters,
@@ -74,7 +81,7 @@ export function buildModelHttpRequest(input: {
           description: spec.description,
           input_schema: spec.parameters,
         })),
-        messages: anthropicMessages(input.messages, input.imageDataUrl),
+        messages: anthropicMessages(input.messages, imageDataUrls),
       },
     };
   }
@@ -86,7 +93,7 @@ export function buildModelHttpRequest(input: {
       model: input.modelId,
       messages: [
         { role: "system", content: input.system },
-        ...openAiMessages(input.messages, input.imageDataUrl),
+        ...openAiMessages(input.messages, imageDataUrls),
       ],
       tools: tools.map((spec) => ({
         type: "function",
@@ -410,6 +417,22 @@ function responsesInput(messages: AgentMessage[]): unknown[] {
   return out;
 }
 
+function mergeImageUrls(
+  single: string | undefined,
+  many: readonly string[] | undefined,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [...(many ?? []), ...(single ? [single] : [])]) {
+    const image = chatImage(raw);
+    if (!image || seen.has(image)) continue;
+    seen.add(image);
+    out.push(image);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 function chatImage(dataUrl: string | undefined): string | null {
   if (!dataUrl?.startsWith("data:image/")) return null;
   if (dataUrl.length > 7_000_000) return null;
@@ -423,9 +446,12 @@ function lastUserIndex(messages: readonly AgentMessage[]): number {
   return -1;
 }
 
-function openAiMessages(messages: AgentMessage[], imageDataUrl?: string): unknown[] {
-  const image = chatImage(imageDataUrl);
-  const imageAt = image ? lastUserIndex(messages) : -1;
+function openAiMessages(
+  messages: AgentMessage[],
+  imageDataUrls: readonly string[] = [],
+): unknown[] {
+  const images = imageDataUrls.map((item) => chatImage(item)).filter(Boolean) as string[];
+  const imageAt = images.length ? lastUserIndex(messages) : -1;
   const out: unknown[] = [];
   for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i]!;
@@ -453,12 +479,12 @@ function openAiMessages(messages: AgentMessage[], imageDataUrl?: string): unknow
         continue;
       }
     }
-    if (i === imageAt && image) {
+    if (i === imageAt && images.length) {
       out.push({
         role: "user",
         content: [
           { type: "text", text: message.content || "请看这张图片" },
-          { type: "image_url", image_url: { url: image } },
+          ...images.map((url) => ({ type: "image_url", image_url: { url } })),
         ],
       });
       continue;
@@ -478,24 +504,30 @@ function anthropicImage(dataUrl: string): { mediaType: string; data: string } | 
   return { mediaType, data };
 }
 
-function anthropicMessages(messages: AgentMessage[], imageDataUrl?: string): unknown[] {
-  const image = chatImage(imageDataUrl);
-  const parsed = image ? anthropicImage(image) : null;
-  const imageAt = parsed ? lastUserIndex(messages) : -1;
+function anthropicMessages(
+  messages: AgentMessage[],
+  imageDataUrls: readonly string[] = [],
+): unknown[] {
+  const parsed = imageDataUrls
+    .map((item) => chatImage(item))
+    .filter(Boolean)
+    .map((image) => anthropicImage(image!))
+    .filter(Boolean) as Array<{ mediaType: string; data: string }>;
+  const imageAt = parsed.length ? lastUserIndex(messages) : -1;
   const out: Array<{ role: string; content: unknown }> = [];
   for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i]!;
     if (message.role === "system" || message.role === "tool") continue;
     if (message.role === "user") {
-      if (i === imageAt && parsed) {
+      if (i === imageAt && parsed.length) {
         out.push({
           role: "user",
           content: [
             { type: "text", text: message.content || "请看这张图片" },
-            {
+            ...parsed.map((item) => ({
               type: "image",
-              source: { type: "base64", media_type: parsed.mediaType, data: parsed.data },
-            },
+              source: { type: "base64", media_type: item.mediaType, data: item.data },
+            })),
           ],
         });
       } else {

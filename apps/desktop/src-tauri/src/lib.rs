@@ -1,3 +1,4 @@
+mod agent_workspace;
 mod fonts;
 mod kb;
 mod model_http;
@@ -20,7 +21,9 @@ pub fn run() {
             kb::kb_write_base64,
             kb::kb_exists,
             kb::kb_mkdir,
+            kb::kb_remove,
             kb::kb_rename,
+            kb::kb_open_path,
             kb::kb_reveal_in_explorer,
             kb::kb_git_branch,
             open_ext::open_external,
@@ -33,6 +36,18 @@ pub fn run() {
             tools::tools_check,
             tools::tools_install,
             tools::tools_run,
+            agent_workspace::agent_workspace_shell,
+            agent_workspace::agent_workspace_job_start,
+            agent_workspace::agent_workspace_job_list,
+            agent_workspace::agent_workspace_job_output,
+            agent_workspace::agent_workspace_job_kill,
+            agent_workspace::agent_terminal_open,
+            agent_workspace::agent_terminal_send,
+            agent_workspace::agent_terminal_read,
+            agent_workspace::agent_terminal_list,
+            agent_workspace::agent_terminal_close,
+            agent_workspace::agent_terminal_signal,
+            agent_workspace::agent_office_to_pdf,
             fonts::list_system_fonts,
             web_session::web_session_show,
             web_session::web_session_set_default_font,

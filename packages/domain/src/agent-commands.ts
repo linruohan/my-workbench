@@ -46,6 +46,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     summary: "列出子智能体，或让其中一个处理任务",
     usage: "/agent [名称] [任务]",
   },
+  {
+    name: "goal",
+    aliases: [],
+    summary: "查看或管理本会话 goal",
+    usage: "/goal [目标|edit …|pause|resume|clear]",
+  },
 ];
 
 export type SlashAction =
@@ -57,7 +63,8 @@ export type SlashAction =
   | { type: "prompt"; text: string }
   | { type: "compact" }
   | { type: "memory"; text: string }
-  | { type: "agent"; name: string; task: string };
+  | { type: "agent"; name: string; task: string }
+  | { type: "goal"; args: string };
 
 /** Command name being typed, before any argument. A space hides suggestions. */
 export function slashQuery(draft: string): string | null {
@@ -187,6 +194,7 @@ export function resolveSlash(
   if (command.name === "compact") return { type: "compact" };
   if (command.name === "memory") return { type: "memory", text: args };
   if (command.name === "agent") return agentAction(args);
+  if (command.name === "goal") return { type: "goal", args };
   return { type: "prompt", text: "晨报" };
 }
 

@@ -1,6 +1,7 @@
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
   addAgentMemory,
+  createGoal,
   DomainError,
   findSkill,
   forgetAgentMemory,
@@ -8,7 +9,18 @@ import {
   mcpEndpointLabel,
   parseLocalDay,
   parseModelRef,
+  parseScheduleRrule,
+  parseScheduleTarget,
   remindOptionToMilliseconds,
+  readSessionEvent,
+  searchSessionEvents,
+  searchSessionMessages,
+  sessionTrace,
+  traceSessionEvent,
+  updateGoal,
+  viewGoal,
+  viewScheduleTask,
+  type AgentGoal,
   type AgentHook,
   type AgentMemory,
   type AgentSkill,
@@ -18,7 +30,9 @@ import {
   type ReminderOptionId,
   type SchedulePatch,
   type Task,
+  type TimedSchedule,
 } from "@wb/domain";
+import { deleteScheduleMeta, getScheduleMeta, setScheduleMeta } from "./schedule-meta";
 
 export type AgentUiEffect =
   | {
@@ -58,6 +72,9 @@ export type AgentRuntimeContext = {
   hostTools?: HostToolSnapshot[];
   /** Subagent turns may only call these tools. */
   toolAllowlist?: readonly string[];
+  /** One goal per session (lightweight DSH goal surface). */
+  goal?: AgentGoal | null;
+  onGoal?: (next: AgentGoal | null) => void;
 };
 
 const REMIND: ReminderOptionId[] = ["none", "at_start", "m5", "m10", "m15", "m30", "h1"];
@@ -401,6 +418,297 @@ function runTool(
         { subagents },
       );
     }
+    case "subagent":
+      throw new DomainError("子智能体委派由宿主执行");
+    case "get_goal": {
+      return ok(ctx.goal ? "已读取 goal" : "当前没有 goal", viewGoal(ctx.goal ?? null));
+    }
+    case "create_goal": {
+      if (ctx.goal && ctx.goal.phase !== "completed") {
+        throw new DomainError("已有未完成 goal；请先 update_goal 或完成它");
+      }
+      const objective = str(args, "objective");
+      if (!objective) throw new DomainError("请提供 objective");
+      const maxRounds = num(args, "max_goal_rounds") ?? undefined;
+      const created = createGoal(objective, maxRounds, ctx.nowMs);
+      if (created.ok === false) throw new DomainError(created.reason);
+      ctx.onGoal?.(created.goal);
+      return ok("已创建 goal", viewGoal(created.goal));
+    }
+    case "update_goal": {
+      const goalId = str(args, "goal_id");
+      const revision = num(args, "revision");
+      const action = str(args, "action");
+      if (!goalId || revision == null || !action) {
+        throw new DomainError("请提供 goal_id、revision、action");
+      }
+      const updated = updateGoal(
+        ctx.goal ?? null,
+        {
+          goalId,
+          revision,
+          action,
+          objective: str(args, "objective") ?? undefined,
+          maxRounds: num(args, "max_goal_rounds") ?? undefined,
+          blockedReason: str(args, "blocked_reason") ?? undefined,
+        },
+        ctx.nowMs,
+      );
+      if (updated.ok === false) throw new DomainError(updated.reason);
+      ctx.onGoal?.(updated.goal);
+      return ok(`已 ${action} goal`, viewGoal(updated.goal));
+    }
+    case "session_search": {
+      const query = str(args, "query");
+      if (!query) throw new DomainError("请提供 query");
+      const maxResults = num(args, "max_results") ?? undefined;
+      const thread = store.getAgentThread(ctx.threadId);
+      if (!thread) throw new DomainError("会话不存在");
+      const threads = store.listAgentThreads({
+        workspaceId: thread.workspaceId,
+        includeArchived: true,
+      });
+      const found = searchSessionMessages({
+        query,
+        threads,
+        messagesFor: (id) => store.listAgentMessages(id),
+        excludeThreadId: ctx.threadId,
+        maxResults: maxResults ?? undefined,
+      });
+      if (found.ok === false) throw new DomainError(found.reason);
+      return ok(
+        found.hits.length ? `找到 ${found.hits.length} 条` : "没有匹配的历史消息",
+        { hits: found.hits },
+      );
+    }
+    case "session_trace": {
+      const sessionId = str(args, "session_id") || ctx.threadId;
+      const limit = num(args, "limit") ?? undefined;
+      const thread = store.getAgentThread(sessionId);
+      if (!thread) throw new DomainError("会话不存在");
+      const caller = store.getAgentThread(ctx.threadId);
+      if (caller && thread.workspaceId !== caller.workspaceId) {
+        throw new DomainError("只能查看同一工作区内的会话");
+      }
+      const trace = sessionTrace({
+        thread,
+        messages: store.listAgentMessages(thread.id),
+        limit: limit ?? undefined,
+      });
+      return ok(`会话轨迹 ${trace.events.length} 条`, trace);
+    }
+    case "session_event_search": {
+      const query = str(args, "query");
+      if (!query) throw new DomainError("请提供 query");
+      const sessionId = str(args, "session_id") || ctx.threadId;
+      const thread = requireWorkspaceThread(store, ctx.threadId, sessionId);
+      const messages = store.listAgentMessages(thread.id);
+      const excludeAfter =
+        sessionId === ctx.threadId
+          ? [...messages].reverse().find((item) => item.role === "user")?.id
+          : undefined;
+      const types = Array.isArray(args.event_types)
+        ? args.event_types.filter((item): item is string => typeof item === "string")
+        : undefined;
+      const found = searchSessionEvents({
+        query,
+        messages,
+        maxResults: num(args, "max_results") ?? undefined,
+        excludeAfterMessageId: excludeAfter,
+        eventTypes: types,
+      });
+      if (found.ok === false) throw new DomainError(found.reason);
+      return ok(
+        found.hits.length ? `找到 ${found.hits.length} 条事件` : "没有匹配的事件",
+        { hits: found.hits },
+      );
+    }
+    case "session_event_read": {
+      const seq = num(args, "seq");
+      if (seq == null) throw new DomainError("请提供 seq");
+      const sessionId = str(args, "session_id") || ctx.threadId;
+      const thread = requireWorkspaceThread(store, ctx.threadId, sessionId);
+      const read = readSessionEvent({
+        messages: store.listAgentMessages(thread.id),
+        seq,
+        before: num(args, "before") ?? undefined,
+        after: num(args, "after") ?? undefined,
+      });
+      if (read.ok === false) throw new DomainError(read.reason);
+      return ok(`事件 #${read.event.seq}`, read);
+    }
+    case "session_event_trace": {
+      const seq = num(args, "seq");
+      if (seq == null) throw new DomainError("请提供 seq");
+      const sessionId = str(args, "session_id") || ctx.threadId;
+      const thread = requireWorkspaceThread(store, ctx.threadId, sessionId);
+      const traced = traceSessionEvent({
+        messages: store.listAgentMessages(thread.id),
+        seq,
+      });
+      if (traced.ok === false) throw new DomainError(traced.reason);
+      return ok(`事件关系 #${traced.event.seq}`, traced);
+    }
+    case "schedule_create": {
+      const title = (str(args, "title") ?? "").slice(0, 120);
+      const prompt = str(args, "prompt") ?? "";
+      const rrule = str(args, "rrule") ?? "";
+      const target = parseScheduleTarget(args.target);
+      if (!title) throw new DomainError("请提供 title");
+      if (!prompt.trim()) throw new DomainError("请提供 prompt");
+      if (!target) throw new DomainError("target 须为 this_session | new_once | new");
+      const parsed = parseScheduleRrule(rrule);
+      if (parsed.ok === false) throw new DomainError(parsed.reason);
+      const thread = store.getAgentThread(ctx.threadId);
+      if (!thread) throw new DomainError("会话不存在");
+      let bindThreadId: string | null = thread.id;
+      if (target === "new" || target === "new_once") {
+        const child = store.createAgentThread({
+          workspaceId: thread.workspaceId,
+          title: `定时 · ${title}`,
+          modelRef: thread.modelRef,
+          permissionMode: thread.permissionMode,
+          nowMs: ctx.nowMs,
+        });
+        bindThreadId = child.id;
+      }
+      const task = store.createTimedTask({
+        title,
+        command: prompt,
+        schedule: parsed.schedule,
+        nowMs: ctx.nowMs,
+      });
+      setScheduleMeta(task.id, {
+        target,
+        threadId: bindThreadId,
+        workspaceId: thread.workspaceId,
+      });
+      return ok(`已创建定时任务 ${task.id}`, {
+        schedule: viewScheduleTask(task, { target }),
+      });
+    }
+    case "schedule_list": {
+      const activeFilter = typeof args.active === "boolean" ? args.active : undefined;
+      const limit = Math.min(500, Math.max(1, num(args, "limit") ?? 100));
+      const offset = Math.max(0, num(args, "offset") ?? 0);
+      let tasks = store.listTimedTasks();
+      if (activeFilter === true) tasks = tasks.filter((task) => task.enabled);
+      if (activeFilter === false) tasks = tasks.filter((task) => !task.enabled);
+      tasks = [...tasks].sort((a, b) => {
+        const an = a.enabled
+          ? (a.nextRunAt ?? Number.MAX_SAFE_INTEGER)
+          : Number.MAX_SAFE_INTEGER;
+        const bn = b.enabled
+          ? (b.nextRunAt ?? Number.MAX_SAFE_INTEGER)
+          : Number.MAX_SAFE_INTEGER;
+        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+        return an - bn;
+      });
+      const page = tasks.slice(offset, offset + limit).map((task) => {
+        const meta = getScheduleMeta(task.id);
+        return viewScheduleTask(task, { target: meta?.target });
+      });
+      return ok(page.length ? `定时任务 ${page.length} 个` : "没有定时任务", {
+        schedules: page,
+      });
+    }
+    case "schedule_view": {
+      const id = str(args, "id");
+      if (!id) throw new DomainError("请提供 id");
+      const task = store.getTimedTask(id);
+      if (!task) {
+        return ok("未找到定时任务", { id, code: "schedule_not_found" });
+      }
+      const meta = getScheduleMeta(id);
+      return ok(`定时任务 ${task.title}`, {
+        schedule: viewScheduleTask(task, { target: meta?.target }),
+      });
+    }
+    case "schedule_edit": {
+      const id = str(args, "id");
+      const action = (str(args, "action") ?? "").toLowerCase();
+      if (!id) throw new DomainError("请提供 id");
+      if (action !== "update" && action !== "delete") {
+        throw new DomainError("action 须为 update | delete");
+      }
+      const task = store.getTimedTask(id);
+      if (!task) {
+        return ok("未找到定时任务", { id, code: "schedule_not_found" });
+      }
+      const expected = num(args, "expectedUpdatedAt");
+      if (expected != null && expected !== task.updatedAt) {
+        return ok("定时任务已变更，请重新 view", {
+          id,
+          code: "schedule_conflict",
+          schedule: viewScheduleTask(task, {
+            target: getScheduleMeta(id)?.target,
+          }),
+        });
+      }
+      if (action === "delete") {
+        store.deleteTimedTask(id);
+        deleteScheduleMeta(id);
+        return ok(`已删除定时任务 ${id}`, { id, deleted: true });
+      }
+      const patch: {
+        title?: string;
+        command?: string;
+        schedule?: TimedSchedule | null;
+        enabled?: boolean;
+      } = {};
+      const title = str(args, "title");
+      const prompt = str(args, "prompt");
+      if (title) patch.title = title.slice(0, 120);
+      if (typeof args.prompt === "string") patch.command = prompt ?? "";
+      if (typeof args.active === "boolean") patch.enabled = args.active;
+      const rrule = str(args, "rrule");
+      if (rrule) {
+        const parsed = parseScheduleRrule(rrule);
+        if (parsed.ok === false) throw new DomainError(parsed.reason);
+        patch.schedule = parsed.schedule;
+      }
+      const target = parseScheduleTarget(args.target);
+      const meta = getScheduleMeta(id) ?? {
+        target: "this_session" as const,
+        threadId: ctx.threadId,
+        workspaceId: store.getAgentThread(ctx.threadId)?.workspaceId ?? null,
+      };
+      if (target) {
+        meta.target = target;
+        if (target === "this_session") meta.threadId = ctx.threadId;
+        if (target === "new" || target === "new_once") {
+          const thread = store.getAgentThread(ctx.threadId);
+          if (thread) {
+            const child = store.createAgentThread({
+              workspaceId: thread.workspaceId,
+              title: `定时 · ${title || task.title}`,
+              modelRef: thread.modelRef,
+              permissionMode: thread.permissionMode,
+              nowMs: ctx.nowMs,
+            });
+            meta.threadId = child.id;
+            meta.workspaceId = thread.workspaceId;
+          }
+        }
+        setScheduleMeta(id, meta);
+      }
+      if (
+        patch.title === undefined &&
+        patch.command === undefined &&
+        patch.schedule === undefined &&
+        patch.enabled === undefined &&
+        !target
+      ) {
+        throw new DomainError("update 至少修改一项");
+      }
+      const next =
+        Object.keys(patch).length > 0
+          ? store.updateTimedTask(id, patch, ctx.nowMs)
+          : task;
+      return ok(`已更新定时任务 ${next.id}`, {
+        schedule: viewScheduleTask(next, { target: getScheduleMeta(id)?.target }),
+      });
+    }
     case "hook_list": {
       const hooks = (ctx.hooks ?? [])
         .filter((item) => item.enabled)
@@ -633,6 +941,20 @@ function resolveNote(store: MemoryWorkbenchRepository, args: Record<string, unkn
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) throw new DomainError("匹配到多条笔记，请改用 noteId");
   throw new DomainError(`找不到笔记「${title}」`);
+}
+
+function requireWorkspaceThread(
+  store: MemoryWorkbenchRepository,
+  callerId: string,
+  sessionId: string,
+) {
+  const thread = store.getAgentThread(sessionId);
+  if (!thread) throw new DomainError("会话不存在");
+  const caller = store.getAgentThread(callerId);
+  if (caller && thread.workspaceId !== caller.workspaceId) {
+    throw new DomainError("只能查看同一工作区内的会话");
+  }
+  return thread;
 }
 
 function ok(summary: string, data: unknown): AgentToolResult {

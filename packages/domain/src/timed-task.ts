@@ -86,6 +86,7 @@ export function patchTimedTask(
     /** @deprecated use schedule */
     schedules?: TimedSchedule[];
     enabled?: boolean;
+    lastRunAt?: number | null;
   },
   nowMs = Date.now(),
 ): TimedTask {
@@ -95,6 +96,8 @@ export function patchTimedTask(
       : patch.schedules !== undefined
         ? resolveTimedSchedule(patch.schedules)
         : task.schedule;
+  const lastRunAt = patch.lastRunAt !== undefined ? patch.lastRunAt : task.lastRunAt;
+  const fromMs = lastRunAt != null && lastRunAt > 0 ? lastRunAt : nowMs;
   return {
     ...task,
     title:
@@ -102,9 +105,15 @@ export function patchTimedTask(
     command: patch.command !== undefined ? patch.command : task.command,
     schedule,
     enabled: patch.enabled !== undefined ? patch.enabled : task.enabled,
-    nextRunAt: schedule ? computeNextRunAt(schedule, nowMs) : null,
+    lastRunAt,
+    nextRunAt: schedule ? computeNextRunAt(schedule, fromMs) : null,
     updatedAt: nowMs,
   };
+}
+
+/** Mark a timed task as fired and advance nextRunAt. */
+export function markTimedTaskRan(task: TimedTask, nowMs = Date.now()): TimedTask {
+  return patchTimedTask(task, { lastRunAt: nowMs }, nowMs);
 }
 
 export function timedPresetLabel(preset: TimedSchedulePreset): string {
