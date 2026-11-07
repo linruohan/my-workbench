@@ -75,8 +75,9 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "定时任务" }));
     await user.type(screen.getByLabelText("快速捕获"), "晨间巡检{Enter}");
-    expect(screen.getByText("晨间巡检")).toBeInTheDocument();
-    expect(screen.getByText(/每天 · 09:00/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "编辑定时任务" })).toBeInTheDocument();
+    expect(screen.getByLabelText("任务标题")).toHaveValue("晨间巡检");
+    expect(screen.getByText("GMT+8 每天，09:00")).toBeInTheDocument();
   });
 
   it("groups task views and lists projects under 任务", async () => {
