@@ -31,9 +31,11 @@ import {
   type TimedSchedule,
 } from "@wb/domain";
 import { createPersistedStore, hydrateStore, saveStore } from "./lib/persistence";
+import { applyUiFont } from "./lib/fonts";
 import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
 import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
 import { AgentView } from "./agent/AgentView";
+import { webSessionSetDefaultFont } from "./agent/web-session";
 import { AgentWorkspaceRail } from "./agent/AgentWorkspaceRail";
 import type { AgentUiEffect } from "./agent/execute";
 import { pickAgentWorkspaceFolder } from "./agent/pick-workspace";
@@ -160,6 +162,11 @@ export default function App() {
       cancelled = true;
     };
   }, [store]);
+
+  useEffect(() => {
+    applyUiFont(prefs.uiFont);
+    void webSessionSetDefaultFont(prefs.webFont);
+  }, [prefs.uiFont, prefs.webFont]);
 
   useEffect(() => {
     if (!ready) return;

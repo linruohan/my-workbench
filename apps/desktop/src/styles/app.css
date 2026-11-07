@@ -940,6 +940,11 @@ textarea {
   padding: var(--wb-space-2) var(--wb-space-3);
 }
 
+.settings__select--font {
+  min-width: var(--wb-menu-md);
+  max-width: var(--wb-popover-mid);
+}
+
 .settings__inline {
   display: flex;
   gap: var(--wb-space-2);
@@ -963,6 +968,17 @@ textarea {
 .settings__save:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.settings__font-preview {
+  margin: 0;
+  width: 100%;
+  padding: var(--wb-space-3);
+  border-radius: var(--wb-radius-control);
+  background: var(--wb-bg);
+  color: var(--wb-text);
+  font-size: var(--wb-text-reading);
+  line-height: 1.5;
 }
 
 .settings__footnote {

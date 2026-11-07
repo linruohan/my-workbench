@@ -46,8 +46,12 @@
   --wb-syn-meta: #0184bc;
   --wb-syn-deletion: #e45649;
 
-  --wb-font-ui: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
-  --wb-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  /* Mac-first: SF Pro via -apple-system on macOS; falls back on Windows/Linux. */
+  --wb-font-ui:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue",
+    Helvetica, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --wb-font-mono:
+    ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Code", Consolas, monospace;
   --wb-text-micro: 10px;
   --wb-text-xs: 12px;
   --wb-text-sm: 13px;

@@ -8,6 +8,7 @@ import type {
   McpServer,
   SkillSourceDir,
 } from "@wb/domain";
+import { normalizeFontFamily, type FontFamilyPref } from "./fonts";
 import { dataFilePath, ensureDataDir, isTauriRuntime, PREFS_FILE } from "./paths";
 
 const PREFS_KEY = "wb.prefs.v1";
@@ -31,6 +32,10 @@ export type AppPrefs = {
   defaultRemind: DefaultRemind;
   noteEditorDefault: NoteEditorDefault;
   windowRestore: WindowRestore;
+  /** App UI text font. Empty = system default stack. */
+  uiFont: FontFamilyPref;
+  /** Default font for embedded web pages. Empty = browser default. */
+  webFont: FontFamilyPref;
   confirmBeforeDelete: boolean;
   openLastNote: boolean;
   httpProxy: string;
@@ -73,6 +78,8 @@ const DEFAULTS: AppPrefs = {
   defaultRemind: "m15",
   noteEditorDefault: "live",
   windowRestore: "default",
+  uiFont: "",
+  webFont: "",
   confirmBeforeDelete: true,
   openLastNote: true,
   httpProxy: "",
@@ -127,6 +134,8 @@ function mergePrefs(partial?: Partial<AppPrefs> | null): AppPrefs {
   next.hostToolPaths = normalizeHostToolPaths(next.hostToolPaths);
   next.hostToolRecords = normalizeHostToolRecords(next.hostToolRecords);
   next.hostToolsFetched = next.hostToolsFetched === true;
+  next.uiFont = normalizeFontFamily(next.uiFont);
+  next.webFont = normalizeFontFamily(next.webFont);
   return next;
 }
 

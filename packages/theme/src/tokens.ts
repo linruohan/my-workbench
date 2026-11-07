@@ -45,8 +45,11 @@ export const LAYOUT = {
 } as const;
 
 export const TYPE = {
-  fontUi: '"Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif',
-  fontMono: 'ui-monospace, "Cascadia Code", Consolas, monospace',
+  // Mac-first stack: SF Pro via -apple-system on macOS; falls back on Windows/Linux.
+  fontUi:
+    '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Helvetica, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
+  fontMono:
+    'ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Code", Consolas, monospace',
   sizeMicro: 10,
   sizeXs: 12,
   sizeSm: 13,

@@ -34,3 +34,4 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["sync"] }
 url = "2"
 cookie = "0.18"
+font-kit = "0.14"

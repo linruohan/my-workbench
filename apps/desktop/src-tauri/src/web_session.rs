@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 use url::Url;
 
@@ -136,6 +137,53 @@ struct Session {
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+/// Default font-family for pages that do not set their own. Empty = browser default.
+static WEB_DEFAULT_FONT: Mutex<String> = Mutex::new(String::new());
+
+fn sanitize_font_family(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 80 {
+        return String::new();
+    }
+    if trimmed.chars().any(|c| {
+        matches!(
+            c,
+            '"' | '\'' | ';' | '{' | '}' | '<' | '>' | '\\' | '\n' | '\r' | '\0'
+        )
+    }) {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
+fn web_default_font() -> String {
+    WEB_DEFAULT_FONT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+fn eval_default_font(webview: &tauri::Webview, font: &str) {
+    let font_js = serde_json::to_string(font).unwrap_or_else(|_| "\"\"".into());
+    let script = format!(
+        r#"(function(){{
+  var font = {font_js};
+  var id = "wb-default-font";
+  var s = document.getElementById(id);
+  if (!font) {{
+    if (s) s.remove();
+    return;
+  }}
+  if (!s) {{
+    s = document.createElement("style");
+    s.id = id;
+    (document.documentElement || document.head || document.body).appendChild(s);
+  }}
+  s.textContent = "html{{font-family:" + JSON.stringify(font) + ",sans-serif;}}";
+}})()"#
+    );
+    let _ = webview.eval(script);
+}
 
 fn session_lock() -> std::sync::MutexGuard<'static, Option<Session>> {
     SESSION.lock().unwrap_or_else(|err| err.into_inner())
@@ -308,6 +356,7 @@ pub async fn web_session_show(
             if let Some(webview) = app.get_webview(LABEL) {
                 place(&webview, x, y, width, height)?;
                 sync_fullscreen(&webview, fullscreen);
+                eval_default_font(&webview, &web_default_font());
             }
             return Ok(opened);
         }
@@ -343,6 +392,7 @@ pub async fn web_session_show(
             }) {
                 eval_fullscreen(&webview, fullscreen);
             }
+            eval_default_font(&webview, &web_default_font());
             return Ok(guard
                 .as_ref()
                 .map(|session| session.opened.clone())
@@ -353,6 +403,11 @@ pub async fn web_session_show(
         let builder = tauri::webview::WebviewBuilder::new(LABEL, WebviewUrl::External(login.url))
             .focused(false)
             .initialization_script(PAGE_CHROME_SCRIPT)
+            .on_page_load(|webview, payload| {
+                if payload.event() == PageLoadEvent::Finished {
+                    eval_default_font(&webview, &web_default_font());
+                }
+            })
             .on_document_title_changed(move |_webview, title| {
                 if title == AUTH_TITLE {
                     let _ = notify.emit("web-session-auth", ());
@@ -382,8 +437,30 @@ pub async fn web_session_show(
         if fullscreen {
             eval_fullscreen(&child, true);
         }
+        eval_default_font(&child, &web_default_font());
         Ok(opened)
     }
+}
+
+/// Update the default font used by the embedded webpage session.
+#[tauri::command]
+pub async fn web_session_set_default_font(app: AppHandle, font: String) -> Result<(), String> {
+    let cleaned = sanitize_font_family(&font);
+    {
+        let mut guard = WEB_DEFAULT_FONT
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        *guard = cleaned.clone();
+    }
+    #[cfg(desktop)]
+    if let Some(webview) = app.get_webview(LABEL) {
+        eval_default_font(&webview, &cleaned);
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -413,7 +490,9 @@ pub async fn web_session_close(app: AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cookie_for_host, exchange_launch_token, navigation_target};
+    use super::{
+        cookie_for_host, exchange_launch_token, navigation_target, sanitize_font_family,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use url::Url;
@@ -485,5 +564,14 @@ mod tests {
         assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.http_only(), Some(true));
         assert_eq!(cookie.same_site(), Some(cookie::SameSite::Strict));
+    }
+
+    #[test]
+    fn font_family_rejects_css_injection() {
+        assert_eq!(sanitize_font_family("Microsoft YaHei"), "Microsoft YaHei");
+        assert_eq!(sanitize_font_family("  Segoe UI  "), "Segoe UI");
+        assert_eq!(sanitize_font_family(""), "");
+        assert_eq!(sanitize_font_family("Evil\";}body{"), "");
+        assert_eq!(sanitize_font_family("a'.b"), "");
     }
 }

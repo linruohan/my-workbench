@@ -88,6 +88,12 @@ export async function webSessionReload(): Promise<void> {
   await invoke("web_session_reload");
 }
 
+/** Push the Settings → 外观 webpage default font into the embedded session. */
+export async function webSessionSetDefaultFont(font: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("web_session_set_default_font", { font });
+}
+
 export async function webSessionHide(): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("web_session_hide");

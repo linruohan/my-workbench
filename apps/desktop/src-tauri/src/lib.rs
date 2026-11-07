@@ -1,3 +1,4 @@
+mod fonts;
 mod kb;
 mod model_http;
 mod oc_runtime;
@@ -32,7 +33,9 @@ pub fn run() {
             tools::tools_check,
             tools::tools_install,
             tools::tools_run,
+            fonts::list_system_fonts,
             web_session::web_session_show,
+            web_session::web_session_set_default_font,
             web_session::web_session_reload,
             web_session::web_session_hide,
             web_session::web_session_close,
