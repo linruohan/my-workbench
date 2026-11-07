@@ -1,11 +1,7 @@
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  createTimedTaskDraft,
-  makePresetSchedule,
-  TIMED_TASK_MISS_GRACE_MS,
-} from "@wb/domain";
+import { createTimedTaskDraft, makePresetSchedule, TIMED_TASK_MISS_GRACE_MS } from "@wb/domain";
 import { renderWithProviders } from "../test/render";
 import { TimedTaskList } from "./TimedTaskList";
 
@@ -14,7 +10,7 @@ afterEach(() => {
 });
 
 describe("TimedTaskList", () => {
-  it("shows expired tasks and supports run / skip / batch actions", async () => {
+  it("keeps expired tasks in the banner only and supports run / skip / batch", async () => {
     const user = userEvent.setup();
     const now = Date.now();
     const expired = {
@@ -26,6 +22,12 @@ describe("TimedTaskList", () => {
       }),
       nextRunAt: now - TIMED_TASK_MISS_GRACE_MS - 60_000,
     };
+    const upcoming = createTimedTaskDraft({
+      title: "午间同步",
+      command: "同步状态",
+      schedule: makePresetSchedule("daily", "12:00"),
+      nowMs: now,
+    });
     const onRunNow = vi.fn();
     const onSkip = vi.fn();
     const onRunAllMissed = vi.fn();
@@ -33,7 +35,7 @@ describe("TimedTaskList", () => {
 
     renderWithProviders(
       <TimedTaskList
-        tasks={[expired]}
+        tasks={[expired, upcoming]}
         nowMs={now}
         bindings={{
           [expired.id]: {
@@ -53,14 +55,19 @@ describe("TimedTaskList", () => {
     );
 
     expect(screen.getByText(/有 1 个已过期的定时任务/)).toBeInTheDocument();
-    expect(screen.getAllByText(/1 个技能/).length).toBeGreaterThan(0);
-    await user.click(screen.getAllByRole("button", { name: "立即执行" })[0]!);
+    expect(screen.getByText(/1 个技能/)).toBeInTheDocument();
+    expect(screen.getByText("午间同步")).toBeInTheDocument();
+    // Expired title appears in banner; upcoming stays in the main list.
+    expect(screen.getAllByText("夜间巡检")).toHaveLength(1);
+
+    const missed = within(screen.getByRole("status"));
+    await user.click(missed.getByRole("button", { name: "立即执行" }));
     expect(onRunNow).toHaveBeenCalledWith(expired.id);
-    await user.click(screen.getAllByRole("button", { name: "跳过本次" })[0]!);
+    await user.click(missed.getByRole("button", { name: "跳过本次" }));
     expect(onSkip).toHaveBeenCalledWith(expired.id);
-    await user.click(screen.getByRole("button", { name: "全部立即执行" }));
+    await user.click(missed.getByRole("button", { name: "全部立即执行" }));
     expect(onRunAllMissed).toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "全部跳过" }));
+    await user.click(missed.getByRole("button", { name: "全部跳过" }));
     expect(onSkipAllMissed).toHaveBeenCalled();
   });
 });
