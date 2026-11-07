@@ -1,4 +1,5 @@
 import {
+  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -17,6 +18,7 @@ import {
 } from "./dialog-context";
 import { coverEmbeddedWebSession } from "../agent/web-session";
 import { isTauriRuntime } from "../lib/paths";
+import { VoiceField } from "../voice";
 import { IconClose } from "./icons";
 
 export type { AlertOptions, ConfirmOptions, DialogApi, PromptOptions };
@@ -98,6 +100,10 @@ export function useDialog(): DialogApi {
   return ctx;
 }
 
+const DialogQueueContext = createContext<{
+  active: DialogRequest | null;
+} | null>(null);
+
 export function DialogProvider({ children }: { children: ReactNode }) {
   const [queue, setQueue] = useState<DialogRequest[]>([]);
   const active = queue[0] ?? null;
@@ -148,12 +154,22 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     [enqueue, finish],
   );
 
+  const queueValue = useMemo(() => ({ active }), [active]);
+
   return (
     <DialogContext.Provider value={api}>
-      {children}
-      {active ? <DialogHost request={active} /> : null}
+      <DialogQueueContext.Provider value={queueValue}>
+        {children}
+      </DialogQueueContext.Provider>
     </DialogContext.Provider>
   );
+}
+
+/** Render inside VoiceInputProvider so prompt fields can use the mic. */
+export function DialogOutlet() {
+  const queue = useContext(DialogQueueContext);
+  if (!queue?.active) return null;
+  return <DialogHost request={queue.active} />;
 }
 
 function DialogHost({ request }: { request: DialogRequest }) {
@@ -239,13 +255,15 @@ function DialogHost({ request }: { request: DialogRequest }) {
               <label className="field__label" htmlFor={inputId}>
                 {request.label}
               </label>
-              <input
-                ref={inputRef}
-                id={inputId}
-                className="date-input"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-              />
+              <VoiceField value={value} onChange={setValue}>
+                <input
+                  ref={inputRef}
+                  id={inputId}
+                  className="date-input"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                />
+              </VoiceField>
             </div>
           ) : (
             <p className="modal__message">{request.message}</p>

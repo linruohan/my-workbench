@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 async function readyApp() {
-  renderWithProviders(<App />);
+  renderWithProviders(<App />, { dialogOutlet: false });
   return screen.findByLabelText("快速捕获");
 }
 

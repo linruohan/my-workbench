@@ -1,17 +1,27 @@
 mod agent_workspace;
+mod process_tree;
+mod shell_env;
 mod fonts;
 mod kb;
 mod model_http;
 mod oc_runtime;
 mod ocr;
 mod open_ext;
+mod speech;
 mod tools;
 mod web_session;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::webview::{PermissionKind, PermissionResponse};
+
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
+        // Voice input uses getUserMedia; auto-allow so the WebView does not prompt.
+        .on_permission_request(|_webview, kind| match kind {
+            PermissionKind::Microphone => PermissionResponse::Allow,
+            _ => PermissionResponse::Default,
+        })
         .invoke_handler(tauri::generate_handler![
             kb::kb_pick_directory,
             kb::kb_list_dir,
@@ -31,6 +41,9 @@ pub fn run() {
             oc_runtime::oc_complete,
             ocr::ocr_ensure_models,
             ocr::ocr_read_model,
+            speech::speech_ensure_models,
+            speech::speech_status,
+            speech::speech_transcribe,
             tools::tools_probe,
             tools::tools_pick_path,
             tools::tools_check,
@@ -48,6 +61,7 @@ pub fn run() {
             agent_workspace::agent_terminal_close,
             agent_workspace::agent_terminal_signal,
             agent_workspace::agent_office_to_pdf,
+            agent_workspace::agent_office_cancel,
             agent_workspace::agent_workspace_runtime_paths,
             fonts::list_system_fonts,
             web_session::web_session_show,

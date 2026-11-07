@@ -46,7 +46,7 @@ import { loadAgentSkills } from "./agent/skills-loader";
 import { enqueueScheduleDelivery, getScheduleMeta } from "./agent/schedule-meta";
 import { KnowledgeView } from "./notes/KnowledgeView";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
-import { useDialog } from "./shell/Dialogs";
+import { DialogOutlet, useDialog } from "./shell/Dialogs";
 import { PromptModal } from "./shell/PromptModal";
 import { Sidebar, type AppNavId } from "./shell/Sidebar";
 import { TitleBar } from "./shell/TitleBar";
@@ -56,6 +56,7 @@ import { TaskRow } from "./tasks/TaskRow";
 import { TasksView, type TasksViewMode } from "./tasks/TasksView";
 import { TimedTaskEditor } from "./timed/TimedTaskEditor";
 import { TimedTaskList } from "./timed/TimedTaskList";
+import { VoiceField, VoiceInputProvider, VoiceStatusLine } from "./voice";
 
 const TASKS_VIEW_KEY = "wb.tasks.viewMode";
 
@@ -1192,164 +1193,184 @@ export default function App() {
   }
 
   return (
-    <div className="shell">
-      <TitleBar
-        notificationsOpen={notificationsOpen}
-        onNotificationsOpenChange={setNotificationsOpen}
-        notifications={notifications}
-        activeReminders={activeReminders}
-        onCompleteReminder={(taskId, remindAt) => {
-          const t = store.getTask(taskId);
-          if (t) complete(t);
-          dismissReminder(taskId, remindAt);
-        }}
-        onDismissReminder={dismissReminder}
-        onDismissNotification={(id) => {
-          store.dismissNotification(id);
-          refresh();
-        }}
-      />
-      {settingsOpen ? (
-        <SettingsView
-          key={settingsSection}
-          prefs={prefs}
-          dataDir={dataDir}
-          onPrefsChange={updatePrefs}
-          onBack={() => setSettingsOpen(false)}
-          initialSection={settingsSection}
-          onHostTools={setHostTools}
+    <VoiceInputProvider
+      enabled={prefs.voiceInputEnabled}
+      deviceId={prefs.voiceInputDeviceId}
+      language={prefs.voiceInputLanguage}
+      openSettings={() => openSettings("voice")}
+    >
+      <div className="shell">
+        <TitleBar
+          notificationsOpen={notificationsOpen}
+          onNotificationsOpenChange={setNotificationsOpen}
+          notifications={notifications}
+          activeReminders={activeReminders}
+          onCompleteReminder={(taskId, remindAt) => {
+            const t = store.getTask(taskId);
+            if (t) complete(t);
+            dismissReminder(taskId, remindAt);
+          }}
+          onDismissReminder={dismissReminder}
+          onDismissNotification={(id) => {
+            store.dismissNotification(id);
+            refresh();
+          }}
         />
-      ) : (
-        <div className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}>
-          <Sidebar
-            collapsed={sidebarCollapsed}
-            onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-            nav={nav}
-            onNav={goNav}
-            settingsOpen={settingsOpen}
-            onOpenSettings={() => openSettings("general")}
-            projects={projects}
-            activeProjectId={filterProjectId}
-            taskNavCounts={taskNavCounts}
-            projectTaskCounts={projectTaskCounts}
-            notes={notes}
-            onCreateProject={() => setCreateProjectOpen(true)}
-            onSelectProject={openProject}
-            onSelectNote={(id) => {
-              setActiveNoteId(id);
-              goNav("knowledge");
-            }}
-            onOpenAgent={openAgent}
-            agentOpen={agentSectionOpen}
-            onToggleAgent={toggleAgentSection}
-            onOpenAgentWeb={() => void openAgentWebSession()}
-            onCreateAgentFromFolder={() => void newAgentChatFromFolder()}
-            agentRail={
-              <AgentWorkspaceRail
-                store={store}
-                threadId={agentThreadId}
-                busyThreadId={agentBusyThreadId}
-                onSelectThread={(id) => {
-                  setAgentThreadId(id);
-                  goNav("agent");
-                }}
-                onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
-                onForgetThread={(id) => forgetAgentThreadRef.current(id)}
-                onRefresh={refresh}
-              />
-            }
-            displayName={prefs.displayName || "本地用户"}
+        {settingsOpen ? (
+          <SettingsView
+            key={settingsSection}
+            prefs={prefs}
+            dataDir={dataDir}
+            onPrefsChange={updatePrefs}
+            onBack={() => setSettingsOpen(false)}
+            initialSection={settingsSection}
+            onHostTools={setHostTools}
           />
-          <main className="main">
-            {body}
-            {editingTask && nav !== "projects" ? (
-              <TaskEditor
-                key={editingTask.id}
-                task={editingTask}
-                bucket={taskBuckets[editingTask.id] ?? "active"}
-                projects={projects}
-                tags={allTags}
-                selectedTagIds={(taskTagMap[editingTask.id] ?? []).map((t) => t.id)}
-                subtasks={store.listSubtasks(editingTask.id)}
-                defaultRemind={prefs.defaultRemind}
-                nowMs={now}
-                onClose={() => setEditingTaskId(null)}
-                onDelete={() => {
-                  void (async () => {
-                    if (prefs.confirmBeforeDelete) {
-                      const ok = await dialog.confirm({
-                        title: "删除任务",
-                        message: "确定删除该任务？此操作不可撤销。",
-                        confirmLabel: "删除",
-                        danger: true,
-                      });
-                      if (!ok) return;
-                    }
-                    deleteTask(editingTask.id);
-                  })();
-                }}
-                onDuplicate={() => {
-                  duplicateTask(editingTask.id);
-                  setEditingTaskId(null);
-                }}
-                onCreateTag={createTag}
-                onAddSubtask={(title) => addSubtask(editingTask.id, title)}
-                onToggleSubtask={toggleDone}
-                onDeleteSubtask={(id) => {
-                  void (async () => {
-                    if (prefs.confirmBeforeDelete) {
-                      const ok = await dialog.confirm({
-                        title: "删除子任务",
-                        message: "确定删除该子任务？此操作不可撤销。",
-                        confirmLabel: "删除",
-                        danger: true,
-                      });
-                      if (!ok) return;
-                    }
-                    deleteTask(id);
-                  })();
-                }}
-                onSave={(draft) => {
-                  saveEditedTask(editingTask.id, draft);
-                  setEditingTaskId(null);
-                }}
-              />
-            ) : null}
-            {nav !== "agent" ? (
-              <footer className="composer">
-                <input
-                  ref={composerRef}
-                  aria-label="快速捕获"
-                  placeholder={composerPlaceholder(nav, projectTitles[filterProjectId])}
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") capture();
+        ) : (
+          <div className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}>
+            <Sidebar
+              collapsed={sidebarCollapsed}
+              onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+              nav={nav}
+              onNav={goNav}
+              settingsOpen={settingsOpen}
+              onOpenSettings={() => openSettings("general")}
+              projects={projects}
+              activeProjectId={filterProjectId}
+              taskNavCounts={taskNavCounts}
+              projectTaskCounts={projectTaskCounts}
+              notes={notes}
+              onCreateProject={() => setCreateProjectOpen(true)}
+              onSelectProject={openProject}
+              onSelectNote={(id) => {
+                setActiveNoteId(id);
+                goNav("knowledge");
+              }}
+              onOpenAgent={openAgent}
+              agentOpen={agentSectionOpen}
+              onToggleAgent={toggleAgentSection}
+              onOpenAgentWeb={() => void openAgentWebSession()}
+              onCreateAgentFromFolder={() => void newAgentChatFromFolder()}
+              agentRail={
+                <AgentWorkspaceRail
+                  store={store}
+                  threadId={agentThreadId}
+                  busyThreadId={agentBusyThreadId}
+                  onSelectThread={(id) => {
+                    setAgentThreadId(id);
+                    goNav("agent");
+                  }}
+                  onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
+                  onForgetThread={(id) => forgetAgentThreadRef.current(id)}
+                  onRefresh={refresh}
+                />
+              }
+              displayName={prefs.displayName || "本地用户"}
+            />
+            <main className="main">
+              {body}
+              {editingTask && nav !== "projects" ? (
+                <TaskEditor
+                  key={editingTask.id}
+                  task={editingTask}
+                  bucket={taskBuckets[editingTask.id] ?? "active"}
+                  projects={projects}
+                  tags={allTags}
+                  selectedTagIds={(taskTagMap[editingTask.id] ?? []).map((t) => t.id)}
+                  subtasks={store.listSubtasks(editingTask.id)}
+                  defaultRemind={prefs.defaultRemind}
+                  nowMs={now}
+                  onClose={() => setEditingTaskId(null)}
+                  onDelete={() => {
+                    void (async () => {
+                      if (prefs.confirmBeforeDelete) {
+                        const ok = await dialog.confirm({
+                          title: "删除任务",
+                          message: "确定删除该任务？此操作不可撤销。",
+                          confirmLabel: "删除",
+                          danger: true,
+                        });
+                        if (!ok) return;
+                      }
+                      deleteTask(editingTask.id);
+                    })();
+                  }}
+                  onDuplicate={() => {
+                    duplicateTask(editingTask.id);
+                    setEditingTaskId(null);
+                  }}
+                  onCreateTag={createTag}
+                  onAddSubtask={(title) => addSubtask(editingTask.id, title)}
+                  onToggleSubtask={toggleDone}
+                  onDeleteSubtask={(id) => {
+                    void (async () => {
+                      if (prefs.confirmBeforeDelete) {
+                        const ok = await dialog.confirm({
+                          title: "删除子任务",
+                          message: "确定删除该子任务？此操作不可撤销。",
+                          confirmLabel: "删除",
+                          danger: true,
+                        });
+                        if (!ok) return;
+                      }
+                      deleteTask(id);
+                    })();
+                  }}
+                  onSave={(draft) => {
+                    saveEditedTask(editingTask.id, draft);
+                    setEditingTaskId(null);
                   }}
                 />
-                <button type="button" className="primary" onClick={capture}>
-                  添加
-                </button>
-              </footer>
-            ) : null}
-          </main>
-        </div>
-      )}
-      <PromptModal
-        open={createProjectOpen}
-        title="新建项目"
-        label="项目名称"
-        initialValue="新项目"
-        confirmLabel="创建"
-        onCancel={() => setCreateProjectOpen(false)}
-        onConfirm={(title) => {
-          const created = store.createProject(title);
-          setCreateProjectOpen(false);
-          refresh();
-          openProject(created.id);
-        }}
-      />
-    </div>
+              ) : null}
+              {nav !== "agent" ? (
+                <footer className="composer">
+                  <VoiceStatusLine />
+                  <div className="composer__row">
+                    <VoiceField
+                      value={draft}
+                      onChange={setDraft}
+                      className="composer__voice"
+                    >
+                      <input
+                        ref={composerRef}
+                        aria-label="快速捕获"
+                        placeholder={composerPlaceholder(
+                          nav,
+                          projectTitles[filterProjectId],
+                        )}
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") capture();
+                        }}
+                      />
+                    </VoiceField>
+                    <button type="button" className="primary" onClick={capture}>
+                      添加
+                    </button>
+                  </div>
+                </footer>
+              ) : null}
+            </main>
+          </div>
+        )}
+        <PromptModal
+          open={createProjectOpen}
+          title="新建项目"
+          label="项目名称"
+          initialValue="新项目"
+          confirmLabel="创建"
+          onCancel={() => setCreateProjectOpen(false)}
+          onConfirm={(title) => {
+            const created = store.createProject(title);
+            setCreateProjectOpen(false);
+            refresh();
+            openProject(created.id);
+          }}
+        />
+        <DialogOutlet />
+      </div>
+    </VoiceInputProvider>
   );
 }
 

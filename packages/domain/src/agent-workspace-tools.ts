@@ -48,7 +48,15 @@ export const WORKSPACE_TOOL_NAMES = HOST_AGENT_TOOL_NAMES;
 export type WorkspaceToolName = (typeof HOST_AGENT_TOOL_NAMES)[number];
 
 export const READ_LINE_LIMIT = 2000;
+/** Max characters retained for `str_replace_editor` view (DSH `maxOutputChars`). */
+export const STR_REPLACE_VIEW_MAX_CHARS = 16_000;
+/** Appended when a str_replace view exceeds {@link STR_REPLACE_VIEW_MAX_CHARS}. */
+export const RESPONSE_CLIPPED_NOTICE =
+  "<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>";
+/** Inline matches returned to the model. */
 export const GREP_MATCH_LIMIT = 250;
+/** Max matches captured for spill / truncation detection (ripgrep --max-count). */
+export const GREP_CAPTURE_LIMIT = 2000;
 export const GLOB_RESULT_LIMIT = 200;
 export const SHELL_OUTPUT_LIMIT = 64 * 1024;
 export const WEB_FETCH_LIMIT = 100_000;
@@ -172,7 +180,7 @@ export const WORKSPACE_AGENT_TOOLS: readonly ToolSpec[] = [
   tool(
     "grep",
     "read",
-    `在工作区文件内容中用正则搜索（ripgrep 语法）。返回带行号的匹配，最多 ${GREP_MATCH_LIMIT} 条。`,
+    `在工作区文件内容中用正则搜索（ripgrep 语法）。内联返回最多 ${GREP_MATCH_LIMIT} 条；超限时全文写入工作区 .wb/spill，可用 read/grep 恢复。`,
     {
       pattern: str("正则表达式"),
       path: str("文件或目录，相对工作区；默认工作区根"),
@@ -188,7 +196,9 @@ export const WORKSPACE_AGENT_TOOLS: readonly ToolSpec[] = [
       command: str("bash 命令"),
       description: str("5–10 个词的主动语态说明，用于界面展示"),
       workdir: str("工作目录，相对或绝对，须在工作区内；默认会话 cwd"),
-      timeout: num("超时毫秒，默认 120000；0 表示不限；后台任务不超时"),
+      timeout: num(
+        "超时毫秒，默认 120000；0 表示不限。前台超时后转入后台 job（不杀掉），可用 job_output / job_kill",
+      ),
       background: {
         type: "boolean",
         description: "后台运行并立即返回 job id；完成后用 job_output 读取",
@@ -204,7 +214,9 @@ export const WORKSPACE_AGENT_TOOLS: readonly ToolSpec[] = [
       command: str("PowerShell 命令"),
       description: str("5–10 个词的主动语态说明，用于界面展示"),
       workdir: str("工作目录，相对或绝对，须在工作区内；默认会话 cwd"),
-      timeout: num("超时毫秒，默认 120000；0 表示不限；后台任务不超时"),
+      timeout: num(
+        "超时毫秒，默认 120000；0 表示不限。前台超时后转入后台 job（不杀掉），可用 job_output / job_kill",
+      ),
       background: {
         type: "boolean",
         description: "后台运行并立即返回 job id；完成后用 job_output 读取",
@@ -220,7 +232,9 @@ export const WORKSPACE_AGENT_TOOLS: readonly ToolSpec[] = [
       command: str("要执行的命令"),
       description: str("5–10 个词的主动语态说明，用于界面展示"),
       workdir: str("工作目录，相对或绝对，须在工作区内；默认会话 cwd"),
-      timeout: num("超时毫秒，默认 120000；0 表示不限；后台任务不超时"),
+      timeout: num(
+        "超时毫秒，默认 120000；0 表示不限。前台超时后转入后台 job（不杀掉），可用 job_output / job_kill",
+      ),
       background: {
         type: "boolean",
         description: "后台运行并立即返回 job id；完成后用 job_output 读取",
@@ -506,6 +520,120 @@ function intOr(value: unknown, fallback: number, label: string): number | string
   return value;
 }
 
+export type GrepMatchHit = {
+  path: string;
+  line: number;
+  text: string;
+};
+
+/** Serialize matches as `path:line:text` lines for spill files. */
+export function formatGrepSpillText(matches: readonly GrepMatchHit[]): string {
+  return matches.map((hit) => `${hit.path}:${hit.line}:${hit.text}`).join("\n");
+}
+
+/** DSH-style marker when a foreground shell is promoted to a background job. */
+export function formatShellPromoteMarker(timeoutMs: number, jobId: string): string {
+  return `[still running after ${timeoutMs}ms; moved to background job ${jobId}]`;
+}
+
+/** DSH-style exit marker; empty when exit code is 0. */
+export function formatShellExitMarker(code: number): string {
+  return code === 0 ? "" : `[exit code: ${code}]`;
+}
+
+/** DSH-style truncation marker pointing at a recoverable spill path. */
+export function formatShellTruncatedMarker(spillPath?: string | null): string {
+  const path = spillPath?.trim() || "(unavailable)";
+  return `[output truncated; full output: ${path}]`;
+}
+
+/** DSH-style stop marker when a job was killed from outside the wait. */
+export function formatShellStoppedMarker(reason: string): string {
+  const note = reason.trim() || "stopped";
+  return `[stopped: ${note}]`;
+}
+
+/**
+ * Model-facing shell body (aligned with dsh-tool-bash `renderResult` /
+ * `renderPromoted`): stdout, optional `[stderr]` section, then status markers.
+ */
+export function formatShellModelText(input: {
+  stdout?: string | null;
+  stderr?: string | null;
+  code: number;
+  truncated?: boolean;
+  spillPath?: string | null;
+  promoted?: boolean;
+  timeoutMs?: number;
+  jobId?: string | null;
+  stopped?: string | null;
+}): string {
+  const stdout = (input.stdout ?? "").replace(/\s+$/u, "");
+  const stderr = (input.stderr ?? "").replace(/\s+$/u, "");
+  const parts: string[] = [];
+  if (stdout) parts.push(stdout);
+  if (stderr) {
+    parts.push(parts.length ? `[stderr]\n${stderr}` : `[stderr]\n${stderr}`);
+  }
+  let body = parts.join("\n");
+  if (!body) body = "(no output)";
+
+  const markers: string[] = [];
+  if (input.truncated || input.spillPath) {
+    markers.push(formatShellTruncatedMarker(input.spillPath));
+  }
+  if (input.promoted && input.jobId && input.timeoutMs != null) {
+    markers.push(formatShellPromoteMarker(input.timeoutMs, input.jobId));
+  } else if (input.stopped?.trim()) {
+    markers.push(formatShellStoppedMarker(input.stopped));
+  } else {
+    const exitMarker = formatShellExitMarker(input.code);
+    if (exitMarker) markers.push(exitMarker);
+  }
+  return markers.length ? `${body}\n${markers.join("\n")}` : body;
+}
+
+/** Clip a str_replace_editor view body and append the DSH clipped notice. */
+export function clipStrReplaceView(
+  content: string,
+  maxChars = STR_REPLACE_VIEW_MAX_CHARS,
+): { text: string; clipped: boolean } {
+  const budget = Math.max(1, Math.floor(maxChars));
+  if (content.length <= budget) return { text: content, clipped: false };
+  return {
+    text: `${content.slice(0, budget)}${RESPONSE_CLIPPED_NOTICE}`,
+    clipped: true,
+  };
+}
+
+/** Skip hidden / dependency / Python cache entries in directory views. */
+export function shouldSkipStrReplaceDirEntry(name: string): boolean {
+  const trimmed = name.trim();
+  return (
+    trimmed.startsWith(".") || trimmed === "node_modules" || trimmed === "__pycache__"
+  );
+}
+
+/** Format a two-level directory listing for `str_replace_editor` view. */
+export function formatStrReplaceDirListing(
+  rootDisplay: string,
+  rows: ReadonlyArray<{ kind: "d" | "f"; path: string }>,
+): string {
+  const sorted = [...rows].sort((left, right) => left.path.localeCompare(right.path));
+  const body = sorted.map((row) => `${row.kind}\t${row.path}`).join("\n");
+  return `Here're the files and directories up to 2 levels deep in ${rootDisplay}, excluding hidden items, node_modules, and Python cache directories:\n${body}\n`;
+}
+
+/** Spill when inline budget is exceeded or the capture ceiling was hit. */
+export function shouldSpillGrepMatches(
+  capturedCount: number,
+  options?: { inlineLimit?: number; captureLimit?: number },
+): boolean {
+  const inlineLimit = options?.inlineLimit ?? GREP_MATCH_LIMIT;
+  const captureLimit = options?.captureLimit ?? GREP_CAPTURE_LIMIT;
+  return capturedCount > inlineLimit || capturedCount >= captureLimit;
+}
+
 /** Prefix each returned line with its 1-based number, matching DSH read formatting. */
 export function formatNumberedLines(
   text: string,
@@ -660,7 +788,7 @@ export function formatWorkspaceToolsHint(hasRoot: boolean): string {
   ];
   if (hasRoot) {
     lines.unshift(
-      "当前会话已绑定本地工作区。用 read / read_image / write / edit / apply_patch / str_replace_editor / glob / grep / bash / shell / pwsh 操作文件与命令；present 交付文件；office_to_pdf 转 PDF；working_directory 切换会话 cwd；需要跨调用状态时用 terminal_*。不要用 shell 去 cat/sed 代替专用工具。",
+      "当前会话已绑定本地工作区。用 read / read_image / write / edit / apply_patch / str_replace_editor / glob / grep / bash / shell / pwsh 操作文件与命令；present 交付文件；office_to_pdf 转 PDF；working_directory 切换会话 cwd；需要跨调用状态时用 terminal_*。不要用 shell 去 cat/sed 代替专用工具。检查每条 bash/shell/pwsh 结果中的 [exit code: N]；失败先排查再继续。",
     );
   }
   return lines.join("");

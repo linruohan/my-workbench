@@ -13,8 +13,16 @@ export const COMPACT_MARKER = "【上下文已压缩】";
 /** Placeholder left when an old tool result is dropped from the model view. */
 export const CLEARED_TOOL_RESULT = "[较早的工具结果已清空]";
 
+/** Middle marker after pressure pruning oversized tool results (model view only). */
+export const PRUNED_TOOL_RESULT_MARK = "\n\n[... 工具结果中段已修剪 ...]\n\n";
+
 export const MICROCOMPACT_KEEP_RECENT = 4;
 const MICROCOMPACT_MIN_CHARS = 240;
+
+/** Align with DSH tool-result-pruner defaults (chars, not tokens). */
+export const TOOL_RESULT_PRUNE_THRESHOLD_CHARS = 8192;
+export const TOOL_RESULT_PRUNE_HEAD_CHARS = 4096;
+export const TOOL_RESULT_PRUNE_TAIL_CHARS = 1024;
 
 /** Tokens reserved for the reply and a small safety margin, same as the turn loop. */
 export function modelContextBudget(
@@ -44,6 +52,45 @@ export function estimateContextTokens(
   budgetTokens: number,
 ): number {
   return estimateTextTokens(system) + estimateTranscriptTokens(messages, budgetTokens);
+}
+
+/**
+ * Deterministic head/tail slice for one oversized tool result.
+ * Idempotent when the middle mark is already present.
+ */
+export function pruneToolResultText(
+  content: string,
+  options?: {
+    thresholdChars?: number;
+    headChars?: number;
+    tailChars?: number;
+  },
+): string {
+  const threshold = options?.thresholdChars ?? TOOL_RESULT_PRUNE_THRESHOLD_CHARS;
+  const headChars = options?.headChars ?? TOOL_RESULT_PRUNE_HEAD_CHARS;
+  const tailChars = options?.tailChars ?? TOOL_RESULT_PRUNE_TAIL_CHARS;
+  if (content.length <= threshold) return content;
+  if (content.includes(PRUNED_TOOL_RESULT_MARK.trim())) return content;
+  if (content.startsWith(CLEARED_TOOL_RESULT)) return content;
+  const head = content.slice(0, Math.max(0, headChars));
+  const tail = content.slice(Math.max(0, content.length - Math.max(0, tailChars)));
+  return `${head}${PRUNED_TOOL_RESULT_MARK}${tail}`;
+}
+
+/** Apply pressure pruning to every tool message over the char threshold. */
+export function pruneOversizedToolResults(
+  messages: AgentMessage[],
+  options?: {
+    thresholdChars?: number;
+    headChars?: number;
+    tailChars?: number;
+  },
+): AgentMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "tool") return message;
+    const next = pruneToolResultText(message.content, options);
+    return next === message.content ? message : { ...message, content: next };
+  });
 }
 
 /**
@@ -95,7 +142,10 @@ export type CompactPlan = {
 
 /** Messages the model should see, compacted when they exceed `budgetTokens`. */
 export function planCompact(messages: AgentMessage[], budgetTokens: number): CompactPlan {
-  const projected = microcompactToolResults(projectForModel(messages));
+  // Pressure prune oversized tool bodies first; hard-clear only when still over budget later.
+  const projected = microcompactToolResults(
+    pruneOversizedToolResults(projectForModel(messages)),
+  );
   const budget = Math.max(1, budgetTokens);
   const lastUser = lastIndex(projected, (message) => message.role === "user");
   if (lastUser <= 0) {

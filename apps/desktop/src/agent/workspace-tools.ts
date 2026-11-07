@@ -1,20 +1,35 @@
 import {
   DEEPSEEK_WEB_API_BASE_URL,
   GLOB_RESULT_LIMIT,
+  GREP_CAPTURE_LIMIT,
   GREP_MATCH_LIMIT,
   READ_LINE_LIMIT,
+  WEB_FETCH_LIMIT,
   WEB_SEARCH_MAX_RESULTS,
+  FS_NOT_OBSERVED,
   applyHunks,
   applyLiteralEdit,
+  assertCanDeleteExisting,
+  assertCanModifyExisting,
   boundDeepSeekSearchText,
   filePathFromArgs,
+  formatGrepSpillText,
   formatNumberedLines,
+  formatRetentionNotice,
+  clipStrReplaceView,
+  collectManagedShellEnv,
+  formatShellModelText,
+  formatStrReplaceDirListing,
   globToRegExp,
+  shouldSkipStrReplaceDirEntry,
+  shouldSpillGrepMatches,
+  STR_REPLACE_VIEW_MAX_CHARS,
   htmlToReadableText,
   insertAtLine,
   isAllowedFetchUrl,
   isPathUnder,
   isWorkspaceToolName,
+  joinPath,
   normalizePath,
   parentDir,
   parseAskUserQuestions,
@@ -35,7 +50,7 @@ import {
   type HostToolSnapshot,
 } from "@wb/domain";
 import { errorMessage } from "../lib/errors";
-import { isTauriRuntime } from "../lib/paths";
+import { isTauriRuntime, resolveDataDir } from "../lib/paths";
 import {
   kbExists,
   kbMkdir,
@@ -51,8 +66,15 @@ import {
 import type { AgentToolResult } from "./execute";
 import { hostFetch } from "./host-fetch";
 import { runHostTool } from "./host-tools";
+import {
+  forgetObservedPath,
+  observedPathsFor,
+  rememberObservedPath,
+} from "./fs-observation-store";
 import { putImageAttachment } from "./image-attachments";
+import { normalizeImageForModel } from "./image-normalize";
 import { clearJobNotice, trackBackgroundJob } from "./job-watch";
+import { saveToolSpill } from "./spill-store";
 
 export type WorkspaceToolEnv = {
   rootPath: string | null | undefined;
@@ -70,14 +92,6 @@ export type WorkspaceToolEnv = {
   onImage?: (dataUrl: string) => void;
   /** Cooperative cancel from the owning agent turn. */
   signal?: AbortSignal;
-};
-
-type ShellHit = {
-  ok: boolean;
-  code: number;
-  stdout: string;
-  stderr: string;
-  truncated: boolean;
 };
 
 export async function runWorkspaceTool(
@@ -181,6 +195,7 @@ async function runRead(
   if (numbered.totalLines > 0 && numbered.start === 0) {
     return fail(`offset ${window.offset} 超出文件行数 ${numbered.totalLines}`);
   }
+  rememberObservedPath(env.threadId, resolved.absolute);
   return ok(`已读取 ${resolved.display}`, {
     path: resolved.display,
     text: numbered.text,
@@ -207,34 +222,53 @@ async function runReadImage(
   if (!mediaType) {
     return fail("仅支持 PNG / JPEG / WebP / GIF");
   }
-  const dataUrl = `data:${mediaType};base64,${b64}`;
   const dims = sniffImageDimensions(bytes);
+  let dataUrl = `data:${mediaType};base64,${b64}`;
+  let outMedia = mediaType;
+  let outBytes = bytes.length;
+  let outWidth = dims.width;
+  let outHeight = dims.height;
+  let normalized = false;
+  try {
+    const norm = await normalizeImageForModel(bytes, mediaType);
+    dataUrl = norm.dataUrl;
+    outMedia = norm.normalized ? "image/jpeg" : mediaType;
+    outBytes = norm.bytes;
+    outWidth = norm.width;
+    outHeight = norm.height;
+    normalized = norm.normalized;
+  } catch {
+    // Fall back to the original bytes when canvas decode fails.
+  }
   const name = resolved.display.split(/[\\/]/).pop() || resolved.display;
   const threadId = env.threadId?.trim() || "";
   const stored = threadId
     ? putImageAttachment({
         threadId,
         path: resolved.display,
-        mediaType,
+        mediaType: outMedia,
         dataUrl,
-        bytes: bytes.length,
-        width: dims.width,
-        height: dims.height,
+        bytes: outBytes,
+        width: outWidth,
+        height: outHeight,
         name,
       })
     : null;
+  rememberObservedPath(env.threadId, resolved.absolute);
   env.onImage?.(dataUrl);
   return ok(`已读取图片 ${resolved.display}`, {
     path: resolved.display,
-    mediaType,
-    bytes: bytes.length,
+    mediaType: outMedia,
+    bytes: outBytes,
+    sourceBytes: bytes.length,
+    normalized,
     imageAttached: Boolean(env.onImage),
     image: {
       attachmentId: stored?.id ?? "ephemeral",
-      mediaType,
-      bytes: bytes.length,
-      width: dims.width,
-      height: dims.height,
+      mediaType: outMedia,
+      bytes: outBytes,
+      width: outWidth,
+      height: outHeight,
       name,
     },
   });
@@ -255,13 +289,18 @@ async function runStrReplaceEditor(
     if (!(await kbExists(resolved.absolute))) return fail("路径不存在");
     const entries = await tryListDir(resolved.absolute);
     if (entries) {
-      const lines = entries
-        .filter((entry) => !entry.name.startsWith("."))
-        .map((entry) => (entry.isDir ? `${entry.name}/` : entry.name));
+      if (value.viewRange) {
+        return fail("目录 view 不能使用 view_range");
+      }
+      const rows = await collectStrReplaceDirRows(resolved.absolute, resolved.display);
+      const listing = formatStrReplaceDirListing(resolved.display, rows);
+      const clipped = clipStrReplaceView(listing, STR_REPLACE_VIEW_MAX_CHARS);
       return ok(`目录 ${resolved.display}`, {
         path: resolved.display,
-        text: lines.join("\n"),
-        total: lines.length,
+        text: clipped.text,
+        total: rows.length,
+        truncated: clipped.clipped,
+        clipped: clipped.clipped,
       });
     }
     const content = await readTextFile(resolved.absolute);
@@ -277,11 +316,14 @@ async function runStrReplaceEditor(
     if (numbered.totalLines > 0 && numbered.start === 0) {
       return fail(`view_range 超出文件行数 ${numbered.totalLines}`);
     }
+    const clipped = clipStrReplaceView(numbered.text, STR_REPLACE_VIEW_MAX_CHARS);
+    rememberObservedPath(env.threadId, resolved.absolute);
     return ok(`已查看 ${resolved.display}`, {
       path: resolved.display,
-      text: numbered.text,
+      text: clipped.text,
       totalLines: numbered.totalLines,
-      truncated: numbered.truncated,
+      truncated: numbered.truncated || clipped.clipped,
+      clipped: clipped.clipped,
     });
   }
 
@@ -292,6 +334,7 @@ async function runStrReplaceEditor(
     }
     await ensureParent(resolved.absolute);
     await writeTextFile(resolved.absolute, value.fileText);
+    rememberObservedPath(env.threadId, resolved.absolute);
     return ok(`已创建 ${resolved.display}`, {
       path: resolved.display,
       bytes: value.fileText.length,
@@ -303,10 +346,13 @@ async function runStrReplaceEditor(
       return fail("str_replace 需要非空 old_str");
     }
     if (!(await kbExists(resolved.absolute))) return fail("文件不存在");
+    const gate = requireObserved(env, resolved.absolute, resolved.display);
+    if (gate) return gate;
     const before = await readTextFile(resolved.absolute);
     const edited = applyLiteralEdit(before, value.oldStr, value.newStr ?? "", false);
     if (edited.ok === false) return fail(edited.reason);
     await writeTextFile(resolved.absolute, edited.content);
+    rememberObservedPath(env.threadId, resolved.absolute);
     return ok(`已替换 ${resolved.display}`, {
       path: resolved.display,
       replacements: edited.replacements,
@@ -317,10 +363,13 @@ async function runStrReplaceEditor(
   if (value.insertLine === undefined) return fail("insert 需要 insert_line");
   if (typeof value.newStr !== "string") return fail("insert 需要 new_str");
   if (!(await kbExists(resolved.absolute))) return fail("文件不存在");
+  const gate = requireObserved(env, resolved.absolute, resolved.display);
+  if (gate) return gate;
   const before = await readTextFile(resolved.absolute);
   const inserted = insertAtLine(before, value.insertLine, value.newStr);
   if (inserted.ok === false) return fail(inserted.reason);
   await writeTextFile(resolved.absolute, inserted.content);
+  rememberObservedPath(env.threadId, resolved.absolute);
   return ok(`已插入 ${resolved.display}`, {
     path: resolved.display,
     insertLine: value.insertLine,
@@ -382,6 +431,7 @@ async function runOfficeToPdf(
     throw new DOMException("The operation was aborted.", "AbortError");
   }
   const { invoke } = await import("@tauri-apps/api/core");
+  const opId = `office_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const invokePromise = invoke<{
     input: string;
     output: string;
@@ -390,9 +440,16 @@ async function runOfficeToPdf(
     root,
     input: input.absolute,
     output: output.absolute,
+    opId,
   });
   const hit = env.signal
-    ? await raceAbort(invokePromise, env.signal)
+    ? await raceAbort(invokePromise, env.signal, async () => {
+        try {
+          await invoke("agent_office_cancel", { opId });
+        } catch {
+          /* ignore */
+        }
+      })
     : await invokePromise;
   return ok(`已转为 PDF ${output.display}`, {
     input: input.display,
@@ -401,21 +458,29 @@ async function runOfficeToPdf(
   });
 }
 
-function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  onAbort?: () => void | Promise<void>,
+): Promise<T> {
   if (signal.aborted) {
+    void onAbort?.();
     return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
   }
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () =>
-      reject(new DOMException("The operation was aborted.", "AbortError"));
-    signal.addEventListener("abort", onAbort, { once: true });
+    const handleAbort = () => {
+      void Promise.resolve(onAbort?.()).finally(() => {
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      });
+    };
+    signal.addEventListener("abort", handleAbort, { once: true });
     promise.then(
       (value) => {
-        signal.removeEventListener("abort", onAbort);
+        signal.removeEventListener("abort", handleAbort);
         resolve(value);
       },
       (error) => {
-        signal.removeEventListener("abort", onAbort);
+        signal.removeEventListener("abort", handleAbort);
         reject(error);
       },
     );
@@ -432,8 +497,13 @@ async function runWrite(
   if (typeof args.content !== "string") return fail("请提供 content");
   const resolved = resolveWorkspacePath(root, raw, env.cwd);
   if (resolved.ok === false) return fail(resolved.reason);
+  if (await kbExists(resolved.absolute)) {
+    const gate = requireObserved(env, resolved.absolute, resolved.display);
+    if (gate) return gate;
+  }
   await ensureParent(resolved.absolute);
   await writeTextFile(resolved.absolute, args.content);
+  rememberObservedPath(env.threadId, resolved.absolute);
   return ok(`已写入 ${resolved.display}`, {
     path: resolved.display,
     bytes: args.content.length,
@@ -452,6 +522,8 @@ async function runEdit(
   const resolved = resolveWorkspacePath(root, raw, env.cwd);
   if (resolved.ok === false) return fail(resolved.reason);
   if (!(await kbExists(resolved.absolute))) return fail("文件不存在");
+  const gate = requireObserved(env, resolved.absolute, resolved.display);
+  if (gate) return gate;
   const before = await readTextFile(resolved.absolute);
   const edited = applyLiteralEdit(
     before,
@@ -461,6 +533,7 @@ async function runEdit(
   );
   if (edited.ok === false) return fail(edited.reason);
   await writeTextFile(resolved.absolute, edited.content);
+  rememberObservedPath(env.threadId, resolved.absolute);
   return ok(`已编辑 ${resolved.display}（${edited.replacements} 处）`, {
     path: resolved.display,
     replacements: edited.replacements,
@@ -516,7 +589,7 @@ async function runGrep(
     "--color",
     "never",
     "-m",
-    String(GREP_MATCH_LIMIT),
+    String(GREP_CAPTURE_LIMIT),
   ];
   if (include) rgArgs.push("--glob", include);
   rgArgs.push(pattern, ".");
@@ -533,7 +606,14 @@ async function runGrep(
         ? (result.data as { code?: number }).code
         : undefined;
     if (code === 1) {
-      return ok("没有匹配", { matches: [], paths: [] });
+      return ok("没有匹配", {
+        matches: [],
+        paths: [],
+        truncated: false,
+        spillPath: null,
+        spillBytes: null,
+        retentionNotice: null,
+      });
     }
     return result;
   }
@@ -541,8 +621,56 @@ async function runGrep(
     result.data && typeof result.data === "object" && "stdout" in result.data
       ? String((result.data as { stdout?: string }).stdout ?? "")
       : "";
-  const matches = parseRgLines(stdout, root).slice(0, GREP_MATCH_LIMIT);
-  return ok(`匹配 ${matches.length} 处`, { matches, paths: matches.map((m) => m.path) });
+  const captured = parseRgLines(stdout, root).slice(0, GREP_CAPTURE_LIMIT);
+  const matches = captured.slice(0, GREP_MATCH_LIMIT);
+  let spillPath: string | null = null;
+  let spillBytes: number | null = null;
+  let retentionNotice: string | null = null;
+  const spill = shouldSpillGrepMatches(captured.length);
+  if (spill) {
+    const spillBody = formatGrepSpillText(captured);
+    if (isTauriRuntime()) {
+      try {
+        const saved = await saveToolSpill({
+          root,
+          toolName: "grep",
+          suggestedName: "grep",
+          content: spillBody,
+        });
+        spillPath = saved.locator;
+        spillBytes = saved.bytes;
+      } catch {
+        /* keep inline preview without spill */
+      }
+    }
+    const retained = formatRetentionNotice({
+      content: spillBody,
+      spillPath,
+      spillBytes,
+      headBytes: Math.min(spillBody.length, formatGrepSpillText(matches).length + 1),
+      tailBytes: 0,
+      kind: "head",
+      toolHint: spillPath
+        ? `用 read 打开 ${spillPath}（可加 offset/limit），或用 grep 搜索该文件。`
+        : "匹配过多；请收窄 pattern / path / include 后再搜。",
+    });
+    retentionNotice = retained.notice || null;
+  }
+  const hitCeiling = captured.length >= GREP_CAPTURE_LIMIT;
+  const summary = spill
+    ? hitCeiling
+      ? `匹配至少 ${captured.length} 处（已截断内联，详见 spill）`
+      : `匹配 ${captured.length} 处（内联 ${matches.length} 条，详见 spill）`
+    : `匹配 ${matches.length} 处`;
+  return ok(summary, {
+    matches,
+    paths: matches.map((m) => m.path),
+    matchCount: captured.length,
+    truncated: spill,
+    spillPath,
+    spillBytes,
+    retentionNotice,
+  });
 }
 
 async function runApplyPatch(
@@ -567,8 +695,13 @@ async function runApplyPatch(
     const resolved = resolveWorkspacePath(root, op.path, env.cwd);
     if (resolved.ok === false) return fail(`${op.path}: ${resolved.reason}`);
     if (op.kind === "add") {
+      if (await kbExists(resolved.absolute)) {
+        const gate = requireObserved(env, resolved.absolute, resolved.display);
+        if (gate) return gate;
+      }
       await ensureParent(resolved.absolute);
       await writeTextFile(resolved.absolute, op.content);
+      rememberObservedPath(env.threadId, resolved.absolute);
       changed.push(`+ ${resolved.display}`);
       continue;
     }
@@ -576,13 +709,24 @@ async function runApplyPatch(
       if (!(await kbExists(resolved.absolute))) {
         return fail(`删除失败，文件不存在：${resolved.display}`);
       }
+      const delGate = assertCanDeleteExisting(
+        observedPathsFor(env.threadId),
+        resolved.absolute,
+        resolved.display,
+      );
+      if (delGate.ok === false) {
+        return failNotObserved(delGate.reason);
+      }
       await kbRemove(resolved.absolute);
+      forgetObservedPath(env.threadId, resolved.absolute);
       changed.push(`- ${resolved.display}`);
       continue;
     }
     if (!(await kbExists(resolved.absolute))) {
       return fail(`更新失败，文件不存在：${resolved.display}`);
     }
+    const gate = requireObserved(env, resolved.absolute, resolved.display);
+    if (gate) return gate;
     const before = await readTextFile(resolved.absolute);
     const applied = applyHunks(before.replace(/\r\n/g, "\n"), op.hunks);
     if (applied.ok === false) {
@@ -594,12 +738,19 @@ async function runApplyPatch(
     if (op.moveTo) {
       const moved = resolveWorkspacePath(root, op.moveTo, env.cwd);
       if (moved.ok === false) return fail(`Move to ${op.moveTo}: ${moved.reason}`);
+      if (await kbExists(moved.absolute)) {
+        const moveGate = requireObserved(env, moved.absolute, moved.display);
+        if (moveGate) return moveGate;
+      }
       await ensureParent(moved.absolute);
       await writeTextFile(moved.absolute, applied.after);
       await kbRemove(resolved.absolute);
+      forgetObservedPath(env.threadId, resolved.absolute);
+      rememberObservedPath(env.threadId, moved.absolute);
       display = `${resolved.display} → ${moved.display}`;
     } else {
       await writeTextFile(resolved.absolute, applied.after);
+      rememberObservedPath(env.threadId, resolved.absolute);
     }
     changed.push(`~ ${display}`);
   }
@@ -627,10 +778,11 @@ async function runShellCommand(
       : "已执行命令";
   if (!isTauriRuntime()) return fail("当前环境不能执行终端命令");
   const { invoke } = await import("@tauri-apps/api/core");
+  const managedEnv = await managedShellEnvFor(env, root, workdir);
   if (args.background === true) {
     const hit = await invoke<{ id: string; description: string }>(
       "agent_workspace_job_start",
-      { root, command, workdir, description: label, shell },
+      { root, command, workdir, description: label, shell, managedEnv },
     );
     if (env.threadId) {
       trackBackgroundJob(env.threadId, hit.id, hit.description || label);
@@ -641,35 +793,19 @@ async function runShellCommand(
     typeof args.timeout === "number" && Number.isFinite(args.timeout)
       ? Math.max(0, Math.floor(args.timeout))
       : 120_000;
-  // Foreground via job + kill so AbortSignal can hard-stop the child.
-  if (env.signal) {
-    return runCancelableShell({
-      root,
-      command,
-      workdir,
-      label,
-      shell,
-      timeoutMs: timeout,
-      signal: env.signal,
-    });
-  }
-  const hit = await invoke<ShellHit>("agent_workspace_shell", {
+  // Always run via job registry so timeout can promote (DSH promoteOnTimeout)
+  // and AbortSignal can still hard-kill on user cancel.
+  return runCancelableShell({
     root,
     command,
     workdir,
-    timeoutMs: timeout,
+    label,
     shell,
+    timeoutMs: timeout,
+    signal: env.signal ?? new AbortController().signal,
+    threadId: env.threadId,
+    managedEnv,
   });
-  return {
-    ok: hit.ok,
-    summary: hit.ok ? label : `${label}失败（退出码 ${hit.code}）`,
-    data: {
-      ...hit,
-      stdout: stripAnsiEscapes(hit.stdout ?? ""),
-      stderr: stripAnsiEscapes(hit.stderr ?? ""),
-    },
-    effects: [],
-  };
 }
 
 type JobOutputHit = {
@@ -680,7 +816,97 @@ type JobOutputHit = {
   stderr: string;
   truncated: boolean;
   done: boolean;
+  spillPath?: string | null;
+  spillBytes?: number | null;
 };
+
+function presentShellResult(input: {
+  label: string;
+  code: number;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  spillPath?: string | null;
+  spillBytes?: number | null;
+  jobId?: string;
+  status?: string;
+  cwd?: string;
+  /** Foreground wait timed out; process kept as background job. */
+  promoted?: boolean;
+  timeoutMs?: number;
+  stopped?: string | null;
+}): AgentToolResult {
+  const combined = [input.stdout, input.stderr].filter(Boolean).join("\n");
+  const retained = formatRetentionNotice({
+    content: combined,
+    spillPath: input.spillPath,
+    spillBytes: input.spillBytes,
+  });
+  const truncated =
+    input.truncated || retained.omittedBytes > 0 || Boolean(input.spillPath);
+  let stdout = input.stdout;
+  let stderr = input.stderr;
+  if (truncated) {
+    // Combined head/tail preview; DSH-style markers appended in `text`.
+    stdout = retained.preview;
+    stderr = "";
+  }
+  const text = formatShellModelText({
+    stdout,
+    stderr,
+    code: input.code,
+    truncated,
+    spillPath: input.spillPath,
+    promoted: input.promoted,
+    timeoutMs: input.timeoutMs,
+    jobId: input.jobId,
+    stopped: input.stopped,
+  });
+  // Non-zero exit is a result for the model, not a tool infrastructure failure.
+  const summary = input.promoted
+    ? `${input.label}（已转后台 ${input.jobId}）`
+    : input.code === 0
+      ? input.label
+      : `${input.label}（退出码 ${input.code}）`;
+  return {
+    ok: true,
+    summary,
+    data: {
+      ok: input.code === 0 && !input.promoted,
+      code: input.code,
+      cwd: input.cwd ?? null,
+      stdout,
+      stderr,
+      text,
+      truncated,
+      spillPath: input.spillPath ?? null,
+      spillBytes: input.spillBytes ?? null,
+      retentionNotice: retained.notice || null,
+      promoted: Boolean(input.promoted),
+      ...(input.jobId ? { jobId: input.jobId, status: input.status } : {}),
+    },
+    effects: [],
+  };
+}
+
+async function managedShellEnvFor(
+  env: WorkspaceToolEnv,
+  root: string,
+  cwd: string,
+): Promise<Record<string, string>> {
+  let home: string | null = null;
+  try {
+    home = await resolveDataDir();
+  } catch {
+    home = null;
+  }
+  return collectManagedShellEnv({
+    home,
+    sessionId: env.threadId,
+    workspaceRoot: root,
+    cwd,
+  });
+}
 
 async function runCancelableShell(input: {
   root: string;
@@ -690,11 +916,20 @@ async function runCancelableShell(input: {
   shell: "pwsh" | "bash";
   timeoutMs: number;
   signal: AbortSignal;
+  threadId?: string | null;
+  managedEnv?: Record<string, string>;
 }): Promise<AgentToolResult> {
   const { invoke } = await import("@tauri-apps/api/core");
   if (input.signal.aborted) {
     throw new DOMException("The operation was aborted.", "AbortError");
   }
+  const managedEnv =
+    input.managedEnv ??
+    (await managedShellEnvFor(
+      { rootPath: input.root, threadId: input.threadId },
+      input.root,
+      input.workdir,
+    ));
   const started = await invoke<{ id: string; description: string }>(
     "agent_workspace_job_start",
     {
@@ -703,12 +938,15 @@ async function runCancelableShell(input: {
       workdir: input.workdir,
       description: input.label,
       shell: input.shell,
+      managedEnv,
     },
   );
   const deadline = Date.now() + input.timeoutMs;
   let stdout = "";
   let stderr = "";
   let truncated = false;
+  let spillPath: string | null = null;
+  let spillBytes: number | null = null;
   try {
     while (true) {
       if (input.signal.aborted) {
@@ -720,11 +958,28 @@ async function runCancelableShell(input: {
       }
       const remaining = Math.max(0, deadline - Date.now());
       if (input.timeoutMs > 0 && remaining === 0) {
-        await invoke("agent_workspace_job_kill", {
+        // promoteOnTimeout: keep the process; hand the same job id to the model.
+        if (input.threadId) {
+          trackBackgroundJob(
+            input.threadId,
+            started.id,
+            started.description || input.label,
+          );
+        }
+        return presentShellResult({
+          label: input.label,
+          code: -1,
+          stdout: stripAnsiEscapes(stdout),
+          stderr: stripAnsiEscapes(stderr),
+          truncated,
+          spillPath,
+          spillBytes,
           jobId: started.id,
-          reason: `timeout ${input.timeoutMs}ms`,
+          status: "running",
+          cwd: input.workdir,
+          promoted: true,
+          timeoutMs: input.timeoutMs,
         });
-        return fail(`命令超时（${input.timeoutMs} ms）`);
       }
       const slice = Math.min(400, remaining || 400);
       const hit = await invoke<JobOutputHit>("agent_workspace_job_output", {
@@ -735,22 +990,24 @@ async function runCancelableShell(input: {
       if (hit.output) stdout += hit.output;
       if (hit.stderr) stderr = hit.stderr;
       truncated = truncated || hit.truncated;
+      if (hit.spillPath) spillPath = hit.spillPath;
+      if (hit.spillBytes != null) spillBytes = hit.spillBytes;
       if (hit.done) {
-        const okRun = hit.status === "completed";
-        return {
-          ok: okRun,
-          summary: okRun ? input.label : `${input.label}失败（退出码 ${hit.code ?? -1}）`,
-          data: {
-            ok: okRun,
-            code: hit.code ?? -1,
-            stdout: stripAnsiEscapes(stdout),
-            stderr: stripAnsiEscapes(stderr),
-            truncated,
-            jobId: started.id,
-            status: hit.status,
-          },
-          effects: [],
-        };
+        const stopped =
+          hit.status === "killed" || hit.status === "failed" ? hit.status : null;
+        return presentShellResult({
+          label: input.label,
+          code: hit.code ?? (hit.status === "completed" ? 0 : -1),
+          stdout: stripAnsiEscapes(stdout),
+          stderr: stripAnsiEscapes(stderr),
+          truncated,
+          spillPath,
+          spillBytes,
+          jobId: started.id,
+          status: hit.status,
+          cwd: input.workdir,
+          stopped,
+        });
       }
     }
   } catch (error) {
@@ -812,9 +1069,10 @@ async function runTerminalOpen(
         ? "pwsh"
         : preferShell();
   const { invoke } = await import("@tauri-apps/api/core");
+  const managedEnv = await managedShellEnvFor(env, root, workdir);
   const hit = await invoke<{ id: string; name: string; cwd: string; shell: string }>(
     "agent_terminal_open",
-    { root, workdir, name: name || null, shell },
+    { root, workdir, name: name || null, shell, managedEnv },
   );
   return ok(`已打开终端 ${hit.id}（${hit.shell || shell}）`, hit);
 }
@@ -939,7 +1197,7 @@ async function runWebFetch(
     throw new DOMException("The operation was aborted.", "AbortError");
   const apiKey = deepSeekApiKey(env);
   if (apiKey) {
-    const deep = await tryDeepSeekFetch(url, apiKey, env.signal);
+    const deep = await tryDeepSeekFetch(url, apiKey, env.signal, env.rootPath);
     if (deep) return deep;
   }
   const response = await hostFetch(url, {
@@ -949,11 +1207,13 @@ async function runWebFetch(
   });
   const raw = await response.text();
   const text = htmlToReadableText(raw);
-  return ok(response.ok ? `已抓取 ${url}` : `抓取 ${url} 返回 ${response.status}`, {
+  return presentFetchedText({
     url,
     status: response.status,
     text,
     provider: "http",
+    okStatus: response.ok,
+    root: env.rootPath,
   });
 }
 
@@ -961,6 +1221,7 @@ async function tryDeepSeekFetch(
   url: string,
   apiKey: string,
   signal?: AbortSignal,
+  root?: string | null,
 ): Promise<AgentToolResult | null> {
   try {
     const response = await hostFetch(`${DEEPSEEK_WEB_API_BASE_URL}/fetch`, {
@@ -978,15 +1239,69 @@ async function tryDeepSeekFetch(
     if (!response.ok) return null;
     const payload = (await response.json()) as { content?: unknown };
     if (typeof payload.content !== "string" || !payload.content.trim()) return null;
-    return ok(`已抓取 ${url}`, {
+    return presentFetchedText({
       url,
       status: 200,
       text: htmlToReadableText(payload.content),
       provider: "deepseek",
+      okStatus: true,
+      root: root ?? undefined,
     });
   } catch {
     return null;
   }
+}
+
+async function presentFetchedText(input: {
+  url: string;
+  status: number;
+  text: string;
+  provider: string;
+  okStatus: boolean;
+  root?: string;
+}): Promise<AgentToolResult> {
+  let text = input.text;
+  let spillPath: string | null = null;
+  let spillBytes: number | null = null;
+  let retentionNotice: string | null = null;
+  if (text.length > WEB_FETCH_LIMIT) {
+    if (input.root?.trim() && isTauriRuntime()) {
+      try {
+        const spill = await saveToolSpill({
+          root: input.root,
+          toolName: "web_fetch",
+          suggestedName: "web-fetch",
+          content: text,
+        });
+        spillPath = spill.locator;
+        spillBytes = spill.bytes;
+      } catch {
+        /* keep truncated preview without spill */
+      }
+    }
+    const retained = formatRetentionNotice({
+      content: text,
+      spillPath,
+      spillBytes,
+      headBytes: Math.floor(WEB_FETCH_LIMIT * 0.6),
+      tailBytes: Math.floor(WEB_FETCH_LIMIT * 0.3),
+    });
+    text = retained.preview;
+    retentionNotice = retained.notice || null;
+  }
+  return ok(
+    input.okStatus ? `已抓取 ${input.url}` : `抓取 ${input.url} 返回 ${input.status}`,
+    {
+      url: input.url,
+      status: input.status,
+      text,
+      provider: input.provider,
+      truncated: Boolean(retentionNotice),
+      spillPath,
+      spillBytes,
+      retentionNotice,
+    },
+  );
 }
 
 async function runWebSearch(
@@ -1242,11 +1557,64 @@ async function tryListDir(path: string): Promise<KbEntry[] | null> {
   }
 }
 
+/** Two-level directory rows for str_replace_editor view (DSH shallow listing). */
+async function collectStrReplaceDirRows(
+  absoluteRoot: string,
+  displayRoot: string,
+): Promise<Array<{ kind: "d" | "f"; path: string }>> {
+  const rows: Array<{ kind: "d" | "f"; path: string }> = [
+    { kind: "d", path: displayRoot },
+  ];
+  const top = (await tryListDir(absoluteRoot)) ?? [];
+  for (const entry of top) {
+    if (shouldSkipStrReplaceDirEntry(entry.name)) continue;
+    const childDisplay = `${displayRoot.replace(/[\\/]+$/, "")}/${entry.name}`;
+    const childAbsolute = joinPath(absoluteRoot, entry.name);
+    if (entry.isDir) {
+      rows.push({ kind: "d", path: childDisplay });
+      const nested = (await tryListDir(childAbsolute)) ?? [];
+      for (const child of nested) {
+        if (shouldSkipStrReplaceDirEntry(child.name)) continue;
+        rows.push({
+          kind: child.isDir ? "d" : "f",
+          path: `${childDisplay}/${child.name}`,
+        });
+      }
+    } else {
+      rows.push({ kind: "f", path: childDisplay });
+    }
+  }
+  return rows;
+}
+
 async function ensureParent(filePath: string): Promise<void> {
   const parent = parentDir(filePath);
   if (!parent || parent === filePath) return;
   if (await kbExists(parent)) return;
   await kbMkdir(parent);
+}
+
+function requireObserved(
+  env: WorkspaceToolEnv,
+  absolutePath: string,
+  displayPath: string,
+): AgentToolResult | null {
+  const decision = assertCanModifyExisting(
+    observedPathsFor(env.threadId),
+    absolutePath,
+    displayPath,
+  );
+  if (decision.ok === true) return null;
+  return failNotObserved(decision.reason);
+}
+
+function failNotObserved(reason: string): AgentToolResult {
+  return {
+    ok: false,
+    summary: reason,
+    data: { error: reason, code: FS_NOT_OBSERVED },
+    effects: [],
+  };
 }
 
 function requireRoot(env: WorkspaceToolEnv): string {

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   applyGoalSlash,
+  BLOCKED_AFTER_CONSECUTIVE_ROUNDS,
   createGoal,
   disarmGoal,
   formatGoalRoundPrompt,
+  GOAL_TOOL_BLOCK_THRESHOLD,
+  goalPolicyHint,
   parseGoalSlash,
   renderGoalWrapup,
   shouldContinueGoal,
@@ -78,6 +81,57 @@ describe("agent goal", () => {
     expect(formatGoalRoundPrompt(resumed.goal)).toContain("Goal Round");
     expect(renderGoalWrapup("迁数据库")).toContain("goal_complete");
     expect(disarmGoal(resumed.goal).continuationArmed).toBe(false);
+  });
+
+  it("enforces blockedAfterConsecutiveRounds on autonomous Goal Rounds", () => {
+    const created = createGoal("修掉 flaky 测试", 10, 1);
+    expect(created.ok).toBe(true);
+    if (created.ok === false) return;
+    const early = updateGoal(
+      created.goal,
+      {
+        goalId: created.goal.id,
+        revision: 1,
+        action: "blocked",
+        blockedReason: "缺登录凭证",
+      },
+      2,
+      { enforceBlockThreshold: true },
+    );
+    expect(early.ok).toBe(false);
+    if (early.ok === false) {
+      expect(early.code).toBe(GOAL_TOOL_BLOCK_THRESHOLD);
+      expect(early.reason).toContain(String(BLOCKED_AFTER_CONSECUTIVE_ROUNDS));
+    }
+    const matured = {
+      ...created.goal,
+      roundsStarted: BLOCKED_AFTER_CONSECUTIVE_ROUNDS,
+    };
+    const blocked = updateGoal(
+      matured,
+      {
+        goalId: matured.id,
+        revision: matured.revision,
+        action: "blocked",
+        blockedReason: "缺登录凭证",
+      },
+      3,
+      { enforceBlockThreshold: true },
+    );
+    expect(blocked.ok).toBe(true);
+    if (blocked.ok) expect(blocked.goal.phase).toBe("blocked");
+    const human = updateGoal(
+      created.goal,
+      {
+        goalId: created.goal.id,
+        revision: 1,
+        action: "blocked",
+        blockedReason: "用户叫停",
+      },
+      4,
+    );
+    expect(human.ok).toBe(true);
+    expect(goalPolicyHint()).toContain(String(BLOCKED_AFTER_CONSECUTIVE_ROUNDS));
   });
 
   it("parses and applies /goal slash requests", () => {

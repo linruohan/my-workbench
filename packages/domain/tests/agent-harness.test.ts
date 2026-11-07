@@ -4,6 +4,7 @@ import {
   addAgentMemory,
   applyMention,
   CLEARED_TOOL_RESULT,
+  PRUNED_TOOL_RESULT_MARK,
   compactMarkerText,
   formatActiveSkills,
   formatSessionContext,
@@ -21,6 +22,8 @@ import {
   parseMcpDocument,
   parsePluginManifest,
   planCompact,
+  pruneOversizedToolResults,
+  pruneToolResultText,
   resolveSlash,
   type AgentMessage,
 } from "../src/index.js";
@@ -84,6 +87,41 @@ describe("agent compact", () => {
     expect(slim[1]?.content).toContain("note_get");
     expect(slim[2]?.content).toBe(bulky);
     expect(slim[0]?.content).toBe("查一下");
+  });
+
+  it("prunes oversized tool results with head and tail", () => {
+    const head = "H".repeat(100);
+    const mid = "M".repeat(200);
+    const tail = "T".repeat(50);
+    const content = head + mid + tail;
+    const pruned = pruneToolResultText(content, {
+      thresholdChars: 200,
+      headChars: 100,
+      tailChars: 50,
+    });
+    expect(pruned.startsWith(head)).toBe(true);
+    expect(pruned.endsWith(tail)).toBe(true);
+    expect(pruned).toContain(PRUNED_TOOL_RESULT_MARK.trim());
+    expect(pruned.length).toBeLessThan(content.length);
+    expect(
+      pruneToolResultText(pruned, { thresholdChars: 200, headChars: 100, tailChars: 50 }),
+    ).toBe(pruned);
+  });
+
+  it("applies prune before microcompact in the model projection", () => {
+    const huge = `HEAD${"x".repeat(9000)}TAIL`;
+    const messages = [
+      message("user", "跑一下", "u"),
+      { ...message("tool", huge, "t1"), toolName: "shell" },
+      message("assistant", "好", "a"),
+    ];
+    const pruned = pruneOversizedToolResults(messages, {
+      thresholdChars: 8192,
+      headChars: 4096,
+      tailChars: 1024,
+    });
+    expect(pruned[1]?.content).toContain(PRUNED_TOOL_RESULT_MARK.trim());
+    expect(pruned[1]?.content.length).toBeLessThan(huge.length);
   });
 });
 

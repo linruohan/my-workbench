@@ -87,6 +87,18 @@ describe("slash commands", () => {
       type: "mode",
       mode: "session_auto",
     });
+    expect(resolveSlash("/mode default", "session_auto")).toEqual({
+      type: "mode",
+      mode: "confirm",
+    });
+    expect(resolveSlash("/mode ask", "readonly")).toEqual({
+      type: "mode",
+      mode: "confirm",
+    });
+    expect(resolveSlash("/permission readonly", "confirm")).toEqual({
+      type: "mode",
+      mode: "readonly",
+    });
     expect(resolveSlash("/mode 随便", "confirm")).toMatchObject({ type: "reply" });
     expect(resolveSlash("/model", "confirm")).toEqual({ type: "model-menu" });
     expect(resolveSlash("/model builtin:workbench/local", "confirm")).toEqual({

@@ -39,6 +39,7 @@ import {
   IconTrash,
   IconUser,
 } from "../shell/icons";
+import { VoiceField } from "../voice";
 import { HostToolsPane } from "./HostToolsPane";
 
 export type AgentCapabilityId =
@@ -126,13 +127,18 @@ function PersonalPane({
         写给 Agent
         的长期偏好，例如称呼、回复长短、排期习惯。每次会话都会放进系统提示，只保存在本机。
       </p>
-      <textarea
-        className="agent-cap__rules"
-        aria-label="用户规则"
-        placeholder="例如：用简体中文，回复尽量短。创建任务时若没说提醒，就提前 15 分钟。"
+      <VoiceField
         value={prefs.agentRules}
-        onChange={(e) => onPatch({ agentRules: e.target.value })}
-      />
+        onChange={(agentRules) => onPatch({ agentRules })}
+      >
+        <textarea
+          className="agent-cap__rules"
+          aria-label="用户规则"
+          placeholder="例如：用简体中文，回复尽量短。创建任务时若没说提醒，就提前 15 分钟。"
+          value={prefs.agentRules}
+          onChange={(e) => onPatch({ agentRules: e.target.value })}
+        />
+      </VoiceField>
     </>
   );
 }
@@ -169,13 +175,15 @@ function MemoryPane({
           add();
         }}
       >
-        <input
-          className="agent-cap__input"
-          aria-label="新记忆"
-          placeholder="例如：周五写周报，提前 15 分钟提醒"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-        />
+        <VoiceField value={text} onChange={setText}>
+          <input
+            className="agent-cap__input"
+            aria-label="新记忆"
+            placeholder="例如：周五写周报，提前 15 分钟提醒"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+          />
+        </VoiceField>
         <button type="submit" className="settings__save">
           添加记忆
         </button>

@@ -34,6 +34,7 @@ import {
   isAgentCapability,
   type AgentCapabilityId,
 } from "./AgentCapabilities";
+import { VoiceInputPane } from "./VoiceInputPane";
 import {
   IconBack,
   IconBell,
@@ -41,6 +42,7 @@ import {
   IconDatabase,
   IconInfo,
   IconLayout,
+  IconMic,
   IconSearch,
   IconSettings,
   IconSun,
@@ -50,6 +52,7 @@ export type SettingsSectionId =
   | "general"
   | "appearance"
   | "notifications"
+  | "voice"
   | "models"
   | AgentCapabilityId
   | "data"
@@ -69,6 +72,7 @@ const SECTION_GROUPS: Array<{
       { id: "general", label: "常规", icon: <IconSettings size={15} /> },
       { id: "appearance", label: "外观", icon: <IconSun size={15} /> },
       { id: "notifications", label: "通知", icon: <IconBell size={15} /> },
+      { id: "voice", label: "语音输入", icon: <IconMic size={15} /> },
     ],
   },
   {
@@ -175,6 +179,7 @@ export function SettingsView({
         {section === "notifications" ? (
           <NotificationsPane prefs={prefs} onPatch={patch} />
         ) : null}
+        {section === "voice" ? <VoiceInputPane prefs={prefs} onPatch={patch} /> : null}
         {section === "models" ? <ModelsPane /> : null}
         {isAgentCapability(section) ? (
           <AgentCapabilityPane

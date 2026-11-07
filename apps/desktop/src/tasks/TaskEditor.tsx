@@ -16,6 +16,7 @@ import { ScheduleRow } from "../timed/ScheduleRow";
 import { DateTimeField } from "../ui/CalendarField";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TagPicker } from "../ui/TagPicker";
+import { VoiceField } from "../voice";
 
 export type TaskEditorSave = {
   title: string;
@@ -199,25 +200,29 @@ export function TaskEditor({
 
         <div className="task-editor__body">
           <section className="task-editor__section">
-            <input
-              id="task-title"
-              className="field__control task-editor__title-input"
-              value={draft.title}
-              placeholder="任务标题"
-              aria-label="标题"
-              onChange={(e) => patch({ title: e.target.value })}
-              autoFocus
-            />
-            <textarea
-              id="task-notes"
-              ref={notesRef}
-              className="field__control field__control--area task-editor__notes"
-              rows={1}
-              value={draft.notes}
-              placeholder="补充说明、清单或上下文"
-              aria-label="备注"
-              onChange={(e) => patch({ notes: e.target.value })}
-            />
+            <VoiceField value={draft.title} onChange={(title) => patch({ title })}>
+              <input
+                id="task-title"
+                className="field__control task-editor__title-input"
+                value={draft.title}
+                placeholder="任务标题"
+                aria-label="标题"
+                onChange={(e) => patch({ title: e.target.value })}
+                autoFocus
+              />
+            </VoiceField>
+            <VoiceField value={draft.notes} onChange={(notes) => patch({ notes })}>
+              <textarea
+                id="task-notes"
+                ref={notesRef}
+                className="field__control field__control--area task-editor__notes"
+                rows={1}
+                value={draft.notes}
+                placeholder="补充说明、清单或上下文"
+                aria-label="备注"
+                onChange={(e) => patch({ notes: e.target.value })}
+              />
+            </VoiceField>
           </section>
 
           <section className="task-editor__section">

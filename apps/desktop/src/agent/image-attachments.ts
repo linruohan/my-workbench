@@ -3,6 +3,7 @@
  * In-memory refs plus optional disk persistence under the app data dir.
  */
 
+import type { ImageOffloadItem } from "@wb/domain";
 import { dataFilePath, isTauriRuntime } from "../lib/paths";
 
 export type StoredImageAttachment = {
@@ -18,10 +19,20 @@ export type StoredImageAttachment = {
   createdAt: number;
 };
 
+export type PendingImagesTake = {
+  dataUrls: string[];
+  attached: Array<{ id: string; path: string; name?: string }>;
+  offloaded: ImageOffloadItem[];
+};
+
 const byThread = new Map<string, StoredImageAttachment[]>();
 const pendingByThread = new Map<string, string[]>();
 
 const MAX_PER_THREAD = 24;
+/** Cap how many pending images ride the next model request. */
+export const PENDING_IMAGE_MAX_COUNT = 4;
+/** Rough total data-URL budget for one vision turn. */
+export const PENDING_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
 
 export function putImageAttachment(
   input: Omit<StoredImageAttachment, "id" | "createdAt"> & { id?: string },
@@ -88,18 +99,68 @@ export async function loadImageAttachment(
   }
 }
 
-/** Data URLs queued since the last model request; clears the pending queue. */
-export function takePendingImageDataUrls(threadId: string): string[] {
+/**
+ * Drain pending vision attachments for one model request.
+ * Keeps the newest images within count/byte budget; older ones stay in the
+ * attachment store and are reported as offloaded so the model can read_image again.
+ */
+export function takePendingImages(threadId: string): PendingImagesTake {
   const pending = pendingByThread.get(threadId) ?? [];
   pendingByThread.set(threadId, []);
   const list = byThread.get(threadId) ?? [];
   const byId = new Map(list.map((item) => [item.id, item]));
-  const out: string[] = [];
+  const queued: StoredImageAttachment[] = [];
   for (const id of pending) {
     const hit = byId.get(id);
-    if (hit?.dataUrl) out.push(hit.dataUrl);
+    if (hit?.dataUrl) queued.push(hit);
   }
-  return out;
+  const selected: StoredImageAttachment[] = [];
+  const offloaded: ImageOffloadItem[] = [];
+  let bytes = 0;
+  for (let i = queued.length - 1; i >= 0; i -= 1) {
+    const hit = queued[i]!;
+    const size = estimateDataUrlBytes(hit.dataUrl);
+    if (selected.length >= PENDING_IMAGE_MAX_COUNT) {
+      offloaded.unshift({
+        id: hit.id,
+        path: hit.path,
+        name: hit.name,
+        reason: "count",
+      });
+      continue;
+    }
+    if (selected.length > 0 && bytes + size > PENDING_IMAGE_MAX_BYTES) {
+      offloaded.unshift({
+        id: hit.id,
+        path: hit.path,
+        name: hit.name,
+        reason: "bytes",
+      });
+      continue;
+    }
+    selected.unshift(hit);
+    bytes += size;
+  }
+  return {
+    dataUrls: selected.map((item) => item.dataUrl),
+    attached: selected.map((item) => ({
+      id: item.id,
+      path: item.path,
+      name: item.name,
+    })),
+    offloaded,
+  };
+}
+
+/** Data URLs queued since the last model request; clears the pending queue. */
+export function takePendingImageDataUrls(threadId: string): string[] {
+  return takePendingImages(threadId).dataUrls;
+}
+
+function estimateDataUrlBytes(dataUrl: string): number {
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) return dataUrl.length;
+  return Math.floor(((dataUrl.length - comma - 1) * 3) / 4);
 }
 
 export function clearThreadImageAttachments(threadId: string): void {

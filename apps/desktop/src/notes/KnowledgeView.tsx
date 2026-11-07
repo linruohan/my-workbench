@@ -15,6 +15,7 @@ import { errorMessage } from "../lib/errors";
 import { isTauriRuntime } from "../lib/paths";
 import { PromptModal } from "../shell/PromptModal";
 import { useDialog } from "../shell/Dialogs";
+import { VoiceField } from "../voice";
 import { FileTree } from "./FileTree";
 import { KnowledgeLibraryMenu } from "./KnowledgeLibraryMenu";
 import {
@@ -714,19 +715,21 @@ function PlainTextFile({
       <p className="knowledge__path" title={path}>
         {path}
       </p>
-      <textarea
-        className="note-editor__source knowledge__plain"
-        aria-label="文件内容"
-        spellCheck={false}
-        value={body}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-            e.preventDefault();
-            onSave();
-          }
-        }}
-      />
+      <VoiceField value={body} onChange={onChange} className="knowledge__voice">
+        <textarea
+          className="note-editor__source knowledge__plain"
+          aria-label="文件内容"
+          spellCheck={false}
+          value={body}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+              e.preventDefault();
+              onSave();
+            }
+          }}
+        />
+      </VoiceField>
     </div>
   );
 }

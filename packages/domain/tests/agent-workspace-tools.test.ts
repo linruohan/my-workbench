@@ -3,10 +3,22 @@ import {
   applyLiteralEdit,
   boundDeepSeekSearchText,
   filePathFromArgs,
+  clipStrReplaceView,
+  formatGrepSpillText,
   formatNumberedLines,
+  formatShellExitMarker,
+  formatShellModelText,
+  formatShellPromoteMarker,
+  formatShellTruncatedMarker,
+  formatStrReplaceDirListing,
   formatTodosForPrompt,
   formatWorkspaceToolsHint,
+  GREP_CAPTURE_LIMIT,
+  GREP_MATCH_LIMIT,
+  RESPONSE_CLIPPED_NOTICE,
   globToRegExp,
+  shouldSkipStrReplaceDirEntry,
+  shouldSpillGrepMatches,
   htmlToReadableText,
   insertAtLine,
   isAllowedFetchUrl,
@@ -60,6 +72,90 @@ describe("workspace tool catalog", () => {
     expect(formatWorkspaceToolsHint(true)).toContain("terminal_");
     expect(formatWorkspaceToolsHint(true)).toContain("read_image");
     expect(formatWorkspaceToolsHint(false)).toContain("ask_user_question");
+  });
+});
+
+describe("grep spill helpers", () => {
+  it("formats path:line:text spill body and decides when to spill", () => {
+    expect(
+      formatGrepSpillText([
+        { path: "a.ts", line: 3, text: "foo" },
+        { path: "b.ts", line: 9, text: "bar" },
+      ]),
+    ).toBe("a.ts:3:foo\nb.ts:9:bar");
+    expect(shouldSpillGrepMatches(GREP_MATCH_LIMIT)).toBe(false);
+    expect(shouldSpillGrepMatches(GREP_MATCH_LIMIT + 1)).toBe(true);
+    expect(shouldSpillGrepMatches(GREP_CAPTURE_LIMIT)).toBe(true);
+  });
+});
+
+describe("shell result markers", () => {
+  it("formats promote and exit markers like DSH", () => {
+    expect(formatShellPromoteMarker(120_000, "job_3")).toBe(
+      "[still running after 120000ms; moved to background job job_3]",
+    );
+    expect(formatShellExitMarker(0)).toBe("");
+    expect(formatShellExitMarker(2)).toBe("[exit code: 2]");
+    expect(formatShellTruncatedMarker(".wb/spill/a.txt")).toBe(
+      "[output truncated; full output: .wb/spill/a.txt]",
+    );
+  });
+
+  it("renders model-facing shell text with stderr section and markers", () => {
+    expect(
+      formatShellModelText({
+        stdout: "",
+        stderr: "",
+        code: 0,
+      }),
+    ).toBe("(no output)");
+    expect(
+      formatShellModelText({
+        stdout: "hello",
+        stderr: "warn",
+        code: 2,
+      }),
+    ).toBe("hello\n[stderr]\nwarn\n[exit code: 2]");
+    expect(
+      formatShellModelText({
+        stdout: "partial",
+        stderr: "",
+        code: -1,
+        promoted: true,
+        timeoutMs: 1000,
+        jobId: "job_9",
+      }),
+    ).toBe("partial\n[still running after 1000ms; moved to background job job_9]");
+  });
+
+  it("mentions exit-code checks in the workspace tools hint", () => {
+    expect(formatWorkspaceToolsHint(true)).toContain("[exit code: N]");
+  });
+});
+
+describe("str_replace_editor view helpers", () => {
+  it("clips long views with the DSH response clipped notice", () => {
+    const long = "x".repeat(20_000);
+    const clipped = clipStrReplaceView(long, 100);
+    expect(clipped.clipped).toBe(true);
+    expect(clipped.text.startsWith("x".repeat(100))).toBe(true);
+    expect(clipped.text.endsWith(RESPONSE_CLIPPED_NOTICE)).toBe(true);
+    expect(clipStrReplaceView("short").clipped).toBe(false);
+  });
+
+  it("skips hidden and cache dirs and formats a two-level listing", () => {
+    expect(shouldSkipStrReplaceDirEntry(".git")).toBe(true);
+    expect(shouldSkipStrReplaceDirEntry("node_modules")).toBe(true);
+    expect(shouldSkipStrReplaceDirEntry("__pycache__")).toBe(true);
+    expect(shouldSkipStrReplaceDirEntry("src")).toBe(false);
+    const text = formatStrReplaceDirListing("proj", [
+      { kind: "f", path: "proj/b.ts" },
+      { kind: "d", path: "proj" },
+      { kind: "d", path: "proj/a" },
+    ]);
+    expect(text).toContain("up to 2 levels deep in proj");
+    expect(text).toContain("d\tproj\n");
+    expect(text.indexOf("proj/a")).toBeLessThan(text.indexOf("proj/b.ts"));
   });
 });
 

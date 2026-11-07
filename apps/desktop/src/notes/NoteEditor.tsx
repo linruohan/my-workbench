@@ -50,6 +50,7 @@ import { renderMarkdown } from "../lib/markdown";
 import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { isTauriRuntime } from "../lib/paths";
 import { useDialog } from "../shell/Dialogs";
+import { appendVoiceText, insertVoiceText, VoiceInputButton } from "../voice";
 import {
   bytesToBase64,
   clipboardFileToPngBytes,
@@ -1403,6 +1404,39 @@ export function NoteEditor({
           >
             跳转
           </button>
+          <VoiceInputButton
+            className="note-editor__voice"
+            onArm={() => {
+              if (active != null && editRef.current) {
+                const area = editRef.current;
+                const pos = area.selectionStart ?? area.value.length;
+                area.focus({ preventScroll: true });
+                area.setSelectionRange(pos, pos);
+                return;
+              }
+              if (blocks.length === 0) {
+                activate(0, { caret: 0 });
+                return;
+              }
+              const last = blocks.length - 1;
+              activate(last, { caret: (blocks[last] ?? "").length });
+            }}
+            onInsert={(text) => {
+              if (active != null && editRef.current) {
+                const area = editRef.current;
+                const { value, caret } = insertVoiceText(
+                  area.value,
+                  text,
+                  area.selectionStart,
+                );
+                const nextBlocks = [...blocks];
+                nextBlocks[active] = value;
+                commitBlocks(nextBlocks, active, caret);
+                return;
+              }
+              onChange({ bodyMd: appendVoiceText(note.bodyMd, text) });
+            }}
+          />
           <div className="note-editor__swatch">
             <button
               type="button"

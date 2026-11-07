@@ -16,9 +16,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "new", aliases: ["clear"], summary: "新开一个会话", usage: "/new" },
   {
     name: "mode",
-    aliases: [],
+    aliases: ["permission"],
     summary: "查看或切换写入权限",
-    usage: "/mode [变更前确认|本会话自动|只读]",
+    usage: "/mode [变更前确认|本会话自动|只读|default|auto|readonly]",
   },
   {
     name: "model",
@@ -271,11 +271,16 @@ function modeAction(args: string, mode: AgentPermissionMode): SlashAction {
   if (!args) {
     return {
       type: "reply",
-      text: `当前权限：${permissionModeLabel(mode)}。可改为变更前确认、本会话自动或只读。`,
+      text: `当前权限：${permissionModeLabel(mode)}（别名 default/ask→变更前确认，auto→本会话自动，readonly→只读）。`,
     };
   }
-  const next = parseMode(args);
-  if (!next) return { type: "reply", text: "权限只能是：变更前确认、本会话自动、只读。" };
+  const next = parsePermissionMode(args);
+  if (!next) {
+    return {
+      type: "reply",
+      text: "权限只能是：变更前确认（default/ask）、本会话自动（auto）、只读（readonly）。",
+    };
+  }
   if (next === mode) {
     return { type: "reply", text: `当前已经是${permissionModeLabel(mode)}。` };
   }
@@ -306,10 +311,16 @@ function findCommand(token: string): SlashCommand | null {
   );
 }
 
-function parseMode(args: string): AgentPermissionMode | null {
+/**
+ * Map human / DSH-style preset names onto the three local permission modes.
+ * Does not introduce sandbox ACL modes (workspace-write / danger-full-access).
+ */
+export function parsePermissionMode(args: string): AgentPermissionMode | null {
   const folded = args.trim().toLowerCase();
   if (
     folded === "confirm" ||
+    folded === "default" ||
+    folded === "ask" ||
     args === "变更前确认" ||
     args === "需确认" ||
     args === "确认"

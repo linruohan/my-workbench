@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { VoiceField } from "../voice";
 import { IconClose } from "./icons";
 
 type Props = {
@@ -77,13 +78,15 @@ export function PromptModal({
             <label className="field__label" htmlFor={inputId}>
               {label}
             </label>
-            <input
-              ref={inputRef}
-              id={inputId}
-              className="date-input"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-            />
+            <VoiceField value={value} onChange={setValue}>
+              <input
+                ref={inputRef}
+                id={inputId}
+                className="date-input"
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+              />
+            </VoiceField>
           </div>
         </div>
 

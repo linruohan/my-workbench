@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { timedScheduleLabel, type TimedSchedule, type TimedTask } from "@wb/domain";
+import { VoiceField } from "../voice";
 import { ScheduleAddMenu } from "./ScheduleAddMenu";
 import { ScheduleRow } from "./ScheduleRow";
 
@@ -80,13 +81,15 @@ export function TimedTaskEditor({
             <label className="field__label" htmlFor="timed-title">
               任务标题
             </label>
-            <input
-              id="timed-title"
-              className="field__control"
-              value={draft.title}
-              placeholder="未命名定时任务"
-              onChange={(e) => onChange({ title: e.target.value })}
-            />
+            <VoiceField value={draft.title} onChange={(title) => onChange({ title })}>
+              <input
+                id="timed-title"
+                className="field__control"
+                value={draft.title}
+                placeholder="未命名定时任务"
+                onChange={(e) => onChange({ title: e.target.value })}
+              />
+            </VoiceField>
           </div>
 
           <div className="field">
@@ -115,14 +118,19 @@ export function TimedTaskEditor({
             <label className="field__label" htmlFor="timed-command">
               指令
             </label>
-            <textarea
-              id="timed-command"
-              className="field__control field__control--area"
-              rows={7}
+            <VoiceField
               value={draft.command}
-              placeholder="例如：Review 最近 24 小时的提交，总结可能引入的 bug 和修复建议"
-              onChange={(e) => onChange({ command: e.target.value })}
-            />
+              onChange={(command) => onChange({ command })}
+            >
+              <textarea
+                id="timed-command"
+                className="field__control field__control--area"
+                rows={7}
+                value={draft.command}
+                placeholder="例如：Review 最近 24 小时的提交，总结可能引入的 bug 和修复建议"
+                onChange={(e) => onChange({ command: e.target.value })}
+              />
+            </VoiceField>
           </div>
         </div>
       ) : (

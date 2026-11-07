@@ -60,18 +60,20 @@
 | `write` | ✅ `write` | 工作区内写文件 |
 | `edit` | ✅ `edit` | 字面量替换 |
 | `apply_patch` | ✅ `apply_patch` | Codex 风格补丁（domain `agent-patch`） |
-| `read_image` | ✅ `read_image` | PNG/JPEG/WebP/GIF 魔数校验；会话附件库（`attachmentId`）+ 可选磁盘落盘；排队到下一轮 vision 请求（可多图） |
+| `read_image` | ✅ `read_image` | PNG/JPEG/WebP/GIF 魔数校验；canvas 规范化（长边 ≤2048、JPEG 质量阶梯逼近 4 MiB）；会话附件库 + 下一轮 vision；超额挂载以 `<image_offload>` 提示可 `read_image` 重读 |
 
-未对齐：`dsh-fs-observation-policy`（先读后写策略）、沙箱围栏、spill、稳定错误码体系、sharp 规范化缩略图 / 对象路径再准入。
+观察策略（轻量）：本会话须先 `read` / `read_image` / `view` 才可覆盖、编辑、删除已有文件；新建不存在路径仍允许；错误码 `FS_NOT_OBSERVED`。无版本新鲜度检测。
+
+未对齐：沙箱围栏、稳定错误码体系（除观察策略）、内容寻址对象存储。
 
 ### `dsh-tool-fs-search` — ✅ 已接入
 
 | DSH 工具 | 本仓库 | 说明 |
 | --- | --- | --- |
 | `glob` | ✅ | 工作区文件发现，有结果上限 |
-| `grep` | ✅ | 内容搜索，有匹配上限 |
+| `grep` | ✅ | 宿主 ripgrep；内联最多 250 条；超限写入 `.wb/spill`（捕获上限 2000） |
 
-未对齐：DSH 的 spill 超限完整恢复、部分 ignore/VCS 细节；本仓库为自实现扫描，不依赖宿主 `rg`。
+未对齐：部分 ignore/VCS 细节；glob 仍为自实现扫描（可选 rg）。
 
 ### `dsh-tool-working-directory` — ✅ 已接入
 
@@ -87,7 +89,13 @@
 | --- | --- | --- |
 | `bash` | ✅ `bash` | 强制 bash（Windows 需 Git Bash 等）；另有 `shell` 按平台默认 pwsh/bash |
 
-未对齐：`DSH_*` 受管环境、沙箱 `sandbox_permissions` / justification 升权、与 job 注册表的深度耦合（超时自动转 job id 等细节）。后台：`background: true` → `job_*`。
+环境：agent `bash`/`shell`/`pwsh` 与 `terminal_*` 启动时走 allowlist scrub（丢弃宿主机密与环境中的 `WB_*`），再按次注入受管事实：`WB_AGENT_SHELL=1`、`WB_HOME`、`WB_SESSION_ID`、`WB_WORKSPACE_ROOT`、`WB_CWD`（对齐 `dsh-shell-env` 的轻量版，无 contributor 注册表）。  
+
+前台一律经 job 注册表等待：超时 **promoteOnTimeout**（不杀进程，返回同一 job id + 目前输出 + `[still running after …]`）；用户取消仍 `job_kill`。非零退出以 `[exit code: N]` 报告，工具本身仍成功。后台：`background: true` → `job_*`。  
+
+模型侧渲染（对齐 `renderResult`）：无输出时 `(no output)`；stderr 以 `[stderr]` 分段；截断为 `[output truncated; full output: …]`；结构化结果含启动 `cwd`。工作区提示词要求检查 exit code。  
+
+未对齐：插件式 `DSH_*` contributor 注册表、沙箱 `sandbox_permissions` / justification 升权。
 
 ### `dsh-tool-bash-persistent` — 🟡 部分接入
 
@@ -122,6 +130,8 @@ DSH 用按所有者隔离的持久 bash（跨调用保留 cwd/变量）。
 | `terminal_close` | ✅ | |
 | `terminal_signal` | ✅ | SIGINT→Ctrl+C；SIGTERM/KILL 杀进程 |
 
+环境：同 shell，PTY 启动时 allowlist scrub。  
+
 未对齐：完整 xterm.js 渲染、OSC 颜色恢复、Tab 补全菜单、Host 重启后进程恢复、DSH 侧栏配额语义。本仓库有轻量终端面板（文本预览 + 输入）。
 
 ### `dsh-tool-jobs` — ✅ 已接入
@@ -133,7 +143,7 @@ DSH 用按所有者隔离的持久 bash（跨调用保留 cwd/变量）。
 | `job_kill` | ✅ | |
 | 完成通知 | ✅ | 空闲会话自动唤醒；繁忙会话在下一步模型请求前注入 system 通知 |
 
-未对齐：PTY/subagent 作为 job kind、steer 打断 wait、`kind` 字段细分。本仓库 job 目前主要来自 `bash`/`shell`/`pwsh` 的 `background: true`。
+未对齐：PTY/subagent 作为 job kind、steer 打断 wait、`kind` 字段细分。本仓库 job 来自 `background: true` 与前台超时 promote。
 
 ### `dsh-tool-web` — ✅ 已接入
 
@@ -193,7 +203,7 @@ DSH 用按所有者隔离的持久 bash（跨调用保留 cwd/变量）。
 | --- | --- | --- |
 | `str_replace_editor` | ✅ | `view` / `create` / `str_replace` / `insert`；与 `read`/`write`/`edit` 并存以兼容 Claude Code 风格提示 |
 
-未对齐：DSH 超长输出 `<response clipped>`、目录 view 两级深度的完整细节。
+`view`：文件超长按 `maxOutputChars=16000` 截断并附 `<response clipped>`；目录列出两级（跳过隐藏 / `node_modules` / `__pycache__`）。
 
 ### `dsh-tool-present` — ✅ 已接入
 
@@ -211,7 +221,9 @@ Rust 无法直接嵌入 LibreOffice Kit，因此通过 Node 桥接调用 `@deeps
 - 命令：`agent_office_to_pdf`（路径 jail 在工作区内）
 - 解析顺序：`WB_LIBREOFFICE_KIT` → 本地 `node_modules` → 本机 DSH 全局安装下的 kit
 
-未对齐：字体元数据缓存调优、`renderImages` / `recalculate`、WASM 回退、LibreOffice 进程级硬杀（当前为协作取消等待）。
+硬杀：前端 `opId` + `agent_office_cancel`；Rust 侧 Windows Job Object / Unix 进程组终止 Node 桥与子树（LibreOffice 引擎若未进同一 Job 仍可能残留，见已知限制）。
+
+未对齐：字体元数据缓存调优、`renderImages` / `recalculate`、WASM 回退。
 
 ### `dsh-tool-goal` — 🟡 部分接入
 
@@ -221,10 +233,11 @@ Rust 无法直接嵌入 LibreOffice Kit，因此通过 Node 桥接调用 `@deeps
 | `create_goal` | ✅ | 精确 objective / max_goal_rounds |
 | `update_goal` | ✅ | edit / pause / resume / complete / blocked + revision；模型不可 resume paused（`GOAL_TOOL_RESUME_PAUSED`） |
 | Round 计数 | 🟡 | 顶层模型回合完成时 `roundsStarted++`；达 `maxRounds` → blocked |
-| 续行驱动 | 🟡 | 会话空闲且队列为空时，若 active+armed 则注入 Goal Round 提示并再跑一轮；complete/blocked 注入 wrapup 收尾指令 |
+| 续行驱动 | 🟡 | 会话空闲且队列为空时，若 active+armed 则注入 Goal Round 提示并再跑一轮；自主 complete/blocked 才注入 wrapup |
+| blocked 阈值 | ✅ | 自主 Goal Round：`roundsStarted < blockedAfterConsecutiveRounds`（默认 3）时拒绝，`GOAL_TOOL_BLOCK_THRESHOLD`；用户直接回合可立即 blocked；策略提示与阈值同值 |
 | `/goal` | ✅ | status / create / edit / pause / resume / clear；不进模型；resume paused 走用户路径 |
 
-未对齐：跨会话持久 Goal 服务 / 事件溯源、连续 blocked 阈值（`blockedAfterConsecutiveRounds`）、`/goal` 附件随目标提交。
+未对齐：跨会话持久 Goal 服务 / 事件溯源、`/goal` 附件随目标提交。
 
 ### `dsh-tool-schedule` — 🟡 部分接入
 
@@ -279,7 +292,39 @@ Rust 无法直接嵌入 LibreOffice Kit，因此通过 Node 桥接调用 `@deeps
 
 DSH：统一协作式取消 + 超时错误映射。
 
-本仓库：`turn.ts` 对 web/shell/office/subagent/job_output 等声明默认预算；工具执行与 drain 循环协作监听 `AbortSignal`；超时 `TOOL_TIMEOUT`；`web_*` / `office_to_pdf` 竞赛取消；前台 shell 经 `job_kill` 硬停。LibreOffice 子进程本身未必随 abort 立刻退出。
+本仓库：`turn.ts` 对 web/shell/office/subagent/job_output 等声明默认预算；工具执行与 drain 循环协作监听 `AbortSignal`；超时 `TOOL_TIMEOUT`。前台 shell 经 job + `job_kill`（Job Object / 进程组）硬停；`office_to_pdf` 超时/中止调用 `agent_office_cancel` 硬杀桥接进程树；`web_*` 仍为竞赛取消 HTTP。
+
+### 进程树硬杀（对齐 `dsh-win32-process` 语义，本地重写）— ⚙️✅
+
+- Windows：unnamed Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`；`job_kill` / shell 超时 / office cancel 走 `TerminateJobObject`
+- Unix：`process_group(0)` + `kill(-pgid, SIGKILL)`
+- 覆盖：`agent_workspace_shell`、后台/可取消 job、`agent_office_to_pdf`
+
+### Spill / output retention（对齐 `dsh-spill*` + `dsh-output-retention`，本地重写）— ⚙️🟡
+
+- 超限 shell/job 输出 tee 到工作区 `.wb/spill/*.txt`，内联保留 head/tail 预览 + 恢复提示（可用 `read`/`grep`）
+- `web_fetch` 超 `WEB_FETCH_LIMIT` 时同样落盘 spill（需已绑定工作区）
+- Domain：`output-retention.ts`；Desktop：`spill-store.ts`
+
+- 启动 GC：绑定工作区时清理 `.wb/spill` 中超过 30 天的文件（`cleanupToolSpill`）
+- 模型视图：`pruneOversizedToolResults` 对超长工具结果做 head/tail 修剪，再必要时 microcompact 硬清
+
+- `grep`：捕获超过内联上限（或触达捕获上限）时，匹配全文 tee 到 `.wb/spill`，模型侧附 `retentionNotice`
+- 图片（轻量）：单轮 vision 挂载有张数 / 体积上限；超出的较早附件仍留在会话附件库，并向模型注入 `<image_offload>` 路径提示（可 `read_image` 重读）
+
+未对齐：token 级 spill-policy（文字+图片共享估算预算）、完整 provider `IMAGE_OFFLOAD_REQUIRED` 拒图重试协议。
+
+### `dsh-repeat-tool-reminder` — ⚙️✅ 基础设施
+
+- 精确匹配同工具 + 规范化参数连续链；阈值 3 / 5 / 8；仅建议、不阻断
+- 新用户消息清零；`todo_write` / `job_output` 透明排除
+- Domain：`agent-repeat-tool.ts`；接线 `turn.ts` `sayTool` 之后
+
+### `dsh-permission-presets` — ⚙️🟡 别名映射（无沙箱）
+
+本仓库仍是三档：`confirm` / `session_auto` / `readonly`。  
+别名：`default`/`ask`→confirm，`auto`→session_auto，`readonly`→readonly；`/permission` 同 `/mode`。  
+不引入 `workspace-write` / `danger-full-access`（依赖 Windows ACL 沙箱，整包延后）。
 
 ### `dsh-tool-executor-native` — ⚙️✅ 基础设施
 
@@ -309,8 +354,9 @@ DSH：统一协作式取消 + 超时错误映射。
 
 ## 接入优先级备忘（若继续对齐）
 
-1. **高价值、可渐进**：sharp 缩略图规范化、LibreOffice 进程硬杀  
-2. **明确不做 / 低优先**：Cordis 自省、PTC `run_code`、Ralph、workflow 全编排
+1. **高价值、可渐进**：沙箱（Windows ACL，整包延后）  
+2. **明确不做 / 低优先**：Cordis 自省、PTC `run_code`、Ralph、workflow 全编排  
+3. **DSH 产品对齐**：工具面 / shell 卫生 / str_replace view / goal blocked 阈值 / 图片 offload 提示已过拐点；再借包清单收益偏低
 
 ---
 

@@ -543,12 +543,17 @@ export function describeToolResult(name: string, data: unknown, summary: string)
     );
   }
 
-  if (
-    name === "host_tool_run" ||
-    name === "pwsh" ||
-    name === "bash" ||
-    name === "shell"
-  ) {
+  if (name === "pwsh" || name === "bash" || name === "shell") {
+    if (typeof record.text === "string" && record.text.trim()) {
+      return [summary, clipOutput(record.text)].filter(Boolean).join("\n");
+    }
+    const stdout = clipOutput(record.stdout);
+    const stderr = clipOutput(record.stderr);
+    const truncated = record.truncated === true ? "输出已截断" : "";
+    return [summary, stdout, stderr, truncated].filter(Boolean).join("\n");
+  }
+
+  if (name === "host_tool_run") {
     const stdout = clipOutput(record.stdout);
     const stderr = clipOutput(record.stderr);
     const truncated = record.truncated === true ? "输出已截断" : "";
@@ -821,7 +826,7 @@ export function describeToolResult(name: string, data: unknown, summary: string)
 
   if (name === "glob" || name === "grep") {
     const hits = asArray(record.paths) ?? asArray(record.matches) ?? [];
-    return joinList(
+    const body = joinList(
       summary,
       hits.slice(0, 40).map((item) => {
         if (typeof item === "string") return `· ${item}`;
@@ -833,6 +838,9 @@ export function describeToolResult(name: string, data: unknown, summary: string)
         return typeof row.path === "string" ? `· ${row.path}` : "";
       }),
     );
+    const notice =
+      typeof record.retentionNotice === "string" ? record.retentionNotice.trim() : "";
+    return notice ? [body, notice].filter(Boolean).join("\n") : body;
   }
 
   if (name === "todo_write") {

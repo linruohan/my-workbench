@@ -80,6 +80,29 @@ export function createGoal(
 
 export type GoalUpdateAction = "edit" | "pause" | "resume" | "complete" | "blocked";
 
+/** Minimum goal rounds before an autonomous Goal Round may self-report blocked (DSH). */
+export const BLOCKED_AFTER_CONSECUTIVE_ROUNDS = 3;
+export const GOAL_TOOL_BLOCK_THRESHOLD = "GOAL_TOOL_BLOCK_THRESHOLD";
+export const GOAL_TOOL_RESUME_PAUSED = "GOAL_TOOL_RESUME_PAUSED";
+
+export type GoalUpdateOptions = {
+  /** User-facing `/goal resume` may rearm a durable paused goal. */
+  allowPausedResume?: boolean;
+  /**
+   * When true (autonomous Goal Round), `blocked` is rejected until
+   * `roundsStarted >= blockedAfterConsecutiveRounds`. Direct human turns omit this.
+   */
+  enforceBlockThreshold?: boolean;
+  blockedAfterConsecutiveRounds?: number;
+};
+
+export function resolveBlockedAfterConsecutiveRounds(value?: number): number {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) {
+    return value;
+  }
+  return BLOCKED_AFTER_CONSECUTIVE_ROUNDS;
+}
+
 export function updateGoal(
   current: AgentGoal | null,
   input: {
@@ -91,7 +114,7 @@ export function updateGoal(
     blockedReason?: string;
   },
   nowMs = Date.now(),
-  options?: { allowPausedResume?: boolean },
+  options?: GoalUpdateOptions,
 ): { ok: true; goal: AgentGoal } | { ok: false; reason: string; code?: string } {
   if (!current) return { ok: false, reason: "当前没有 goal" };
   if (current.id !== input.goalId.trim()) {
@@ -146,7 +169,7 @@ export function updateGoal(
       return {
         ok: false,
         reason: "paused goal 须由用户恢复，不能用 update_goal resume",
-        code: "GOAL_TOOL_RESUME_PAUSED",
+        code: GOAL_TOOL_RESUME_PAUSED,
       };
     }
     if (current.roundsStarted >= current.maxRounds) {
@@ -166,6 +189,18 @@ export function updateGoal(
   // blocked
   const reason = input.blockedReason?.trim() ?? "";
   if (!reason) return { ok: false, reason: "blocked 需要 blocked_reason" };
+  if (options?.enforceBlockThreshold) {
+    const threshold = resolveBlockedAfterConsecutiveRounds(
+      options.blockedAfterConsecutiveRounds,
+    );
+    if (current.roundsStarted < threshold) {
+      return {
+        ok: false,
+        reason: `blocked 需要至少连续 ${threshold} 个 Goal Round；当前 roundsStarted=${current.roundsStarted}`,
+        code: GOAL_TOOL_BLOCK_THRESHOLD,
+      };
+    }
+  }
   next.phase = "blocked";
   next.continuationArmed = false;
   next.blockedReason = reason.slice(0, 500);
@@ -221,13 +256,22 @@ export function renderGoalWrapup(
   ].join("\n");
 }
 
-export const GOAL_POLICY_HINT =
-  "create_goal 可从用户直接请求推断长期目标。会话恢复后 active goal 会 disarm：用户要求继续时用 update_goal resume 重新启用。仅在目标真正达成时 complete；同一阻塞条件持续多轮后再 blocked，并写明具体条件。";
+export function goalPolicyHint(blockedAfter = BLOCKED_AFTER_CONSECUTIVE_ROUNDS): string {
+  const threshold = resolveBlockedAfterConsecutiveRounds(blockedAfter);
+  return `create_goal 可从用户直接请求推断长期目标。会话恢复后 active goal 会 disarm：用户要求继续时用 update_goal resume 重新启用。仅在目标真正达成时 complete；同一阻塞条件持续至少 ${threshold} 个连续 Goal Round 后再 blocked，并写明具体条件；难度或仍可推进的工作不算 blocked。`;
+}
 
-export function formatGoalForPrompt(goal: AgentGoal | null): string {
-  if (!goal) return GOAL_POLICY_HINT;
+/** @deprecated Prefer goalPolicyHint() so the threshold stays in sync with enforcement. */
+export const GOAL_POLICY_HINT = goalPolicyHint();
+
+export function formatGoalForPrompt(
+  goal: AgentGoal | null,
+  blockedAfter = BLOCKED_AFTER_CONSECUTIVE_ROUNDS,
+): string {
+  const hint = goalPolicyHint(blockedAfter);
+  if (!goal) return hint;
   return [
-    GOAL_POLICY_HINT,
+    hint,
     "当前会话 goal：",
     `- id ${goal.id} rev ${goal.revision}`,
     `- ${goal.phase} · ${goal.objective}`,

@@ -1,4 +1,9 @@
-import { hostToolById, type HostToolProbe } from "@wb/domain";
+import {
+  hostToolById,
+  isSpeechLanguage,
+  type HostToolProbe,
+  type SpeechLanguage,
+} from "@wb/domain";
 import type {
   AgentCustomCommand,
   AgentHook,
@@ -65,6 +70,11 @@ export type AppPrefs = {
   hostToolsFetched: boolean;
   /** Skill ids the user turned off in Settings → 技能. */
   disabledSkillIds: string[];
+  /** Experimental local SenseVoice voice input. */
+  voiceInputEnabled: boolean;
+  /** Browser MediaDeviceInfo.deviceId; empty = system default. */
+  voiceInputDeviceId: string;
+  voiceInputLanguage: SpeechLanguage;
 };
 
 const DEFAULTS: AppPrefs = {
@@ -100,6 +110,9 @@ const DEFAULTS: AppPrefs = {
   hostToolRecords: [],
   hostToolsFetched: false,
   disabledSkillIds: [],
+  voiceInputEnabled: false,
+  voiceInputDeviceId: "",
+  voiceInputLanguage: "auto",
 };
 
 function normalizeSkillDirs(value: unknown): SkillSourceDir[] {
@@ -136,6 +149,12 @@ function mergePrefs(partial?: Partial<AppPrefs> | null): AppPrefs {
   next.hostToolsFetched = next.hostToolsFetched === true;
   next.uiFont = normalizeFontFamily(next.uiFont);
   next.webFont = normalizeFontFamily(next.webFont);
+  next.voiceInputEnabled = next.voiceInputEnabled === true;
+  next.voiceInputDeviceId =
+    typeof next.voiceInputDeviceId === "string" ? next.voiceInputDeviceId.trim() : "";
+  next.voiceInputLanguage = isSpeechLanguage(String(next.voiceInputLanguage))
+    ? next.voiceInputLanguage
+    : "auto";
   return next;
 }
 

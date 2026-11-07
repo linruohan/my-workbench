@@ -28,6 +28,7 @@ import {
   formatGoalForPrompt,
   renderGoalWrapup,
   formatWorkspaceToolsHint,
+  formatImageOffloadNotice,
   findSubagent,
   invokedSkillsInText,
   omitInvokedSkillTokens,
@@ -48,8 +49,10 @@ import {
   reduceOpenAiStreamEvent,
   takeSseData,
   describeToolResult,
+  noteRepeatedToolCall,
   toolCallSummary,
   type AgentGoal,
+  type RepeatToolState,
   type AgentHook,
   type AgentMemory,
   type AgentMessage,
@@ -82,7 +85,7 @@ import {
   takeManagedAgentInbox,
   takePendingAgentNotices,
 } from "./agent-registry";
-import { takePendingImageDataUrls } from "./image-attachments";
+import { takePendingImages } from "./image-attachments";
 import { takePendingJobNotices } from "./job-watch";
 import { isTauriRuntime } from "../lib/paths";
 import { completeViaOpenCode } from "./oc-runtime";
@@ -115,6 +118,8 @@ export type AgentTurnEnv = {
   /** Session goal (lightweight DSH goal_*). */
   goal?: AgentGoal | null;
   onGoal?: (next: AgentGoal | null) => void;
+  /** True when this turn was admitted as an autonomous Goal Round. */
+  goalRound?: boolean;
   /** Session working directory under the workspace root. */
   cwd?: string | null;
   onCwd?: (next: string) => void;
@@ -166,6 +171,8 @@ export async function startAgentTurn(
     content: text.trim(),
     nowMs,
   });
+  // Fresh user instruction clears the repeat-tool streak (DSH-aligned).
+  clearRepeatToolStreak(env.threadId);
   if (priorUsers === 0) {
     const notice = formatHookNotices(hooksForEvent(env.hooks ?? [], "session_start"));
     if (notice) {
@@ -459,7 +466,7 @@ async function drain(
         }
       }
       sayTool(env, call, content, nowMs);
-      if (result.ok && call.name === "update_goal") {
+      if (result.ok && call.name === "update_goal" && env.goalRound) {
         const goal = goalPort(env).get();
         if (goal && (goal.phase === "completed" || goal.phase === "blocked")) {
           env.store.appendAgentMessage({
@@ -605,7 +612,7 @@ async function requestModel(
   const caps = provider.models[found.modelId];
   const budget = modelContextBudget(caps?.context, caps?.output);
   const visible = modelTranscript(transcript, budget);
-  const system = composeSystemPrompt(env, transcript, budget, thread);
+  const systemBase = composeSystemPrompt(env, transcript, budget, thread);
   const ocModel = Boolean(found.provider.models[found.modelId]?.endpoint);
   let apiKey = env.readApiKey?.(provider.id) ?? env.apiKey ?? null;
   if (found.provider.kind === "builtin" && ocModel) {
@@ -613,7 +620,7 @@ async function requestModel(
       const text = await completeViaOpenCode(
         found.modelId,
         buildOcRunPrompt({
-          system,
+          system: systemBase,
           messages: visible.map((message) => ({
             role: message.role,
             content: message.content,
@@ -628,9 +635,14 @@ async function requestModel(
     throw new Error("缺少模型密钥，请在设置 · 模型中填写。密钥不会写入会话。");
   }
   const canSee = modelCanSeeImages(provider.kind, caps);
-  const pendingImages = canSee ? takePendingImageDataUrls(thread.id) : [];
+  const pending = canSee
+    ? takePendingImages(thread.id)
+    : { dataUrls: [] as string[], attached: [], offloaded: [] };
+  const pendingImages = [...pending.dataUrls];
   if (canSee && env.imageDataUrl) pendingImages.push(env.imageDataUrl);
   env.imageDataUrl = undefined;
+  const offloadNotice = formatImageOffloadNotice(pending.offloaded);
+  const system = offloadNotice ? `${systemBase}\n\n${offloadNotice}` : systemBase;
   const request = buildModelHttpRequest({
     provider,
     modelId: found.modelId,
@@ -944,6 +956,7 @@ function runtime(env: AgentTurnEnv, nowMs: number): AgentRuntimeContext {
     toolAllowlist: env.toolAllowlist,
     goal: goals.get(),
     onGoal: goals.set,
+    goalRound: env.goalRound === true,
   };
 }
 
@@ -1118,6 +1131,7 @@ async function runSubagentControl(
         ...env,
         threadId: agentId,
         subagentDepth: (env.subagentDepth ?? 0) + 1,
+        goalRound: false,
         signal: controller.signal,
         nowMs,
       };
@@ -1243,6 +1257,7 @@ async function runSubagentDelegation(
     ...env,
     threadId: child.id,
     subagentDepth: depth + 1,
+    goalRound: false,
     subagentPrompt: `你正在作为子智能体「${agent.name}」回答。\n${agent.prompt}`,
     toolAllowlist: agent.toolNames.length ? agent.toolNames : undefined,
     maxRounds: Math.min(env.maxRounds ?? 3, 4),
@@ -1356,7 +1371,32 @@ function sayTool(
     toolCallId: call.id,
     nowMs,
   });
+  maybeRemindRepeatedTool(env, call, nowMs);
   env.onStep?.();
+}
+
+const repeatToolByThread = new Map<string, RepeatToolState>();
+
+function clearRepeatToolStreak(threadId: string): void {
+  repeatToolByThread.delete(threadId);
+}
+
+function maybeRemindRepeatedTool(
+  env: AgentTurnEnv,
+  call: PlannedCall,
+  nowMs: number,
+): void {
+  const prev = repeatToolByThread.get(env.threadId) ?? null;
+  const { state, reminder } = noteRepeatedToolCall(prev, call.name, call.args);
+  if (state) repeatToolByThread.set(env.threadId, state);
+  else repeatToolByThread.delete(env.threadId);
+  if (!reminder) return;
+  env.store.appendAgentMessage({
+    threadId: env.threadId,
+    role: "system",
+    content: reminder,
+    nowMs,
+  });
 }
 
 function toolContent(name: string, result: { summary: string; data: unknown }): string {

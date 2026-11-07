@@ -86,8 +86,8 @@ import {
   IconCommand,
   IconFolder,
   IconGitBranch,
-  IconHand,
   IconMaximize,
+  IconShield,
   IconMore,
   IconPencil,
   IconPin,
@@ -102,6 +102,7 @@ import { ModelMenu } from "./ModelMenu";
 import { readTerminalPanelOpen, writeTerminalPanelOpen } from "./terminal-api";
 import { imageDataUrl } from "./ocr-image";
 import { recognizeLocalImage } from "./ocr-engine";
+import { insertVoiceText, VoiceField, VoiceInputButton, VoiceStatusLine } from "../voice";
 import {
   onWebSessionResume,
   webSessionClose,
@@ -119,6 +120,7 @@ import {
   takePendingJobNotices,
 } from "./job-watch";
 import { takeScheduleDeliveries } from "./schedule-meta";
+import { cleanupToolSpill } from "./spill-store";
 import {
   askUserTimedConfig,
   previewAgentContext,
@@ -292,7 +294,14 @@ export function AgentView({
   const wantDrain = useRef<string | null>(null);
   const wantGoalContinue = useRef<string | null>(null);
   const draining = useRef(false);
-  const sendPromptRef = useRef<(content: string) => Promise<boolean>>(async () => false);
+  const sendPromptRef = useRef<
+    (
+      content: string,
+      subagent?: AgentSubagent,
+      imageDataUrl?: string,
+      options?: { goalRound?: boolean },
+    ) => Promise<boolean>
+  >(async () => false);
   const [copied, setCopied] = useState<string | null>(null);
   const [slashUi, setSlashUi] = useState({ draft: "", dismissed: false, index: 0 });
   const mounted = useRef(true);
@@ -466,6 +475,13 @@ export function AgentView({
     return () => {
       cancelled = true;
     };
+  }, [workspaceRootPath]);
+
+  useEffect(() => {
+    if (!workspaceRootPath || !isTauriRuntime()) return;
+    void cleanupToolSpill(workspaceRootPath).catch(() => {
+      /* spill GC must never block the UI */
+    });
   }, [workspaceRootPath]);
 
   useEffect(() => {
@@ -870,9 +886,11 @@ export function AgentView({
     wantGoalContinue.current = null;
     if (!shouldContinueGoal(goal) || !goal) return;
     draining.current = true;
-    void sendPromptRef.current(formatGoalRoundPrompt(goal)).then((started) => {
-      if (!started) draining.current = false;
-    });
+    void sendPromptRef
+      .current(formatGoalRoundPrompt(goal), undefined, undefined, { goalRound: true })
+      .then((started) => {
+        if (!started) draining.current = false;
+      });
   }, [busyThreadId, pending, thread?.id, queueRev, queuePaused]);
 
   const env = (): AgentTurnEnv | null => {
@@ -1061,6 +1079,7 @@ export function AgentView({
     content: string,
     subagent?: AgentSubagent,
     imageDataUrl?: string,
+    options?: { goalRound?: boolean },
   ): Promise<boolean> => {
     const current = env();
     if (!current || sending.current || busyThreadId || pending) return false;
@@ -1076,6 +1095,7 @@ export function AgentView({
         {
           ...current,
           imageDataUrl,
+          goalRound: options?.goalRound === true,
           signal: controller.signal,
           subagentPrompt: subagent
             ? `你正在作为子智能体「${subagent.name}」回答。\n${subagent.prompt}`
@@ -2536,23 +2556,38 @@ export function AgentView({
                               })}
                             </div>
                           ) : (
-                            <input
-                              className="agent__approval-input"
+                            <VoiceField
                               value={
                                 typeof questionAnswers[question.id] === "string"
                                   ? (questionAnswers[question.id] as string)
                                   : ""
                               }
                               disabled={Boolean(busyThreadId)}
-                              placeholder="输入回答"
-                              onChange={(event) => {
-                                const value = event.target.value;
+                              onChange={(value) => {
                                 setQuestionAnswers((current) => ({
                                   ...current,
                                   [question.id]: value,
                                 }));
                               }}
-                            />
+                            >
+                              <input
+                                className="agent__approval-input"
+                                value={
+                                  typeof questionAnswers[question.id] === "string"
+                                    ? (questionAnswers[question.id] as string)
+                                    : ""
+                                }
+                                disabled={Boolean(busyThreadId)}
+                                placeholder="输入回答"
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setQuestionAnswers((current) => ({
+                                    ...current,
+                                    [question.id]: value,
+                                  }));
+                                }}
+                              />
+                            </VoiceField>
                           )}
                         </div>
                       ))}
@@ -2630,6 +2665,8 @@ export function AgentView({
                   </div>
                 </div>
               ) : null}
+
+              <VoiceStatusLine />
 
               {error ? (
                 <div className="agent__error" role="alert">
@@ -3165,6 +3202,37 @@ export function AgentView({
                         onSelect={selectModel}
                         onOpenSettings={onOpenModels}
                       />
+                      <VoiceInputButton
+                        disabled={!thread || Boolean(pending) || Boolean(thread?.webUrl)}
+                        onArm={() => {
+                          const node = inputRef.current;
+                          if (!node) return;
+                          const pos =
+                            typeof node.selectionStart === "number"
+                              ? node.selectionStart
+                              : node.value.length;
+                          node.focus({ preventScroll: true });
+                          node.setSelectionRange(pos, pos);
+                        }}
+                        onInsert={(text) => {
+                          const el = inputRef.current;
+                          const current = el?.value ?? draft;
+                          const { value, caret } = insertVoiceText(
+                            current,
+                            text,
+                            el?.selectionStart ?? current.length,
+                          );
+                          setDraft(value);
+                          if (thread) drafts.current.set(thread.id, value);
+                          setPicker(null);
+                          requestAnimationFrame(() => {
+                            const node = inputRef.current;
+                            if (!node) return;
+                            node.focus({ preventScroll: true });
+                            node.setSelectionRange(caret, caret);
+                          });
+                        }}
+                      />
                       {busyHere ? (
                         <>
                           <button
@@ -3227,9 +3295,21 @@ export function AgentView({
 }
 
 const MODES: Array<{ id: AgentPermissionMode; label: string; hint: string }> = [
-  { id: "confirm", label: "变更前确认", hint: "写入前先问你" },
-  { id: "session_auto", label: "本会话自动", hint: "普通写入直接执行，删除仍要确认" },
-  { id: "readonly", label: "只读", hint: "不能修改任务、笔记和项目" },
+  {
+    id: "confirm",
+    label: "变更前确认",
+    hint: "default / ask — 写入前先问你",
+  },
+  {
+    id: "session_auto",
+    label: "本会话自动",
+    hint: "auto — 普通写入直接执行，删除仍要确认",
+  },
+  {
+    id: "readonly",
+    label: "只读",
+    hint: "readonly — 仅允许读取类工具",
+  },
 ];
 
 function ComposerPlusMenu({
@@ -3393,7 +3473,7 @@ function ModeMenu({
         title={disabled ? "请先处理待确认操作" : undefined}
         onClick={() => onOpenChange(!open)}
       >
-        <IconHand size={14} />
+        <IconShield size={14} />
         <span>{current.label}</span>
         <span aria-hidden="true">▾</span>
       </button>

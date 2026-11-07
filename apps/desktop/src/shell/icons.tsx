@@ -96,6 +96,15 @@ export function IconHand({ size, className }: IconProps) {
   );
 }
 
+export function IconShield({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M12 3 5 6v6c0 5 3.2 7.8 7 9 3.8-1.2 7-4 7-9V6l-7-3Z" />
+      <path d="M9.5 12.2 11.2 14l3.5-3.8" />
+    </Svg>
+  );
+}
+
 export function IconGitBranch({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>
@@ -473,6 +482,17 @@ export function IconCommand({ size, className }: IconProps) {
     <Svg size={size} className={className}>
       <path d="m5.5 8 4.2 4-4.2 4" />
       <path d="M12 16h6.5" />
+    </Svg>
+  );
+}
+
+export function IconMic({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3Z" />
+      <path d="M6.5 11a5.5 5.5 0 0 0 11 0" />
+      <path d="M12 16.5v3.5" />
+      <path d="M9 20h6" />
     </Svg>
   );
 }

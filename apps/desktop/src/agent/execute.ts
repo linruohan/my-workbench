@@ -75,6 +75,8 @@ export type AgentRuntimeContext = {
   /** One goal per session (lightweight DSH goal surface). */
   goal?: AgentGoal | null;
   onGoal?: (next: AgentGoal | null) => void;
+  /** True when this turn was admitted as an autonomous Goal Round. */
+  goalRound?: boolean;
 };
 
 const REMIND: ReminderOptionId[] = ["none", "at_start", "m5", "m10", "m15", "m30", "h1"];
@@ -459,6 +461,9 @@ function runTool(
           blockedReason: str(args, "blocked_reason") ?? undefined,
         },
         ctx.nowMs,
+        {
+          enforceBlockThreshold: ctx.goalRound === true,
+        },
       );
       if (updated.ok === false) throw new DomainError(updated.reason);
       ctx.onGoal?.(updated.goal);

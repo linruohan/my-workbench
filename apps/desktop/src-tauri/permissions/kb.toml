@@ -45,4 +45,7 @@ commands.allow = [
   "web_session_close",
   "ocr_ensure_models",
   "ocr_read_model",
+  "speech_ensure_models",
+  "speech_status",
+  "speech_transcribe",
 ]

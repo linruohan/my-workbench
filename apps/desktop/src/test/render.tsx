@@ -1,19 +1,33 @@
 import { render, type RenderOptions } from "@testing-library/react";
 import type { ReactElement, ReactNode } from "react";
-import { DialogProvider } from "../shell/Dialogs";
+import { DialogOutlet, DialogProvider } from "../shell/Dialogs";
 import { ThemeProvider } from "../theme/ThemeProvider";
 
-function Providers(props: { children: ReactNode }) {
+type ExtraOptions = {
+  /** App already mounts DialogOutlet; set false when rendering `<App />`. */
+  dialogOutlet?: boolean;
+};
+
+function Providers(props: { children: ReactNode; dialogOutlet: boolean }) {
   return (
     <ThemeProvider>
-      <DialogProvider>{props.children}</DialogProvider>
+      <DialogProvider>
+        {props.children}
+        {props.dialogOutlet ? <DialogOutlet /> : null}
+      </DialogProvider>
     </ThemeProvider>
   );
 }
 
 export function renderWithProviders(
   ui: ReactElement,
-  options?: Omit<RenderOptions, "wrapper">,
+  options?: Omit<RenderOptions, "wrapper"> & ExtraOptions,
 ) {
-  return render(ui, { wrapper: Providers, ...options });
+  const { dialogOutlet = true, ...rest } = options ?? {};
+  return render(ui, {
+    wrapper: ({ children }) => (
+      <Providers dialogOutlet={dialogOutlet}>{children}</Providers>
+    ),
+    ...rest,
+  });
 }

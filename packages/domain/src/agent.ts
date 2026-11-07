@@ -377,14 +377,14 @@ export const AGENT_TOOLS: ToolSpec[] = [
   tool(
     "update_goal",
     "write",
-    "按精确 goal_id + revision 更新：edit / pause / resume / complete / blocked。",
+    "按精确 goal_id + revision 更新：edit / pause / resume / complete / blocked。自主 Goal Round 中 blocked 须达到连续轮次阈值；用户直接回合可立即 blocked。",
     {
       goal_id: str("先前 get_goal 返回的 id"),
       revision: num("先前 get_goal 返回的 revision"),
       action: str("edit | pause | resume | complete | blocked"),
       objective: str("edit 时的新目标"),
       max_goal_rounds: num("edit 时的新轮次上限"),
-      blocked_reason: str("blocked 时必填原因"),
+      blocked_reason: str("blocked 时必填：跨多轮持续的具体阻塞条件"),
     },
     ["goal_id", "revision", "action"],
   ),
@@ -556,6 +556,13 @@ export function permissionModeLabel(mode: AgentPermissionMode): string {
   if (mode === "confirm") return "变更前确认";
   if (mode === "session_auto") return "本会话自动";
   return "只读";
+}
+
+/** Short DSH-style preset alias for UI / slash help. */
+export function permissionPresetAlias(mode: AgentPermissionMode): string {
+  if (mode === "confirm") return "default";
+  if (mode === "session_auto") return "auto";
+  return "readonly";
 }
 
 function clock(ms: number): string {
