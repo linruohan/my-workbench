@@ -81,6 +81,9 @@ export function VoiceField({
     if (pos != null) caretRef.current = pos;
   };
 
+  // Only show while CapsLock/mic PTT is active (or transient errors); never idle "ready".
+  const hint = voice.status?.split("\n")[0]?.trim() || "";
+
   return (
     <div
       className={
@@ -97,6 +100,11 @@ export function VoiceField({
         onSelect={rememberCaret}
         onInput={rememberCaret}
       >
+        {hint ? (
+          <div className="voice-field__hint" role="status" aria-live="polite">
+            {hint}
+          </div>
+        ) : null}
         {children}
       </div>
       <VoiceInputButton
@@ -133,12 +141,13 @@ export function VoiceField({
   );
 }
 
+/** Floating status line for surfaces that already sit above a composer (e.g. Agent). */
 export function VoiceStatusLine() {
   const { status } = useVoiceInput();
   if (!status) return null;
   return (
     <div className="voice-status" role="status">
-      {status}
+      {status.split("\n")[0]}
     </div>
   );
 }

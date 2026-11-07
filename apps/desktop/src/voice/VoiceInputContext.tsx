@@ -8,13 +8,20 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { SpeechLanguage } from "@wb/domain";
-import { ensureSenseVoice, readSpeechStatus, warmSenseVoice } from "./speech-models";
+import type { SpeechEngineId, SpeechLanguage } from "@wb/domain";
+import { useDialog } from "../shell/Dialogs";
+import { startCapsLockPtt } from "./caps-lock-ptt";
+import {
+  readSpeechStatus,
+  speechMissingModelMessage,
+  warmSpeechEngine,
+} from "./speech-models";
 
 export type VoiceInputConfig = {
   enabled: boolean;
   deviceId: string;
   language: SpeechLanguage;
+  engine: SpeechEngineId;
   openSettings?: () => void;
 };
 
@@ -23,6 +30,8 @@ type VoiceInputContextValue = VoiceInputConfig & {
   status: string | null;
   setStatus: (message: string | null) => void;
   markReady: () => void;
+  /** Short status + modal with download guide when models are missing. */
+  notifyMissingModel: (engine?: SpeechEngineId, modelDir?: string) => void;
 };
 
 const VoiceInputContext = createContext<VoiceInputContextValue | null>(null);
@@ -33,13 +42,16 @@ export function VoiceInputProvider({
   enabled,
   deviceId,
   language,
+  engine,
   openSettings,
   children,
 }: VoiceInputConfig & { children: ReactNode }) {
+  const dialog = useDialog();
   const [ready, setReady] = useState(false);
   const [status, setStatusState] = useState<string | null>(null);
   const statusTimer = useRef(0);
   const statusToken = useRef(0);
+  const missingDialogOpen = useRef(false);
 
   const setStatus = useCallback((message: string | null) => {
     window.clearTimeout(statusTimer.current);
@@ -47,11 +59,36 @@ export function VoiceInputProvider({
     setStatusState(message);
     if (message == null) return;
     // Keep in-progress hints until replaced; auto-clear terminal messages.
-    if (/正在|准备中/.test(message)) return;
+    // In-progress hold/transcribe stay until replaced; everything else auto-clears.
+    if (/正在|准备中|录音中/.test(message)) return;
     statusTimer.current = window.setTimeout(() => {
       if (statusToken.current === token) setStatusState(null);
     }, STATUS_CLEAR_MS);
   }, []);
+
+  const notifyMissingModel = useCallback(
+    (nextEngine?: SpeechEngineId, modelDir?: string) => {
+      const useEngine = nextEngine ?? engine;
+      setStatus("请先准备语音模型");
+      if (missingDialogOpen.current) return;
+      missingDialogOpen.current = true;
+      const guide = speechMissingModelMessage(useEngine, modelDir);
+      void dialog
+        .confirm({
+          title: "语音模型未就绪",
+          message: guide,
+          confirmLabel: "去设置准备",
+          cancelLabel: "知道了",
+        })
+        .then((go) => {
+          if (go) openSettings?.();
+        })
+        .finally(() => {
+          missingDialogOpen.current = false;
+        });
+    },
+    [dialog, engine, openSettings, setStatus],
+  );
 
   useEffect(() => {
     return () => window.clearTimeout(statusTimer.current);
@@ -64,38 +101,72 @@ export function VoiceInputProvider({
       return;
     }
     let live = true;
+    const options = { engine };
     void (async () => {
-      const statusResult = await readSpeechStatus();
+      const statusResult = await readSpeechStatus(options);
       if (!live) return;
       if (statusResult.ready) {
         setReady(true);
-        void warmSenseVoice();
+        void warmSpeechEngine(options);
         return;
       }
-      const prepared = await ensureSenseVoice();
-      if (!live) return;
-      if (prepared.ok === true) {
-        setReady(true);
-        void warmSenseVoice();
-      }
+      setReady(false);
     })();
     return () => {
       live = false;
     };
-  }, [enabled, setStatus]);
+  }, [enabled, engine, setStatus]);
+
+  const capsOptsRef = useRef({
+    enabled,
+    deviceId,
+    language,
+    engine,
+    setStatus,
+    markReady: () => setReady(true),
+    openSettings,
+    notifyMissingModel,
+  });
+  capsOptsRef.current = {
+    enabled,
+    deviceId,
+    language,
+    engine,
+    setStatus,
+    markReady: () => setReady(true),
+    openSettings,
+    notifyMissingModel,
+  };
+
+  useEffect(() => {
+    if (!enabled) return;
+    return startCapsLockPtt(() => capsOptsRef.current);
+  }, [enabled]);
 
   const value = useMemo<VoiceInputContextValue>(
     () => ({
       enabled,
       deviceId,
       language,
+      engine,
       openSettings,
       ready,
       status,
       setStatus,
       markReady: () => setReady(true),
+      notifyMissingModel,
     }),
-    [enabled, deviceId, language, openSettings, ready, status, setStatus],
+    [
+      enabled,
+      deviceId,
+      language,
+      engine,
+      openSettings,
+      ready,
+      status,
+      setStatus,
+      notifyMissingModel,
+    ],
   );
 
   return (
@@ -110,10 +181,12 @@ export function useVoiceInput(): VoiceInputContextValue {
       enabled: false,
       deviceId: "",
       language: "auto",
+      engine: "sensevoice",
       ready: false,
       status: null,
       setStatus: () => undefined,
       markReady: () => undefined,
+      notifyMissingModel: () => undefined,
     };
   }
   return value;

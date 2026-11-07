@@ -2673,8 +2673,6 @@ export function AgentView({
                 </div>
               ) : null}
 
-              <VoiceStatusLine />
-
               {error ? (
                 <div className="agent__error" role="alert">
                   <span>{error}</span>
@@ -2776,6 +2774,7 @@ export function AgentView({
                   void send(picked ? `/${picked.name}` : draft);
                 }}
               >
+                <VoiceStatusLine />
                 {showComposerContext && activeWorkspace ? (
                   <div className="agent__composer-context">
                     <div className="agent__composer-chip-wrap">

@@ -108,10 +108,11 @@ export function VoiceInputButton({
     setPhase("transcribing");
     report("正在转写…");
     try {
-      const { warmSenseVoice } = await import("./speech-models");
-      await warmSenseVoice().catch(() => false);
+      const { warmSpeechEngine } = await import("./speech-models");
+      const engineOptions = { engine: voice.engine };
+      await warmSpeechEngine(engineOptions).catch(() => false);
       const wav = await recording.stop();
-      const result = await transcribeRecording(wav, voice.language);
+      const result = await transcribeRecording(wav, voice.language, engineOptions);
       if (result.ok === false) {
         report(result.message);
         setPhase("idle");
@@ -156,20 +157,21 @@ export function VoiceInputButton({
 
   const startRecording = async () => {
     onArmRef.current?.();
-    void import("./speech-models").then(({ warmSenseVoice }) => warmSenseVoice());
+    const engineOptions = { engine: voice.engine };
     if (!voice.ready) {
-      report("正在准备语音资源…");
-      const { ensureSenseVoice } = await import("./speech-models");
-      const prepared = await ensureSenseVoice();
-      if (prepared.ok === false) {
-        report(prepared.message);
-        voice.openSettings?.();
+      const { readSpeechStatus } = await import("./speech-models");
+      const status = await readSpeechStatus(engineOptions);
+      if (!status.ready) {
+        voice.notifyMissingModel(voice.engine, status.dir);
         pressRef.current = null;
         finishingRef.current = false;
         return;
       }
       voice.markReady();
     }
+    void import("./speech-models").then(({ warmSpeechEngine }) =>
+      warmSpeechEngine(engineOptions),
+    );
     const press = pressRef.current;
     if (!press?.active) {
       // Released during ensure — apply threshold against original press time.

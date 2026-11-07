@@ -2,6 +2,9 @@ export {
   appendVoiceText,
   insertVoiceText,
   injectVoiceIntoField,
+  injectVoiceIntoEditable,
+  isVoiceEditable,
+  setNativeFieldValue,
   VOICE_HOLD_MIN_MS,
 } from "./text";
 export { VoiceField, VoiceStatusLine } from "./VoiceField";
@@ -16,6 +19,16 @@ export {
   type MicrophoneDevice,
   type MicrophoneChoices,
 } from "./speech-audio";
-export { ensureSenseVoice, readSpeechStatus, warmSenseVoice } from "./speech-models";
+export {
+  cancelSpeechDownload,
+  ensureSenseVoice,
+  ensureSpeechEngine,
+  readSpeechStatus,
+  speechMissingModelMessage,
+  subscribeSpeechDownloadProgress,
+  warmSenseVoice,
+  warmSpeechEngine,
+  type SpeechDownloadProgress,
+} from "./speech-models";
 export { recordingErrorMessage, transcribeRecording } from "./speech-engine";
 export { micLockOwnerId, subscribeMicLock } from "./mic-lock";

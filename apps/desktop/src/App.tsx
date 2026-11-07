@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   ActiveTimer,
   agentWorkspaceTitleFromPath,
@@ -56,7 +63,7 @@ import { TaskRow } from "./tasks/TaskRow";
 import { TasksView, type TasksViewMode } from "./tasks/TasksView";
 import { TimedTaskEditor } from "./timed/TimedTaskEditor";
 import { TimedTaskList } from "./timed/TimedTaskList";
-import { VoiceField, VoiceInputProvider, VoiceStatusLine } from "./voice";
+import { VoiceField, VoiceInputProvider } from "./voice";
 
 const TASKS_VIEW_KEY = "wb.tasks.viewMode";
 
@@ -92,11 +99,13 @@ export default function App() {
   const [store] = useState(() => createPersistedStore());
   const [nav, setNav] = useState<AppNavId>(() => readPrefs().startupView);
   const [agentSectionOpen, setAgentSectionOpen] = useState(false);
+  const [agentShowArchived, setAgentShowArchived] = useState(false);
   const forgetAgentThreadRef = useRef<(id: string) => void>(() => {});
   const [tick, setTick] = useState(0);
   const [draft, setDraft] = useState("");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => readPrefs().sidebarWidth);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("general");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -1197,6 +1206,7 @@ export default function App() {
       enabled={prefs.voiceInputEnabled}
       deviceId={prefs.voiceInputDeviceId}
       language={prefs.voiceInputLanguage}
+      engine={prefs.voiceInputEngine}
       openSettings={() => openSettings("voice")}
     >
       <div className="shell">
@@ -1227,7 +1237,14 @@ export default function App() {
             onHostTools={setHostTools}
           />
         ) : (
-          <div className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}>
+          <div
+            className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}
+            style={
+              sidebarCollapsed
+                ? undefined
+                : ({ ["--wb-sidebar-width"]: `${sidebarWidth}px` } as CSSProperties)
+            }
+          >
             <Sidebar
               collapsed={sidebarCollapsed}
               onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
@@ -1251,11 +1268,14 @@ export default function App() {
               onToggleAgent={toggleAgentSection}
               onOpenAgentWeb={() => void openAgentWebSession()}
               onCreateAgentFromFolder={() => void newAgentChatFromFolder()}
+              agentShowArchived={agentShowArchived}
+              onToggleAgentShowArchived={() => setAgentShowArchived((value) => !value)}
               agentRail={
                 <AgentWorkspaceRail
                   store={store}
                   threadId={agentThreadId}
                   busyThreadId={agentBusyThreadId}
+                  showArchived={agentShowArchived}
                   onSelectThread={(id) => {
                     setAgentThreadId(id);
                     goNav("agent");
@@ -1266,6 +1286,12 @@ export default function App() {
                 />
               }
               displayName={prefs.displayName || "本地用户"}
+              width={sidebarWidth}
+              onWidthChange={setSidebarWidth}
+              onWidthCommit={(next) => {
+                setSidebarWidth(next);
+                updatePrefs({ ...prefs, sidebarWidth: next });
+              }}
             />
             <main className="main">
               {body}
@@ -1324,7 +1350,6 @@ export default function App() {
               ) : null}
               {nav !== "agent" ? (
                 <footer className="composer">
-                  <VoiceStatusLine />
                   <div className="composer__row">
                     <VoiceField
                       value={draft}

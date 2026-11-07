@@ -1,6 +1,19 @@
-import { useMemo, useState, type ReactNode } from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { INBOX_PROJECT_ID, type Note } from "@wb/domain";
 import {
+  clampSidebarWidth,
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+} from "../lib/prefs";
+import {
+  IconArchive,
   IconChat,
   IconDone,
   IconFolder,
@@ -60,8 +73,16 @@ type Props = {
   onToggleAgent: () => void;
   onOpenAgentWeb: () => void;
   onCreateAgentFromFolder: () => void;
+  /** Show archived Agent sessions in the rail. */
+  agentShowArchived: boolean;
+  onToggleAgentShowArchived: () => void;
   agentRail: ReactNode;
   displayName: string;
+  /** Expanded sidebar width in px. */
+  width: number;
+  onWidthChange: (width: number) => void;
+  /** Persist width after drag / reset. */
+  onWidthCommit: (width: number) => void;
 };
 
 function NavCount({ value }: { value: number | undefined }) {
@@ -94,10 +115,17 @@ export function Sidebar({
   onToggleAgent,
   onOpenAgentWeb,
   onCreateAgentFromFolder,
+  agentShowArchived,
+  onToggleAgentShowArchived,
   agentRail,
   displayName,
+  width,
+  onWidthChange,
+  onWidthCommit,
 }: Props) {
   const [query, setQuery] = useState("");
+  const [resizing, setResizing] = useState(false);
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [tasksOpen, setTasksOpen] = useState(true);
 
@@ -199,8 +227,57 @@ export function Sidebar({
     );
   }
 
+  const onResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    dragRef.current = { startX: event.clientX, startWidth: width };
+    setResizing(true);
+    handle.setPointerCapture(event.pointerId);
+  };
+
+  const onResizePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const next = clampSidebarWidth(drag.startWidth + (event.clientX - drag.startX));
+    onWidthChange(next);
+  };
+
+  const onResizePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const next = clampSidebarWidth(drag.startWidth + (event.clientX - drag.startX));
+    dragRef.current = null;
+    setResizing(false);
+    onWidthChange(next);
+    onWidthCommit(next);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // already released
+    }
+  };
+
   return (
     <aside className="sidebar" aria-label="侧栏">
+      <div
+        className={resizing ? "sidebar__resizer is-dragging" : "sidebar__resizer"}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整侧栏宽度"
+        aria-valuemin={SIDEBAR_WIDTH_MIN}
+        aria-valuemax={SIDEBAR_WIDTH_MAX}
+        aria-valuenow={width}
+        title="拖拽调整宽度，双击恢复默认"
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+        onPointerCancel={onResizePointerUp}
+        onDoubleClick={() => {
+          onWidthChange(SIDEBAR_WIDTH_DEFAULT);
+          onWidthCommit(SIDEBAR_WIDTH_DEFAULT);
+        }}
+      />
       <div className="sidebar__top">
         <div className="sidebar__tools">
           <button
@@ -376,6 +453,23 @@ export function Sidebar({
                   }}
                 >
                   <IconGlobe size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={
+                    agentShowArchived
+                      ? "sidebar__group-add is-active"
+                      : "sidebar__group-add"
+                  }
+                  title={agentShowArchived ? "隐藏归档会话" : "显示归档会话"}
+                  aria-label={agentShowArchived ? "隐藏归档" : "显示归档"}
+                  aria-pressed={agentShowArchived}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleAgentShowArchived();
+                  }}
+                >
+                  <IconArchive size={14} />
                 </button>
                 <button
                   type="button"

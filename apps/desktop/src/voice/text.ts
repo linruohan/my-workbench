@@ -37,9 +37,37 @@ export function insertVoiceText(
   return { value, caret: head.length };
 }
 
+function dispatchInsertInput(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  data: string,
+): void {
+  el.dispatchEvent(
+    new InputEvent("input", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "insertText",
+      data,
+    }),
+  );
+}
+
+/** Write value through the native setter so React controlled inputs see the change. */
+export function setNativeFieldValue(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  value: string,
+): void {
+  const proto =
+    el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+  if (setter) setter.call(el, value);
+  else el.value = value;
+}
+
 /**
  * CapsWriter-style paste injection: prefer native insertText (undo-friendly),
- * then fall back to computing the next controlled value for React.
+ * then fall back to a React-safe value write + input event.
  */
 export function injectVoiceIntoField(
   el: HTMLInputElement | HTMLTextAreaElement,
@@ -52,11 +80,24 @@ export function injectVoiceIntoField(
   const chunk = result.value.slice(start, result.caret);
   if (!chunk) return result;
 
+  const applyResult = () => {
+    setNativeFieldValue(el, result.value);
+    try {
+      el.setSelectionRange(result.caret, result.caret);
+    } catch {
+      // ignore selection errors on unsupported inputs
+    }
+    dispatchInsertInput(el, chunk);
+    return result;
+  };
+
   try {
     el.focus({ preventScroll: true });
     el.setSelectionRange(start, end);
     // Native insert keeps the browser undo stack, similar to clipboard paste.
     if (document.execCommand("insertText", false, chunk)) {
+      // Reconcile spacing / React controlled value if the DOM drifted.
+      if (el.value !== result.value) return applyResult();
       return {
         value: el.value,
         caret: el.selectionStart ?? result.caret,
@@ -64,9 +105,8 @@ export function injectVoiceIntoField(
     }
     if (typeof el.setRangeText === "function") {
       el.setRangeText(chunk, start, end, "end");
-      el.dispatchEvent(
-        new InputEvent("input", { bubbles: true, inputType: "insertText", data: chunk }),
-      );
+      if (el.value !== result.value) return applyResult();
+      dispatchInsertInput(el, chunk);
       return {
         value: el.value,
         caret: el.selectionStart ?? result.caret,
@@ -75,7 +115,79 @@ export function injectVoiceIntoField(
   } catch {
     // fall through to pure value rewrite
   }
-  return result;
+
+  return applyResult();
+}
+
+export function isVoiceEditable(
+  el: Element | null,
+): el is HTMLInputElement | HTMLTextAreaElement | HTMLElement {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  if (el instanceof HTMLTextAreaElement) return !el.readOnly && !el.disabled;
+  if (el instanceof HTMLInputElement) {
+    if (el.readOnly || el.disabled) return false;
+    const type = (el.type || "text").toLowerCase();
+    return ![
+      "button",
+      "checkbox",
+      "radio",
+      "submit",
+      "reset",
+      "file",
+      "image",
+      "hidden",
+      "range",
+      "color",
+    ].includes(type);
+  }
+  return Boolean(el.isContentEditable);
+}
+
+/** Insert spoken text into an input/textarea or contenteditable element. */
+export function injectVoiceIntoEditable(el: HTMLElement, spoken: string): boolean {
+  const next = spoken.trim();
+  if (!next) return false;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    injectVoiceIntoField(el, next);
+    return true;
+  }
+  if (!el.isContentEditable) return false;
+  try {
+    el.focus({ preventScroll: true });
+    if (document.execCommand("insertText", false, next)) return true;
+  } catch {
+    // fall through
+  }
+  try {
+    const selection = window.getSelection();
+    if (!selection) return false;
+    if (selection.rangeCount === 0) {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(next);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    el.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        cancelable: true,
+        inputType: "insertText",
+        data: next,
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function joinSpoken(before: string, spoken: string): string {

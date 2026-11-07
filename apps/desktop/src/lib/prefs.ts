@@ -1,7 +1,9 @@
 import {
   hostToolById,
+  isSpeechEngineId,
   isSpeechLanguage,
   type HostToolProbe,
+  type SpeechEngineId,
   type SpeechLanguage,
 } from "@wb/domain";
 import type {
@@ -70,12 +72,26 @@ export type AppPrefs = {
   hostToolsFetched: boolean;
   /** Skill ids the user turned off in Settings → 技能. */
   disabledSkillIds: string[];
-  /** Experimental local SenseVoice voice input. */
+  /** Experimental local voice input. */
   voiceInputEnabled: boolean;
   /** Browser MediaDeviceInfo.deviceId; empty = system default. */
   voiceInputDeviceId: string;
   voiceInputLanguage: SpeechLanguage;
+  /** Local ASR backend. */
+  voiceInputEngine: SpeechEngineId;
+  /** Expanded left sidebar width in px. */
+  sidebarWidth: number;
 };
+
+export const SIDEBAR_WIDTH_DEFAULT = 220;
+export const SIDEBAR_WIDTH_MIN = 180;
+export const SIDEBAR_WIDTH_MAX = 420;
+
+export function clampSidebarWidth(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return SIDEBAR_WIDTH_DEFAULT;
+  return Math.round(Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, n)));
+}
 
 const DEFAULTS: AppPrefs = {
   displayName: "本地用户",
@@ -113,6 +129,8 @@ const DEFAULTS: AppPrefs = {
   voiceInputEnabled: false,
   voiceInputDeviceId: "",
   voiceInputLanguage: "auto",
+  voiceInputEngine: "sensevoice",
+  sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
 };
 
 function normalizeSkillDirs(value: unknown): SkillSourceDir[] {
@@ -155,6 +173,10 @@ function mergePrefs(partial?: Partial<AppPrefs> | null): AppPrefs {
   next.voiceInputLanguage = isSpeechLanguage(String(next.voiceInputLanguage))
     ? next.voiceInputLanguage
     : "auto";
+  next.voiceInputEngine = isSpeechEngineId(String(next.voiceInputEngine))
+    ? next.voiceInputEngine
+    : "sensevoice";
+  next.sidebarWidth = clampSidebarWidth(next.sidebarWidth);
   return next;
 }
 

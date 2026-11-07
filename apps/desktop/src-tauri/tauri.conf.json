@@ -35,7 +35,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["resources/speech/transcribe.mjs"],
+    "resources": [
+      "resources/speech/transcribe.mjs",
+      "resources/speech/funasr_worker.py",
+      "resources/speech/qwenctc_worker.py",
+      "resources/speech/runtimes",
+      "resources/speech/assets"
+    ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

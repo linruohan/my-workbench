@@ -9,6 +9,7 @@ mod ocr;
 mod open_ext;
 mod speech;
 mod tools;
+mod voice_ptt;
 mod web_session;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -42,9 +43,12 @@ pub fn run() {
             ocr::ocr_ensure_models,
             ocr::ocr_read_model,
             speech::speech_ensure_models,
+            speech::speech_cancel_download,
             speech::speech_status,
             speech::speech_warm,
             speech::speech_transcribe,
+            voice_ptt::voice_ptt_set_enabled,
+            voice_ptt::voice_ptt_paste,
             tools::tools_probe,
             tools::tools_pick_path,
             tools::tools_check,

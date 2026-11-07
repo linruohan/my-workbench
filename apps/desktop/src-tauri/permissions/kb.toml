@@ -46,6 +46,10 @@ commands.allow = [
   "ocr_ensure_models",
   "ocr_read_model",
   "speech_ensure_models",
+  "speech_cancel_download",
   "speech_status",
+  "speech_warm",
   "speech_transcribe",
+  "voice_ptt_set_enabled",
+  "voice_ptt_paste",
 ]

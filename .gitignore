@@ -19,3 +19,9 @@ apps/desktop/src-tauri/target/
 *.log
 credentials.bin
 workbench/
+
+__pycache__/
+*.py[cod]
+
+__pycache__/
+*.py[cod]

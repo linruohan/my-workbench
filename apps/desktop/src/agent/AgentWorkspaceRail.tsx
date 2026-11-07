@@ -23,6 +23,8 @@ type Props = {
   threadId: string | null;
   /** Session currently answering, for a side-rail status dot. */
   busyThreadId?: string | null;
+  /** Include archived sessions (toggled from Agent sidebar header). */
+  showArchived?: boolean;
   onSelectThread: (id: string | null) => void;
   onCreateThread: (workspaceId: string) => void;
   /** Drop queued prompts kept only in the open chat. */
@@ -34,6 +36,7 @@ export function AgentWorkspaceRail({
   store,
   threadId,
   busyThreadId = null,
+  showArchived = false,
   onSelectThread,
   onCreateThread,
   onForgetThread,
@@ -42,7 +45,6 @@ export function AgentWorkspaceRail({
   const dialog = useDialog();
   const workspaces = store.listAgentWorkspaces();
   const [threadQuery, setThreadQuery] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
   const threads = store.listAgentThreads({ includeArchived: showArchived });
   const visibleThreads = filterAgentThreads(threads, threadQuery);
   const thread = threadId
@@ -187,14 +189,6 @@ export function AgentWorkspaceRail({
               aria-label="筛选会话"
               onChange={(event) => setThreadQuery(event.target.value)}
             />
-            <label className="agent__thread-filter-archived">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(event) => setShowArchived(event.target.checked)}
-              />
-              显示归档
-            </label>
           </div>
           {filterMiss ? (
             <p className="agent__hint">没有匹配的会话</p>

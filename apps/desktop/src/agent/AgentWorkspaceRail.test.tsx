@@ -60,10 +60,11 @@ describe("agent workspace rail", () => {
       title: "别的话题",
     });
 
-    renderWithProviders(
+    const { rerender } = renderWithProviders(
       <AgentWorkspaceRail
         store={store}
         threadId={keep.id}
+        showArchived={false}
         onSelectThread={() => {}}
         onCreateThread={() => {}}
         onRefresh={() => {}}
@@ -76,7 +77,16 @@ describe("agent workspace rail", () => {
     expect(screen.queryByText("别的话题")).not.toBeInTheDocument();
 
     await user.clear(screen.getByRole("searchbox", { name: "筛选会话" }));
-    await user.click(screen.getByRole("checkbox", { name: "显示归档" }));
+    rerender(
+      <AgentWorkspaceRail
+        store={store}
+        threadId={keep.id}
+        showArchived
+        onSelectThread={() => {}}
+        onCreateThread={() => {}}
+        onRefresh={() => {}}
+      />,
+    );
     expect(screen.getByText(/〔归档〕\s*旧周报/)).toBeInTheDocument();
   });
 

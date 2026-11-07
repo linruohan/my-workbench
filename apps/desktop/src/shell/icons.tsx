@@ -85,6 +85,16 @@ export function IconPlus({ size, className }: IconProps) {
   );
 }
 
+export function IconArchive({ size, className }: IconProps) {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M3 7h18v3H3z" />
+      <path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9" />
+      <path d="M10 14h4" />
+    </Svg>
+  );
+}
+
 export function IconHand({ size, className }: IconProps) {
   return (
     <Svg size={size} className={className}>

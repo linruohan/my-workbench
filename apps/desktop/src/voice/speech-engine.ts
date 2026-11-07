@@ -1,7 +1,13 @@
 import type { SpeechLanguage } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
 import { audioBase64, RecordingError } from "./speech-audio";
-import { ensureSenseVoice, warmSenseVoice } from "./speech-models";
+import {
+  currentSpeechEngineOptions,
+  readSpeechStatus,
+  speechMissingModelMessage,
+  warmSpeechEngine,
+  type SpeechEngineOptions,
+} from "./speech-models";
 
 export type TranscribeResult =
   | { ok: true; text: string; audioSeconds: number; inferenceSeconds: number }
@@ -30,22 +36,27 @@ export function recordingErrorMessage(error: unknown): string {
 export async function transcribeRecording(
   wav: Uint8Array,
   language: SpeechLanguage,
+  options?: Partial<SpeechEngineOptions>,
 ): Promise<TranscribeResult> {
   if (!isTauriRuntime()) {
     return { ok: false, message: "语音转写需要在桌面应用中使用" };
   }
-  const prepared = await ensureSenseVoice();
-  if (prepared.ok === false) {
-    return { ok: false, message: prepared.message };
+  const resolved = { ...currentSpeechEngineOptions(), ...options };
+  const status = await readSpeechStatus(resolved);
+  if (!status.ready) {
+    return {
+      ok: false,
+      message: speechMissingModelMessage(resolved.engine, status.dir),
+    };
   }
-  // Best-effort: if warm finished during recording, the worker is already loaded.
-  await warmSenseVoice().catch(() => false);
+  await warmSpeechEngine(resolved).catch(() => false);
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const result = await invoke<HostTranscript>("speech_transcribe", {
       request: {
         audioBase64: audioBase64(wav),
         language,
+        engine: resolved.engine,
       },
     });
     return {

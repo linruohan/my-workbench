@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { appendVoiceText, insertVoiceText, VOICE_HOLD_MIN_MS } from "./text";
+import {
+  appendVoiceText,
+  injectVoiceIntoEditable,
+  injectVoiceIntoField,
+  insertVoiceText,
+  isVoiceEditable,
+  VOICE_HOLD_MIN_MS,
+} from "./text";
 import { resampleTo16k } from "./speech-audio";
 
 describe("insertVoiceText", () => {
@@ -19,6 +26,61 @@ describe("insertVoiceText", () => {
 
   it("keeps CapsWriter-style short-press threshold at 500ms", () => {
     expect(VOICE_HOLD_MIN_MS).toBe(500);
+  });
+});
+
+describe("injectVoiceIntoField", () => {
+  it("writes into a textarea and keeps caret after the spoken chunk", () => {
+    const area = document.createElement("textarea");
+    area.value = "你好世界";
+    document.body.appendChild(area);
+    Object.defineProperty(area, "selectionStart", {
+      configurable: true,
+      get: () => 2,
+      set: () => undefined,
+    });
+    Object.defineProperty(area, "selectionEnd", {
+      configurable: true,
+      get: () => 2,
+      set: () => undefined,
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: () => false,
+    });
+
+    const result = injectVoiceIntoField(area, "中间");
+    expect(result.value).toBe("你好 中间 世界");
+    expect(area.value).toBe("你好 中间 世界");
+
+    area.remove();
+  });
+
+  it("treats textareas and contenteditable as voice targets", () => {
+    const area = document.createElement("textarea");
+    const div = document.createElement("div");
+    Object.defineProperty(div, "isContentEditable", {
+      configurable: true,
+      value: true,
+    });
+    expect(isVoiceEditable(area)).toBe(true);
+    expect(isVoiceEditable(div)).toBe(true);
+    expect(isVoiceEditable(document.createElement("button"))).toBe(false);
+  });
+
+  it("injects into contenteditable via insertText", () => {
+    const div = document.createElement("div");
+    Object.defineProperty(div, "isContentEditable", {
+      configurable: true,
+      value: true,
+    });
+    document.body.appendChild(div);
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: () => true,
+    });
+    expect(injectVoiceIntoEditable(div, "你好")).toBe(true);
+    div.remove();
   });
 });
 
