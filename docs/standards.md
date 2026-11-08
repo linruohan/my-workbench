@@ -1,78 +1,76 @@
 # 代码规范
 
-本文件是个人工作台的**强制编码标准**。发版前须通过根目录 `npm run check`。
+## 1. 语言与类型
 
-## 1. 总则
+- TypeScript `strict`；不使用 `any`、`@ts-ignore`，确需例外要写原因。
+- 共享类型放 `packages/domain`；组件 Props 就近定义，不导出无用类型。
+- 判别联合优先于布尔组合；外部数据（模型响应、IPC、文件内容）先校验再使用。
+- 异步显式处理失败，不吞 Promise；面向用户的错误转成中文可读文案。
 
-1. TypeScript **strict**；禁止无必要的 `any`。
-2. 业务规则放在 `@wb/domain`，持久化放在 `@wb/db`，视觉令牌放在 `@wb/theme`，UI 不复制不变量。
-3. **所有业务数据只写本机**；不得引入云端业务库或静默上传。
-4. 改行为必补测试；修 bug 优先加回归测试。
-5. 提交信息说明「为什么」；不提交 `node_modules`、`target`、`*.db`、凭据。
+## 2. 领域与架构
 
-## 2. 目录与依赖方向
+- `packages/domain` 必须纯：不引 React / DOM / Tauri / 文件系统，不取系统时间（`now` 由调用方传入）。
+- 所有不变量先落领域函数，再落 UI：计划日与时刻互斥、截止同理、今日、逾期、重复推进、提醒窗口、定时下次运行、工具权限门、知识库扩展白名单。
+- 界面不直接改快照；通过仓储方法或领域函数。
+- 原生能力只做 IO 与进程 / 窗口管理，不写业务规则。
+- 依赖方向：`apps/desktop → domain / db / theme`；`db → domain`；`domain`、`theme` 不反向依赖。
+- SQLite 仓储为实验代码，新增生产功能不得依赖它。
 
-```
-apps/desktop  →  @wb/domain, @wb/db/memory|@wb/db, @wb/theme
-packages/db   →  @wb/domain
-packages/theme → （无业务依赖）
-packages/domain → （无 UI / IO 依赖）
-```
+## 3. 文件与模块
 
-禁止：`domain` 依赖 `desktop`；禁止 UI 直接拼 SQL。
+- 单文件聚焦单一职责，**目标 ≤ 400 行**；超出按「视图 / 面板 / 纯逻辑」拆分，减少功能耦合。
+- 一个目录一个特性：`tasks/`、`notes/`、`timed/`、`agent/`、`voice/`、`settings/`。
+- 纯逻辑（解析、排序、分组、格式化）优先放领域或同目录 `*.ts`，组件只负责渲染与交互。
+- 通用组件放 `ui/`；只出现一次的组件不提前抽象。
+- 存储键、路径、偏好读取集中在 `lib/persistence.ts`、`lib/prefs.ts`、`lib/paths.ts`。
 
-## 3. 命名
+## 4. 命名与注释
 
-| 类别 | 约定 |
-| --- | --- |
-| 文件 | `kebab-case.ts` / 组件 `PascalCase.tsx` |
-| 类型 / 组件 | `PascalCase` |
-| 函数 / 变量 | `camelCase` |
-| 常量 | `UPPER_SNAKE` 或只读对象 |
-| CSS 类 | BEM 风格：`block__element`、`is-active` |
-| CSS 变量 | `--wb-*`（仅来自 `@wb/theme`） |
+- 变量 / 函数 / 类型英文；界面文案中文；文件名反映职责（`TaskBoard.tsx`、`run-timed-task.ts`）。
+- 函数级注释用中文说明「做什么、边界、失败行为」；显而易见的赋值不注释。
+- 复杂不变量在领域函数旁写「为什么」，不写「改了什么」。
+- 注释跟随代码更新，过期注释直接删。
 
-## 4. React / UI
+## 5. React 与样式
 
-1. 主题必须经 `ThemeProvider`；颜色与间距只用 `--wb-*`，禁止在功能 CSS 写死色值（测试夹具除外）。
-2. 列表将来大数据量用虚拟滚动；禁止为装饰引入持续占用主线程的动画。
-3. `prefers-reduced-motion` 已在主题中归零动效，勿绕过。
-4. 无障碍：按钮有可见文案或 `aria-label`；提醒弹层使用适当 `role`。
+- 函数组件 + Hooks；不引入类组件与全局状态库。
+- 组件不读 `localStorage` 原文；通过 `prefs` / `persistence` 封装。
+- 列表与长消息窗口化；动画短、可关，遵循 `prefers-reduced-motion`。
+- 颜色、间距、圆角、阴影只用主题令牌 `--wb-*`，不硬编码十六进制色。
+- 交互必须有键盘路径与可见焦点；图标按钮带 `aria-label`；危险操作二次确认。
+- 拖拽必须提供非拖拽替代路径（菜单 / 按钮）。
 
-## 5. 测试
+## 6. 数据与安全
 
-| 包 | 最低要求 |
-| --- | --- |
-| `@wb/domain` | 每个导出模块有单测；不变量变更必须改测 |
-| `@wb/db` | 仓储关键路径有集成测（内存 SQLite / Memory） |
-| `@wb/theme` | 解析、持久化、cycle 有单测 |
-| `@wb/desktop` | 主路径交互测（捕获、排期、主题切换） |
+- Provider 密钥只存 `wb.credentials.v1`，不入快照、日志、URL、工具参数。
+- 快照升级在仓储归一化处补默认值；旧 `workbench.json` 不得导致崩溃。
+- 写入本机文件前校验路径归属（知识库根 / 工作区 `rootPath`）；不跟随用户输入任意绝对路径。
+- `dangerouslySetInnerHTML` 只用于已清洗的 Markdown / 高亮结果。
+- 外部网页内容按不可信输入处理；不得直接注入主界面 DOM。
+- 新增 Tauri 命令必须注册、限定参数、评估路径与进程风险，并同步 capabilities。
 
-命令：`npm test`
+## 7. 测试
 
-## 6. 格式与静态检查
+- 领域规则必须有 Vitest：互斥字段、今日、逾期、重复、提醒、统计、定时、知识库路径、权限门。
+- 仓储测试覆盖快照 round-trip 与旧数据归一化。
+- 缺陷修复先写复现用例。
+- 不把 E2E / 真实模型调用作为门禁；外部调用用假实现。
 
-- EditorConfig：`.editorconfig`
-- Prettier：`.prettierrc`
-- Oxlint（desktop）：`apps/desktop/.oxlintrc.json`
+## 8. 性能
 
-```bash
-npm run format        # 写入格式化
-npm run format:check  # CI / 发版检查
-npm run lint          # oxlint desktop
-npm run typecheck
-npm run check         # format:check + lint + typecheck + test
-```
+- 视图切换首帧 ≤ 100ms；命令面板 ≤ 80ms；完成 / 排期乐观更新 ≤ 50ms（本地实测）。
+- 避免在渲染路径做全量排序 / 扫描；派生结果缓存到 memo 或领域函数。
+- 大文件（知识库、Agent 输出）分块读取 / 虚拟化渲染；超长工具输出进入 `.wb\spill\`。
 
-## 7. Git
+## 9. 依赖与原生
 
-- 默认分支 `main`
-- 提交前本地 `npm run check`（发版强制）
-- 不使用 `--no-verify` 跳过约定（除非紧急热修并事后补测）
+- 新增依赖先说明用途、体积、许可与替代方案；能复用现有能力不新增包。
+- 原生依赖同步 `Cargo.toml`、`lib.rs`、`capabilities/`，并在 `docs/packaging.md` 记录资源变化。
+- 不把模型权重、运行日志、构建产物提交到仓库。
 
-## 8. 相关文档
+## 10. Git 与文档
 
-- 设计：`docs/design.md`
-- 主题实现：`packages/theme`
-- 发布标准：`docs/release.md`
-- 打包：`docs/packaging.md`
+- 提交聚焦一件事；信息写「为什么」，不写「改了哪些文件」。
+- 能力、入口、快捷键、数据位置变化必须同步 `README.md` 与 `docs/design.md`。
+- 工具变化同步 `docs/tools.md`；打包资源变化同步 `docs/packaging.md`；版本与验收同步 `docs/release.md`。
+- 文档不承诺未落地能力；如需保留规划，明确标注「未落地」。

@@ -1,5 +1,7 @@
 # DSH 工具链 Rust 重写可行性分析
 
+> 说明：本文是针对 `@deepseek-ai/dsh@0.2.2-rc.1` 的可行性分析快照（2026-11-06），不代表本仓库已全部迁移。当前工具落地状态以 [`tools.md`](tools.md) 为准。
+
 > 分析对象：`C:\software\nodejs\npm_global\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai`
 > 分析日期：2026-11-06　版本快照：`@deepseek-ai/dsh@0.2.2-rc.1`（`engines.node >= 24.9.0`，bin = `dsh` → `lib/bin.js`，顶层 90 个直接依赖）
 

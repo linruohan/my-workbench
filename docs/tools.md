@@ -5,6 +5,7 @@
 - **对照源**：`…/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-*`
 - **本仓库实现**：`packages/domain/src/agent-workspace-tools.ts`、`packages/domain/src/agent.ts`、`apps/desktop/src/agent/workspace-tools.ts`、`apps/desktop/src-tauri/src/agent_workspace.rs`
 - **原则**：不 npm 依赖 DSH/Cordis；按契约重实现，并绑在工作区 `rootPath` 与现有权限门上
+- **对齐版本**：`0.1.10`（2026-11-08）；新增 / 删除 / 改参数工具时必须同步更新本文件
 
 ## 图例
 
