@@ -19,6 +19,7 @@ apps/desktop/src-tauri/target/
 *.log
 credentials.bin
 workbench/
+CapsWriter-Offline/
 
 __pycache__/
 *.py[cod]
