@@ -460,8 +460,11 @@ export function CommandPalette({
     setIndex(0);
     setNowMs(Date.now());
     const id = requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
+      const node = inputRef.current;
+      if (!node) return;
+      if (document.activeElement !== node) node.focus();
+      // 只在输入框还空着时全选，避免把用户已经打进去的首字选中后被下一个字符覆盖。
+      if (node.value === "") node.select();
     });
     return () => cancelAnimationFrame(id);
   }, [open]);
