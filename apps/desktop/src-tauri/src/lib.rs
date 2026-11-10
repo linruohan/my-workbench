@@ -89,8 +89,14 @@ pub fn run() {
             apply_taskbar_icon(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // 关掉窗口时顺手结束语音 worker（python / node），不留后台进程。
+            if let tauri::RunEvent::Exit = event {
+                speech::shutdown_workers();
+            }
+        });
 }
 
 #[cfg(windows)]

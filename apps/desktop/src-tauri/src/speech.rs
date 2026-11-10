@@ -164,7 +164,7 @@ fn models_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .path()
         .data_dir()
         .map_err(|_| "无法定位配置目录".to_string())?;
-    Ok(root.join("my-workbench").join("models"))
+    Ok(strip_verbatim(root).join("my-workbench").join("models"))
 }
 
 fn engine_model_dir(app: &tauri::AppHandle, engine: &str) -> Result<PathBuf, String> {
@@ -180,38 +180,83 @@ fn model_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     engine_model_dir(app, "sensevoice")
 }
 
-fn speech_runtime_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// Windows 的 `\\?\`（verbatim）前缀会让 Node 解析入口脚本直接失败
+/// （`Error: EISDIR ... lstat 'C:'`），Python 却不受影响。这里统一去掉前缀。
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+/// 语音资源根目录候选（按优先级）。
+///
+/// Tauri 打包时 `bundle.resources` 用数组形式会保留 `resources/` 前缀，安装后
+/// 真实路径是 `<resource_dir>/resources/speech`；`tauri-build` 在开发态也会把
+/// 资源复制到二进制旁的 `resources/speech`。这里统一列出所有候选，避免安装后
+/// 误报「找不到运行时」，同时保留源码目录兜底供 `tauri dev` 使用。
+fn speech_resource_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !roots.contains(&path) {
+            roots.push(path);
+        }
+    };
     if let Ok(resource) = app.path().resource_dir() {
-        let bundled = resource.join("speech").join("runtimes");
+        let resource = strip_verbatim(resource);
+        push(resource.join("resources").join("speech"));
+        push(resource.join("speech"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push(strip_verbatim(dir.to_path_buf()).join("resources").join("speech"));
+            push(strip_verbatim(dir.to_path_buf()).join("speech"));
+        }
+    }
+    push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("speech"),
+    );
+    roots
+}
+
+fn speech_runtime_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let roots = speech_resource_roots(app);
+    for root in &roots {
+        let bundled = root.join("runtimes");
         if bundled.is_dir() {
             return Ok(bundled);
         }
     }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("resources")
-        .join("speech")
-        .join("runtimes");
-    if dev.is_dir() {
-        return Ok(dev);
-    }
-    Err("找不到语音推理运行时".into())
+    Err(format!("找不到语音推理运行时（已尝试：{}）", join_paths(&roots)))
 }
 
 fn resource_speech_file(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
-    if let Ok(resource) = app.path().resource_dir() {
-        let bundled = resource.join("speech").join(name);
+    let roots = speech_resource_roots(app);
+    for root in &roots {
+        let bundled = root.join(name);
         if bundled.is_file() {
             return Ok(bundled);
         }
     }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("resources")
-        .join("speech")
-        .join(name);
-    if dev.is_file() {
-        return Ok(dev);
-    }
-    Err(format!("找不到语音转写脚本：{name}"))
+    Err(format!(
+        "找不到语音转写脚本：{name}（已尝试：{}）",
+        join_paths(&roots)
+    ))
+}
+
+/// 把候选目录拼成一行，方便安装后排查「资源没打进去」的问题。
+fn join_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join("；")
 }
 
 fn sensevoice_worker_script(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -618,6 +663,21 @@ fn resolved_paths(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     Ok((model, tokens, vad))
 }
 
+/// 启动子进程时不弹出黑色控制台窗口。
+///
+/// 安装后的应用是 GUI 进程（没有控制台），此时 `spawn` python / node
+/// 会新建一个 cmd 黑窗闪一下；加 `CREATE_NO_WINDOW` 后只在后台静默运行。
+fn hidden_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn find_node() -> Result<PathBuf, String> {
     which("node")
         .or_else(|| which("node.exe"))
@@ -651,27 +711,42 @@ fn which(name: &str) -> Option<PathBuf> {
 
 fn sherpa_module_paths() -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(npm_root) = Command::new("npm").args(["root", "-g"]).output() {
-        if npm_root.status.success() {
-            let root = String::from_utf8_lossy(&npm_root.stdout).trim().to_string();
-            if !root.is_empty() {
-                out.push(root.clone());
-                out.push(
-                    Path::new(&root)
-                        .join("@deepseek-ai")
-                        .join("dsh")
-                        .join("node_modules")
-                        .display()
-                        .to_string(),
-                );
-            }
-        }
+    // Windows 上 npm 实际是 npm.cmd，直接 Command::new("npm") 多半找不到，这里显式走 cmd。
+    let npm_root = hidden_command(Path::new("cmd"))
+        .args(["/C", "npm", "root", "-g"])
+        .output()
+        .ok()
+        .filter(|item| item.status.success())
+        .map(|item| String::from_utf8_lossy(&item.stdout).trim().to_string())
+        .filter(|item| !item.is_empty());
+    if let Some(root) = npm_root {
+        out.push(root.clone());
+        out.push(
+            Path::new(&root)
+                .join("@deepseek-ai")
+                .join("dsh")
+                .join("node_modules")
+                .display()
+                .to_string(),
+        );
     }
     let fallback =
         PathBuf::from(r"C:\software\nodejs\npm_global\node_modules\@deepseek-ai\dsh\node_modules");
     if fallback.is_dir() {
         out.push(fallback.display().to_string());
     }
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        let dsh = PathBuf::from(app_data)
+            .join("npm")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("node_modules");
+        if dsh.is_dir() {
+            out.push(dsh.display().to_string());
+        }
+    }
+    out.dedup();
     out
 }
 
@@ -951,26 +1026,10 @@ async fn download_and_unzip(
 }
 
 fn copy_qwenctc_assets(app: &tauri::AppHandle, dir: &Path) -> Result<(), String> {
-    let asset_root = {
-        if let Ok(resource) = app.path().resource_dir() {
-            let bundled = resource.join("speech").join("assets").join("qwenctc");
-            if bundled.is_dir() {
-                Some(bundled)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-    .or_else(|| {
-        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources")
-            .join("speech")
-            .join("assets")
-            .join("qwenctc");
-        dev.is_dir().then_some(dev)
-    });
+    let asset_root = speech_resource_roots(app)
+        .into_iter()
+        .map(|root| root.join("assets").join("qwenctc"))
+        .find(|path| path.is_dir());
     let Some(assets) = asset_root else {
         return Ok(());
     };
@@ -1342,6 +1401,15 @@ fn stop_worker(worker: &mut Option<SpeechWorker>) {
     }
 }
 
+/// 应用退出时结束常驻的转写 worker（python / node），避免后台残留进程。
+pub fn shutdown_workers() {
+    let pending = tauri::async_runtime::block_on(async { worker_slot().lock().await.take() });
+    if let Some(mut worker) = pending {
+        let _ = worker.child.kill();
+        let _ = worker.child.wait();
+    }
+}
+
 fn worker_alive(child: &mut Child) -> bool {
     match child.try_wait() {
         Ok(None) => true,
@@ -1359,7 +1427,7 @@ fn collect_stderr(stderr: std::process::ChildStderr) -> std::sync::mpsc::Receive
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if sink.len() < 8 * 1024 {
+                    if sink.len() < 32 * 1024 {
                         sink.push_str(&String::from_utf8_lossy(&buf[..n]));
                     }
                 }
@@ -1371,33 +1439,132 @@ fn collect_stderr(stderr: std::process::ChildStderr) -> std::sync::mpsc::Receive
     rx
 }
 
+/// 一次 worker 启动的上下文，崩溃时连同 stderr 一起落盘，方便安装环境排查。
+#[derive(Clone)]
+struct WorkerLaunch {
+    engine: &'static str,
+    program: PathBuf,
+    script: PathBuf,
+    module_paths: Vec<String>,
+}
+
+impl WorkerLaunch {
+    fn describe(&self) -> String {
+        let paths = if self.module_paths.is_empty() {
+            "(空)".to_string()
+        } else {
+            self.module_paths.join(" | ")
+        };
+        format!(
+            "engine={} program={} script={} modulePaths={}",
+            self.engine,
+            self.program.display(),
+            self.script.display(),
+            paths
+        )
+    }
+}
+
+/// Node 崩溃报告的第一行通常是 `node:internal/...`，真正的错误在中段的 `Error:`。
+fn looks_like_error_line(line: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "Error",
+        "error",
+        "Cannot",
+        "cannot",
+        "not found",
+        "ENOENT",
+        "EPERM",
+        "EACCES",
+        "ERR_",
+        "failed",
+        "Failed",
+        "错误",
+        "无法",
+        "缺少",
+        "不存在",
+    ];
+    KEYS.iter().any(|key| line.contains(key))
+}
+
 fn summarize_worker_stderr(stderr: &str) -> Option<String> {
-    let trimmed = stderr.trim();
-    if trimmed.is_empty() {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect();
+    if lines.is_empty() {
         return None;
     }
-    let line = trimmed
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|item| !item.is_empty())
-        .unwrap_or(trimmed);
-    let compact = if line.chars().count() > 180 {
-        format!("{}…", line.chars().take(180).collect::<String>())
+    // 从第一条「像错误」的行开始取，最多三行，避免只看到 `Node.js v24.x` 这种尾巴。
+    let start = lines
+        .iter()
+        .position(|line| looks_like_error_line(line))
+        .unwrap_or(0);
+    let picked: Vec<&str> = lines.iter().skip(start).take(3).copied().collect();
+    let joined = picked.join(" ");
+    let compact = if joined.chars().count() > 320 {
+        format!("{}…", joined.chars().take(320).collect::<String>())
     } else {
-        line.to_string()
+        joined
     };
     Some(compact)
 }
 
-fn with_worker_stderr(message: String, stderr_rx: Option<std::sync::mpsc::Receiver<String>>) -> String {
-    let Some(rx) = stderr_rx else {
-        return message;
+/// 把启动命令与完整 stderr 追加到 `<配置目录>/my-workbench/logs/speech-worker.log`。
+fn append_worker_log(app: &tauri::AppHandle, launch: &WorkerLaunch, detail: &str) {
+    let Ok(base) = app.path().data_dir() else {
+        return;
     };
-    let stderr = rx.recv_timeout(Duration::from_millis(400)).unwrap_or_default();
+    let dir = base.join("my-workbench").join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|item| item.as_secs())
+        .unwrap_or(0);
+    let body = format!(
+        "[{stamp}] {}\n--- 输出 ---\n{}\n\n",
+        launch.describe(),
+        detail.trim()
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("speech-worker.log"))
+    {
+        use std::io::Write;
+        let _ = file.write_all(body.as_bytes());
+    }
+}
+
+fn exit_hint(status: Option<std::process::ExitStatus>) -> String {
+    match status {
+        Some(status) => match status.code() {
+            Some(code) if code < 0 => format!("退出码 0x{:08X}", code as u32),
+            Some(code) => format!("退出码 {code}"),
+            None => "进程被强制终止".to_string(),
+        },
+        None => "退出码未知".to_string(),
+    }
+}
+
+fn with_worker_stderr(
+    app: &tauri::AppHandle,
+    message: String,
+    stderr_rx: Option<std::sync::mpsc::Receiver<String>>,
+    launch: &WorkerLaunch,
+    status: Option<std::process::ExitStatus>,
+) -> String {
+    let stderr = stderr_rx
+        .map(|rx| rx.recv_timeout(Duration::from_millis(600)).unwrap_or_default())
+        .unwrap_or_default();
+    append_worker_log(app, launch, &stderr);
+    let head = format!("{message}（{}）", exit_hint(status));
     match summarize_worker_stderr(&stderr) {
-        Some(detail) if !message.contains(&detail) => format!("{message}：{detail}"),
-        _ => message,
+        Some(detail) if !head.contains(&detail) => format!("{head}：{detail}"),
+        _ => head,
     }
 }
 
@@ -1436,7 +1603,13 @@ fn wait_for_port(stdout: impl Read + Send + 'static) -> Result<u16, String> {
         .map_err(|_| "转写进程启动失败".to_string())?
 }
 
-fn finish_spawn(mut child: Child, token: String, fingerprint: String) -> Result<SpeechWorker, String> {
+fn finish_spawn(
+    app: &tauri::AppHandle,
+    mut child: Child,
+    token: String,
+    fingerprint: String,
+    launch: WorkerLaunch,
+) -> Result<SpeechWorker, String> {
     let stdout = child
         .stdout
         .take()
@@ -1447,15 +1620,25 @@ fn finish_spawn(mut child: Child, token: String, fingerprint: String) -> Result<
         Ok(port) => port,
         Err(message) => {
             let _ = child.kill();
-            let _ = child.wait();
-            return Err(with_worker_stderr(message, stderr_rx));
+            let status = child.wait().ok();
+            return Err(with_worker_stderr(
+                app,
+                message,
+                stderr_rx,
+                &launch,
+                status,
+            ));
         }
     };
 
     if !worker_alive(&mut child) {
+        let status = child.try_wait().ok().flatten();
         return Err(with_worker_stderr(
+            app,
             "转写进程在就绪后退出".into(),
             stderr_rx,
+            &launch,
+            status,
         ));
     }
 
@@ -1481,15 +1664,22 @@ fn spawn_sensevoice_worker(app: &tauri::AppHandle, fingerprint: String) -> Resul
     let script = sensevoice_worker_script(app)?;
     let node = find_node()?;
     let token = speech_token();
+    let module_paths = sherpa_module_paths();
     let config = serde_json::json!({
         "model": model,
         "tokens": tokens,
         "vad": vad,
         "threads": 2,
         "maxAudioBytes": MAX_WAV_BYTES,
-        "modulePaths": sherpa_module_paths(),
+        "modulePaths": module_paths.clone(),
     });
-    let child = Command::new(&node)
+    let launch = WorkerLaunch {
+        engine: "sensevoice",
+        program: node.clone(),
+        script: script.clone(),
+        module_paths,
+    };
+    let child = hidden_command(&node)
         .arg(&script)
         .arg(config.to_string())
         .env("WB_SPEECH_TOKEN", &token)
@@ -1498,7 +1688,7 @@ fn spawn_sensevoice_worker(app: &tauri::AppHandle, fingerprint: String) -> Resul
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("转写进程启动失败：{err}"))?;
-    finish_spawn(child, token, fingerprint)
+    finish_spawn(app, child, token, fingerprint, launch)
 }
 
 fn spawn_funasr_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result<SpeechWorker, String> {
@@ -1514,7 +1704,13 @@ fn spawn_funasr_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result<
         "enginesRoot": runtime,
         "maxAudioBytes": MAX_WAV_BYTES,
     });
-    let child = Command::new(&python)
+    let launch = WorkerLaunch {
+        engine: "funasr",
+        program: python.clone(),
+        script: script.clone(),
+        module_paths: Vec::new(),
+    };
+    let child = hidden_command(&python)
         .arg(&script)
         .arg(worker_config.to_string())
         .env("WB_SPEECH_TOKEN", &token)
@@ -1525,7 +1721,7 @@ fn spawn_funasr_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result<
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("FunASR 转写进程启动失败：{err}"))?;
-    finish_spawn(child, token, fingerprint)
+    finish_spawn(app, child, token, fingerprint, launch)
 }
 
 fn spawn_qwenctc_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result<SpeechWorker, String> {
@@ -1541,7 +1737,13 @@ fn spawn_qwenctc_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result
         "codeRoot": runtime,
         "maxAudioBytes": MAX_WAV_BYTES,
     });
-    let child = Command::new(&python)
+    let launch = WorkerLaunch {
+        engine: "qwenctc",
+        program: python.clone(),
+        script: script.clone(),
+        module_paths: Vec::new(),
+    };
+    let child = hidden_command(&python)
         .arg(&script)
         .arg(worker_config.to_string())
         .env("WB_SPEECH_TOKEN", &token)
@@ -1553,7 +1755,7 @@ fn spawn_qwenctc_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("QwenCTC 转写进程启动失败：{err}"))?;
-    finish_spawn(child, token, fingerprint)
+    finish_spawn(app, child, token, fingerprint, launch)
 }
 
 fn spawn_worker(app: &tauri::AppHandle, config: &EngineConfig) -> Result<SpeechWorker, String> {

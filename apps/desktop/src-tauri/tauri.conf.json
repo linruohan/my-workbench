@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "My Workbench",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "identifier": "com.myworkbench.app",
   "build": {
     "frontendDist": "../dist",
@@ -18,7 +18,8 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
-        "shadow": true
+        "shadow": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
       }
     ],
     "security": {

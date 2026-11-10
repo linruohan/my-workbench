@@ -1,7 +1,7 @@
 {
   "name": "@wb/desktop",
   "private": true,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -24,6 +24,7 @@
     "highlight.js": "^11.12.0",
     "markdown-it": "^15.0.3",
     "onnxruntime-web": "^1.22.0",
+    "opencc-js": "^1.4.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

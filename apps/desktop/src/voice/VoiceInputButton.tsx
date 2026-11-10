@@ -162,7 +162,7 @@ export function VoiceInputButton({
       const { readSpeechStatus } = await import("./speech-models");
       const status = await readSpeechStatus(engineOptions);
       if (!status.ready) {
-        voice.notifyMissingModel(voice.engine, status.dir);
+        voice.notifyMissingModel(voice.engine, status.dir, status.message);
         pressRef.current = null;
         finishingRef.current = false;
         return;

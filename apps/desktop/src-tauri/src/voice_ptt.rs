@@ -29,7 +29,7 @@ mod win {
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_KEYUP, SendInput, VK_CAPITAL, VK_CONTROL, VK_V,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VK_CAPITAL, VK_CONTROL, VK_V,
     };
 
     const CF_UNICODETEXT: u32 = 13;
@@ -187,9 +187,20 @@ mod win {
         }
     }
 
+    /// 带重试地打开剪贴板：其它进程可能短暂占用，直接失败会导致应用外粘贴丢字。
+    fn open_clipboard_retry() -> bool {
+        for _ in 0..12 {
+            if unsafe { OpenClipboard(ptr::null_mut()) } != 0 {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        false
+    }
+
     fn read_clipboard_unicode() -> Option<String> {
         unsafe {
-            if OpenClipboard(ptr::null_mut()) == 0 {
+            if !open_clipboard_retry() {
                 return None;
             }
             let handle = GetClipboardData(CF_UNICODETEXT);
@@ -222,7 +233,7 @@ mod win {
         wide.push(0);
         let bytes = wide.len() * 2;
         unsafe {
-            if OpenClipboard(ptr::null_mut()) == 0 {
+            if !open_clipboard_retry() {
                 return Err("无法打开剪贴板".into());
             }
             EmptyClipboard();
@@ -307,19 +318,64 @@ mod win {
         }
     }
 
+    /// 剪贴板不可用时的兜底：把文字作为 Unicode 键盘事件直接打进当前焦点。
+    fn type_unicode(text: &str) -> Result<(), String> {
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
+        for unit in text.encode_utf16() {
+            for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+                inputs.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: 0,
+                            wScan: unit,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                });
+            }
+        }
+        let sent = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_mut_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+        if sent as usize != inputs.len() {
+            return Err("无法写入当前输入焦点".into());
+        }
+        Ok(())
+    }
+
+    /// 把转写结果粘贴到系统当前焦点（应用外的任意输入框）。
     pub fn paste_text(text: String) -> Result<(), String> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(());
         }
+        let spoken = trimmed.to_string();
         let previous = read_clipboard_unicode();
-        set_clipboard_unicode(trimmed)?;
-        thread::sleep(Duration::from_millis(40));
-        send_ctrl_v();
-        if let Some(prev) = previous {
-            thread::sleep(Duration::from_millis(120));
-            let _ = set_clipboard_unicode(&prev);
+        if set_clipboard_unicode(&spoken).is_err() {
+            // 剪贴板被占用时直接退化为 Unicode 直输，避免应用外「没反应」。
+            return type_unicode(&spoken);
         }
+        // 留出一点时间让目标窗口完成焦点切换，再发 Ctrl+V。
+        thread::sleep(Duration::from_millis(80));
+        send_ctrl_v();
+        // 延后恢复剪贴板：Electron/Office 等程序会异步读取剪贴板，
+        // 过早恢复会粘出旧内容或什么都不粘。
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(900));
+            if read_clipboard_unicode().as_deref() != Some(spoken.as_str()) {
+                return; // 用户已经复制了新内容，不覆盖
+            }
+            if let Some(prev) = previous {
+                let _ = set_clipboard_unicode(&prev);
+            }
+        });
         Ok(())
     }
 }
@@ -342,7 +398,11 @@ pub fn voice_ptt_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String
 }
 
 /// Paste text into the current OS focus via clipboard + Ctrl+V.
+///
+/// 异步执行：剪贴板重试与粘贴延时不能阻塞 WebView 的主线程。
 #[tauri::command]
-pub fn voice_ptt_paste(text: String) -> Result<(), String> {
-    win::paste_text(text)
+pub async fn voice_ptt_paste(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || win::paste_text(text))
+        .await
+        .map_err(|_| "粘贴任务执行失败".to_string())?
 }

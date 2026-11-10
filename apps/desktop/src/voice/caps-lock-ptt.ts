@@ -11,7 +11,12 @@ export type CapsLockPttOptions = {
   setStatus: (message: string | null) => void;
   markReady: () => void;
   openSettings?: () => void;
-  notifyMissingModel?: (engine?: SpeechEngineId, modelDir?: string) => void;
+  /** 模型未就绪时的提示入口，附带后端返回的诊断信息（缺运行时/脚本时会给出已尝试路径）。 */
+  notifyMissingModel?: (
+    engine?: SpeechEngineId,
+    modelDir?: string,
+    diagnostic?: string | null,
+  ) => void;
 };
 
 const LOCK_ID = "voice-dictation:caps-lock";
@@ -38,27 +43,37 @@ function captureEditable(): CapturedTarget | null {
   return { el: active, start: null, end: null };
 }
 
+/**
+ * 把转写结果写到当前光标处：
+ * - 应用内有焦点时，以「释放瞬间」的可编辑元素为准（按住期间换输入框也能落到新光标）；
+ * - 应用不在前台时，交给 Rust 走剪贴板粘贴，写进系统当前的任意输入焦点。
+ */
 async function writeBack(text: string, target: CapturedTarget | null): Promise<void> {
   const spoken = text.trim();
   if (!spoken) return;
 
-  // Prefer the element that was focused when CapsLock went down.
-  const preferred = target?.el && document.contains(target.el) ? target : null;
+  // 实时的焦点优先，按下时捕获的元素只作为兜底。
   const live = isVoiceEditable(document.activeElement)
     ? (document.activeElement as HTMLElement)
     : null;
-  const el = preferred?.el ?? live;
+  const captured =
+    target?.el && document.contains(target.el) && isVoiceEditable(target.el)
+      ? target
+      : null;
+  const picked: CapturedTarget | null = live
+    ? { el: live, start: null, end: null }
+    : captured;
 
-  if (el && document.hasFocus()) {
+  if (picked && document.hasFocus()) {
+    const el = picked.el;
     try {
       el.focus({ preventScroll: true });
       if (
         (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) &&
-        preferred &&
-        preferred.start != null &&
-        preferred.end != null
+        picked.start != null &&
+        picked.end != null
       ) {
-        el.setSelectionRange(preferred.start, preferred.end);
+        el.setSelectionRange(picked.start, picked.end);
       }
     } catch {
       // ignore focus/selection failures
@@ -66,7 +81,7 @@ async function writeBack(text: string, target: CapturedTarget | null): Promise<v
     if (injectVoiceIntoEditable(el, spoken)) return;
   }
 
-  // Outside the webview / non-editable focus: CapsWriter-style clipboard paste.
+  // 应用外（或没有可编辑焦点）：CapsWriter 式剪贴板粘贴，落进系统当前焦点。
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("voice_ptt_paste", { text: spoken });
 }
@@ -111,7 +126,7 @@ export function startCapsLockPtt(getOptions: () => CapsLockPttOptions): () => vo
       if (!status.ready) {
         pressed = false;
         target = null;
-        opts.notifyMissingModel?.(opts.engine, status.dir);
+        opts.notifyMissingModel?.(opts.engine, status.dir, status.message);
         return;
       }
       opts.markReady();

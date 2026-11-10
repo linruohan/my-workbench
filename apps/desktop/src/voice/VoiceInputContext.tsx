@@ -31,7 +31,11 @@ type VoiceInputContextValue = VoiceInputConfig & {
   setStatus: (message: string | null) => void;
   markReady: () => void;
   /** Short status + modal with download guide when models are missing. */
-  notifyMissingModel: (engine?: SpeechEngineId, modelDir?: string) => void;
+  notifyMissingModel: (
+    engine?: SpeechEngineId,
+    modelDir?: string,
+    diagnostic?: string | null,
+  ) => void;
 };
 
 const VoiceInputContext = createContext<VoiceInputContextValue | null>(null);
@@ -67,16 +71,18 @@ export function VoiceInputProvider({
   }, []);
 
   const notifyMissingModel = useCallback(
-    (nextEngine?: SpeechEngineId, modelDir?: string) => {
+    (nextEngine?: SpeechEngineId, modelDir?: string, diagnostic?: string | null) => {
       const useEngine = nextEngine ?? engine;
       setStatus("请先准备语音模型");
       if (missingDialogOpen.current) return;
       missingDialogOpen.current = true;
       const guide = speechMissingModelMessage(useEngine, modelDir);
+      // 把后端诊断一起展示：安装包缺运行时/脚本时能直接看到已尝试的路径。
+      const detail = diagnostic?.trim();
       void dialog
         .confirm({
           title: "语音模型未就绪",
-          message: guide,
+          message: detail ? `${guide}\n\n诊断信息：${detail}` : guide,
           confirmLabel: "去设置准备",
           cancelLabel: "知道了",
         })

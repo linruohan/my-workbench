@@ -250,6 +250,12 @@ export class Recording {
       this.context = new AudioCtx();
       if (this.context.state === "suspended") {
         await this.context.resume().catch(() => undefined);
+        // 应用失焦或缺少用户手势时 Chromium 可能暂时拒绝恢复音频上下文，
+        // 这里重试几次，避免「应用外按 CapsLock 录不到声音」。
+        for (let i = 0; i < 3 && this.context.state === "suspended"; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          await this.context.resume().catch(() => undefined);
+        }
       }
       this.sampleRate = this.context.sampleRate || TARGET_RATE;
       this.source = this.context.createMediaStreamSource(this.stream);

@@ -1,6 +1,7 @@
 import type { SpeechLanguage } from "@wb/domain";
 import { isTauriRuntime } from "../lib/paths";
 import { audioBase64, RecordingError } from "./speech-audio";
+import { toSimplifiedChinese } from "./simplify";
 import {
   currentSpeechEngineOptions,
   readSpeechStatus,
@@ -61,7 +62,7 @@ export async function transcribeRecording(
     });
     return {
       ok: true,
-      text: result.text.trim(),
+      text: toSimplifiedChinese(result.text.trim()),
       audioSeconds: result.audioSeconds,
       inferenceSeconds: result.inferenceSeconds,
     };
