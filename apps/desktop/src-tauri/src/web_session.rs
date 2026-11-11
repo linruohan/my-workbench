@@ -402,6 +402,17 @@ pub async fn web_session_show(
         let notify = app.clone();
         let builder = tauri::webview::WebviewBuilder::new(LABEL, WebviewUrl::External(login.url))
             .focused(false)
+            // Must match the main window's additionalBrowserArgs so the child
+            // webview can share the same EBWebView data directory. On Windows,
+            // WebViews with different additionalBrowserArgs must use different
+            // data directories, otherwise creation fails with 0x8007139F.
+            .additional_browser_args(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                 --autoplay-policy=no-user-gesture-required \
+                 --disable-background-timer-throttling \
+                 --disable-renderer-backgrounding \
+                 --disable-backgrounding-occluded-windows",
+            )
             .initialization_script(PAGE_CHROME_SCRIPT)
             .on_page_load(|webview, payload| {
                 if payload.event() == PageLoadEvent::Finished {
