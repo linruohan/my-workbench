@@ -471,12 +471,22 @@ pub async fn web_session_reload(app: AppHandle) -> Result<(), String> {
     webview.reload().map_err(|err| err.to_string())
 }
 
+/// 收起内嵌网页时把它挪到可视区外，而不是切换窗口显隐。
+///
+/// Windows + WebView2 在 `hide()` → `show()` 之后会丢失/错乱鼠标命中区域，
+/// 导致整个主窗口的点击被吞掉（模型选择、按钮都点不动），所以这里只改位置，
+/// 不碰可见性；恢复时 `place()` 会重新摆回原位并保持可见。
+const HIDDEN_X: f64 = -32000.0;
+const HIDDEN_Y: f64 = -32000.0;
+
 #[tauri::command]
 pub async fn web_session_hide(app: AppHandle) -> Result<(), String> {
     let Some(webview) = app.get_webview(LABEL) else {
         return Ok(());
     };
-    webview.hide().map_err(|err| err.to_string())
+    webview
+        .set_position(LogicalPosition::new(HIDDEN_X, HIDDEN_Y))
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
