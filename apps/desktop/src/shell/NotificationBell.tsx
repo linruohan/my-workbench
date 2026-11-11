@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import { coverEmbeddedWebSession } from "../agent/web-session";
 import { IconBell } from "./icons";
 
 export type NotificationItem = {
@@ -59,21 +58,6 @@ export function NotificationBell({
       document.removeEventListener("keydown", onKey);
     };
   }, [open, onOpenChange]);
-
-  // 内嵌网页是原生子窗口，永远盖在浮层之上；打开通知面板时先把它收起，关闭后恢复。
-  useEffect(() => {
-    if (!open) return;
-    let release: (() => void) | null = null;
-    let disposed = false;
-    void coverEmbeddedWebSession().then((fn) => {
-      if (disposed) fn();
-      else release = fn;
-    });
-    return () => {
-      disposed = true;
-      release?.();
-    };
-  }, [open]);
 
   return (
     <div className="notif" ref={rootRef}>
