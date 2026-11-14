@@ -62,8 +62,68 @@ type MemNotification = {
   snoozeUntil?: number | null;
 };
 
+/** SQLite 增量持久化的实体集合名（entities.kind）。 */
+export type EntityKind =
+  | "task"
+  | "task_bucket"
+  | "project"
+  | "today_order"
+  | "notification"
+  | "note"
+  | "timed_task"
+  | "tag"
+  | "task_tag"
+  | "agent_workspace"
+  | "agent_thread"
+  | "agent_message"
+  | "agent_approval";
+
+/** 一条待写实体：upsert 携带规范化 JSON；seq 用于加载时保序（如会话消息）。 */
+export type PendingEntity = {
+  kind: EntityKind;
+  id: string;
+  seq?: number;
+  data: string;
+};
+
+export type PendingKey = { kind: EntityKind; id: string };
+
+/** collectPendingChanges() 的结果：逐实体增删 + 需整集合替换的 kind。 */
+export type PendingChanges = {
+  upserts: PendingEntity[];
+  deletes: PendingKey[];
+  /** 这些 kind 需要先清空再写入（小集合的全量替换语义）。 */
+  replaced: EntityKind[];
+};
+
+const ALL_KINDS: EntityKind[] = [
+  "task",
+  "task_bucket",
+  "project",
+  "today_order",
+  "notification",
+  "note",
+  "timed_task",
+  "tag",
+  "task_tag",
+  "agent_workspace",
+  "agent_thread",
+  "agent_message",
+  "agent_approval",
+];
+
 export class MemoryWorkbenchRepository {
   private tasks = new Map<string, Task>();
+  /** listTasks 的缓存；任何任务变更时通过 touchTasks() 失效。 */
+  private taskListCache: Task[] | null = null;
+  /** listTagsForTask 的按任务缓存；标签分配/删除/导入时清空。 */
+  private taskTagListCache = new Map<string, Tag[]>();
+  /** 其余列表查询的稳定引用缓存（通知/项目/标签/笔记/定时任务）。 */
+  private notificationsListCache: MemNotification[] | null = null;
+  private projectsListCache: MemProject[] | null = null;
+  private tagsListCache: Tag[] | null = null;
+  private notesListCache: Note[] | null = null;
+  private timedListCache: TimedTask[] | null = null;
   private projects = new Map<string, MemProject>([
     [INBOX_PROJECT_ID, { id: INBOX_PROJECT_ID, title: "收件箱" }],
   ]);
@@ -76,11 +136,233 @@ export class MemoryWorkbenchRepository {
   private notifications: MemNotification[] = [];
   private agentWorkspaces = new Map<string, AgentWorkspace>();
   private agentThreads = new Map<string, AgentThread>();
+  /** Agent 列表查询的稳定引用缓存（线程/工作区），任何 Agent 变更时失效。 */
+  private agentThreadListCache: AgentThread[] | null = null;
+  private agentWorkspaceListCache: AgentWorkspace[] | null = null;
   private agentMessages: AgentMessage[] = [];
+  private agentMessagesByThread = new Map<string, AgentMessage[]>();
+  /** listAgentMessages 的按线程克隆缓存；消息增删时失效。 */
+  private agentMessagesListCache = new Map<string, AgentMessage[]>();
   private agentApprovals: AgentApproval[] = [];
 
+  // ---- SQLite 增量持久化的变更日志 ----
+  /** agent 消息逐实体日志（高频路径，避免整集合重序列化）；后写覆盖先写。 */
+  private messageJournal = new Map<string, "upsert" | "delete">();
+  /** 需要整集合替换的 kind（小集合；touch 即标记）。 */
+  private replaceKinds = new Set<EntityKind>();
+  /** importSnapshot 后置位：所有 kind 全量替换（迁移/导入场景）。 */
+  private journalFull = false;
+
+  private rebuildAgentMessageIndex(): void {
+    const index = new Map<string, AgentMessage[]>();
+    for (const message of this.agentMessages) {
+      const list = index.get(message.threadId);
+      if (list) list.push(message);
+      else index.set(message.threadId, [message]);
+    }
+    this.agentMessagesByThread = index;
+    this.agentMessagesListCache.clear();
+  }
+
+  /** 防止单会话消息无限增长导致快照/内存膨胀；超限时丢弃最早消息。
+   *  裁剪边界保证上下文完整：工具结果必须与其调用方（assistant 工具调用）同进退，
+   *  边界落在工具结果上时把结果一并丢弃，避免留下调用方已失踪的孤儿 tool 消息
+   *  （重放到 OpenAI / Responses 等接口会被拒绝）。 */
+  private trimAgentThreadMessages(threadId: string, limit = 1200): void {
+    const list = this.agentMessagesByThread.get(threadId);
+    if (!list || list.length <= limit) return;
+    let dropCount = list.length - limit;
+    while (dropCount < list.length && list[dropCount].role === "tool") {
+      dropCount += 1;
+    }
+    if (dropCount >= list.length) return;
+    const droppedList = list.slice(0, dropCount);
+    const dropped = new Set(droppedList.map((message) => message.id));
+    this.agentMessagesByThread.set(threadId, list.slice(dropCount));
+    this.agentMessages = this.agentMessages.filter((message) => !dropped.has(message.id));
+    this.touchAgentMessages(threadId);
+    this.journalAgentMessages(droppedList, "delete");
+  }
+
+  // ---- 变更日志：写入 SQLite 前由 collectPendingChanges() 消费 ----
+
+  private markReplace(kind: EntityKind): void {
+    if (this.journalFull) return;
+    this.replaceKinds.add(kind);
+  }
+
+  /** 会话消息逐实体日志；后写覆盖先写（先 upsert 后 delete → 删除）。 */
+  private journalAgentMessages(
+    messages: readonly AgentMessage[],
+    op: "upsert" | "delete",
+  ): void {
+    if (this.journalFull) return;
+    for (const message of messages) {
+      this.messageJournal.set(message.id, op);
+    }
+  }
+
+  /**
+   * 汇出待持久化变更：会话消息逐实体增删，其余 kind 整集合替换（行数有界）。
+   * 只读不改日志；写库成功后调用 markPersisted() 才清空，失败可重试。
+   * 无变更时返回 null，持久化层据此跳过写库。
+   */
+  collectPendingChanges(): PendingChanges | null {
+    if (
+      !this.journalFull &&
+      this.replaceKinds.size === 0 &&
+      this.messageJournal.size === 0
+    ) {
+      return null;
+    }
+    const upserts: PendingEntity[] = [];
+    const deletes: PendingKey[] = [];
+    const replaced: EntityKind[] = [];
+    if (this.journalFull) {
+      for (const kind of ALL_KINDS) {
+        replaced.push(kind);
+        upserts.push(...this.serializeKind(kind));
+      }
+      return { upserts, deletes, replaced };
+    }
+    for (const kind of this.replaceKinds) {
+      replaced.push(kind);
+      upserts.push(...this.serializeKind(kind));
+    }
+    for (const [id, op] of this.messageJournal) {
+      if (op === "delete") {
+        deletes.push({ kind: "agent_message", id });
+        continue;
+      }
+      const message = this.agentMessages.find((item) => item.id === id);
+      // 日志期间又被删除：按删除处理，避免写回幽灵行。
+      if (!message) {
+        deletes.push({ kind: "agent_message", id });
+        continue;
+      }
+      upserts.push({
+        kind: "agent_message",
+        id,
+        seq: message.createdAt,
+        data: JSON.stringify(message),
+      });
+    }
+    return { upserts, deletes, replaced };
+  }
+
+  /** 落库成功后清空日志，回到干净状态（首次从 SQLite 装载后也用它复位）。 */
+  markPersisted(): void {
+    this.messageJournal.clear();
+    this.replaceKinds.clear();
+    this.journalFull = false;
+  }
+
+  /** 整集合序列化为待写行；today_order 是单行（id 固定 current）。 */
+  private serializeKind(kind: EntityKind): PendingEntity[] {
+    switch (kind) {
+      case "task":
+        return [...this.tasks.values()].map((task) => ({
+          kind,
+          id: task.id,
+          data: JSON.stringify(task),
+        }));
+      case "task_bucket":
+        return [...this.buckets.entries()].map(([id, bucket]) => ({
+          kind,
+          id,
+          data: JSON.stringify(bucket),
+        }));
+      case "project":
+        return [...this.projects.values()].map((project) => ({
+          kind,
+          id: project.id,
+          data: JSON.stringify(project),
+        }));
+      case "today_order":
+        return [{ kind, id: "current", data: JSON.stringify(this.todayOrder) }];
+      case "notification":
+        return this.notifications.map((row) => ({
+          kind,
+          id: row.id,
+          data: JSON.stringify(row),
+        }));
+      case "note":
+        return [...this.notes.values()].map((note) => ({
+          kind,
+          id: note.id,
+          data: JSON.stringify(note),
+        }));
+      case "timed_task":
+        return [...this.timedTasks.values()].map((task) => ({
+          kind,
+          id: task.id,
+          data: JSON.stringify(task),
+        }));
+      case "tag":
+        return [...this.tags.values()].map((tag) => ({
+          kind,
+          id: tag.id,
+          data: JSON.stringify(tag),
+        }));
+      case "task_tag":
+        return [...this.taskTags.entries()].map(([taskId, ids]) => ({
+          kind,
+          id: taskId,
+          data: JSON.stringify([...ids]),
+        }));
+      case "agent_workspace":
+        return [...this.agentWorkspaces.values()].map((workspace) => ({
+          kind,
+          id: workspace.id,
+          data: JSON.stringify(workspace),
+        }));
+      case "agent_thread":
+        return [...this.agentThreads.values()].map((thread) => ({
+          kind,
+          id: thread.id,
+          data: JSON.stringify(thread),
+        }));
+      case "agent_message":
+        return this.agentMessages.map((message) => ({
+          kind,
+          id: message.id,
+          seq: message.createdAt,
+          data: JSON.stringify(message),
+        }));
+      case "agent_approval":
+        return this.agentApprovals.map((approval) => ({
+          kind,
+          id: approval.id,
+          data: JSON.stringify(approval),
+        }));
+    }
+  }
+
+  private trimNotifications(limit = 300): void {
+    if (this.notifications.length <= limit) return;
+    const sorted = [...this.notifications].sort((a, b) => b.fireAt - a.fireAt);
+    const keep = new Set<string>();
+    for (const item of sorted) {
+      if (keep.size >= limit) break;
+      keep.add(item.id);
+    }
+    this.notifications = this.notifications.filter((item) => keep.has(item.id));
+    this.touchNotifications();
+  }
+
   listTasks(): Task[] {
-    return [...this.tasks.values()].sort((a, b) => a.createdAt - b.createdAt);
+    // 按需缓存：返回稳定数组引用（直到任一任务变更），上层 useMemo 可命中。
+    if (this.taskListCache) return this.taskListCache;
+    const list = [...this.tasks.values()].sort((a, b) => a.createdAt - b.createdAt);
+    this.taskListCache = list;
+    return list;
+  }
+
+  /** 任务集合/字段发生任何变更后使 listTasks 缓存失效，并标记持久化脏。 */
+  private touchTasks(): void {
+    this.taskListCache = null;
+    this.markReplace("task");
+    this.markReplace("task_bucket");
   }
 
   getTask(id: string): Task | null {
@@ -123,6 +405,7 @@ export class MemoryWorkbenchRepository {
     };
     this.tasks.set(task.id, task);
     this.buckets.set(task.id, input.bucket ?? "active");
+    this.touchTasks();
     return task;
   }
 
@@ -174,6 +457,7 @@ export class MemoryWorkbenchRepository {
       updatedAt: nowMs,
     };
     this.tasks.set(taskId, next);
+    this.touchTasks();
     return next;
   }
 
@@ -190,6 +474,7 @@ export class MemoryWorkbenchRepository {
     const next = { ...task, updatedAt: nowMs };
     this.tasks.set(taskId, next);
     this.buckets.set(taskId, "active");
+    this.touchTasks();
     return next;
   }
 
@@ -210,6 +495,7 @@ export class MemoryWorkbenchRepository {
     };
     this.tasks.set(taskId, next);
     this.buckets.set(taskId, "backlog");
+    this.touchTasks();
     return next;
   }
 
@@ -234,6 +520,7 @@ export class MemoryWorkbenchRepository {
     }
     const next = patchTaskContent(task, patch, nowMs);
     this.tasks.set(taskId, next);
+    this.touchTasks();
     return next;
   }
 
@@ -244,7 +531,11 @@ export class MemoryWorkbenchRepository {
     this.tasks.delete(taskId);
     this.buckets.delete(taskId);
     this.taskTags.delete(taskId);
+    this.taskTagListCache.delete(taskId);
     this.todayOrder = this.todayOrder.filter((id) => id !== taskId);
+    this.markReplace("today_order");
+    this.markReplace("task_tag");
+    this.touchTasks();
     for (const child of this.listTasks().filter((t) => t.parentId === taskId)) {
       this.tasks.set(child.id, {
         ...child,
@@ -252,6 +543,7 @@ export class MemoryWorkbenchRepository {
         updatedAt: Date.now(),
       });
     }
+    this.touchTasks();
   }
 
   completeTask(taskId: string, nowMs = Date.now()): Task {
@@ -259,6 +551,7 @@ export class MemoryWorkbenchRepository {
     if (!task) throw new DomainError(`task not found: ${taskId}`);
     const next = markTaskComplete(task, nowMs);
     this.tasks.set(taskId, next);
+    this.touchTasks();
     return next;
   }
 
@@ -268,6 +561,7 @@ export class MemoryWorkbenchRepository {
     const next = markTaskIncomplete(task, nowMs);
     this.tasks.set(taskId, next);
     if (!this.buckets.has(taskId)) this.buckets.set(taskId, "active");
+    this.touchTasks();
     return next;
   }
 
@@ -286,6 +580,7 @@ export class MemoryWorkbenchRepository {
     }
     const next = { ...task, parentId, updatedAt: nowMs };
     this.tasks.set(taskId, next);
+    this.touchTasks();
     return next;
   }
 
@@ -324,6 +619,7 @@ export class MemoryWorkbenchRepository {
       updatedAt: endedAt,
     };
     this.tasks.set(taskId, next);
+    this.touchTasks();
     return next;
   }
 
@@ -333,6 +629,7 @@ export class MemoryWorkbenchRepository {
     assertNoRepeatOnSubtask(task.parentId, repeatCfgId);
     const next = { ...task, repeatCfgId, updatedAt: nowMs };
     this.tasks.set(taskId, next);
+    this.touchTasks();
     return next;
   }
 
@@ -348,13 +645,17 @@ export class MemoryWorkbenchRepository {
       color: pickTagColor(trimmed),
     };
     this.tags.set(tagId, tag);
+    this.touchTags();
     return tag;
   }
 
   listTags(): Tag[] {
-    return [...this.tags.values()]
+    if (this.tagsListCache) return this.tagsListCache;
+    const list = [...this.tags.values()]
       .map((tag) => this.withTagColor(tag))
       .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+    this.tagsListCache = list;
+    return list;
   }
 
   deleteTag(tagId: string): void {
@@ -364,6 +665,7 @@ export class MemoryWorkbenchRepository {
       set.delete(tagId);
       if (set.size === 0) this.taskTags.delete(taskId);
     }
+    this.touchTags();
   }
 
   assignTag(taskId: string, tagId: string): void {
@@ -373,6 +675,7 @@ export class MemoryWorkbenchRepository {
     const set = this.taskTags.get(taskId) ?? new Set<string>();
     set.add(tagId);
     this.taskTags.set(taskId, set);
+    this.touchTags();
   }
 
   unassignTag(taskId: string, tagId: string): void {
@@ -380,16 +683,50 @@ export class MemoryWorkbenchRepository {
     if (!set) return;
     set.delete(tagId);
     if (set.size === 0) this.taskTags.delete(taskId);
+    this.touchTags();
   }
 
   listTagsForTask(taskId: string): Tag[] {
+    const cached = this.taskTagListCache.get(taskId);
+    if (cached) return cached;
     const ids = this.taskTags.get(taskId);
-    if (!ids) return [];
-    return [...ids]
-      .map((id) => this.tags.get(id))
-      .filter((t): t is Tag => t != null)
-      .map((tag) => this.withTagColor(tag))
-      .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+    const list: Tag[] = ids
+      ? [...ids]
+          .map((id) => this.tags.get(id))
+          .filter((t): t is Tag => t != null)
+          .map((tag) => this.withTagColor(tag))
+          .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"))
+      : [];
+    this.taskTagListCache.set(taskId, list);
+    return list;
+  }
+
+  /** 标签分配关系变更后清空 listTagsForTask 缓存，并标记持久化脏。 */
+  private touchTags(): void {
+    this.taskTagListCache.clear();
+    this.tagsListCache = null;
+    this.markReplace("tag");
+    this.markReplace("task_tag");
+  }
+
+  private touchNotes(): void {
+    this.notesListCache = null;
+    this.markReplace("note");
+  }
+
+  private touchProjects(): void {
+    this.projectsListCache = null;
+    this.markReplace("project");
+  }
+
+  private touchTimed(): void {
+    this.timedListCache = null;
+    this.markReplace("timed_task");
+  }
+
+  private touchNotifications(): void {
+    this.notificationsListCache = null;
+    this.markReplace("notification");
   }
 
   private withTagColor(tag: Tag): Tag {
@@ -397,11 +734,13 @@ export class MemoryWorkbenchRepository {
     if (tag.color === color) return tag;
     const next = { ...tag, color };
     this.tags.set(tag.id, next);
+    this.markReplace("tag");
     return next;
   }
 
   setTodayOrder(taskIds: string[]): void {
     this.todayOrder = [...taskIds];
+    this.markReplace("today_order");
   }
 
   getTodayOrder(): string[] {
@@ -448,23 +787,33 @@ export class MemoryWorkbenchRepository {
         remindAt: item.remindAt,
       });
     }
+    if (created.length) {
+      this.trimNotifications();
+      this.touchNotifications();
+    }
     return created;
   }
 
   listNotifications() {
-    return [...this.notifications].sort((a, b) => b.fireAt - a.fireAt);
+    if (this.notificationsListCache) return this.notificationsListCache;
+    const list = [...this.notifications].sort((a, b) => b.fireAt - a.fireAt);
+    this.notificationsListCache = list;
+    return list;
   }
 
   listProjects(opts?: { includeArchived?: boolean }): MemProject[] {
-    const all = [...this.projects.values()];
-    if (opts?.includeArchived) return all;
-    return all.filter((project) => !project.isArchived);
+    if (opts?.includeArchived) return [...this.projects.values()];
+    if (this.projectsListCache) return this.projectsListCache;
+    const list = [...this.projects.values()].filter((project) => !project.isArchived);
+    this.projectsListCache = list;
+    return list;
   }
 
   createProject(title: string, nowMs = Date.now()) {
     const id = createId(nowMs);
     const project = { id, title, isArchived: false };
     this.projects.set(id, project);
+    this.touchProjects();
     return project;
   }
 
@@ -476,6 +825,7 @@ export class MemoryWorkbenchRepository {
     if (!project) throw new DomainError(`unknown project: ${projectId}`);
     const next = { ...project, isArchived: true };
     this.projects.set(projectId, next);
+    this.touchProjects();
     return next;
   }
 
@@ -483,6 +833,7 @@ export class MemoryWorkbenchRepository {
     const row = this.notifications.find((item) => item.id === id);
     if (!row) throw new DomainError(`notification not found: ${id}`);
     row.status = "dismissed";
+    this.touchNotifications();
   }
 
   pushNotification(input: {
@@ -502,6 +853,7 @@ export class MemoryWorkbenchRepository {
       existing.body = body;
       existing.fireAt = now;
       existing.status = "delivered";
+      this.touchNotifications();
       return existing;
     }
     const row: MemNotification = {
@@ -514,6 +866,8 @@ export class MemoryWorkbenchRepository {
       refId: null,
     };
     this.notifications.push(row);
+    this.trimNotifications();
+    this.touchNotifications();
     return row;
   }
 
@@ -522,6 +876,7 @@ export class MemoryWorkbenchRepository {
     if (!row) throw new DomainError(`notification not found: ${id}`);
     row.status = "snoozed";
     row.snoozeUntil = untilMs;
+    this.touchNotifications();
   }
 
   createAgentWorkspace(input?: {
@@ -540,6 +895,8 @@ export class MemoryWorkbenchRepository {
       updatedAt: now,
     };
     this.agentWorkspaces.set(workspace.id, workspace);
+    this.agentWorkspaceListCache = null;
+    this.markReplace("agent_workspace");
     return workspace;
   }
 
@@ -550,7 +907,12 @@ export class MemoryWorkbenchRepository {
   }
 
   listAgentWorkspaces(): AgentWorkspace[] {
-    return [...this.agentWorkspaces.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    if (this.agentWorkspaceListCache) return this.agentWorkspaceListCache;
+    const list = [...this.agentWorkspaces.values()].sort(
+      (a, b) => b.updatedAt - a.updatedAt,
+    );
+    this.agentWorkspaceListCache = list;
+    return list;
   }
 
   getAgentWorkspace(id: string): AgentWorkspace | null {
@@ -586,6 +948,8 @@ export class MemoryWorkbenchRepository {
       updatedAt: nowMs,
     };
     this.agentWorkspaces.set(id, next);
+    this.agentWorkspaceListCache = null;
+    this.markReplace("agent_workspace");
     return next;
   }
 
@@ -596,6 +960,8 @@ export class MemoryWorkbenchRepository {
       if (thread.workspaceId === id) this.deleteAgentThread(thread.id);
     }
     this.agentWorkspaces.delete(id);
+    this.agentWorkspaceListCache = null;
+    this.markReplace("agent_workspace");
   }
 
   createAgentThread(input?: {
@@ -630,6 +996,7 @@ export class MemoryWorkbenchRepository {
       updatedAt: now,
     };
     this.agentThreads.set(thread.id, thread);
+    this.touchAgentThreads();
     this.touchAgentWorkspace(workspaceId, now);
     return thread;
   }
@@ -638,15 +1005,28 @@ export class MemoryWorkbenchRepository {
     workspaceId?: string;
     includeArchived?: boolean;
   }): AgentThread[] {
+    if (this.agentThreadListCache) {
+      const cached = this.agentThreadListCache;
+      const workspaceId = opts?.workspaceId;
+      const includeArchived = opts?.includeArchived === true;
+      if (!workspaceId && includeArchived) return cached;
+      return cached.filter((thread) => {
+        if (workspaceId && thread.workspaceId !== workspaceId) return false;
+        if (!includeArchived && thread.archivedAt != null) return false;
+        return true;
+      });
+    }
     const workspaceId = opts?.workspaceId;
     const includeArchived = opts?.includeArchived === true;
-    return [...this.agentThreads.values()]
+    const list = [...this.agentThreads.values()]
       .filter((thread) => {
         if (workspaceId && thread.workspaceId !== workspaceId) return false;
         if (!includeArchived && thread.archivedAt != null) return false;
         return true;
       })
       .sort((a, b) => b.updatedAt - a.updatedAt);
+    if (!workspaceId && includeArchived) this.agentThreadListCache = list;
+    return list;
   }
 
   getAgentThread(id: string): AgentThread | null {
@@ -688,6 +1068,7 @@ export class MemoryWorkbenchRepository {
     }
     const next = { ...current, ...patch, webUrl, updatedAt: nowMs };
     this.agentThreads.set(id, next);
+    this.touchAgentThreads();
     this.touchAgentWorkspace(next.workspaceId, nowMs);
     return next;
   }
@@ -710,8 +1091,14 @@ export class MemoryWorkbenchRepository {
 
   deleteAgentThread(id: string): void {
     this.agentThreads.delete(id);
+    const removed = this.agentMessagesByThread.get(id) ?? [];
+    this.journalAgentMessages(removed, "delete");
     this.agentMessages = this.agentMessages.filter((message) => message.threadId !== id);
+    this.agentMessagesByThread.delete(id);
+    this.agentMessagesListCache.delete(id);
     this.agentApprovals = this.agentApprovals.filter((item) => item.threadId !== id);
+    this.markReplace("agent_approval");
+    this.touchAgentThreads();
   }
 
   appendAgentMessage(input: {
@@ -737,31 +1124,53 @@ export class MemoryWorkbenchRepository {
       createdAt: now,
     };
     this.agentMessages.push(message);
+    const byThread = this.agentMessagesByThread.get(message.threadId);
+    if (byThread) byThread.push(message);
+    else this.agentMessagesByThread.set(message.threadId, [message]);
+    this.trimAgentThreadMessages(message.threadId);
+    this.touchAgentMessages(message.threadId);
+    // 裁剪可能连带丢弃该消息（极端时序），只有仍存在时才记为待写。
+    if (this.agentMessagesByThread.get(message.threadId)?.includes(message)) {
+      this.journalAgentMessages([message], "upsert");
+    }
     const title =
       thread.title === "新会话" && input.role === "user"
         ? agentThreadTitle(input.content)
         : thread.title;
     this.agentThreads.set(thread.id, { ...thread, title, updatedAt: now });
+    this.touchAgentThreads();
     this.touchAgentWorkspace(thread.workspaceId, now);
     return message;
   }
 
   listAgentMessages(threadId: string): AgentMessage[] {
-    return this.agentMessages.filter((message) => message.threadId === threadId);
+    const cached = this.agentMessagesListCache.get(threadId);
+    if (cached) return cached;
+    const list = [...(this.agentMessagesByThread.get(threadId) ?? [])];
+    this.agentMessagesListCache.set(threadId, list);
+    return list;
+  }
+
+  /** 指定线程消息集合变更后使克隆缓存失效。 */
+  private touchAgentMessages(threadId: string): void {
+    this.agentMessagesListCache.delete(threadId);
   }
 
   /** Drop one message and everything after it in the same thread. */
   deleteAgentMessagesFrom(threadId: string, messageId: string, nowMs = Date.now()): void {
-    const inThread = this.agentMessages.filter(
-      (message) => message.threadId === threadId,
-    );
+    const inThread = this.agentMessagesByThread.get(threadId) ?? [];
     const start = inThread.findIndex((message) => message.id === messageId);
     if (start < 0) return;
-    const drop = new Set(inThread.slice(start).map((message) => message.id));
+    const droppedList = inThread.slice(start);
+    const drop = new Set(droppedList.map((message) => message.id));
     this.agentMessages = this.agentMessages.filter((message) => !drop.has(message.id));
+    this.agentMessagesByThread.set(threadId, inThread.slice(0, start));
+    this.touchAgentMessages(threadId);
+    this.journalAgentMessages(droppedList, "delete");
     const thread = this.agentThreads.get(threadId);
     if (!thread) return;
     this.agentThreads.set(threadId, { ...thread, queueJson: null, updatedAt: nowMs });
+    this.touchAgentThreads();
     this.touchAgentWorkspace(thread.workspaceId, nowMs);
   }
 
@@ -769,6 +1178,14 @@ export class MemoryWorkbenchRepository {
     const workspace = this.agentWorkspaces.get(id);
     if (!workspace) return;
     this.agentWorkspaces.set(id, { ...workspace, updatedAt: nowMs });
+    this.agentWorkspaceListCache = null;
+    this.markReplace("agent_workspace");
+  }
+
+  /** Agent 线程集合/字段变更后清空线程列表缓存，并标记持久化脏。 */
+  private touchAgentThreads(): void {
+    this.agentThreadListCache = null;
+    this.markReplace("agent_thread");
   }
 
   addAgentApproval(input: {
@@ -795,6 +1212,7 @@ export class MemoryWorkbenchRepository {
       resolvedAt: null,
     };
     this.agentApprovals.push(approval);
+    this.markReplace("agent_approval");
     return approval;
   }
 
@@ -812,11 +1230,15 @@ export class MemoryWorkbenchRepository {
     if (!current) throw new DomainError(`agent approval not found: ${id}`);
     const next: AgentApproval = { ...current, status, resolvedAt: nowMs };
     this.agentApprovals[index] = next;
+    this.markReplace("agent_approval");
     return next;
   }
 
   listNotes(): Note[] {
-    return [...this.notes.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    if (this.notesListCache) return this.notesListCache;
+    const list = [...this.notes.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    this.notesListCache = list;
+    return list;
   }
 
   getNote(id: string): Note | null {
@@ -831,6 +1253,7 @@ export class MemoryWorkbenchRepository {
   }): Note {
     const note = createNoteDraft(input);
     this.notes.set(note.id, note);
+    this.touchNotes();
     return note;
   }
 
@@ -843,15 +1266,20 @@ export class MemoryWorkbenchRepository {
     if (!current) throw new DomainError(`note not found: ${id}`);
     const next = patchNote(current, patch, nowMs);
     this.notes.set(id, next);
+    this.touchNotes();
     return next;
   }
 
   deleteNote(id: string): void {
     this.notes.delete(id);
+    this.touchNotes();
   }
 
   listTimedTasks(): TimedTask[] {
-    return [...this.timedTasks.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    if (this.timedListCache) return this.timedListCache;
+    const list = [...this.timedTasks.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    this.timedListCache = list;
+    return list;
   }
 
   getTimedTask(id: string): TimedTask | null {
@@ -868,6 +1296,7 @@ export class MemoryWorkbenchRepository {
   }): TimedTask {
     const task = createTimedTaskDraft(input);
     this.timedTasks.set(task.id, task);
+    this.touchTimed();
     return task;
   }
 
@@ -888,6 +1317,7 @@ export class MemoryWorkbenchRepository {
     if (!current) throw new DomainError(`timed task not found: ${id}`);
     const next = patchTimedTask(current, patch, nowMs);
     this.timedTasks.set(id, next);
+    this.touchTimed();
     return next;
   }
 
@@ -897,6 +1327,7 @@ export class MemoryWorkbenchRepository {
 
   deleteTimedTask(id: string): void {
     this.timedTasks.delete(id);
+    this.touchTimed();
   }
 
   /** Enabled timed tasks whose nextRunAt is due. */
@@ -946,10 +1377,12 @@ export class MemoryWorkbenchRepository {
       agentApprovals?: AgentApproval[];
     };
     this.tasks = new Map(data.tasks.map((t) => [t.id, t]));
+    this.touchTasks();
     this.projects = new Map(data.projects.map((p) => [p.id, p]));
     this.buckets = new Map(data.buckets);
     this.todayOrder = data.todayOrder ?? [];
     this.notifications = data.notifications ?? [];
+    this.trimNotifications();
     this.notes = new Map((data.notes ?? []).map((n) => [n.id, n]));
     this.timedTasks = new Map(
       (data.timedTasks ?? []).map((t) => {
@@ -969,6 +1402,11 @@ export class MemoryWorkbenchRepository {
     this.taskTags = new Map(
       (data.taskTags ?? []).map(([taskId, ids]) => [taskId, new Set(ids)]),
     );
+    this.touchTags();
+    this.touchProjects();
+    this.touchNotes();
+    this.touchTimed();
+    this.touchNotifications();
     this.agentWorkspaces = new Map(
       (data.agentWorkspaces ?? []).map((workspace) => [
         workspace.id,
@@ -1012,9 +1450,19 @@ export class MemoryWorkbenchRepository {
       ...message,
       toolCallsJson: message.toolCallsJson ?? null,
     }));
+    this.rebuildAgentMessageIndex();
+    for (const threadId of this.agentMessagesByThread.keys()) {
+      this.trimAgentThreadMessages(threadId);
+    }
     this.agentApprovals = (data.agentApprovals ?? []).map((approval) => ({
       ...approval,
       toolCallId: approval.toolCallId ?? null,
     }));
+    this.agentThreadListCache = null;
+    this.agentWorkspaceListCache = null;
+    // 导入即全量替换持久化内容（迁移/恢复场景）。
+    this.journalFull = true;
+    this.messageJournal.clear();
+    this.replaceKinds.clear();
   }
 }

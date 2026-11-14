@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { MemoryWorkbenchRepository } from "@wb/db/memory";
 import {
   addAgentMemory,
@@ -243,6 +243,8 @@ export function AgentView({
   const [logScroll, setLogScroll] = useState({ top: 0, height: 480 });
   /** Local transcript bump so tool steps do not re-render the whole shell. */
   const [transcriptRev, setTranscriptRev] = useState(0);
+  const transcriptRevRaf = useRef<number | null>(null);
+  const transcriptBumpSig = useRef("");
   const [queues, setQueues] = useState<Record<string, string[]>>({});
   const [todosByThread, setTodosByThread] = useState<Record<string, AgentTodoItem[]>>({});
   const [goalsByThread, setGoalsByThread] = useState<Record<string, AgentGoal | null>>(
@@ -562,6 +564,9 @@ export function AgentView({
   useEffect(() => {
     return () => {
       if (liveRaf.current != null) window.cancelAnimationFrame(liveRaf.current);
+      if (transcriptRevRaf.current != null) {
+        window.cancelAnimationFrame(transcriptRevRaf.current);
+      }
     };
   }, []);
 
@@ -949,7 +954,18 @@ export function AgentView({
       focus,
       onStep: () => {
         onPersist?.();
-        if (mounted.current) setTranscriptRev((rev) => rev + 1);
+        if (!mounted.current) return;
+        const ms = store.listAgentMessages(thread.id);
+        const tail = ms[ms.length - 1];
+        const sig = `${ms.length}:${tail?.id ?? ""}:${tail?.content.length ?? 0}:${tail?.toolCallsJson?.length ?? 0}`;
+        if (sig === transcriptBumpSig.current) return;
+        if (transcriptRevRaf.current != null) return;
+        transcriptRevRaf.current = window.requestAnimationFrame(() => {
+          transcriptRevRaf.current = null;
+          if (!mounted.current) return;
+          transcriptBumpSig.current = sig;
+          setTranscriptRev((rev) => rev + 1);
+        });
       },
       onDelta: (text) => {
         if (!mounted.current || viewingThreadId.current !== thread.id) return;
@@ -964,14 +980,26 @@ export function AgentView({
     };
   };
   const turnEnv = env();
-  const contextPreview = turnEnv ? previewAgentContext(turnEnv, messages) : null;
-  const loadedSkills = skillsLoadedInTranscript(
-    skills,
-    messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      toolName: message.toolName,
-    })),
+  // 上下文估算需要拼一遍系统提示词，只在会话真的变化时重算（流式逐帧刷新不重算）
+  const ctxSig = `${messages.length}:${messages[messages.length - 1]?.content.length ?? 0}:${transcriptRev}`;
+  transcriptBumpSig.current = `${messages.length}:${messages[messages.length - 1]?.id ?? ""}:${messages[messages.length - 1]?.content.length ?? 0}:${messages[messages.length - 1]?.toolCallsJson?.length ?? 0}`;
+  const contextPreview = useMemo(
+    () => (turnEnv ? previewAgentContext(turnEnv, messages) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ctxSig, thread?.id, thread?.modelRef],
+  );
+  const loadedSkills = useMemo(
+    () =>
+      skillsLoadedInTranscript(
+        skills,
+        messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          toolName: message.toolName,
+        })),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ctxSig, skills],
   );
   const contextRatio =
     contextPreview && contextPreview.budget > 0
@@ -1756,9 +1784,22 @@ export function AgentView({
     }
   }, [slashPick, mentionPick, showSlash, showMention]);
   const nowMs = Date.now();
-  const turns = conversationBlocks(messages, Boolean(pending));
-  const turnPieces = turns.map((turn) =>
-    turn.kind === "agent" ? agentTurnPieces(turn.messages, nowMs) : null,
+  // 相对时间按分钟取整，避免逐帧刷新让切片缓存失效
+  const nowMinute = Math.floor(nowMs / 60_000) * 60_000;
+  const tailMessage = messages[messages.length - 1];
+  const transcriptSig = `${messages.length}:${tailMessage?.id ?? ""}:${tailMessage?.content.length ?? 0}`;
+  // store 每次返回新数组，这里按会话签名缓存，避免逐帧重建整段对话块
+  const turns = useMemo(
+    () => conversationBlocks(messages, Boolean(pending)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [transcriptSig, transcriptRev, Boolean(pending)],
+  );
+  const turnPieces = useMemo(
+    () =>
+      turns.map((turn) =>
+        turn.kind === "agent" ? agentTurnPieces(turn.messages, nowMinute) : null,
+      ),
+    [turns, nowMinute],
   );
   const findNeedle = findOpen ? findQuery : "";
   if (turnsLenRef.current !== turns.length) {
@@ -1778,30 +1819,38 @@ export function AgentView({
       setMeasureTick((tick) => tick + 1);
     }
   }
-  const turnHeights = turns.map((turn, index) => {
-    const measured = measuredHeights.current.get(index);
-    if (measured != null && measured > 0) return measured;
-    if (turn.kind === "marker") return estimateAgentTurnHeight("marker", 1);
-    if (turn.kind === "user") {
-      return estimateAgentTurnHeight(
-        "user",
-        Math.max(1, turn.message.content.split(/\r?\n/).length),
-      );
-    }
-    const pieces = turnPieces[index] ?? [];
-    if (!pieces.length) return 0;
-    const toolCount = pieces.filter((piece) => piece.kind === "tool").length;
-    const proseLines = pieces
-      .filter((piece) => piece.kind === "prose")
-      .reduce((sum, piece) => sum + Math.max(1, piece.text.split(/\r?\n/).length), 0);
-    return estimateAgentTurnHeight("agent", 0, toolCount, proseLines);
-  });
-  const logMetrics = buildHeightMetrics(turnHeights);
+  const turnHeights = useMemo(
+    () =>
+      turns.map((turn, index) => {
+        const measured = measuredHeights.current.get(index);
+        if (measured != null && measured > 0) return measured;
+        if (turn.kind === "marker") return estimateAgentTurnHeight("marker", 1);
+        if (turn.kind === "user") {
+          return estimateAgentTurnHeight(
+            "user",
+            Math.max(1, turn.message.content.split(/\r?\n/).length),
+          );
+        }
+        const pieces = turnPieces[index] ?? [];
+        if (!pieces.length) return 0;
+        const toolCount = pieces.filter((piece) => piece.kind === "tool").length;
+        const proseLines = pieces
+          .filter((piece) => piece.kind === "prose")
+          .reduce((sum, piece) => sum + Math.max(1, piece.text.split(/\r?\n/).length), 0);
+        return estimateAgentTurnHeight("agent", 0, toolCount, proseLines);
+      }),
+    [turns, turnPieces, measureTick],
+  );
+  const logMetrics = useMemo(() => buildHeightMetrics(turnHeights), [turnHeights]);
   const virtualizeLog =
     !findNeedle.trim() && turns.length >= AGENT_LOG_VIRTUAL_MIN && !live;
-  const logRange = virtualizeLog
-    ? agentLogVisibleRange(logMetrics, logScroll.top, logScroll.height)
-    : { start: 0, end: turns.length };
+  const logRange = useMemo(
+    () =>
+      virtualizeLog
+        ? agentLogVisibleRange(logMetrics, logScroll.top, logScroll.height)
+        : { start: 0, end: turns.length },
+    [virtualizeLog, logMetrics, logScroll.top, logScroll.height, turns.length],
+  );
   useEffect(() => {
     if (live) {
       wasLiveRef.current = true;
@@ -1844,28 +1893,35 @@ export function AgentView({
     });
     return () => observer.disconnect();
   }, [virtualizeLog, logRange.start, logRange.end, turns.length, messages.length]);
-  let findCursor = 0;
-  const pieceBases: number[][] = [];
-  const findBases = turns.map((turn, index) => {
-    const base = findCursor;
+  // 只在关键词变化时重算命中位置，避免逐帧把整段会话渲染成 HTML 数命中
+  const findMeta = useMemo(() => {
     if (!findNeedle.trim()) {
-      pieceBases.push([]);
+      return {
+        findBases: turns.map(() => 0),
+        pieceBases: turns.map(() => []),
+        totalHits: 0,
+      };
+    }
+    let cursor = 0;
+    const basesByTurn: number[][] = [];
+    const hits = turns.map((turn, index) => {
+      const base = cursor;
+      if (turn.kind !== "agent") {
+        cursor += literalHitCount(turn.message.content, findNeedle);
+        basesByTurn.push([]);
+        return base;
+      }
+      const bases: number[] = [];
+      for (const piece of turnPieces[index] ?? []) {
+        bases.push(cursor);
+        cursor += htmlTextHitCount(renderChatMarkdown(piece.text), findNeedle);
+      }
+      basesByTurn.push(bases);
       return base;
-    }
-    if (turn.kind !== "agent") {
-      findCursor += literalHitCount(turn.message.content, findNeedle);
-      pieceBases.push([]);
-      return base;
-    }
-    const bases: number[] = [];
-    for (const piece of turnPieces[index] ?? []) {
-      bases.push(findCursor);
-      findCursor += htmlTextHitCount(renderChatMarkdown(piece.text), findNeedle);
-    }
-    pieceBases.push(bases);
-    return base;
-  });
-  const totalHits = findCursor;
+    });
+    return { findBases: hits, pieceBases: basesByTurn, totalHits: cursor };
+  }, [turns, turnPieces, findNeedle]);
+  const { findBases, pieceBases, totalHits } = findMeta;
   const activeHit =
     totalHits === 0 ? 0 : ((findIndex % totalHits) + totalHits) % totalHits;
   activeHitRef.current = activeHit;
@@ -2336,7 +2392,10 @@ export function AgentView({
                                 )}
                               </div>
                               <div className="agent__msg-actions">
-                                <MessageTime ms={turn.message.createdAt} nowMs={nowMs} />
+                                <MessageTime
+                                  ms={turn.message.createdAt}
+                                  nowMs={nowMinute}
+                                />
                                 <button
                                   type="button"
                                   className="agent__copy"
@@ -2421,7 +2480,7 @@ export function AgentView({
                             </div>
                             <div className="agent__msg-actions">
                               <span className="agent__msg-meta">
-                                <MessageTime ms={stamp} nowMs={nowMs} />
+                                <MessageTime ms={stamp} nowMs={nowMinute} />
                                 <ReplyElapsed text={replyElapsed(turns, index, stamp)} />
                               </span>
                               <button
@@ -3578,7 +3637,14 @@ function ComposerSkillText({
   );
 }
 
-function MessageTime({ ms, nowMs }: { ms: number; nowMs: number }) {
+// 气泡时间只到分钟精度：传入分钟粒度的 nowMs 并 memo，秒级 tick 不再逐条重渲染。
+const MessageTime = memo(function MessageTime({
+  ms,
+  nowMs,
+}: {
+  ms: number;
+  nowMs: number;
+}) {
   return (
     <time
       className="agent__msg-time"
@@ -3588,7 +3654,7 @@ function MessageTime({ ms, nowMs }: { ms: number; nowMs: number }) {
       {formatAgentBubbleTime(ms, nowMs)}
     </time>
   );
-}
+});
 
 function ReplyElapsed({ text }: { text: string }) {
   if (!text) return null;
@@ -3628,7 +3694,7 @@ function ThinkingStatus({ messages }: { messages: AgentMessage[] }) {
   );
 }
 
-function AgentMarkdown({
+const AgentMarkdown = memo(function AgentMarkdown({
   text,
   query = "",
   indexBase = 0,
@@ -3640,7 +3706,8 @@ function AgentMarkdown({
   active?: number;
 }) {
   const dialog = useDialog();
-  const html = renderChatMarkdown(text);
+  // 同一段正文只渲染一次 markdown，逐帧刷新时复用
+  const html = useMemo(() => renderChatMarkdown(text), [text]);
   return (
     <div
       className="agent__md"
@@ -3667,7 +3734,7 @@ function AgentMarkdown({
       }}
     />
   );
-}
+});
 
 function HighlightedPlain({
   text,

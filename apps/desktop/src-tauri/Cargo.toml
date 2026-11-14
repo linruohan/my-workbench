@@ -26,6 +26,7 @@ tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 base64 = "0.21"
 rfd = "0.15"
+rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "charset", "stream"] }
 zip = "2.2"
 flate2 = "1"

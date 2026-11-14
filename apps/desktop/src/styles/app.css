@@ -3749,6 +3749,17 @@ body:has(.sidebar__resizer.is-dragging) {
   padding: var(--wb-space-2) var(--wb-space-3);
 }
 
+.pill--input {
+  cursor: text;
+  font-variant-numeric: tabular-nums;
+  color-scheme: light dark;
+}
+
+.pill--input:focus {
+  outline: none;
+  border-color: var(--wb-accent);
+}
+
 .custom-freq--compact {
   align-items: center;
 }
@@ -8795,4 +8806,15 @@ body:has(.sidebar__resizer.is-dragging) {
   .agent__chrome {
     flex-wrap: wrap;
   }
+}
+
+.save-warning {
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #f0c36d;
+  border-radius: 10px;
+  background: #fff7e6;
+  color: #7a4b00;
+  font-size: 13px;
+  line-height: 1.4;
 }

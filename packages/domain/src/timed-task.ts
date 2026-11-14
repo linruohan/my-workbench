@@ -15,6 +15,10 @@ export function normalizeAtTime(raw: string | null | undefined): string {
 }
 
 export function normalizeTimedSchedule(raw: TimedSchedule): TimedSchedule {
+  if (raw.kind === "once") {
+    const at = Number(raw.at);
+    return { kind: "once", at: Number.isFinite(at) ? Math.floor(at) : Date.now() };
+  }
   if (raw.kind === "preset") {
     return {
       kind: "preset",
@@ -98,15 +102,28 @@ export function patchTimedTask(
         : task.schedule;
   const lastRunAt = patch.lastRunAt !== undefined ? patch.lastRunAt : task.lastRunAt;
   const fromMs = lastRunAt != null && lastRunAt > 0 ? lastRunAt : nowMs;
+
+  // One-off tasks disable themselves after the first run and never reschedule.
+  const isOnce = schedule?.kind === "once";
+  const hasRun = lastRunAt != null && lastRunAt > 0;
+  const enabled =
+    patch.enabled !== undefined ? patch.enabled : isOnce && hasRun ? false : task.enabled;
+  const nextRunAt =
+    schedule == null
+      ? null
+      : isOnce && hasRun
+        ? null
+        : computeNextRunAt(schedule, fromMs);
+
   return {
     ...task,
     title:
       patch.title !== undefined ? patch.title.trim() || "未命名定时任务" : task.title,
     command: patch.command !== undefined ? patch.command : task.command,
     schedule,
-    enabled: patch.enabled !== undefined ? patch.enabled : task.enabled,
+    enabled,
     lastRunAt,
-    nextRunAt: schedule ? computeNextRunAt(schedule, fromMs) : null,
+    nextRunAt,
     updatedAt: nowMs,
   };
 }
@@ -134,11 +151,13 @@ export function timedIntervalUnitLabel(unit: TimedIntervalUnit): string {
 }
 
 export function timedScheduleKindLabel(schedule: TimedSchedule): string {
+  if (schedule.kind === "once") return "一次性";
   if (schedule.kind === "custom") return "自定义";
   return timedPresetLabel(schedule.preset);
 }
 
 export function timedFrequencyLabel(schedule: TimedSchedule): string {
+  if (schedule.kind === "once") return "仅一次";
   if (schedule.kind === "preset") {
     if (schedule.preset === "hourly") return "每小时";
     if (schedule.preset === "daily") return "每1天";
@@ -152,6 +171,9 @@ export function timedFrequencyLabel(schedule: TimedSchedule): string {
 export function timedScheduleLabel(schedule: TimedSchedule | null): string {
   if (!schedule) return "未设置计划";
   const s = normalizeTimedSchedule(schedule);
+  if (s.kind === "once") {
+    return `一次性 · ${new Date(s.at).toLocaleString("zh-CN")}`;
+  }
   if (s.kind === "preset") {
     if (s.preset === "hourly") return timedPresetLabel(s.preset);
     return `${timedPresetLabel(s.preset)} · ${s.atTime}`;
@@ -168,6 +190,9 @@ export function timedScheduleLabel(schedule: TimedSchedule | null): string {
 
 export function timedScheduleSummary(schedule: TimedSchedule): string {
   const s = normalizeTimedSchedule(schedule);
+  if (s.kind === "once") {
+    return `GMT+8 一次性 · ${new Date(s.at).toLocaleString("zh-CN")}`;
+  }
   if (s.kind === "preset") {
     if (s.preset === "hourly") return "GMT+8 每小时";
     return `GMT+8 ${timedPresetLabel(s.preset)}，${s.atTime}`;
@@ -205,6 +230,14 @@ export function computeNextRunAt(
   fromMs = Date.now(),
 ): number | null {
   const s = normalizeTimedSchedule(schedule);
+
+  if (s.kind === "once") {
+    // One-off tasks fire exactly at their scheduled timestamp.
+    // Already-past times are still returned so the ticker can fire them once;
+    // the runner disables the task afterwards via patchTimedTask.
+    return s.at;
+  }
+
   if (s.kind === "custom" && s.endMode === "on_date" && s.endDate) {
     const end = Date.parse(`${s.endDate}T23:59:59`);
     if (!Number.isNaN(end) && fromMs > end) return null;
@@ -365,6 +398,11 @@ export function makePresetSchedule(
   atTime = DEFAULT_AT_TIME,
 ): TimedSchedule {
   return { kind: "preset", preset, atTime: normalizeAtTime(atTime) };
+}
+
+/** Build a one-off schedule firing at an absolute timestamp (ms). */
+export function makeOnceSchedule(atMs: number): TimedSchedule {
+  return { kind: "once", at: Math.floor(Number(atMs) || Date.now()) };
 }
 
 export function defaultCustomSchedule(nowMs = Date.now()): TimedSchedule {

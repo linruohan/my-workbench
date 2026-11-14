@@ -309,7 +309,30 @@ export type RenderMarkdownOptions = {
    * Avoids re-scanning the full document on every live block render.
    */
   documentHeadings?: MdHeading[];
+  /**
+   * Precomputed occurrence map for `documentHeadings`, keyed by `${level}\0${text}`.
+   * Lets each live block align its local heading ids in O(local headings) instead of
+   * scanning the full document heading list per block.
+   */
+  documentHeadingMap?: Map<string, MdHeading[]>;
 };
+
+/**
+ * Build an occurrence map used by `renderMarkdown` to align live-block heading ids
+ * with the full document (duplicates are consumed in document order).
+ */
+export function buildHeadingOccurrenceMap(
+  headings: MdHeading[],
+): Map<string, MdHeading[]> {
+  const map = new Map<string, MdHeading[]>();
+  for (const heading of headings) {
+    const key = `${heading.level}\0${heading.text}`;
+    const list = map.get(key);
+    if (list) list.push(heading);
+    else map.set(key, [heading]);
+  }
+  return map;
+}
 
 /** Render note Markdown. `imageUrls[i]` replaces the i-th image outside code fences. */
 export function renderMarkdown(
@@ -329,16 +352,25 @@ export function renderMarkdown(
   };
   // When rendering a single live block, align heading ids with the full document.
   if (options?.document && options.document !== raw) {
-    const docHeads = [...(cachedHeads ?? extractMdHeadings(doc))];
+    const occurrence =
+      options.documentHeadingMap ??
+      buildHeadingOccurrenceMap(cachedHeads ?? extractMdHeadings(doc));
+    // Lazily clone occurrence lists so repeated renders stay idempotent while
+    // duplicates within one call are still consumed in document order.
+    const cloned = new Map<string, MdHeading[]>();
+    const queueFor = (key: string): MdHeading[] => {
+      let list = cloned.get(key);
+      if (list === undefined) {
+        const source = occurrence.get(key);
+        list = source ? source.slice() : [];
+        cloned.set(key, list);
+      }
+      return list;
+    };
     const local = extractMdHeadings(markdown);
     env.headingQueue = local.map((h) => {
-      const idx = docHeads.findIndex((d) => d.level === h.level && d.text === h.text);
-      if (idx >= 0) {
-        const hit = docHeads[idx]!;
-        docHeads.splice(idx, 1);
-        return hit;
-      }
-      return h;
+      const list = queueFor(`${h.level}\0${h.text}`);
+      return list.length > 0 ? (list.shift() as MdHeading) : h;
     });
   }
   try {

@@ -1,7 +1,7 @@
 import { visibleRange, type RowMetrics } from "../notes/md-live-virtual";
 
 /** Start windowing once the transcript is long enough to hurt. */
-export const AGENT_LOG_VIRTUAL_MIN = 28;
+export const AGENT_LOG_VIRTUAL_MIN = 12;
 export const AGENT_LOG_OVERSCAN = 6;
 /** Matches .agent__log-body gap (var(--wb-space-4)). */
 export const AGENT_LOG_GAP_PX = 16;

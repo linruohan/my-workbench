@@ -21,7 +21,6 @@ import { KnowledgeLibraryMenu } from "./KnowledgeLibraryMenu";
 import {
   ensureNoteAssetDir,
   kbExists,
-  listFilesRecursive,
   loadActiveKnowledgeRoot,
   loadKnowledgeRoots,
   loadKnowledgeSort,
@@ -35,6 +34,7 @@ import {
   saveActiveKnowledgeRoot,
   saveKnowledgeRoots,
   saveKnowledgeSort,
+  scanKnowledgeFiles,
   writeTextFile,
   type KbEntry,
   type KbSortDir,
@@ -82,6 +82,9 @@ type OpenFile =
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 
+/** 输入停顿多久后自动写盘 */
+const AUTOSAVE_DELAY_MS = 800;
+
 export function KnowledgeView({
   notes,
   activeId,
@@ -115,8 +118,11 @@ export function KnowledgeView({
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickFiles, setQuickFiles] = useState<KbEntry[]>([]);
   const [quickLoading, setQuickLoading] = useState(false);
-  const pendingSave = useRef<{ path: string; body: string } | null>(null);
+  const pendingSave = useRef<Map<string, string>>(new Map());
+  const saveTimer = useRef<number | null>(null);
   const libraryRef = useRef<HTMLDivElement>(null);
+  /** 当前 QuickOpen 扫描会话；关闭面板或重新打开时置 cancelled 终止旧扫描。 */
+  const quickScanRef = useRef<{ cancelled: boolean } | null>(null);
 
   const activeRootLabel = useMemo(() => {
     if (!activeRoot) return "选择目录";
@@ -149,35 +155,52 @@ export function KnowledgeView({
   }, [activeNoteId]);
 
   const flushSave = useCallback(async () => {
-    const item = pendingSave.current;
-    if (!item) return;
+    if (saveTimer.current != null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const pending = pendingSave.current;
+    if (pending.size === 0) return;
     if (!isTauriRuntime()) {
-      pendingSave.current = null;
+      pending.clear();
       setSaveState("saved");
       return;
     }
-    pendingSave.current = null;
+    const entries = [...pending.entries()];
+    pending.clear();
     setSaveState("saving");
-    try {
-      await writeTextFile(item.path, item.body);
-      setSaveState("saved");
-    } catch (err) {
-      pendingSave.current = item;
-      setSaveState("error");
-      void dialog.alert({
-        title: "保存失败",
-        message: errorMessage(err, "保存失败"),
-      });
+    const failed: Array<[string, string]> = [];
+    let firstError: unknown = null;
+    for (const [path, body] of entries) {
+      try {
+        await writeTextFile(path, body);
+      } catch (err) {
+        failed.push([path, body]);
+        firstError ??= err;
+      }
     }
+    for (const [path, body] of failed) {
+      // 保存期间又有新输入时，保留更新的内容而不是回填旧文本
+      if (!pending.has(path)) pending.set(path, body);
+    }
+    if (!failed.length) {
+      setSaveState("saved");
+      return;
+    }
+    setSaveState("error");
+    void dialog.alert({
+      title: "保存失败",
+      message: errorMessage(firstError, "保存失败"),
+    });
   }, [dialog]);
 
   // Save pending edits when hiding/closing the app or leaving this view.
   useEffect(() => {
     const onLeave = () => {
-      const item = pendingSave.current;
-      if (!item || !isTauriRuntime()) return;
-      void writeTextFile(item.path, item.body);
-      pendingSave.current = null;
+      const pending = pendingSave.current;
+      if (pending.size === 0 || !isTauriRuntime()) return;
+      for (const [path, body] of pending) void writeTextFile(path, body);
+      pending.clear();
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") onLeave();
@@ -191,6 +214,15 @@ export function KnowledgeView({
     };
   }, [flushSave]);
 
+  /** 输入停顿 800ms 后自动写盘，避免只在切视图/关窗时才保存 */
+  const scheduleSave = useCallback(() => {
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      void flushSave();
+    }, AUTOSAVE_DELAY_MS);
+  }, [flushSave]);
+
   const updateFileBody = (path: string, body: string) => {
     setOpenFile((current) =>
       current &&
@@ -199,8 +231,9 @@ export function KnowledgeView({
         ? { ...current, body }
         : current,
     );
-    pendingSave.current = { path, body };
+    pendingSave.current.set(path, body);
     setSaveState("dirty");
+    scheduleSave();
   };
 
   const renameOpenFile = async (nextFileName: string) => {
@@ -218,8 +251,10 @@ export function KnowledgeView({
       throw new Error("同名文件已存在。");
     }
     await renameKbPath(fromPath, dest);
-    if (pendingSave.current?.path === fromPath) {
-      pendingSave.current = { ...pendingSave.current, path: dest };
+    const pendingBody = pendingSave.current.get(fromPath);
+    if (pendingBody !== undefined) {
+      pendingSave.current.delete(fromPath);
+      pendingSave.current.set(dest, pendingBody);
     }
     setOpenFile((current) =>
       current && current.path === fromPath
@@ -234,14 +269,41 @@ export function KnowledgeView({
     setQuickOpen(true);
     if (!isTauriRuntime() || roots.length === 0) {
       setQuickFiles([]);
+      setQuickLoading(false);
       return;
     }
+    if (quickScanRef.current) quickScanRef.current.cancelled = true;
+    const run = { cancelled: false };
+    quickScanRef.current = run;
+    setQuickFiles([]);
     setQuickLoading(true);
-    void listFilesRecursive(roots)
-      .then((files) => setQuickFiles(files))
-      .catch(() => setQuickFiles([]))
-      .finally(() => setQuickLoading(false));
+    // 扫描会话：逐批增量填充结果；关闭面板即取消。
+    void scanKnowledgeFiles(roots, {
+      maxFiles: 8000,
+      isCancelled: () => run.cancelled,
+      onBatch: (batch) => {
+        if (run.cancelled) return;
+        setQuickFiles((prev) => [...prev, ...batch]);
+        setQuickLoading(false);
+      },
+    })
+      .then((files) => {
+        if (run.cancelled) return;
+        setQuickFiles(files);
+      })
+      .catch(() => {
+        if (run.cancelled) return;
+        setQuickFiles([]);
+      })
+      .finally(() => {
+        if (!run.cancelled) setQuickLoading(false);
+      });
   }, [roots]);
+
+  const closeQuickOpen = useCallback(() => {
+    setQuickOpen(false);
+    if (quickScanRef.current) quickScanRef.current.cancelled = true;
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -641,7 +703,7 @@ export function KnowledgeView({
         files={quickFiles}
         loading={quickLoading}
         activePath={openFile?.path ?? null}
-        onClose={() => setQuickOpen(false)}
+        onClose={closeQuickOpen}
         onOpen={(entry) => void openEntry(entry)}
       />
     </section>

@@ -1,3 +1,4 @@
+import { memo } from "react";
 import {
   decodeTaskRepeat,
   formatDurationMs,
@@ -31,7 +32,7 @@ type Props = {
   onDropOn?: (taskId: string) => void;
 };
 
-export function TaskRow({
+export const TaskRow = memo(function TaskRow({
   task,
   projectTitle,
   tags = [],
@@ -173,4 +174,4 @@ export function TaskRow({
       )}
     </li>
   );
-}
+});

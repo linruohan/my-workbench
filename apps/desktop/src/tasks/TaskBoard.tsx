@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   TASK_BOARD_COLUMNS,
   decodeTaskRepeat,
@@ -23,7 +23,7 @@ type Props = {
   onMoveColumn: (taskId: string, column: TaskBoardColumnId) => void;
 };
 
-export function TaskBoard({
+export const TaskBoard = memo(function TaskBoard({
   tasks,
   buckets,
   projectTitles,
@@ -36,15 +36,18 @@ export function TaskBoard({
   const [overColumn, setOverColumn] = useState<TaskBoardColumnId | null>(null);
   const today = formatLocalDay(nowMs);
 
-  const grouped: Record<TaskBoardColumnId, Task[]> = {
-    active: [],
-    backlog: [],
-    done: [],
-  };
-  for (const task of tasks) {
-    const col = resolveTaskBoardColumn(task, buckets[task.id] ?? "active");
-    grouped[col].push(task);
-  }
+  const grouped = useMemo(() => {
+    const next: Record<TaskBoardColumnId, Task[]> = {
+      active: [],
+      backlog: [],
+      done: [],
+    };
+    for (const task of tasks) {
+      const col = resolveTaskBoardColumn(task, buckets[task.id] ?? "active");
+      next[col].push(task);
+    }
+    return next;
+  }, [tasks, buckets]);
 
   return (
     <div className="task-board" role="list" aria-label="任务看板">
@@ -147,4 +150,4 @@ export function TaskBoard({
       ))}
     </div>
   );
-}
+});

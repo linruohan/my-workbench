@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { createPortal } from "react-dom";
 import {
   defaultCustomSchedule,
+  makeOnceSchedule,
   makePresetSchedule,
   timedPresetLabel,
   type TimedSchedule,
@@ -15,6 +16,9 @@ const PRESETS: TimedSchedulePreset[] = [
   "weekly",
   "monthly",
 ];
+
+/** Default lead time for a new one-off schedule: 10 minutes from now. */
+const ONCE_DEFAULT_LEAD_MS = 10 * 60 * 1000;
 
 type Pos = { top: number; left: number; width: number; maxHeight: number };
 
@@ -138,6 +142,17 @@ export function ScheduleAddMenu({
                   : { visibility: "hidden", top: 0, left: 0 }
               }
             >
+              <li>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() =>
+                    pick(makeOnceSchedule(Date.now() + ONCE_DEFAULT_LEAD_MS))
+                  }
+                >
+                  一次性（10 分钟后）
+                </button>
+              </li>
               {PRESETS.map((preset) => (
                 <li key={preset}>
                   <button

@@ -42,13 +42,14 @@ import {
   splitMdBlocks,
   styleMarkdownSelection,
   wrapMarkdownSelection,
+  type ImageSlot,
   type InlineStyleKind,
   type MdSnippetRange,
   type Note,
 } from "@wb/domain";
 import { copyCodeBlock } from "../lib/code-copy";
 import { errorMessage } from "../lib/errors";
-import { renderMarkdown } from "../lib/markdown";
+import { buildHeadingOccurrenceMap, renderMarkdown } from "../lib/markdown";
 import { externalHrefFromEvent, openExternalUrl } from "../lib/open-external";
 import { isTauriRuntime } from "../lib/paths";
 import { useDialog } from "../shell/Dialogs";
@@ -395,9 +396,10 @@ export function NoteEditor({
   const gPending = useRef(false);
   const gTimer = useRef<number | null>(null);
   const noteIdRef = useRef<string | null>(null);
+  /** 上一次提交给外部的正文，用于跳过外部回写引起的重复拆分 */
+  const lastCommittedRef = useRef<string | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
-  const prepared = useMemo(() => extractImageSlots(note.bodyMd), [note.bodyMd]);
   const lineStarts = useMemo(() => {
     const starts: number[] = [];
     let line = 1;
@@ -409,7 +411,22 @@ export function NoteEditor({
   }, [blocks]);
 
   const documentText = useMemo(() => joinMdBlocks(blocks), [blocks]);
+  const prepared = useMemo(() => extractImageSlots(documentText), [documentText]);
   const documentHeadings = useMemo(() => extractMdHeadings(documentText), [documentText]);
+  const documentHeadingMap = useMemo(
+    () => buildHeadingOccurrenceMap(documentHeadings),
+    [documentHeadings],
+  );
+  const slotsCacheRef = useRef(new Map<string, ImageSlot[]>());
+  const cachedSlots = (text: string): ImageSlot[] => {
+    const cache = slotsCacheRef.current;
+    const hit = cache.get(text);
+    if (hit) return hit;
+    const { slots } = extractImageSlots(text);
+    if (cache.size > 512) cache.clear();
+    cache.set(text, slots);
+    return slots;
+  };
   const rowMetrics = useMemo(
     () => buildRowMetrics(blocks, measuredHeights.current),
     [blocks, measureTick],
@@ -488,6 +505,7 @@ export function NoteEditor({
   useEffect(() => {
     if (noteIdRef.current !== note.id) {
       noteIdRef.current = note.id;
+      lastCommittedRef.current = null;
       setActive(null);
       measuredHeights.current = new Map();
       pinIndexRef.current = null;
@@ -503,11 +521,14 @@ export function NoteEditor({
         if (body === note.bodyMd) return;
         measuredHeights.current = new Map();
         setBlocks(numberedBlocks);
+        lastCommittedRef.current = body;
         onChangeRef.current({ bodyMd: body });
       }, 0);
       return () => window.clearTimeout(handle);
     }
     if (active == null) {
+      // 外部回写的正是自己刚提交的正文时，无需再拆分一次
+      if (note.bodyMd === lastCommittedRef.current) return;
       setBlocks(normalizeMdBlocks(splitMdBlocks(note.bodyMd)));
     }
   }, [note.bodyMd, note.id, active]);
@@ -527,8 +548,13 @@ export function NoteEditor({
     key: "",
     urls: [],
   });
-  const urls = remoteUrls.map(
-    (url, index) => url ?? (local.key === slotKey ? (local.urls[index] ?? null) : null),
+  const urls = useMemo(
+    () =>
+      remoteUrls.map(
+        (url, index) =>
+          url ?? (local.key === slotKey ? (local.urls[index] ?? null) : null),
+      ),
+    [remoteUrls, local, slotKey],
   );
   const urlByDest = useMemo(() => {
     const map = new Map<string, string>();
@@ -596,24 +622,35 @@ export function NoteEditor({
     const normalized = normalizeMdBlocks(nextBlocks);
     if (caret != null) pendingCaret.current = caret;
     const nextText = joinMdBlocks(normalized);
-    const prevText = joinMdBlocks(blocks);
+    // 复用本帧已拼接好的正文，避免每次按键再拼一遍全文
+    const prevText = documentText;
     setBlocks(normalized);
     setActive(focus);
-    if (nextText !== prevText) onChange({ bodyMd: nextText });
+    if (nextText !== prevText) {
+      lastCommittedRef.current = nextText;
+      onChange({ bodyMd: nextText });
+    }
   };
 
   /** Sync outline numbers into source when leaving edit (keeps render free of CSS counters). */
   const commitNumbered = (nextBlocks: string[], focus: number | null) => {
-    const numbered = applyHeadingNumbers(joinMdBlocks(normalizeMdBlocks(nextBlocks)));
+    const baseText = joinMdBlocks(normalizeMdBlocks(nextBlocks));
+    const numbered = applyHeadingNumbers(baseText);
     const normalized = normalizeMdBlocks(splitMdBlocks(numbered));
     const nextText = joinMdBlocks(normalized);
-    const prevText = joinMdBlocks(blocks);
+    const prevText = documentText;
+    if (nextText === prevText) {
+      if (normalized !== blocks) setBlocks(normalized);
+      setActive(focus);
+      return;
+    }
     setBlocks(normalized);
     setActive(focus);
-    if (nextText !== prevText) onChange({ bodyMd: nextText });
+    lastCommittedRef.current = nextText;
+    onChange({ bodyMd: nextText });
   };
 
-  const docText = () => joinMdBlocks(blocks);
+  const docText = () => documentText;
 
   const captureScope = () => {
     if (active == null || !editRef.current) return selectionScope.current;
@@ -946,8 +983,10 @@ export function NoteEditor({
     if (active == null) return;
     const next = [...blocks];
     next[active] = text;
+    const body = joinMdBlocks(next);
+    lastCommittedRef.current = body;
     setBlocks(next);
-    onChange({ bodyMd: joinMdBlocks(next) });
+    onChange({ bodyMd: body });
   };
 
   const finishEditing = () => {
@@ -1641,11 +1680,12 @@ export function NoteEditor({
 
   const renderBlock = (text: string) => {
     if (!text) return "";
-    const { slots } = extractImageSlots(text);
+    const slots = cachedSlots(text);
     const blockUrls = slots.map((slot) => urlByDest.get(slot.dest) ?? null);
     return renderMarkdown(text, blockUrls, {
       document: documentText,
       documentHeadings,
+      documentHeadingMap,
     });
   };
 

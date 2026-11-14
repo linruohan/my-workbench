@@ -61,6 +61,8 @@ type Props = {
   /** Knowledge library roots; used to show short library names instead of full paths. */
   kbRoots?: string[];
   kbLoading?: boolean;
+  /** Live scan progress from the backend index session, when indexing. */
+  kbProgress?: { files: number; dirs: number; done: boolean } | null;
   onClose: () => void;
   onSelect: (result: CommandPaletteResult) => void;
 };
@@ -231,6 +233,7 @@ export function CommandPalette({
   kbFiles,
   kbRoots = [],
   kbLoading = false,
+  kbProgress = null,
   onClose,
   onSelect,
 }: Props) {
@@ -546,7 +549,12 @@ export function CommandPalette({
         />
         <div className="quick-open__list" role="listbox" aria-label="搜索结果">
           {kbLoading && (scope === "all" || scope === "file" || scope === "note") ? (
-            <p className="quick-open__hint">正在索引知识库文件…</p>
+            <p className="quick-open__hint">
+              正在索引知识库文件…
+              {kbProgress
+                ? ` 已扫描 ${kbProgress.files} 个文件 · ${kbProgress.dirs} 个目录`
+                : ""}
+            </p>
           ) : null}
           {!kbLoading && matches.length === 0 ? (
             <p className="quick-open__hint">

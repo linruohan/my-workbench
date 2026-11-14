@@ -19,6 +19,7 @@
     "fs:allow-mkdir",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
+    "fs:allow-rename",
     "allow-kb-fs",
     {
       "identifier": "fs:scope",

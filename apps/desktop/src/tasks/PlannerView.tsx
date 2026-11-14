@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import {
   formatTimelineDayHeader,
   groupPlannerByDay,
@@ -17,7 +18,7 @@ type Props = {
   onOpen: (task: Task) => void;
 };
 
-export function PlannerView({
+export const PlannerView = memo(function PlannerView({
   tasks,
   projectTitles,
   taskTagMap,
@@ -27,7 +28,7 @@ export function PlannerView({
   onToggleDone,
   onOpen,
 }: Props) {
-  const groups = groupPlannerByDay(tasks);
+  const groups = useMemo(() => groupPlannerByDay(tasks), [tasks]);
 
   return (
     <section className="panel planner">
@@ -67,4 +68,4 @@ export function PlannerView({
       )}
     </section>
   );
-}
+});

@@ -80,6 +80,7 @@ export type TimedSchedulePreset = "hourly" | "daily" | "weekdays" | "weekly" | "
 export type TimedIntervalUnit = "minute" | "hour" | "day" | "week" | "month" | "year";
 
 export type TimedSchedule =
+  | { kind: "once"; at: number }
   | { kind: "preset"; preset: TimedSchedulePreset; atTime: string }
   | {
       kind: "custom";

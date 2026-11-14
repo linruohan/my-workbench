@@ -31,7 +31,7 @@ export function CustomRepeatModal({ initial, onCancel, onConfirm }: Props) {
     initial?.kind === "custom" ? initial.unit : "day",
   );
   const [atTime, setAtTime] = useState(() =>
-    initial ? initial.atTime : DEFAULT_AT_TIME,
+    initial && initial.kind !== "once" ? initial.atTime : DEFAULT_AT_TIME,
   );
   const [unitOpen, setUnitOpen] = useState(false);
   const [endMode, setEndMode] = useState<"never" | "on_date">(() =>

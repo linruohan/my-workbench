@@ -145,6 +145,13 @@ export function parseScheduleRrule(
 export function timedTaskToRrule(task: TimedTask): string {
   const schedule = task.schedule;
   if (!schedule) return "";
+  if (schedule.kind === "once") {
+    // One-off tasks have no recurrence; emit a bare DTSTART at the target time.
+    const d = new Date(schedule.at);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const dt = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+    return `DTSTART:${dt}`;
+  }
   const at = schedule.atTime.replace(":", "");
   const dt = `DTSTART:20260101T${at}00`;
   if (schedule.kind === "preset") {

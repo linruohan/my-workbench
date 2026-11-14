@@ -140,6 +140,20 @@ export type CompactPlan = {
   messages: AgentMessage[];
 };
 
+/**
+ * 调整裁剪边界，保证保留的模型视图上下文完整：
+ * 视图不能从孤儿工具结果开始（其调用方 assistant 工具调用已被裁掉），
+ * 否则 OpenAI / Responses 等接口会因 tool 消息没有对应 tool_calls 而拒绝请求。
+ * 连续的工具结果随边界一起移出；最多推进到最后一条 user 消息（活轮次不会被丢）。
+ */
+export function safeCutIndex(messages: AgentMessage[], start: number): number {
+  let index = Math.max(0, Math.min(start, messages.length));
+  while (index < messages.length && messages[index].role === "tool") {
+    index += 1;
+  }
+  return index;
+}
+
 /** Messages the model should see, compacted when they exceed `budgetTokens`. */
 export function planCompact(messages: AgentMessage[], budgetTokens: number): CompactPlan {
   // Pressure prune oversized tool bodies first; hard-clear only when still over budget later.
@@ -163,7 +177,8 @@ export function planCompact(messages: AgentMessage[], budgetTokens: number): Com
   if (start === 0) {
     return { needed: false, summary: "", dropped: 0, messages: projected };
   }
-  const dropped = projected.slice(0, start);
+  const cut = safeCutIndex(projected, start);
+  const dropped = projected.slice(0, cut);
   const summary = summarizeDropped(dropped);
   const marker: AgentMessage = {
     id: "compact-projection",
@@ -179,7 +194,7 @@ export function planCompact(messages: AgentMessage[], budgetTokens: number): Com
     needed: true,
     summary,
     dropped: dropped.length,
-    messages: [marker, ...projected.slice(start)],
+    messages: [marker, ...projected.slice(cut)],
   };
 }
 

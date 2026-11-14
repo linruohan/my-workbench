@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -38,7 +39,15 @@ import {
   type Task,
   type TaskBoardColumnId,
 } from "@wb/domain";
-import { createPersistedStore, hydrateStore, saveStore } from "./lib/persistence";
+import {
+  createPersistedStore,
+  getLastSaveStatus,
+  hydrateStore,
+  saveStore,
+  scheduleSaveStore,
+  subscribeSaveStatus,
+  type SaveStatus,
+} from "./lib/persistence";
 import { applyUiFont, prefetchSystemFonts } from "./lib/fonts";
 import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
 import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
@@ -57,7 +66,12 @@ import {
   setScheduleMeta,
 } from "./agent/schedule-meta";
 import { KnowledgeView } from "./notes/KnowledgeView";
-import { listFilesRecursive, loadKnowledgeRoots, type KbEntry } from "./notes/kb-api";
+import {
+  loadKnowledgeRoots,
+  scanKnowledgeFiles,
+  type KbEntry,
+  type KbScanProgress,
+} from "./notes/kb-api";
 import { SettingsView, type SettingsSectionId } from "./settings/SettingsView";
 import { CommandPalette, type CommandPaletteResult } from "./shell/CommandPalette";
 import { DialogOutlet, useDialog } from "./shell/Dialogs";
@@ -119,7 +133,6 @@ export default function App() {
   const [agentShowArchived, setAgentShowArchived] = useState(false);
   const forgetAgentThreadRef = useRef<(id: string) => void>(() => {});
   const [tick, setTick] = useState(0);
-  const [draft, setDraft] = useState("");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => readPrefs().sidebarWidth);
@@ -127,6 +140,7 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("general");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [prefs, setPrefs] = useState<AppPrefs>(() => readPrefs());
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>(() => getLastSaveStatus());
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   const [hostTools, setHostTools] = useState<HostToolSnapshot[]>([]);
   const [pluginCatalog, setPluginCatalog] = useState<LoadedPlugin[]>([]);
@@ -137,7 +151,7 @@ export default function App() {
   const [timedDraft, setTimedDraft] = useState<TimedDraft>(EMPTY_TIMED_DRAFT);
   const [filterProjectId, setFilterProjectId] = useState("inbox");
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
-  const composerRef = useRef<HTMLInputElement>(null);
+  const focusComposerRef = useRef<(() => void) | null>(null);
   const [tasksViewMode, setTasksViewMode] = useState<TasksViewMode>(() =>
     readTasksViewMode(),
   );
@@ -149,6 +163,8 @@ export default function App() {
   const [noteFocusToken, setNoteFocusToken] = useState(0);
   const [paletteKbFiles, setPaletteKbFiles] = useState<KbEntry[]>([]);
   const [paletteKbLoading, setPaletteKbLoading] = useState(false);
+  const [paletteKbProgress, setPaletteKbProgress] = useState<KbScanProgress | null>(null);
+  const [paletteKbRoots, setPaletteKbRoots] = useState<string[]>([]);
   const paletteKbCacheRef = useRef<{
     rootsKey: string;
     at: number;
@@ -165,8 +181,21 @@ export default function App() {
 
   const today = formatLocalDay(now);
 
+  /** 合并写入：短时间内多次改动只落盘一次，避免每个按键都全量序列化 */
   const persist = useCallback(() => {
-    saveStore(store);
+    scheduleSaveStore(store);
+  }, [store]);
+
+  useEffect(() => {
+    const flush = () => {
+      if (noteRefreshTimer.current != null) {
+        window.clearTimeout(noteRefreshTimer.current);
+        noteRefreshTimer.current = null;
+      }
+      saveStore(store);
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => window.removeEventListener("beforeunload", flush);
   }, [store]);
 
   const refresh = useCallback(() => {
@@ -175,13 +204,54 @@ export default function App() {
     setTick((n) => n + 1);
   }, [persist]);
 
+  /** 应用内笔记输入高频触发：更新 store 但延后持久化与全局重渲染，避免每键全量刷新 */
+  const noteRefreshTimer = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (noteRefreshTimer.current != null) window.clearTimeout(noteRefreshTimer.current);
+    };
+  }, []);
+  const scheduleNoteRefresh = useCallback(() => {
+    if (noteRefreshTimer.current != null) window.clearTimeout(noteRefreshTimer.current);
+    noteRefreshTimer.current = window.setTimeout(() => {
+      noteRefreshTimer.current = null;
+      persist();
+      setNow(Date.now());
+      setTick((n) => n + 1);
+    }, 300);
+  }, [persist]);
+
+  const flushNoteRefresh = useCallback(() => {
+    if (noteRefreshTimer.current == null) return;
+    window.clearTimeout(noteRefreshTimer.current);
+    noteRefreshTimer.current = null;
+    persist();
+    setNow(Date.now());
+    setTick((n) => n + 1);
+  }, [persist]);
+
+  useEffect(() => subscribeSaveStatus(setSaveStatus), []);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      await hydrateStore(store);
+      const hydrate = await hydrateStore(store);
       const nextPrefs = await hydratePrefs();
       const dir = await resolveDataDir();
       if (cancelled) return;
+      if (hydrate.restoredFromBackup) {
+        store.pushNotification({
+          kind: "system",
+          title: "已从备份恢复数据",
+          body: "检测到主数据文件不可用，已自动回退到最近的可用备份。",
+        });
+      } else if (hydrate.hadLoadIssue) {
+        store.pushNotification({
+          kind: "system",
+          title: "本地数据加载异常",
+          body: "读取本地数据时出现问题，当前可能为空白状态，请检查数据目录与备份文件。",
+        });
+      }
       setPrefs(nextPrefs);
       setNav(nextPrefs.startupView);
       setDataDir(dir);
@@ -359,7 +429,7 @@ export default function App() {
       if (settingsOpen) return;
       if (key === "n") {
         e.preventDefault();
-        composerRef.current?.focus();
+        focusComposerRef.current?.();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -367,18 +437,25 @@ export default function App() {
   }, [settingsOpen]);
 
   useEffect(() => {
-    if (!commandPaletteOpen) return;
-    if (!isTauriRuntime()) {
-      setPaletteKbFiles([]);
-      setPaletteKbLoading(false);
+    if (!commandPaletteOpen) {
+      setPaletteKbRoots([]);
+      setPaletteKbProgress(null);
       return;
     }
     const roots = loadKnowledgeRoots();
+    setPaletteKbRoots(roots);
+    if (!isTauriRuntime()) {
+      setPaletteKbFiles([]);
+      setPaletteKbLoading(false);
+      setPaletteKbProgress(null);
+      return;
+    }
     const rootsKey = roots.join("\0");
     if (roots.length === 0) {
       paletteKbCacheRef.current = null;
       setPaletteKbFiles([]);
       setPaletteKbLoading(false);
+      setPaletteKbProgress(null);
       return;
     }
     const cached = paletteKbCacheRef.current;
@@ -387,6 +464,7 @@ export default function App() {
     if (fresh) {
       setPaletteKbFiles(cached.files);
       setPaletteKbLoading(false);
+      setPaletteKbProgress(null);
       return;
     }
     if (cached && cached.rootsKey === rootsKey) {
@@ -396,7 +474,22 @@ export default function App() {
       setPaletteKbLoading(true);
     }
     let cancelled = false;
-    void listFilesRecursive(roots)
+    // 扫描会话索引：每批增量展示（从头累积，避免与已展示的缓存列表拼接重复），
+    // 进度随批更新；取消时立刻停止取批并由后端终结会话。
+    const acc: KbEntry[] = [];
+    void scanKnowledgeFiles(roots, {
+      maxFiles: 8000,
+      isCancelled: () => cancelled,
+      onBatch: (batch) => {
+        if (cancelled) return;
+        acc.push(...batch);
+        setPaletteKbFiles(acc.slice());
+      },
+      onProgress: (progress) => {
+        if (cancelled) return;
+        setPaletteKbProgress(progress);
+      },
+    })
       .then((files) => {
         if (cancelled) return;
         paletteKbCacheRef.current = { rootsKey, at: Date.now(), files };
@@ -407,23 +500,43 @@ export default function App() {
         if (!cached || cached.rootsKey !== rootsKey) setPaletteKbFiles([]);
       })
       .finally(() => {
-        if (!cancelled) setPaletteKbLoading(false);
+        if (!cancelled) {
+          setPaletteKbLoading(false);
+          setPaletteKbProgress(null);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [commandPaletteOpen]);
 
-  void tick;
-  const todayTasks = store.listToday(now);
-  const allTasks = store.listTasks();
-  const plannerTasks = selectPlannerTasks(allTasks);
-  const openTasks = allTasks.filter((t) => !t.isDone);
-  const notifications = store.listNotifications();
-  const notes = store.listNotes();
-  const projects = store.listProjects();
-  const timedTasks = store.listTimedTasks();
-  const allTags = store.listTags();
+  const dataTick = tick;
+  void dataTick;
+  const nowMinute = Math.floor(now / 60_000);
+  // 分钟粒度的时间戳：任务视图的相对标签/过期判断只需分钟精度，
+  // 传入分钟值让 memo 化视图在秒级 tick 时命中缓存（计时器走独立 timerElapsedMs）。
+  const nowMinuteMs = nowMinute * 60_000;
+  // 今日列表顺序的版本号：setTodayOrder 不触碰 tasks Map，需要独立信号驱动 todayTasks 重算。
+  const [todayOrderRev, bumpTodayOrderRev] = useState(0);
+  const allTasks = useMemo(() => store.listTasks(), [store, dataTick]);
+  const todayTasks = useMemo(
+    () => store.listToday(now),
+    // listToday = selectTodayTasks(allTasks, todayOrder, nowMs)：
+    // 依赖收敛为任务集合 + 顺序版本 + 分钟粒度时钟，store tick 不再触发全量重算。
+    [store, nowMinute, allTasks, todayOrderRev],
+  );
+  const plannerTasks = useMemo(() => selectPlannerTasks(allTasks), [allTasks]);
+  const openTasks = useMemo(() => allTasks.filter((t) => !t.isDone), [allTasks]);
+  const notifications = useMemo(() => store.listNotifications(), [store, dataTick]);
+  const notes = useMemo(() => store.listNotes(), [store, dataTick]);
+  const projects = useMemo(() => store.listProjects(), [store, dataTick]);
+  const timedTasks = useMemo(() => store.listTimedTasks(), [store, dataTick]);
+  const allTags = useMemo(() => store.listTags(), [store, dataTick]);
+  const paletteThreads = useMemo(
+    () => store.listAgentThreads({ includeArchived: agentShowArchived }),
+    [store, agentShowArchived, dataTick],
+  );
+  const paletteWorkspaces = useMemo(() => store.listAgentWorkspaces(), [store, dataTick]);
   const timedBindings = useMemo(() => {
     const map: Record<string, TimedTaskBindingView> = {};
     for (const task of timedTasks) {
@@ -440,6 +553,10 @@ export default function App() {
   const doneTasks = useMemo(
     () => allTasks.filter((t) => t.isDone && !t.parentId),
     [allTasks],
+  );
+  const sortedDoneTasks = useMemo(
+    () => [...doneTasks].sort((a, b) => (b.doneOn ?? 0) - (a.doneOn ?? 0)),
+    [doneTasks],
   );
   const taskNavCounts = useMemo(
     () => ({
@@ -474,21 +591,28 @@ export default function App() {
     for (const p of projects) map[p.id] = p.title;
     return map;
   }, [projects]);
+  const prevTaskBucketsRef = useRef<Record<string, ProjectBucket>>({});
+  // listTasks 现在返回稳定引用：所有 bucket 变更都会同时改 tasks Map，
+  // 因此 allTasks 引用变化足以覆盖 bucket 变更，无需依赖 dataTick。
   const taskBuckets = useMemo(() => {
+    const prev = prevTaskBucketsRef.current;
     const map: Record<string, ProjectBucket> = {};
     for (const t of allTasks) {
-      map[t.id] = store.getTaskBucket(t.id);
+      const next = store.getTaskBucket(t.id);
+      map[t.id] = prev[t.id] === next ? prev[t.id] : next;
     }
+    prevTaskBucketsRef.current = map;
     return map;
   }, [allTasks, store]);
+  // store 的 listTagsForTask 已按任务缓存并返回稳定数组引用：
+  // 每 tick 只做 Map.get + 引用赋值，标签未变时下游 memo 全部命中。
   const taskTagMap = useMemo(() => {
-    void tick;
     const map: Record<string, Tag[]> = {};
     for (const t of allTasks) {
       map[t.id] = store.listTagsForTask(t.id);
     }
     return map;
-  }, [allTasks, store, tick]);
+  }, [allTasks, store, dataTick]);
 
   const editingTask = editingTaskId ? (store.getTask(editingTaskId) ?? null) : null;
   const openNote = activeNoteId ? store.getNote(activeNoteId) : null;
@@ -503,205 +627,255 @@ export default function App() {
   const timerElapsedMs =
     activeTimerTaskId && timerStartedAt != null ? Math.max(0, now - timerStartedAt) : 0;
 
-  const scheduleToday = (task: Task) => {
-    store.scheduleTask(task.id, { dueDay: today });
-    refresh();
-  };
+  const settleSegment = useCallback(
+    (segment: { taskId: string; startedAt: number; endedAt: number }) => {
+      try {
+        store.addTimeSpent(segment.taskId, segment.startedAt, segment.endedAt);
+      } catch {
+        // parent-with-children cannot be timed; ignore settle
+      }
+    },
+    [store],
+  );
 
-  const scheduleAfternoon = (task: Task) => {
-    const at = new Date();
-    at.setHours(15, 0, 0, 0);
-    store.scheduleTask(task.id, {
-      dueWithTime: at.getTime(),
-      ...(prefs.defaultRemind !== "none" ? { remindOption: prefs.defaultRemind } : {}),
-    });
-    refresh();
-  };
-
-  const clearPlan = (task: Task) => {
-    store.scheduleTask(task.id, {
-      dueDay: null,
-      dueWithTime: null,
-      remindAt: null,
-    });
-    refresh();
-  };
-
-  const settleSegment = (segment: {
-    taskId: string;
-    startedAt: number;
-    endedAt: number;
-  }) => {
-    try {
-      store.addTimeSpent(segment.taskId, segment.startedAt, segment.endedAt);
-    } catch {
-      // parent-with-children cannot be timed; ignore settle
-    }
-  };
-
-  const stopTimerIfTask = (taskId: string) => {
-    if (activeTimerTaskId !== taskId) return;
-    const stopped = timer.stop(Date.now());
-    if (stopped) settleSegment(stopped);
-    setActiveTimerTaskId(null);
-    setTimerStartedAt(null);
-  };
-
-  const complete = (task: Task) => {
-    stopTimerIfTask(task.id);
-    store.completeTask(task.id);
-    refresh();
-  };
-
-  const toggleDone = (task: Task) => {
-    if (task.isDone) store.uncompleteTask(task.id);
-    else {
-      stopTimerIfTask(task.id);
-      store.completeTask(task.id);
-    }
-    refresh();
-  };
-
-  const clearCompletedTasks = (taskIds: string[]) => {
-    for (const id of taskIds) {
-      stopTimerIfTask(id);
-      store.deleteTask(id);
-    }
-    refresh();
-  };
-
-  const reorderToday = (fromId: string, toId: string) => {
-    const ids = todayTasks.map((t) => t.id);
-    store.setTodayOrder(reorderIds(ids, fromId, toId));
-    refresh();
-  };
-
-  const changeTasksViewMode = (mode: TasksViewMode) => {
-    setTasksViewMode(mode);
-    localStorage.setItem(TASKS_VIEW_KEY, mode);
-  };
-
-  const moveTaskColumn = (taskId: string, column: TaskBoardColumnId) => {
-    const task = store.getTask(taskId);
-    if (!task) return;
-    if (column === "done") {
-      stopTimerIfTask(taskId);
-      if (!task.isDone) store.completeTask(taskId);
-    } else {
-      if (task.isDone) store.uncompleteTask(taskId);
-      store.setTaskBucket(taskId, column);
-    }
-    refresh();
-  };
-
-  const toggleTimer = (task: Task) => {
-    const at = Date.now();
-    if (activeTimerTaskId === task.id) {
-      const stopped = timer.stop(at);
+  const stopTimerIfTask = useCallback(
+    (taskId: string) => {
+      if (activeTimerTaskId !== taskId) return;
+      const stopped = timer.stop(Date.now());
       if (stopped) settleSegment(stopped);
       setActiveTimerTaskId(null);
       setTimerStartedAt(null);
+    },
+    [activeTimerTaskId, timer, settleSegment],
+  );
+
+  const scheduleToday = useCallback(
+    (task: Task) => {
+      store.scheduleTask(task.id, { dueDay: today });
       refresh();
-      return;
-    }
-    const { previous } = timer.start(task.id, at);
-    if (previous) settleSegment(previous);
-    setActiveTimerTaskId(task.id);
-    setTimerStartedAt(at);
-    refresh();
-  };
+    },
+    [store, today, refresh],
+  );
 
-  const createTag = (title: string): Tag | null => {
-    try {
-      const tag = store.createTag(title);
+  const scheduleAfternoon = useCallback(
+    (task: Task) => {
+      const at = new Date();
+      at.setHours(15, 0, 0, 0);
+      store.scheduleTask(task.id, {
+        dueWithTime: at.getTime(),
+        ...(prefs.defaultRemind !== "none" ? { remindOption: prefs.defaultRemind } : {}),
+      });
       refresh();
-      return tag;
-    } catch {
-      return null;
-    }
-  };
+    },
+    [store, prefs.defaultRemind, refresh],
+  );
 
-  const saveEditedTask = (taskId: string, draft: TaskEditorSave) => {
-    const task = store.getTask(taskId);
-    if (!task) return;
-    store.updateTask(taskId, {
-      title: draft.title,
-      notes: draft.notes,
-      projectId: draft.projectId,
-      timeEstimate: draft.timeEstimateMinutes * 60_000,
-    });
-
-    const currentTagIds = store.listTagsForTask(taskId).map((t) => t.id);
-    for (const tagId of draft.tagIds) {
-      if (!currentTagIds.includes(tagId)) store.assignTag(taskId, tagId);
-    }
-    for (const tagId of currentTagIds) {
-      if (!draft.tagIds.includes(tagId)) store.unassignTag(taskId, tagId);
-    }
-
-    if (draft.isDone && !task.isDone) store.completeTask(taskId);
-    if (!draft.isDone && task.isDone) store.uncompleteTask(taskId);
-    if (!draft.isDone) store.setTaskBucket(taskId, draft.bucket);
-
-    if (!draft.dueWithTimeLocal) {
-      store.scheduleTask(taskId, {
+  const clearPlan = useCallback(
+    (task: Task) => {
+      store.scheduleTask(task.id, {
         dueDay: null,
         dueWithTime: null,
         remindAt: null,
       });
-    } else {
-      const ms = Date.parse(draft.dueWithTimeLocal);
-      store.scheduleTask(taskId, {
-        dueWithTime: Number.isNaN(ms) ? Date.now() : ms,
-        ...(draft.remindOption !== "none"
-          ? { remindOption: draft.remindOption }
-          : { remindAt: null }),
+      refresh();
+    },
+    [store, refresh],
+  );
+
+  const complete = useCallback(
+    (task: Task) => {
+      stopTimerIfTask(task.id);
+      store.completeTask(task.id);
+      refresh();
+    },
+    [stopTimerIfTask, store, refresh],
+  );
+
+  const toggleDone = useCallback(
+    (task: Task) => {
+      if (task.isDone) store.uncompleteTask(task.id);
+      else {
+        stopTimerIfTask(task.id);
+        store.completeTask(task.id);
+      }
+      refresh();
+    },
+    [stopTimerIfTask, store, refresh],
+  );
+
+  const clearCompletedTasks = useCallback(
+    (taskIds: string[]) => {
+      for (const id of taskIds) {
+        stopTimerIfTask(id);
+        store.deleteTask(id);
+      }
+      refresh();
+    },
+    [stopTimerIfTask, store, refresh],
+  );
+
+  const openTask = useCallback((task: Task) => {
+    setEditingTaskId(task.id);
+  }, []);
+
+  const reorderToday = useCallback(
+    (fromId: string, toId: string) => {
+      const ids = todayTasks.map((t) => t.id);
+      store.setTodayOrder(reorderIds(ids, fromId, toId));
+      bumpTodayOrderRev((value) => value + 1);
+      refresh();
+    },
+    [todayTasks, store, refresh],
+  );
+
+  const changeTasksViewMode = useCallback((mode: TasksViewMode) => {
+    setTasksViewMode(mode);
+    localStorage.setItem(TASKS_VIEW_KEY, mode);
+  }, []);
+
+  const moveTaskColumn = useCallback(
+    (taskId: string, column: TaskBoardColumnId) => {
+      const task = store.getTask(taskId);
+      if (!task) return;
+      if (column === "done") {
+        stopTimerIfTask(taskId);
+        if (!task.isDone) store.completeTask(taskId);
+      } else {
+        if (task.isDone) store.uncompleteTask(taskId);
+        store.setTaskBucket(taskId, column);
+      }
+      refresh();
+    },
+    [store, stopTimerIfTask, refresh],
+  );
+
+  const toggleTimer = useCallback(
+    (task: Task) => {
+      const at = Date.now();
+      if (activeTimerTaskId === task.id) {
+        const stopped = timer.stop(at);
+        if (stopped) settleSegment(stopped);
+        setActiveTimerTaskId(null);
+        setTimerStartedAt(null);
+        refresh();
+        return;
+      }
+      const { previous } = timer.start(task.id, at);
+      if (previous) settleSegment(previous);
+      setActiveTimerTaskId(task.id);
+      setTimerStartedAt(at);
+      refresh();
+    },
+    [activeTimerTaskId, timer, settleSegment, refresh],
+  );
+
+  const createTag = useCallback(
+    (title: string): Tag | null => {
+      try {
+        const tag = store.createTag(title);
+        refresh();
+        return tag;
+      } catch {
+        return null;
+      }
+    },
+    [store, refresh],
+  );
+
+  const saveEditedTask = useCallback(
+    (taskId: string, draft: TaskEditorSave) => {
+      const task = store.getTask(taskId);
+      if (!task) return;
+      store.updateTask(taskId, {
+        title: draft.title,
+        notes: draft.notes,
+        projectId: draft.projectId,
+        timeEstimate: draft.timeEstimateMinutes * 60_000,
       });
-    }
 
-    if (!draft.deadlineWithTimeLocal) {
-      store.scheduleTask(taskId, {
-        deadlineDay: null,
-        deadlineWithTime: null,
+      const currentTagIds = store.listTagsForTask(taskId).map((t) => t.id);
+      for (const tagId of draft.tagIds) {
+        if (!currentTagIds.includes(tagId)) store.assignTag(taskId, tagId);
+      }
+      for (const tagId of currentTagIds) {
+        if (!draft.tagIds.includes(tagId)) store.unassignTag(taskId, tagId);
+      }
+
+      if (draft.isDone && !task.isDone) store.completeTask(taskId);
+      if (!draft.isDone && task.isDone) store.uncompleteTask(taskId);
+      if (!draft.isDone) store.setTaskBucket(taskId, draft.bucket);
+
+      if (!draft.dueWithTimeLocal) {
+        store.scheduleTask(taskId, {
+          dueDay: null,
+          dueWithTime: null,
+          remindAt: null,
+        });
+      } else {
+        const ms = Date.parse(draft.dueWithTimeLocal);
+        store.scheduleTask(taskId, {
+          dueWithTime: Number.isNaN(ms) ? Date.now() : ms,
+          ...(draft.remindOption !== "none"
+            ? { remindOption: draft.remindOption }
+            : { remindAt: null }),
+        });
+      }
+
+      if (!draft.deadlineWithTimeLocal) {
+        store.scheduleTask(taskId, {
+          deadlineDay: null,
+          deadlineWithTime: null,
+        });
+      } else {
+        const deadlineMs = Date.parse(draft.deadlineWithTimeLocal);
+        const safeDeadline = Number.isNaN(deadlineMs) ? Date.now() : deadlineMs;
+        store.scheduleTask(taskId, {
+          deadlineWithTime: safeDeadline,
+        });
+      }
+
+      if (!task.parentId) {
+        store.setRepeatCfg(taskId, draft.repeat ? encodeTaskRepeat(draft.repeat) : null);
+      }
+      refresh();
+    },
+    [store, refresh],
+  );
+
+  const deleteTask = useCallback(
+    (taskId: string) => {
+      store.deleteTask(taskId);
+      setEditingTaskId((prev) => (prev === taskId ? null : prev));
+      refresh();
+    },
+    [store, refresh],
+  );
+
+  const duplicateTask = useCallback(
+    (taskId: string) => {
+      store.duplicateTask(taskId);
+      refresh();
+    },
+    [store, refresh],
+  );
+
+  const addSubtask = useCallback(
+    (parentId: string, title: string) => {
+      const parent = store.getTask(parentId);
+      if (!parent) return;
+      store.createTask({
+        title,
+        projectId: parent.projectId,
+        parentId,
+        nowMs: Date.now(),
       });
-    } else {
-      const deadlineMs = Date.parse(draft.deadlineWithTimeLocal);
-      const safeDeadline = Number.isNaN(deadlineMs) ? Date.now() : deadlineMs;
-      store.scheduleTask(taskId, {
-        deadlineWithTime: safeDeadline,
-      });
-    }
-
-    if (!task.parentId) {
-      store.setRepeatCfg(taskId, draft.repeat ? encodeTaskRepeat(draft.repeat) : null);
-    }
-    refresh();
-  };
-
-  const deleteTask = (taskId: string) => {
-    store.deleteTask(taskId);
-    setEditingTaskId((prev) => (prev === taskId ? null : prev));
-    refresh();
-  };
-
-  const duplicateTask = (taskId: string) => {
-    store.duplicateTask(taskId);
-    refresh();
-  };
-
-  const addSubtask = (parentId: string, title: string) => {
-    const parent = store.getTask(parentId);
-    if (!parent) return;
-    store.createTask({
-      title,
-      projectId: parent.projectId,
-      parentId,
-      nowMs: Date.now(),
-    });
-    refresh();
-  };
+      refresh();
+    },
+    [store, refresh],
+  );
 
   const goNav = (id: AppNavId) => {
+    flushNoteRefresh();
     setSettingsOpen(false);
     setTimedEditing(false);
     setTimedEditId(null);
@@ -720,9 +894,9 @@ export default function App() {
     goNav("projects");
   };
 
-  const capture = () => {
-    const text = draft.trim();
-    if (!text || settingsOpen) return;
+  const capture = (raw: string): boolean => {
+    const text = raw.trim();
+    if (!text || settingsOpen) return false;
     const nowMs = Date.now();
 
     if (text.startsWith("/")) {
@@ -735,8 +909,7 @@ export default function App() {
           refresh();
           openProject(created.id);
         }
-        setDraft("");
-        return;
+        return true;
       }
       if (cmd === "笔记" || cmd === "note") {
         const note = store.createNote({
@@ -746,9 +919,8 @@ export default function App() {
         });
         setActiveNoteId(note.id);
         goNav("knowledge");
-        setDraft("");
         refresh();
-        return;
+        return true;
       }
       if (cmd === "定时" || cmd === "timed") {
         const created = store.createTimedTask({
@@ -757,10 +929,9 @@ export default function App() {
           schedule: makePresetSchedule("daily"),
           nowMs,
         });
-        setDraft("");
         refresh();
         openTimedEdit(created.id);
-        return;
+        return true;
       }
     }
 
@@ -771,9 +942,8 @@ export default function App() {
         nowMs,
       });
       setActiveNoteId(note.id);
-      setDraft("");
       refresh();
-      return;
+      return true;
     }
 
     if (nav === "timed") {
@@ -783,10 +953,9 @@ export default function App() {
         schedule: makePresetSchedule("daily"),
         nowMs,
       });
-      setDraft("");
       refresh();
       openTimedEdit(created.id);
-      return;
+      return true;
     }
 
     const parsed = parseQuickCapture(text, { nowMs });
@@ -826,8 +995,8 @@ export default function App() {
         ...(remindOption ? { remindOption } : {}),
       });
     }
-    setDraft("");
     refresh();
+    return true;
   };
 
   const dismissReminder = (taskId: string, remindAt: number) => {
@@ -859,7 +1028,7 @@ export default function App() {
       nextPatch.title = inferNoteTitleFromBody(patch.bodyMd);
     }
     store.updateNote(id, nextPatch);
-    refresh();
+    scheduleNoteRefresh();
   };
 
   const deleteNote = async (id: string) => {
@@ -1224,11 +1393,11 @@ export default function App() {
         denseMeta={prefs.workMode === "office"}
         reorderable
         hint="汇总全部项目 · 拖拽可调整今日顺序"
-        nowMs={now}
+        nowMs={nowMinuteMs}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
-        onOpen={(t) => setEditingTaskId(t.id)}
+        onOpen={openTask}
         onReorder={reorderToday}
       />
     );
@@ -1247,7 +1416,7 @@ export default function App() {
         confirmBeforeDelete={prefs.confirmBeforeDelete}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
-        nowMs={now}
+        nowMs={nowMinuteMs}
         onViewModeChange={changeTasksViewMode}
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
@@ -1264,21 +1433,20 @@ export default function App() {
       />
     );
   } else if (nav === "done") {
-    const doneList = [...doneTasks].sort((a, b) => (b.doneOn ?? 0) - (a.doneOn ?? 0));
     body = (
       <TaskList
         title="已完成"
         empty="还没有已完成的任务。"
-        tasks={doneList}
+        tasks={sortedDoneTasks}
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
         hint="汇总全部项目的已完成任务"
-        nowMs={now}
+        nowMs={nowMinuteMs}
         showDoneStyle
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
-        onOpen={(t) => setEditingTaskId(t.id)}
+        onOpen={openTask}
       />
     );
   } else if (nav === "planner") {
@@ -1287,11 +1455,11 @@ export default function App() {
         tasks={plannerTasks}
         projectTitles={projectTitles}
         taskTagMap={taskTagMap}
-        nowMs={now}
+        nowMs={nowMinuteMs}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
         onToggleDone={toggleDone}
-        onOpen={(t) => setEditingTaskId(t.id)}
+        onOpen={openTask}
       />
     );
   } else if (nav === "knowledge") {
@@ -1411,7 +1579,7 @@ export default function App() {
         confirmBeforeDelete={prefs.confirmBeforeDelete}
         activeTimerTaskId={activeTimerTaskId}
         timerElapsedMs={timerElapsedMs}
-        nowMs={now}
+        nowMs={nowMinuteMs}
         onViewModeChange={changeTasksViewMode}
         onToggleDone={toggleDone}
         onPlanToday={scheduleToday}
@@ -1481,148 +1649,139 @@ export default function App() {
             onHostTools={setHostTools}
           />
         ) : (
-          <div
-            className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}
-            style={
-              sidebarCollapsed
-                ? undefined
-                : ({ ["--wb-sidebar-width"]: `${sidebarWidth}px` } as CSSProperties)
-            }
-          >
-            <Sidebar
-              collapsed={sidebarCollapsed}
-              onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-              nav={nav}
-              onNav={goNav}
-              settingsOpen={settingsOpen}
-              onOpenSettings={() => openSettings("general")}
-              onOpenSearch={() => setCommandPaletteOpen(true)}
-              projects={projects}
-              activeProjectId={filterProjectId}
-              taskNavCounts={taskNavCounts}
-              projectTaskCounts={projectTaskCounts}
-              notes={notes}
-              onCreateProject={() => setCreateProjectOpen(true)}
-              onSelectProject={openProject}
-              onSelectNote={(id) => {
-                setActiveNoteId(id);
-                goNav("knowledge");
-              }}
-              onOpenAgent={openAgent}
-              agentOpen={agentSectionOpen}
-              onToggleAgent={toggleAgentSection}
-              onOpenAgentWeb={() => void openAgentWebSession()}
-              onCreateAgentFromFolder={() => void newAgentChatFromFolder()}
-              agentShowArchived={agentShowArchived}
-              onToggleAgentShowArchived={() => setAgentShowArchived((value) => !value)}
-              agentRail={
-                <AgentWorkspaceRail
-                  store={store}
-                  threadId={agentThreadId}
-                  busyThreadId={agentBusyThreadId}
-                  showArchived={agentShowArchived}
-                  onSelectThread={(id) => {
-                    setAgentThreadId(id);
-                    goNav("agent");
-                  }}
-                  onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
-                  onForgetThread={(id) => forgetAgentThreadRef.current(id)}
-                  onRefresh={refresh}
-                />
+          <>
+            {!saveStatus.ok && saveStatus.message ? (
+              <div className="save-warning" role="alert">
+                本地保存失败：{saveStatus.message}
+                （请检查磁盘空间或权限，修改可能尚未落盘）
+              </div>
+            ) : saveStatus.ok && saveStatus.warning ? (
+              <div className="save-warning" role="status">
+                {saveStatus.warning}
+              </div>
+            ) : null}
+            <div
+              className={sidebarCollapsed ? "shell__body is-collapsed" : "shell__body"}
+              style={
+                sidebarCollapsed
+                  ? undefined
+                  : ({ ["--wb-sidebar-width"]: `${sidebarWidth}px` } as CSSProperties)
               }
-              displayName={prefs.displayName || "本地用户"}
-              width={sidebarWidth}
-              onWidthChange={setSidebarWidth}
-              onWidthCommit={(next) => {
-                setSidebarWidth(next);
-                updatePrefs({ ...prefs, sidebarWidth: next });
-              }}
-            />
-            <main className="main">
-              {body}
-              {editingTask && nav !== "projects" ? (
-                <TaskEditor
-                  key={editingTask.id}
-                  task={editingTask}
-                  bucket={taskBuckets[editingTask.id] ?? "active"}
-                  projects={projects}
-                  tags={allTags}
-                  selectedTagIds={(taskTagMap[editingTask.id] ?? []).map((t) => t.id)}
-                  subtasks={store.listSubtasks(editingTask.id)}
-                  defaultRemind={prefs.defaultRemind}
-                  nowMs={now}
-                  onClose={() => setEditingTaskId(null)}
-                  onDelete={() => {
-                    void (async () => {
-                      if (prefs.confirmBeforeDelete) {
-                        const ok = await dialog.confirm({
-                          title: "删除任务",
-                          message: "确定删除该任务？此操作不可撤销。",
-                          confirmLabel: "删除",
-                          danger: true,
-                        });
-                        if (!ok) return;
-                      }
-                      deleteTask(editingTask.id);
-                    })();
-                  }}
-                  onDuplicate={() => {
-                    duplicateTask(editingTask.id);
-                    setEditingTaskId(null);
-                  }}
-                  onCreateTag={createTag}
-                  onAddSubtask={(title) => addSubtask(editingTask.id, title)}
-                  onToggleSubtask={toggleDone}
-                  onDeleteSubtask={(id) => {
-                    void (async () => {
-                      if (prefs.confirmBeforeDelete) {
-                        const ok = await dialog.confirm({
-                          title: "删除子任务",
-                          message: "确定删除该子任务？此操作不可撤销。",
-                          confirmLabel: "删除",
-                          danger: true,
-                        });
-                        if (!ok) return;
-                      }
-                      deleteTask(id);
-                    })();
-                  }}
-                  onSave={(draft) => {
-                    saveEditedTask(editingTask.id, draft);
-                    setEditingTaskId(null);
-                  }}
-                />
-              ) : null}
-              {nav !== "agent" ? (
-                <footer className="composer">
-                  <div className="composer__row">
-                    <VoiceField
-                      value={draft}
-                      onChange={setDraft}
-                      className="composer__voice"
-                    >
-                      <input
-                        ref={composerRef}
-                        aria-label="快速捕获"
-                        placeholder={composerPlaceholder(
-                          nav,
-                          projectTitles[filterProjectId],
-                        )}
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") capture();
-                        }}
-                      />
-                    </VoiceField>
-                    <button type="button" className="primary" onClick={capture}>
-                      添加
-                    </button>
-                  </div>
-                </footer>
-              ) : null}
-            </main>
-          </div>
+            >
+              <Sidebar
+                collapsed={sidebarCollapsed}
+                onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+                nav={nav}
+                onNav={goNav}
+                settingsOpen={settingsOpen}
+                onOpenSettings={() => openSettings("general")}
+                onOpenSearch={() => setCommandPaletteOpen(true)}
+                projects={projects}
+                activeProjectId={filterProjectId}
+                taskNavCounts={taskNavCounts}
+                projectTaskCounts={projectTaskCounts}
+                notes={notes}
+                onCreateProject={() => setCreateProjectOpen(true)}
+                onSelectProject={openProject}
+                onSelectNote={(id) => {
+                  setActiveNoteId(id);
+                  goNav("knowledge");
+                }}
+                onOpenAgent={openAgent}
+                agentOpen={agentSectionOpen}
+                onToggleAgent={toggleAgentSection}
+                onOpenAgentWeb={() => void openAgentWebSession()}
+                onCreateAgentFromFolder={() => void newAgentChatFromFolder()}
+                agentShowArchived={agentShowArchived}
+                onToggleAgentShowArchived={() => setAgentShowArchived((value) => !value)}
+                agentRail={
+                  <AgentWorkspaceRail
+                    store={store}
+                    threadId={agentThreadId}
+                    busyThreadId={agentBusyThreadId}
+                    showArchived={agentShowArchived}
+                    onSelectThread={(id) => {
+                      setAgentThreadId(id);
+                      goNav("agent");
+                    }}
+                    onCreateThread={(workspaceId) => newAgentChat({ workspaceId })}
+                    onForgetThread={(id) => forgetAgentThreadRef.current(id)}
+                    onRefresh={refresh}
+                  />
+                }
+                displayName={prefs.displayName || "本地用户"}
+                width={sidebarWidth}
+                onWidthChange={setSidebarWidth}
+                onWidthCommit={(next) => {
+                  setSidebarWidth(next);
+                  updatePrefs({ ...prefs, sidebarWidth: next });
+                }}
+              />
+              <main className="main">
+                {body}
+                {editingTask && nav !== "projects" ? (
+                  <TaskEditor
+                    key={editingTask.id}
+                    task={editingTask}
+                    bucket={taskBuckets[editingTask.id] ?? "active"}
+                    projects={projects}
+                    tags={allTags}
+                    selectedTagIds={(taskTagMap[editingTask.id] ?? []).map((t) => t.id)}
+                    subtasks={store.listSubtasks(editingTask.id)}
+                    defaultRemind={prefs.defaultRemind}
+                    nowMs={nowMinuteMs}
+                    onClose={() => setEditingTaskId(null)}
+                    onDelete={() => {
+                      void (async () => {
+                        if (prefs.confirmBeforeDelete) {
+                          const ok = await dialog.confirm({
+                            title: "删除任务",
+                            message: "确定删除该任务？此操作不可撤销。",
+                            confirmLabel: "删除",
+                            danger: true,
+                          });
+                          if (!ok) return;
+                        }
+                        deleteTask(editingTask.id);
+                      })();
+                    }}
+                    onDuplicate={() => {
+                      duplicateTask(editingTask.id);
+                      setEditingTaskId(null);
+                    }}
+                    onCreateTag={createTag}
+                    onAddSubtask={(title) => addSubtask(editingTask.id, title)}
+                    onToggleSubtask={toggleDone}
+                    onDeleteSubtask={(id) => {
+                      void (async () => {
+                        if (prefs.confirmBeforeDelete) {
+                          const ok = await dialog.confirm({
+                            title: "删除子任务",
+                            message: "确定删除该子任务？此操作不可撤销。",
+                            confirmLabel: "删除",
+                            danger: true,
+                          });
+                          if (!ok) return;
+                        }
+                        deleteTask(id);
+                      })();
+                    }}
+                    onSave={(draft) => {
+                      saveEditedTask(editingTask.id, draft);
+                      setEditingTaskId(null);
+                    }}
+                  />
+                ) : null}
+                {nav !== "agent" ? (
+                  <QuickCaptureComposer
+                    placeholder={composerPlaceholder(nav, projectTitles[filterProjectId])}
+                    focusRef={focusComposerRef}
+                    onCapture={capture}
+                  />
+                ) : null}
+              </main>
+            </div>
+          </>
         )}
         <PromptModal
           open={createProjectOpen}
@@ -1642,12 +1801,13 @@ export default function App() {
           open={commandPaletteOpen}
           tasks={allTasks}
           projects={projects}
-          threads={store.listAgentThreads({ includeArchived: agentShowArchived })}
-          workspaces={store.listAgentWorkspaces()}
+          threads={paletteThreads}
+          workspaces={paletteWorkspaces}
           notes={notes}
           kbFiles={paletteKbFiles}
-          kbRoots={loadKnowledgeRoots()}
+          kbRoots={paletteKbRoots}
           kbLoading={paletteKbLoading}
+          kbProgress={paletteKbProgress}
           onClose={() => setCommandPaletteOpen(false)}
           onSelect={openCommandPaletteResult}
         />
@@ -1657,7 +1817,49 @@ export default function App() {
   );
 }
 
-function TaskList(props: {
+function QuickCaptureComposer(props: {
+  placeholder: string;
+  focusRef: { current: (() => void) | null };
+  onCapture: (text: string) => boolean;
+}) {
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    props.focusRef.current = () => inputRef.current?.focus();
+    return () => {
+      props.focusRef.current = null;
+    };
+  }, [props.focusRef]);
+
+  const submit = () => {
+    if (props.onCapture(draft)) setDraft("");
+  };
+
+  return (
+    <footer className="composer">
+      <div className="composer__row">
+        <VoiceField value={draft} onChange={setDraft} className="composer__voice">
+          <input
+            ref={inputRef}
+            aria-label="快速捕获"
+            placeholder={props.placeholder}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+          />
+        </VoiceField>
+        <button type="button" className="primary" onClick={submit}>
+          添加
+        </button>
+      </div>
+    </footer>
+  );
+}
+
+const TaskList = memo(function TaskList(props: {
   title: string;
   empty: string;
   tasks: Task[];
@@ -1676,6 +1878,24 @@ function TaskList(props: {
 }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
+
+  const onDragStart = useCallback((id: string) => {
+    setDragId(id);
+    setOverId(id);
+  }, []);
+  const onDragOver = useCallback((id: string) => {
+    setOverId(id);
+  }, []);
+  const onDropOn = useCallback(
+    (toId: string) => {
+      setDragId((currentDrag) => {
+        if (currentDrag && props.onReorder) props.onReorder(currentDrag, toId);
+        return null;
+      });
+      setOverId(null);
+    },
+    [props.onReorder],
+  );
 
   return (
     <section className="panel">
@@ -1703,26 +1923,9 @@ function TaskList(props: {
               }
               draggable={props.reorderable}
               dropTarget={props.reorderable && overId === task.id && dragId !== task.id}
-              onDragStart={
-                props.reorderable
-                  ? (id) => {
-                      setDragId(id);
-                      setOverId(id);
-                    }
-                  : undefined
-              }
-              onDragOver={props.reorderable ? (id) => setOverId(id) : undefined}
-              onDropOn={
-                props.reorderable
-                  ? (toId) => {
-                      if (dragId && props.onReorder) {
-                        props.onReorder(dragId, toId);
-                      }
-                      setDragId(null);
-                      setOverId(null);
-                    }
-                  : undefined
-              }
+              onDragStart={props.reorderable ? onDragStart : undefined}
+              onDragOver={props.reorderable ? onDragOver : undefined}
+              onDropOn={props.reorderable ? onDropOn : undefined}
               onToggleDone={props.onToggleDone}
               onOpen={props.onOpen}
             />
@@ -1731,4 +1934,4 @@ function TaskList(props: {
       )}
     </section>
   );
-}
+});

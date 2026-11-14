@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import {
   computeTaskStats,
   filterTasks,
@@ -80,7 +80,7 @@ const VIEW_MODES: Array<{ id: TasksViewMode; label: string }> = [
   { id: "stats", label: "统计" },
 ];
 
-export function TasksView({
+export const TasksView = memo(function TasksView({
   tasks,
   projects,
   tags,
@@ -163,32 +163,90 @@ export function TasksView({
     return sortTasks(filtered, sortKey);
   }, [scopedTasks, query, status, today, sortKey, filterTagId, taskTagMap]);
 
+  const childCountByParent = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const task of tasks) {
+      if (!task.parentId) continue;
+      map[task.parentId] = (map[task.parentId] ?? 0) + 1;
+    }
+    return map;
+  }, [tasks]);
+
   const editing = editingId ? (tasks.find((t) => t.id === editingId) ?? null) : null;
-  const editingSubtasks = editing ? listChildTasks(tasks, editing.id) : [];
+  const editingSubtasks = useMemo(
+    () => (editing ? listChildTasks(tasks, editing.id) : []),
+    [editing, tasks],
+  );
 
   const title = projectTitles[filterProjectId] ?? "项目";
 
-  const confirmDelete = async (taskId: string) => {
-    if (confirmBeforeDelete) {
-      const ok = await dialog.confirm({
-        title: "删除任务",
-        message: "确定删除该任务？此操作不可撤销。",
-        confirmLabel: "删除",
-        danger: true,
-      });
-      if (!ok) return;
-    }
-    onDeleteTask(taskId);
-    setEditingId((prev) => (prev === taskId ? null : prev));
-  };
+  const openEditing = useCallback((task: Task) => {
+    setEditingId(task.id);
+  }, []);
 
-  const drillFromStats = (next: Exclude<TaskStatusFilter, "all">) => {
-    setStatus(next);
-    onViewModeChange("list");
-  };
+  const confirmDelete = useCallback(
+    async (taskId: string) => {
+      if (confirmBeforeDelete) {
+        const ok = await dialog.confirm({
+          title: "删除任务",
+          message: "确定删除该任务？此操作不可撤销。",
+          confirmLabel: "删除",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      onDeleteTask(taskId);
+      setEditingId((prev) => (prev === taskId ? null : prev));
+    },
+    [confirmBeforeDelete, dialog, onDeleteTask],
+  );
 
-  const doneInScope = scopedTasks.filter((t) => t.isDone && !t.parentId);
-  const openVisible = visible.filter((t) => !t.isDone);
+  const drillFromStats = useCallback(
+    (next: Exclude<TaskStatusFilter, "all">) => {
+      setStatus(next);
+      onViewModeChange("list");
+    },
+    [onViewModeChange],
+  );
+
+  const doneInScope = useMemo(
+    () => scopedTasks.filter((t) => t.isDone && !t.parentId),
+    [scopedTasks],
+  );
+  const openVisible = useMemo(() => visible.filter((t) => !t.isDone), [visible]);
+
+  const planVisibleToday = useCallback(() => {
+    openVisible.forEach(onPlanToday);
+  }, [openVisible, onPlanToday]);
+
+  const clearFilters = useCallback(() => {
+    setQuery("");
+    setFilterTagId(null);
+    setStatus("all");
+  }, []);
+
+  const handleClearCompleted = useCallback(() => {
+    void (async () => {
+      if (confirmBeforeDelete) {
+        const ok = await dialog.confirm({
+          title: "清理已完成",
+          message: `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
+          confirmLabel: "清理",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      onClearCompleted(doneInScope.map((t) => t.id));
+    })();
+  }, [confirmBeforeDelete, dialog, doneInScope, onClearCompleted]);
+
+  const handleViewModeClick = useCallback(
+    (e: MouseEvent<HTMLButtonElement>) => {
+      const mode = e.currentTarget.dataset.mode as TasksViewMode | undefined;
+      if (mode) onViewModeChange(mode);
+    },
+    [onViewModeChange],
+  );
 
   return (
     <section className="tasks panel">
@@ -203,11 +261,12 @@ export function TasksView({
               <button
                 key={mode.id}
                 type="button"
+                data-mode={mode.id}
                 className={
                   viewMode === mode.id ? "tasks__view-btn is-active" : "tasks__view-btn"
                 }
                 aria-pressed={viewMode === mode.id}
-                onClick={() => onViewModeChange(mode.id)}
+                onClick={handleViewModeClick}
               >
                 {mode.label}
               </button>
@@ -277,7 +336,7 @@ export function TasksView({
               type="button"
               className="btn btn--ghost"
               disabled={openVisible.length === 0}
-              onClick={() => openVisible.forEach(onPlanToday)}
+              onClick={planVisibleToday}
             >
               可见项排到今天 ({openVisible.length})
             </button>
@@ -285,33 +344,12 @@ export function TasksView({
               type="button"
               className="btn btn--ghost"
               disabled={doneInScope.length === 0}
-              onClick={() => {
-                void (async () => {
-                  if (confirmBeforeDelete) {
-                    const ok = await dialog.confirm({
-                      title: "清理已完成",
-                      message: `确定清理 ${doneInScope.length} 个已完成任务？此操作不可撤销。`,
-                      confirmLabel: "清理",
-                      danger: true,
-                    });
-                    if (!ok) return;
-                  }
-                  onClearCompleted(doneInScope.map((t) => t.id));
-                })();
-              }}
+              onClick={handleClearCompleted}
             >
               清理已完成 ({doneInScope.length})
             </button>
             {(query || filterTagId || status !== "all") && (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => {
-                  setQuery("");
-                  setFilterTagId(null);
-                  setStatus("all");
-                }}
-              >
+              <button type="button" className="btn btn--ghost" onClick={clearFilters}>
                 清空筛选
               </button>
             )}
@@ -330,7 +368,7 @@ export function TasksView({
                         key={task.id}
                         task={task}
                         tags={taskTagMap[task.id] ?? []}
-                        childCount={listChildTasks(tasks, task.id).length}
+                        childCount={childCountByParent[task.id] ?? 0}
                         denseMeta={denseMeta}
                         showDoneStyle
                         nowMs={nowMs}
@@ -339,7 +377,7 @@ export function TasksView({
                           activeTimerTaskId === task.id ? timerElapsedMs : 0
                         }
                         onToggleDone={onToggleDone}
-                        onOpen={(t) => setEditingId(t.id)}
+                        onOpen={openEditing}
                       />
                     ))}
                   </ul>
@@ -350,7 +388,7 @@ export function TasksView({
                   buckets={buckets}
                   projectTitles={projectTitles}
                   nowMs={nowMs}
-                  onOpen={(t) => setEditingId(t.id)}
+                  onOpen={openEditing}
                   onToggleDone={onToggleDone}
                   onMoveColumn={onMoveColumn}
                 />
@@ -389,4 +427,4 @@ export function TasksView({
       )}
     </section>
   );
-}
+});

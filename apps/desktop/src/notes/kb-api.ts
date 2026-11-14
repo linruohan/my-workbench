@@ -152,35 +152,166 @@ export async function listDirectory(path: string): Promise<KbEntry[]> {
   return call<KbEntry[]>("kb_list_dir", { path });
 }
 
+/**
+ * 分页递归列出文件（桌面运行时后端支持时逐页取回，onBatch 每页回调用于增量展示；
+ * 旧运行时或命令失败时回退整体遍历 listFilesRecursive）。
+ */
+export async function listFilesRecursivePaged(
+  roots: string[],
+  maxFiles = 8000,
+  options?: {
+    pageSize?: number;
+    onBatch?: (files: KbEntry[]) => void;
+    isCancelled?: () => boolean;
+  },
+): Promise<KbEntry[]> {
+  if (!roots.length) return [];
+  if (!isTauriRuntime()) return listFilesRecursive(roots, maxFiles);
+  const pageSize = options?.pageSize ?? 800;
+  const out: KbEntry[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+  try {
+    for (;;) {
+      if (options?.isCancelled?.()) return out;
+      const page = await call<{
+        files: KbEntry[];
+        cursor: string | null;
+        truncated: boolean;
+      }>("kb_list_files_page", { roots, cursor, maxFiles: pageSize });
+      const files = page?.files ?? [];
+      if (files.length) {
+        const fresh = files.filter((entry) => {
+          if (seen.has(entry.path)) return false;
+          seen.add(entry.path);
+          return true;
+        });
+        if (fresh.length) {
+          out.push(...fresh);
+          options?.onBatch?.(fresh);
+        }
+      }
+      cursor = page?.cursor ?? null;
+      if (!cursor || out.length >= maxFiles) return out;
+    }
+  } catch {
+    // 后端无分页命令（或出错）时回退一次性遍历。
+    if (options?.isCancelled?.()) return out;
+    return listFilesRecursive(roots, maxFiles);
+  }
+}
+
+export type KbScanProgress = { files: number; dirs: number; done: boolean };
+
+/**
+ * 扫描会话版递归索引：后端建会话后逐批取回，随时可取消，每批带累计进度。
+ * 会话命令不可用（旧运行时）时回退分页 cursor 协议，再回退一次性遍历。
+ */
+export async function scanKnowledgeFiles(
+  roots: string[],
+  options?: {
+    pageSize?: number;
+    maxFiles?: number;
+    onBatch?: (files: KbEntry[]) => void;
+    onProgress?: (progress: KbScanProgress) => void;
+    isCancelled?: () => boolean;
+  },
+): Promise<KbEntry[]> {
+  if (!roots.length) return [];
+  const maxFiles = options?.maxFiles ?? 8000;
+  if (isTauriRuntime()) {
+    try {
+      const scanId = await call<number>("kb_scan_start", { roots });
+      const out: KbEntry[] = [];
+      const seen = new Set<string>();
+      for (;;) {
+        if (options?.isCancelled?.()) {
+          void call("kb_scan_cancel", { scanId }).catch(() => {});
+          return out;
+        }
+        const page = await call<{ files: KbEntry[]; progress: KbScanProgress }>(
+          "kb_scan_next",
+          { scanId, pageSize: options?.pageSize ?? 800 },
+        );
+        const files = page?.files ?? [];
+        if (files.length) {
+          const fresh = files.filter((entry) => {
+            if (seen.has(entry.path)) return false;
+            seen.add(entry.path);
+            return true;
+          });
+          if (fresh.length) {
+            out.push(...fresh);
+            options?.onBatch?.(fresh);
+          }
+        }
+        options?.onProgress?.(
+          page?.progress ?? { files: out.length, dirs: 0, done: false },
+        );
+        if (options?.isCancelled?.()) {
+          void call("kb_scan_cancel", { scanId }).catch(() => {});
+          return out;
+        }
+        if (page?.progress?.done || out.length >= maxFiles) return out;
+      }
+    } catch {
+      // 后端无扫描会话命令（或出错）时走下方回退路径。
+    }
+  }
+  return listFilesRecursivePaged(roots, maxFiles, {
+    pageSize: options?.pageSize ?? 800,
+    onBatch: options?.onBatch,
+    isCancelled: options?.isCancelled,
+  });
+}
+
 /** Recursively list files under imported knowledge roots (skips ignored dirs). */
 export async function listFilesRecursive(
   roots: string[],
   maxFiles = 8000,
 ): Promise<KbEntry[]> {
-  const out: KbEntry[] = [];
-  const walk = async (dir: string) => {
-    if (out.length >= maxFiles) return;
-    let entries: KbEntry[] = [];
+  if (!roots.length) return [];
+  if (isTauriRuntime()) {
     try {
-      entries = await listDirectory(dir);
+      return await call<KbEntry[]>("kb_list_files_recursive", { roots, maxFiles });
     } catch {
-      return;
+      // fallback to JS traversal for older runtimes or command errors
     }
-    for (const entry of entries) {
-      if (out.length >= maxFiles) return;
-      if (entry.isDir) {
-        if (isIgnoredKbName(entry.name)) continue;
-        await walk(entry.path);
+  }
+
+  const out: KbEntry[] = [];
+  const queue: string[] = [...roots];
+  let cursor = 0;
+  const concurrency = 4;
+
+  const worker = async () => {
+    while (out.length < maxFiles) {
+      const dir = queue[cursor++];
+      if (dir === undefined) return;
+      let entries: KbEntry[] = [];
+      try {
+        entries = await listDirectory(dir);
+      } catch {
         continue;
       }
-      if (isIgnoredKbName(entry.name)) continue;
-      out.push(entry);
+      for (const entry of entries) {
+        if (out.length >= maxFiles) return;
+        if (entry.isDir) {
+          if (isIgnoredKbName(entry.name)) continue;
+          queue.push(entry.path);
+          continue;
+        }
+        if (isIgnoredKbName(entry.name)) continue;
+        out.push(entry);
+      }
     }
   };
-  for (const root of roots) {
-    if (out.length >= maxFiles) break;
-    await walk(root);
-  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, Math.max(1, queue.length || 1)) }, () =>
+      worker(),
+    ),
+  );
   return out;
 }
 

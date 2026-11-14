@@ -10,6 +10,7 @@ mod open_ext;
 mod speech;
 mod tools;
 mod voice_ptt;
+mod wbdb;
 mod web_session;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,6 +19,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
+        .manage(std::sync::Arc::new(kb::KbScanRegistry::new()))
+        .manage(std::sync::Arc::new(wbdb::WorkbenchDb::new()))
         // Voice input uses getUserMedia; auto-allow so the WebView does not prompt.
         .on_permission_request(|_webview, kind| match kind {
             PermissionKind::Microphone => PermissionResponse::Allow,
@@ -37,6 +40,14 @@ pub fn run() {
             kb::kb_open_path,
             kb::kb_reveal_in_explorer,
             kb::kb_git_branch,
+            kb::kb_list_files_recursive,
+            kb::kb_list_files_page,
+            kb::kb_scan_start,
+            kb::kb_scan_next,
+            kb::kb_scan_cancel,
+            wbdb::wb_db_open,
+            wbdb::wb_db_apply,
+            wbdb::wb_db_close,
             open_ext::open_external,
             model_http::model_http,
             oc_runtime::oc_complete,

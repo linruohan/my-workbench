@@ -25,6 +25,7 @@ import {
   pruneOversizedToolResults,
   pruneToolResultText,
   resolveSlash,
+  safeCutIndex,
   type AgentMessage,
 } from "../src/index.js";
 
@@ -122,6 +123,97 @@ describe("agent compact", () => {
     });
     expect(pruned[1]?.content).toContain(PRUNED_TOOL_RESULT_MARK.trim());
     expect(pruned[1]?.content.length).toBeLessThan(huge.length);
+  });
+});
+
+describe("agent compact integrity", () => {
+  /** 视图里不允许出现调用方已被裁掉的孤儿工具结果。 */
+  function hasOrphanToolResults(view: AgentMessage[]): boolean {
+    const keptCalls = new Set<string>();
+    for (const item of view) {
+      if (item.role === "assistant" && item.toolCallsJson) {
+        const calls = JSON.parse(item.toolCallsJson) as Array<{ id: string }>;
+        for (const call of calls) keptCalls.add(call.id);
+      }
+      if (item.role === "tool" && !keptCalls.has(item.toolCallId ?? "")) return true;
+    }
+    return false;
+  }
+
+  function toolCalls(calls: Array<{ id: string; name: string }>): string {
+    return JSON.stringify(
+      calls.map((call) => ({ ...call, args: { body: "x".repeat(400) } })),
+    );
+  }
+
+  it("moves dropped tool results out with their caller when the cut lands mid-run", () => {
+    const messages = [
+      message("user", "第一件事".repeat(60), "1"),
+      {
+        ...message("assistant", "", "2"),
+        toolCallsJson: toolCalls([{ id: "c1", name: "note_get" }]),
+      },
+      { ...message("tool", "结果一", "3"), toolName: "note_get", toolCallId: "c1" },
+      message("user", "第二件事", "4"),
+    ];
+    // 预算只够留下工具结果、不够留下其调用方：边界必须前移越过结果，避免孤儿。
+    const plan = planCompact(messages, 30);
+    expect(plan.needed).toBe(true);
+    expect(hasOrphanToolResults(plan.messages)).toBe(false);
+    expect(plan.messages.at(-1)?.content).toBe("第二件事");
+  });
+
+  it("never splits a multi-result tool run at the boundary", () => {
+    const messages = [
+      message("user", "第一件事".repeat(60), "1"),
+      {
+        ...message("assistant", "", "2"),
+        toolCallsJson: toolCalls([
+          { id: "c1", name: "task_list" },
+          { id: "c2", name: "note_get" },
+        ]),
+      },
+      { ...message("tool", "结果一", "3"), toolName: "task_list", toolCallId: "c1" },
+      { ...message("tool", "结果二", "4"), toolName: "note_get", toolCallId: "c2" },
+      message("user", "第二件事", "5"),
+    ];
+    const plan = planCompact(messages, 30);
+    expect(hasOrphanToolResults(plan.messages)).toBe(false);
+    // 活轮次的用户消息永远保留
+    expect(plan.messages.at(-1)?.content).toBe("第二件事");
+  });
+
+  it("keeps the whole call batch when the budget allows it", () => {
+    const messages = [
+      message("user", "查一下", "1"),
+      {
+        ...message("assistant", "", "2"),
+        toolCallsJson: toolCalls([{ id: "c1", name: "note_get" }]),
+      },
+      { ...message("tool", "结果", "3"), toolName: "note_get", toolCallId: "c1" },
+      message("user", "继续", "4"),
+    ];
+    const plan = planCompact(messages, 10_000);
+    expect(plan.needed).toBe(false);
+    expect(hasOrphanToolResults(plan.messages)).toBe(false);
+  });
+
+  it("advances the cut to a safe index directly", () => {
+    const messages = [
+      {
+        ...message("assistant", "", "1"),
+        toolCallsJson: '[{"id":"c1","name":"x","args":{}}]',
+      },
+      { ...message("tool", "r1", "2"), toolName: "x", toolCallId: "c1" },
+      { ...message("tool", "r2", "3"), toolName: "x", toolCallId: "c1" },
+      message("assistant", "done", "4"),
+    ];
+    // 从调用方（0）切是安全的——结果跟随其后；从结果（1/2）切必须越过整段结果
+    expect(safeCutIndex(messages, 0)).toBe(0);
+    expect(safeCutIndex(messages, 1)).toBe(3);
+    expect(safeCutIndex(messages, 2)).toBe(3);
+    expect(safeCutIndex(messages, 3)).toBe(3);
+    expect(safeCutIndex(messages, 4)).toBe(4);
   });
 });
 

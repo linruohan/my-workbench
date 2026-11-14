@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   DEFAULT_AT_TIME,
+  makeOnceSchedule,
   makePresetSchedule,
   timedFrequencyLabel,
   timedIntervalUnitLabel,
@@ -37,6 +38,9 @@ const HALF_HOUR_TIMES = Array.from(
   },
 );
 
+/** Default lead time when switching a schedule to one-off. */
+const ONCE_DEFAULT_LEAD_MS = 10 * 60 * 1000;
+
 function snapHalfHour(raw: string): string {
   const m = /^(\d{1,2}):(\d{2})$/.exec(raw.trim());
   if (!m) return DEFAULT_AT_TIME;
@@ -47,6 +51,18 @@ function snapHalfHour(raw: string): string {
   const outH = String(Math.floor(total / 60)).padStart(2, "0");
   const outM = String(total % 60).padStart(2, "0");
   return `${outH}:${outM}`;
+}
+
+/** Format a timestamp as a value for <input type="datetime-local" step="1">. */
+function msToDateTimeLocal(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** Parse a datetime-local value (with optional seconds) back to a local timestamp. */
+function dateTimeLocalToMs(value: string): number {
+  return new Date(value).getTime();
 }
 
 type Props = {
@@ -71,13 +87,18 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
   const freqPos = usePortalMenuPos(freqOpen, freqTriggerRef, freqMenuRef, 280);
   const timePos = usePortalMenuPos(timeOpen, timeTriggerRef, timeMenuRef, 260);
 
-  const atTime = snapHalfHour(schedule.atTime || DEFAULT_AT_TIME);
+  const atTime = snapHalfHour(
+    schedule.kind === "once" ? DEFAULT_AT_TIME : schedule.atTime || DEFAULT_AT_TIME,
+  );
+  const isOnce = schedule.kind === "once";
   const showTime =
+    !isOnce &&
     !(schedule.kind === "preset" && schedule.preset === "hourly") &&
     !(
       schedule.kind === "custom" &&
       (schedule.unit === "minute" || schedule.unit === "hour")
     );
+  const showDateTime = isOnce;
 
   useEffect(() => {
     if (!kindOpen && !freqOpen && !timeOpen) return;
@@ -105,8 +126,13 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
     };
   }, [kindOpen, freqOpen, timeOpen]);
 
-  const setKind = (next: "custom" | TimedSchedulePreset) => {
-    if (next === "custom") {
+  const setKind = (next: "once" | "custom" | TimedSchedulePreset) => {
+    if (next === "once") {
+      // Preserve the existing target time when possible; otherwise default to 10 min later.
+      const existingAt =
+        schedule.kind === "once" ? schedule.at : Date.now() + ONCE_DEFAULT_LEAD_MS;
+      onChange(makeOnceSchedule(existingAt));
+    } else if (next === "custom") {
       onChange({
         kind: "custom",
         every: 1,
@@ -122,6 +148,7 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
   };
 
   const setAtTime = (next: string) => {
+    if (schedule.kind === "once") return;
     onChange({ ...schedule, atTime: snapHalfHour(next) });
     setTimeOpen(false);
   };
@@ -164,6 +191,11 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
                       : { visibility: "hidden", top: 0, left: 0 }
                   }
                 >
+                  <li>
+                    <button type="button" onClick={() => setKind("once")}>
+                      一次性
+                    </button>
+                  </li>
                   {PRESETS.map((preset) => (
                     <li key={preset}>
                       <button type="button" onClick={() => setKind(preset)}>
@@ -315,8 +347,26 @@ export function ScheduleRow({ schedule, onChange, onDelete }: Props) {
           </>
         ) : null}
 
+        {showDateTime && schedule.kind === "once" ? (
+          <div className="pill-menu">
+            <input
+              type="datetime-local"
+              step="1"
+              className="pill pill--input"
+              aria-label="执行时间（精确到秒）"
+              value={msToDateTimeLocal(schedule.at)}
+              onChange={(e) => {
+                const ms = dateTimeLocalToMs(e.target.value);
+                if (Number.isFinite(ms)) {
+                  onChange({ kind: "once", at: ms });
+                }
+              }}
+            />
+          </div>
+        ) : null}
+
         <span className="schedule-row__summary">
-          {timedScheduleSummary({ ...schedule, atTime })}
+          {timedScheduleSummary(isOnce ? schedule : { ...schedule, atTime })}
         </span>
       </div>
 

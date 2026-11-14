@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { memo, type CSSProperties } from "react";
 import type { TaskStats, TaskStatusFilter } from "@wb/domain";
 
 type MetricKey = "open" | "overdue" | "today" | "unplanned" | "done";
@@ -26,7 +26,11 @@ function barWidth(part: number, total: number): string {
   return `${Math.max(4, Math.round((part / total) * 100))}%`;
 }
 
-export function TaskStatsPanel({ stats, projectTitles, onDrill }: Props) {
+export const TaskStatsPanel = memo(function TaskStatsPanel({
+  stats,
+  projectTitles,
+  onDrill,
+}: Props) {
   const metrics: Array<{
     key: MetricKey;
     label: string;
@@ -183,4 +187,4 @@ export function TaskStatsPanel({ stats, projectTitles, onDrill }: Props) {
       </section>
     </section>
   );
-}
+});
