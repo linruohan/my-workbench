@@ -8,7 +8,7 @@ SemVer `MAJOR.MINOR.PATCH`：
 - `MINOR`：新视图、新工具、新设置项、新材料化能力；快照 / 设置键可向后兼容。
 - `MAJOR`：破坏性数据迁移、存储格式不兼容、平台要求提升。
 
-当前版本 `0.1.13`。发版时同步以下位置：
+当前版本 `0.1.14`。发版时同步以下位置：
 
 1. `package.json` → `version`
 2. `apps/desktop/package.json` → `version`
