@@ -32,7 +32,12 @@ import {
   type Task,
   type TimedSchedule,
 } from "@wb/domain";
-import { deleteScheduleMeta, getScheduleMeta, setScheduleMeta } from "./schedule-meta";
+import {
+  deleteScheduleMeta,
+  getScheduleMeta,
+  listScheduleMetas,
+  setScheduleMeta,
+} from "./schedule-meta";
 
 export type AgentUiEffect =
   | {
@@ -615,8 +620,10 @@ function runTool(
         if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
         return an - bn;
       });
+      // 整表读一次而不是逐项 getScheduleMeta（后者每项都全量 parse localStorage）
+      const metas = listScheduleMetas();
       const page = tasks.slice(offset, offset + limit).map((task) => {
-        const meta = getScheduleMeta(task.id);
+        const meta = metas[task.id];
         return viewScheduleTask(task, { target: meta?.target });
       });
       return ok(page.length ? `定时任务 ${page.length} 个` : "没有定时任务", {

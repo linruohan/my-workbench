@@ -9,6 +9,28 @@ use std::sync::{Arc, Mutex};
 
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
+/// 原子写：先落 `{path}.part` 再改名覆盖目标。
+/// 知识库文件是用户笔记正文的唯一存储，直接 `fs::write` 原地截断重写，
+/// 写入中途崩溃/断电会把 Markdown 截断且无备份。
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let partial = path.with_extension(format!(
+        "{}part",
+        path.extension()
+            .map(|ext| format!("{}.", ext.to_string_lossy()))
+            .unwrap_or_default()
+    ));
+    fs::write(&partial, bytes).map_err(|err| format!("无法写入临时文件：{err}"))?;
+    if path.exists() {
+        // Windows 上 rename 对已存在文件的处理依赖目标类型，先移除保证可覆盖。
+        let _ = fs::remove_file(path);
+    }
+    fs::rename(&partial, path).map_err(|err| {
+        // 改名失败时尽量回收临时文件，但不覆盖原错误信息
+        let _ = fs::remove_file(&partial);
+        format!("无法写入文件：{err}")
+    })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KbEntry {
@@ -174,7 +196,7 @@ pub async fn kb_write_text(path: String, contents: String) -> Result<(), String>
         if contents.len() as u64 > MAX_BYTES {
             return Err("文件过大".into());
         }
-        fs::write(&path, contents).map_err(|err| format!("无法写入文件：{err}"))
+        write_file_atomic(Path::new(&path), contents.as_bytes())
     })
     .await
     .map_err(|err| format!("写入文件任务失败：{err}"))?
@@ -194,8 +216,8 @@ pub async fn kb_read_base64(path: String) -> Result<String, String> {
 pub async fn kb_write_base64(path: String, data: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = STANDARD
-            .decode(data.trim().as_bytes())
-            .map_err(|err| format!("图片数据无效：{err}"))?;
+            .decode(data.trim())
+            .map_err(|err| format!("无效的图片数据：{err}"))?;
         if bytes.len() as u64 > MAX_BYTES {
             return Err("图片过大".into());
         }
@@ -204,7 +226,7 @@ pub async fn kb_write_base64(path: String, data: String) -> Result<(), String> {
                 fs::create_dir_all(parent).map_err(|err| format!("无法创建目录：{err}"))?;
             }
         }
-        fs::write(&path, bytes).map_err(|err| format!("无法保存图片：{err}"))
+        write_file_atomic(Path::new(&path), &bytes)
     })
     .await
     .map_err(|err| format!("写入文件任务失败：{err}"))?

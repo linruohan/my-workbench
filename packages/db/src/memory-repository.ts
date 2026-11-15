@@ -16,6 +16,7 @@ import {
   isScheduleMember,
   selectPlannerTasks,
   markTaskComplete,
+  markTaskCompleteAndAdvance,
   markTaskIncomplete,
   patchNote,
   patchTaskContent,
@@ -94,6 +95,16 @@ export type PendingChanges = {
   deletes: PendingKey[];
   /** 这些 kind 需要先清空再写入（小集合的全量替换语义）。 */
   replaced: EntityKind[];
+};
+
+/** takePendingChanges() 换出的日志租约；落库失败时用 mergePendingChanges() 归还。 */
+export type PendingChangesLease = {
+  /** 换出时是否处于全量替换状态（importSnapshot 后）。 */
+  journalFull: boolean;
+  replaceKinds: Set<EntityKind>;
+  messageJournal: Map<string, "upsert" | "delete">;
+  /** 由换出日志构建的待写库变更（序列化取当前内存状态）。 */
+  changes: PendingChanges;
 };
 
 const ALL_KINDS: EntityKind[] = [
@@ -230,6 +241,95 @@ export class MemoryWorkbenchRepository {
       upserts.push(...this.serializeKind(kind));
     }
     for (const [id, op] of this.messageJournal) {
+      if (op === "delete") {
+        deletes.push({ kind: "agent_message", id });
+        continue;
+      }
+      const message = this.agentMessages.find((item) => item.id === id);
+      // 日志期间又被删除：按删除处理，避免写回幽灵行。
+      if (!message) {
+        deletes.push({ kind: "agent_message", id });
+        continue;
+      }
+      upserts.push({
+        kind: "agent_message",
+        id,
+        seq: message.createdAt,
+        data: JSON.stringify(message),
+      });
+    }
+    return { upserts, deletes, replaced };
+  }
+
+  /**
+   * 原子换出待持久化变更：日志立即清空，写库期间产生的新变更进入新日志。
+   * 修掉「collect → await 落库 → markPersisted」窗口内新变更被整体清空、
+   * 从此不再记日志而永久丢失的竞态。落库成功直接丢弃换出的日志即可；
+   * 落库失败调用 mergePendingChanges() 归还，与新写入取并集后可重试。
+   */
+  takePendingChanges(): PendingChangesLease | null {
+    if (
+      !this.journalFull &&
+      this.replaceKinds.size === 0 &&
+      this.messageJournal.size === 0
+    ) {
+      return null;
+    }
+    const lease: PendingChangesLease = {
+      journalFull: this.journalFull,
+      replaceKinds: this.replaceKinds,
+      messageJournal: this.messageJournal,
+      changes: this.buildPendingChanges(
+        this.journalFull,
+        this.replaceKinds,
+        this.messageJournal,
+      ),
+    };
+    this.journalFull = false;
+    this.replaceKinds = new Set();
+    this.messageJournal = new Map();
+    return lease;
+  }
+
+  /** 落库失败时把换出的日志归还：kind 并集；消息日志以归还后的新写入（更新）优先。 */
+  mergePendingChanges(lease: PendingChangesLease): void {
+    if (lease.journalFull) {
+      // 全量替换覆盖一切，期间的新变更已包含在下次全量导出中。
+      this.journalFull = true;
+      this.replaceKinds = new Set();
+      this.messageJournal = new Map();
+      return;
+    }
+    for (const kind of lease.replaceKinds) {
+      this.replaceKinds.add(kind);
+    }
+    const merged = new Map(lease.messageJournal);
+    for (const [id, op] of this.messageJournal) {
+      merged.set(id, op);
+    }
+    this.messageJournal = merged;
+  }
+
+  private buildPendingChanges(
+    journalFull: boolean,
+    replaceKinds: Set<EntityKind>,
+    messageJournal: Map<string, "upsert" | "delete">,
+  ): PendingChanges {
+    const upserts: PendingEntity[] = [];
+    const deletes: PendingKey[] = [];
+    const replaced: EntityKind[] = [];
+    if (journalFull) {
+      for (const kind of ALL_KINDS) {
+        replaced.push(kind);
+        upserts.push(...this.serializeKind(kind));
+      }
+      return { upserts, deletes, replaced };
+    }
+    for (const kind of replaceKinds) {
+      replaced.push(kind);
+      upserts.push(...this.serializeKind(kind));
+    }
+    for (const [id, op] of messageJournal) {
       if (op === "delete") {
         deletes.push({ kind: "agent_message", id });
         continue;
@@ -549,7 +649,9 @@ export class MemoryWorkbenchRepository {
   completeTask(taskId: string, nowMs = Date.now()): Task {
     const task = this.getTask(taskId);
     if (!task) throw new DomainError(`task not found: ${taskId}`);
-    const next = markTaskComplete(task, nowMs);
+    // 重复任务：完成同时推进到下一次出现点（同一任务继续存在，
+    // 子任务 / 标签 / 计时记录保持连贯）；无重复或无下一次时按普通完成处理。
+    const next = markTaskCompleteAndAdvance(task, nowMs) ?? markTaskComplete(task, nowMs);
     this.tasks.set(taskId, next);
     this.touchTasks();
     return next;

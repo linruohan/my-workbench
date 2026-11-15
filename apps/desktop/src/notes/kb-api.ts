@@ -26,7 +26,19 @@ const ROOTS_KEY = "wb.kb.roots.v1";
 const RECENT_KEY = "wb.kb.recent.v1";
 const ACTIVE_ROOT_KEY = "wb.kb.activeRoot.v1";
 const SORT_KEY = "wb.kb.sort.v1";
+/** 图片 data URL 缓存上限（条数）：每张图可达数 MB，无上限会随浏览持续吃内存。 */
+const IMAGE_CACHE_LIMIT = 48;
 const imageCache = new Map<string, string>();
+
+/** 简易 LRU：命中重新插入（Map 迭代序=插入序），超出上限淘汰最旧条目。 */
+function cacheImageDataUrl(path: string, url: string): void {
+  imageCache.delete(path);
+  imageCache.set(path, url);
+  if (imageCache.size > IMAGE_CACHE_LIMIT) {
+    const oldest = imageCache.keys().next().value;
+    if (oldest != null) imageCache.delete(oldest);
+  }
+}
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
@@ -356,10 +368,13 @@ export function bytesToBase64(bytes: Uint8Array): string {
 
 export async function readImageDataUrl(path: string): Promise<string> {
   const cached = imageCache.get(path);
-  if (cached) return cached;
+  if (cached) {
+    cacheImageDataUrl(path, cached);
+    return cached;
+  }
   const data = await call<string>("kb_read_base64", { path });
   const url = `data:${imageMime(path)};base64,${data}`;
-  imageCache.set(path, url);
+  cacheImageDataUrl(path, url);
   return url;
 }
 

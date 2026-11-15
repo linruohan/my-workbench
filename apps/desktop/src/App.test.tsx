@@ -129,7 +129,7 @@ describe("App shell", () => {
     expect(screen.getByLabelText("HTTP 代理")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "数据" }));
     expect(screen.getByLabelText("数据目录")).toHaveTextContent(
-      "AppData\\Roaming\\my-workbench",
+      "%APPDATA%\\my-workbench",
     );
     await user.click(screen.getByRole("button", { name: "外观" }));
     expect(screen.getByRole("heading", { name: "外观" })).toBeInTheDocument();

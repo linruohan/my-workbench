@@ -207,3 +207,21 @@ async function removeDiskAttachment(
     /* ignore */
   }
 }
+
+/**
+ * 会话删除时连同磁盘附件目录一起清理。之前 clearThreadImageAttachments
+ * 没有任何调用方：内存与 attachments/ 目录只增不减，删除会话也不释放。
+ */
+export async function deleteThreadAttachments(threadId: string): Promise<void> {
+  clearThreadImageAttachments(threadId);
+  if (!isTauriRuntime()) return;
+  try {
+    const { join } = await import("@tauri-apps/api/path");
+    const { exists, remove } = await import("@tauri-apps/plugin-fs");
+    const root = await dataFilePath("attachments");
+    const dir = await join(root, sanitize(threadId));
+    if (await exists(dir)) await remove(dir, { recursive: true });
+  } catch {
+    /* ignore */
+  }
+}

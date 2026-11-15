@@ -27,6 +27,9 @@ export type TaskEditorSave = {
   dueWithTimeLocal: string;
   /** Empty = no deadline. Local `YYYY-MM-DDTHH:mm`. */
   deadlineWithTimeLocal: string;
+  /** 打开时是日计划且未动过时间字段：保存时保持日计划语义（不升级成时刻）。 */
+  dueDayPreserved: string | null;
+  deadlineDayPreserved: string | null;
   remindOption: ReminderOptionId;
   timeEstimateMinutes: number;
   tagIds: string[];
@@ -117,6 +120,9 @@ function fromTask(
     bucket,
     dueWithTimeLocal,
     deadlineWithTimeLocal,
+    // 占位：真正是否保留日计划由组件保存按钮按"是否动过时间字段"决定
+    dueDayPreserved: null,
+    deadlineDayPreserved: null,
     remindOption,
     timeEstimateMinutes: Math.round(Math.max(0, task.timeEstimate) / 60_000),
     tagIds: [...selectedTagIds],
@@ -149,6 +155,12 @@ export function TaskEditor({
   const [subtaskTitle, setSubtaskTitle] = useState("");
   const [repeatMenuOpen, setRepeatMenuOpen] = useState(false);
   const notesRef = useRef<HTMLTextAreaElement>(null);
+  // 日计划任务直接点保存不应被静默升级成「打开时刻」的时计划：
+  // 记住打开时的日计划形态，只有用户真的动过时间字段才升级。
+  const dueDayInitialRef = useRef(task.dueDay);
+  const deadlineDayInitialRef = useRef(task.deadlineDay);
+  const dueTimeTouchedRef = useRef(false);
+  const deadlineTimeTouchedRef = useRef(false);
 
   useLayoutEffect(() => {
     autosizeNotes(notesRef.current);
@@ -277,7 +289,10 @@ export function TaskEditor({
                   allowEmpty
                   emptyLabel="未设置开始时间"
                   defaultTime={localClock(nowMs)}
-                  onChange={(dueWithTimeLocal) => patch({ dueWithTimeLocal })}
+                  onChange={(dueWithTimeLocal) => {
+                    dueTimeTouchedRef.current = true;
+                    patch({ dueWithTimeLocal });
+                  }}
                 />
               </div>
               <div className="task-editor__inline">
@@ -288,7 +303,10 @@ export function TaskEditor({
                   allowEmpty
                   emptyLabel="未设置截止时间"
                   defaultTime={DEFAULT_DEADLINE_TIME}
-                  onChange={(deadlineWithTimeLocal) => patch({ deadlineWithTimeLocal })}
+                  onChange={(deadlineWithTimeLocal) => {
+                    deadlineTimeTouchedRef.current = true;
+                    patch({ deadlineWithTimeLocal });
+                  }}
                 />
               </div>
             </div>
@@ -380,7 +398,21 @@ export function TaskEditor({
             <button
               type="button"
               className="btn btn--primary"
-              onClick={() => onSave(draft)}
+              onClick={() => {
+                onSave({
+                  ...draft,
+                  // 未动过时间字段时保留原日计划；动过则按新时刻升级
+                  dueDayPreserved:
+                    dueDayInitialRef.current != null && !dueTimeTouchedRef.current
+                      ? dueDayInitialRef.current
+                      : null,
+                  deadlineDayPreserved:
+                    deadlineDayInitialRef.current != null &&
+                    !deadlineTimeTouchedRef.current
+                      ? deadlineDayInitialRef.current
+                      : null,
+                });
+              }}
             >
               保存
             </button>

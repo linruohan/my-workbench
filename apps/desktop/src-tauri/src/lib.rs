@@ -9,6 +9,7 @@ mod ocr;
 mod open_ext;
 mod speech;
 mod tools;
+mod utf8_stream;
 mod voice_ptt;
 mod wbdb;
 mod web_session;

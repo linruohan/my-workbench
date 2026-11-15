@@ -173,20 +173,64 @@ pub async fn ocr_ensure_models(
     })
 }
 
+/// 进程内模型文件缓存：识图模型可达几十 MB，之前每次识图都同步重读整个文件，
+/// 且同步读落在 tokio worker 上。按 mtime 失效，内存驻留上限 ~64MB。
+struct CachedOcrModel {
+    mtime_ms: u64,
+    bytes: std::sync::Arc<Vec<u8>>,
+}
+
+fn ocr_model_cache() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, CachedOcrModel>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, CachedOcrModel>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Read one model file already stored in the config directory.
 #[tauri::command]
-pub fn ocr_read_model(app: tauri::AppHandle, name: String) -> Result<tauri::ipc::Response, String> {
-    let name = safe_name(&name)?;
-    let path = model_dir(&app)?.join(name);
-    let mut file = std::fs::File::open(&path).map_err(|_| "识图模型文件不存在".to_string())?;
-    let meta = file
-        .metadata()
-        .map_err(|_| "识图模型文件不存在".to_string())?;
-    if meta.len() > MAX_BYTES {
-        return Err("识图模型文件过大".into());
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| "识图模型文件无法读取".to_string())?;
-    Ok(tauri::ipc::Response::new(bytes))
+pub async fn ocr_read_model(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let name = safe_name(&name)?;
+        let path = model_dir(&app)?.join(name);
+        let meta = std::fs::metadata(&path).map_err(|_| "识图模型文件不存在".to_string())?;
+        if meta.len() > MAX_BYTES {
+            return Err("识图模型文件过大".into());
+        }
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        {
+            let cache = ocr_model_cache().lock().expect("ocr model cache");
+            if let Some(hit) = cache.get(&path) {
+                if hit.mtime_ms == mtime_ms {
+                    return Ok(tauri::ipc::Response::new(hit.bytes.as_ref().clone()));
+                }
+            }
+        }
+        let mut file = std::fs::File::open(&path).map_err(|_| "识图模型文件不存在".to_string())?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| "识图模型文件无法读取".to_string())?;
+        let bytes = std::sync::Arc::new(bytes);
+        if let Ok(mut cache) = ocr_model_cache().lock() {
+            cache.insert(
+                path.clone(),
+                CachedOcrModel {
+                    mtime_ms,
+                    bytes: bytes.clone(),
+                },
+            );
+        }
+        Ok(tauri::ipc::Response::new(bytes.as_ref().clone()))
+    })
+    .await
+    .map_err(|err| format!("读取识图模型任务失败：{err}"))?
 }

@@ -10,6 +10,7 @@ import {
   DomainError,
   INBOX_PROJECT_ID,
   isScheduleMember,
+  markTaskCompleteAndAdvance,
   selectPlannerTasks,
   patchNote,
   ensureTagColor,
@@ -320,6 +321,18 @@ export class WorkbenchRepository {
   }
 
   completeTask(taskId: string, nowMs = Date.now()): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new DomainError(`task not found: ${taskId}`);
+    // 与 Memory 仓储一致：重复任务完成时推进到下一次出现点
+    const advanced = markTaskCompleteAndAdvance(task, nowMs);
+    if (advanced) {
+      this.db
+        .prepare(
+          `UPDATE tasks SET is_done = 0, done_on = NULL, due_day = ?, due_with_time = ?, remind_at = ?, deadline_remind_at = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(advanced.dueDay, advanced.dueWithTime, advanced.remindAt, nowMs, taskId);
+      return this.getTask(taskId)!;
+    }
     this.db
       .prepare(
         `UPDATE tasks SET is_done = 1, done_on = ?, remind_at = NULL, deadline_remind_at = NULL, updated_at = ? WHERE id = ?`,
@@ -329,6 +342,9 @@ export class WorkbenchRepository {
   }
 
   uncompleteTask(taskId: string, nowMs = Date.now()): Task {
+    if (!this.getTask(taskId)) {
+      throw new DomainError(`task not found: ${taskId}`);
+    }
     this.db
       .prepare(
         `UPDATE tasks SET is_done = 0, done_on = NULL, updated_at = ? WHERE id = ?`,

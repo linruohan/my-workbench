@@ -85,11 +85,14 @@ function parseMonthDayToken(
       consumed: md[0],
     };
   }
-  const dotted = /(\d{1,2})[.\/\-](\d{1,2})\s*号?/.exec(text);
+  const dotted = /(?<!\d)(\d{1,2})[.\/\-](\d{1,2})\s*(号(?!\d))?/.exec(text);
   if (dotted) {
     const month = Number(dotted[1]);
     const date = Number(dotted[2]);
     if (month < 1 || month > 12 || date < 1 || date > 31) return null;
+    // 带号是显式日期；不带号时排除紧邻量词的小数场景（1.5小时 / 3-5个 / 3.5万）
+    const after = text.slice(dotted.index + dotted[0].length);
+    if (!dotted[3] && /^[小时分个万人千百天年周块钱元份两斤]/.test(after)) return null;
     const y = Number(today.slice(0, 4));
     return {
       day: `${y}-${String(month).padStart(2, "0")}-${String(date).padStart(2, "0")}`,

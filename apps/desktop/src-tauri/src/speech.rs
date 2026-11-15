@@ -1423,12 +1423,20 @@ fn collect_stderr(stderr: std::process::ChildStderr) -> std::sync::mpsc::Receive
         let mut sink = String::new();
         let mut reader = BufReader::new(stderr);
         let mut buf = [0u8; 1024];
+        // 1KB 小块几乎必切中文：增量解码保留残缺序列，避免错误信息里全是 U+FFFD
+        let mut decoder = crate::utf8_stream::Utf8StreamDecoder::new();
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    let tail = decoder.finish();
+                    if sink.len() < 32 * 1024 {
+                        sink.push_str(&tail);
+                    }
+                    break;
+                }
                 Ok(n) => {
                     if sink.len() < 32 * 1024 {
-                        sink.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        sink.push_str(&decoder.push(&buf[..n]));
                     }
                 }
                 Err(_) => break,

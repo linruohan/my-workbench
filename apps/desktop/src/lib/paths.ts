@@ -5,9 +5,11 @@ export const STORE_FILE = "workbench.json";
 export const PREFS_FILE = "prefs.json";
 export const THEME_FILE = "theme.json";
 
-/** Display path used in settings (Windows default). */
-export const DEFAULT_DATA_DIR_DISPLAY =
-  "C:\\Users\\Administrator\\AppData\\Roaming\\my-workbench";
+/**
+ * Display path used in settings. 通用形式而非硬编码本机用户名：
+ * 打包后运行在其他用户机器上时展示的是他们的 %APPDATA%。
+ */
+export const DEFAULT_DATA_DIR_DISPLAY = "%APPDATA%\\my-workbench";
 
 export function isTauriRuntime(): boolean {
   return (

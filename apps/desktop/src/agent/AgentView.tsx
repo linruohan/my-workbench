@@ -120,6 +120,8 @@ import {
 } from "./web-session";
 import { modelGroups, readProviderStore, setDefaultModel } from "./providers";
 import { takePendingAgentNotices } from "./agent-registry";
+import { deleteThreadAttachments } from "./image-attachments";
+import { clearThreadObservations } from "./fs-observation-store";
 import {
   listWatchedRunning,
   pollBackgroundJobs,
@@ -1737,6 +1739,27 @@ export function AgentView({
       delete next[id];
       return next;
     });
+    // per-thread 残留一并释放：待办 / 目标 / cwd / 图片附件（内存+磁盘）/ 观察路径
+    setTodosByThread((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setGoalsByThread((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setCwdByThread((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    void deleteThreadAttachments(id);
+    clearThreadObservations(id);
     if (wantDrain.current === id) wantDrain.current = null;
   };
   if (forgetThreadRef) forgetThreadRef.current = forgetThreadLocal;

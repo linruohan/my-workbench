@@ -12,6 +12,7 @@ import {
   samePath,
 } from "@wb/domain";
 import { errorMessage } from "../lib/errors";
+import { registerNoteFlusher } from "../lib/note-flush";
 import { isTauriRuntime } from "../lib/paths";
 import { PromptModal } from "../shell/PromptModal";
 import { useDialog } from "../shell/Dialogs";
@@ -205,9 +206,12 @@ export function KnowledgeView({
     const onVisibility = () => {
       if (document.visibilityState === "hidden") onLeave();
     };
+    // 退出流程（App 的 CloseRequested 拦截）通过注册表调到这里，await 写完挂起内容
+    registerNoteFlusher(() => flushSave());
     window.addEventListener("beforeunload", onLeave);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      registerNoteFlusher(null);
       window.removeEventListener("beforeunload", onLeave);
       document.removeEventListener("visibilitychange", onVisibility);
       void flushSave();

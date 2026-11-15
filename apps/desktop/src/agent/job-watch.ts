@@ -40,11 +40,17 @@ export function clearJobNotice(jobId: string): void {
 
 export function takePendingJobNotices(threadId: string): string[] {
   const out: string[] = [];
-  for (const job of watched.values()) {
-    if (job.threadId !== threadId || !job.pendingNotice) continue;
-    out.push(job.pendingNotice);
-    job.pendingNotice = null;
+  const droppable: string[] = [];
+  for (const [jobId, job] of watched) {
+    if (job.threadId !== threadId) continue;
+    if (job.pendingNotice) {
+      out.push(job.pendingNotice);
+      job.pendingNotice = null;
+    }
+    // 已结束且通知已投递的条目即可回收，避免 Map 随会话无界增长
+    if (job.done && !job.pendingNotice) droppable.push(jobId);
   }
+  for (const jobId of droppable) watched.delete(jobId);
   return out;
 }
 

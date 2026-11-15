@@ -77,6 +77,8 @@ struct JobState {
     spill_path: Option<PathBuf>,
     spill_rel: Option<String>,
     spill_bytes: u64,
+    /// 进入终态的时刻；超过 TTL 的结束任务会被清理，防注册表与内存无界增长。
+    finished_at: Option<u64>,
 }
 
 fn jobs() -> &'static Mutex<HashMap<String, JobState>> {
@@ -246,6 +248,7 @@ pub fn agent_workspace_job_kill(job_id: String, reason: Option<String>) -> Resul
         }
         job.status = "killed".into();
         job.code = Some(-1);
+        job.finished_at = Some(unix_ms());
         if let Some(text) = reason {
             let note = text.trim();
             if !note.is_empty() {
@@ -297,6 +300,7 @@ fn start_job(
                 spill_path: None,
                 spill_rel: None,
                 spill_bytes: 0,
+                finished_at: None,
             },
         );
     }
@@ -318,18 +322,40 @@ fn start_job(
 
 fn pump_pipe(id: String, is_stdout: bool, reader: &mut impl Read) {
     let mut buf = [0u8; 8 * 1024];
+    // 块边界可能切在多字节字符中间：用增量解码保留残缺序列，避免中文乱码
+    let mut decoder = crate::utf8_stream::Utf8StreamDecoder::new();
     loop {
         match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                let chunk = decoder.finish();
+                if !chunk.is_empty() {
+                    if let Ok(mut map) = jobs().lock() {
+                        if let Some(job) = map.get_mut(&id) {
+                            append_job_output(job, is_stdout, &chunk);
+                        }
+                    }
+                }
+                break;
+            }
             Ok(n) => {
-                let chunk = String::from_utf8_lossy(&buf[..n]);
+                let chunk = decoder.push(&buf[..n]);
                 if let Ok(mut map) = jobs().lock() {
                     if let Some(job) = map.get_mut(&id) {
                         append_job_output(job, is_stdout, &chunk);
                     }
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                let chunk = decoder.finish();
+                if !chunk.is_empty() {
+                    if let Ok(mut map) = jobs().lock() {
+                        if let Some(job) = map.get_mut(&id) {
+                            append_job_output(job, is_stdout, &chunk);
+                        }
+                    }
+                }
+                break;
+            }
         }
     }
 }
@@ -449,7 +475,38 @@ fn read_job_output(id: &str, wait: bool, timeout_ms: u64) -> Result<JobOutputHit
     }
 }
 
+/// 已结束任务的保留窗口：给前端足够时间读取输出，过后连同 spill 文件一起清理，
+/// 避免注册表条目与 .wb/spill 目录随会话数无界增长。
+const FINISHED_JOB_TTL_MS: u64 = 30 * 60_000;
+/// 死终端条目的保留期：留时间给前端读最后输出，过后清理。
+const FINISHED_TERM_TTL_MS: u64 = 30 * 60_000;
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn reap_finished(map: &mut HashMap<String, JobState>) {
+    let now = unix_ms();
+    let expired: Vec<String> = map
+        .iter()
+        .filter(|(_, job)| {
+            job.status != "running"
+                && job
+                    .finished_at
+                    .is_some_and(|at| now.saturating_sub(at) > FINISHED_JOB_TTL_MS)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in expired {
+        if let Some(job) = map.remove(&id) {
+            if let Some(path) = job.spill_path {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
     for job in map.values_mut() {
         if job.status != "running" {
             continue;
@@ -468,6 +525,7 @@ fn reap_finished(map: &mut HashMap<String, JobState>) {
                 job.child = None;
                 // Drop tree: kill-on-close Job reaps leftover grandchildren.
                 job.tree = None;
+                job.finished_at = Some(now);
             }
             Ok(None) => {}
             Err(_) => {
@@ -475,6 +533,7 @@ fn reap_finished(map: &mut HashMap<String, JobState>) {
                 job.code = Some(-1);
                 job.child = None;
                 job.tree = None;
+                job.finished_at = Some(now);
             }
         }
     }
@@ -675,44 +734,75 @@ fn pump_shell_stream(
     is_stdout: bool,
 ) {
     let mut bytes = [0u8; 8 * 1024];
+    // 块边界可能切在多字节字符中间：用增量解码保留残缺序列，避免中文乱码
+    let mut decoder = crate::utf8_stream::Utf8StreamDecoder::new();
     loop {
         match reader.read(&mut bytes) {
-            Ok(0) => break,
+            Ok(0) => {
+                let tail = decoder.finish();
+                if !tail.is_empty() {
+                    append_shell_chunk(&tail, &buf, &peer, &spill, &truncated, &root, is_stdout);
+                }
+                break;
+            }
             Ok(n) => {
-                let chunk = String::from_utf8_lossy(&bytes[..n]);
-                let mut target = buf.lock().expect("buf");
-                if target.len() < OUTPUT_LIMIT {
-                    let room = OUTPUT_LIMIT - target.len();
-                    let take = room.min(chunk.len());
-                    target.push_str(&chunk[..take]);
-                    if take < chunk.len() {
-                        truncated.store(true, Ordering::Relaxed);
-                        let overflow = chunk[take..].to_string();
-                        let self_text = format!("{}{}", target.as_str(), &overflow);
-                        drop(target);
-                        let peer_text = peer.lock().expect("peer").clone();
-                        let seed = combine_shell_streams(is_stdout, &self_text, &peer_text);
-                        if !ensure_shell_spill_seed(&spill, &root, &seed) {
-                            let labeled = if is_stdout {
-                                overflow
-                            } else {
-                                format!("\n--- stderr ---\n{overflow}")
-                            };
-                            let _ = append_shell_spill_bytes(&spill, &labeled);
-                        }
-                    }
-                } else {
-                    truncated.store(true, Ordering::Relaxed);
-                    drop(target);
+                let chunk = decoder.push(&bytes[..n]);
+                append_shell_chunk(
+                    &chunk, &buf, &peer, &spill, &truncated, &root, is_stdout,
+                );
+            }
+            Err(_) => {
+                let tail = decoder.finish();
+                if !tail.is_empty() {
+                    append_shell_chunk(&tail, &buf, &peer, &spill, &truncated, &root, is_stdout);
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// 把一段已解码文本并入 shell 输出缓冲，超出限额的部分落 spill 文件。
+#[allow(clippy::too_many_arguments)]
+fn append_shell_chunk(
+    chunk: &str,
+    buf: &Arc<Mutex<String>>,
+    peer: &Arc<Mutex<String>>,
+    spill: &Arc<Mutex<ShellSpill>>,
+    truncated: &Arc<std::sync::atomic::AtomicBool>,
+    root: &PathBuf,
+    is_stdout: bool,
+) {
+    if chunk.is_empty() {
+        return;
+    }
+    {
+        let mut target = buf.lock().expect("buf");
+        if target.len() < OUTPUT_LIMIT {
+            let room = OUTPUT_LIMIT - target.len();
+            let take = room.min(chunk.len());
+            target.push_str(&chunk[..take]);
+            if take < chunk.len() {
+                truncated.store(true, Ordering::Relaxed);
+                let overflow = chunk[take..].to_string();
+                let self_text = format!("{}{}", target.as_str(), &overflow);
+                drop(target);
+                let peer_text = peer.lock().expect("peer").clone();
+                let seed = combine_shell_streams(is_stdout, &self_text, &peer_text);
+                if !ensure_shell_spill_seed(&spill, &root, &seed) {
                     let labeled = if is_stdout {
-                        chunk.to_string()
+                        overflow
                     } else {
-                        format!("{chunk}")
+                        format!("\n--- stderr ---\n{overflow}")
                     };
                     let _ = append_shell_spill_bytes(&spill, &labeled);
                 }
             }
-            Err(_) => break,
+        } else {
+            truncated.store(true, Ordering::Relaxed);
+            drop(target);
+            let labeled = chunk.to_string();
+            let _ = append_shell_spill_bytes(&spill, &labeled);
         }
     }
 }
@@ -842,6 +932,8 @@ struct TermState {
     child: Option<Box<dyn PtyChild + Send + Sync>>,
     /// Keep the master PTY alive for the session lifetime.
     _master: Option<Box<dyn MasterPty + Send>>,
+    /// 进入死态的时刻；超过保留期的死终端会被清理，防注册表无界增长。
+    finished_at: Option<u64>,
 }
 
 fn terms() -> &'static Mutex<HashMap<String, TermState>> {
@@ -961,10 +1053,12 @@ pub fn agent_terminal_close(session_id: String) -> Result<TermInfo, String> {
     if id.is_empty() {
         return Err("请提供 session_id".into());
     }
-    let mut map = terms().lock().expect("terms lock");
-    let Some(mut term) = map.remove(id) else {
-        return Err(format!("未知终端 {id}"));
+    // 先从注册表摘除并放锁：kill+wait 可能阻塞，持锁会拖死 read/list/signal。
+    let term = {
+        let mut map = terms().lock().expect("terms lock");
+        map.remove(id).ok_or_else(|| format!("未知终端 {id}"))?
     };
+    let mut term = term;
     if let Some(mut child) = term.child.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -991,32 +1085,46 @@ pub fn agent_terminal_signal(session_id: String, signal: Option<String>) -> Resu
         .map(str::trim)
         .unwrap_or("SIGINT")
         .to_ascii_uppercase();
-    let mut map = terms().lock().expect("terms lock");
-    reap_terms(&mut map);
-    let term = map.get_mut(id).ok_or_else(|| format!("未知终端 {id}"))?;
-    match kind.as_str() {
-        "SIGKILL" | "KILL" | "SIGTERM" | "TERM" => {
-            if let Some(mut child) = term.child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+    let (term_info, mut kill_child) = {
+        let mut map = terms().lock().expect("terms lock");
+        reap_terms(&mut map);
+        let term = map.get_mut(id).ok_or_else(|| format!("未知终端 {id}"))?;
+        let child = match kind.as_str() {
+            "SIGKILL" | "KILL" | "SIGTERM" | "TERM" => {
+                term.writer = None;
+                term._master = None;
+                term.finished_at = Some(unix_ms());
+                term.child.take()
             }
-            term.writer = None;
-            term._master = None;
-        }
-        _ => {
-            // ConPTY/PTY: Ctrl-C is delivered as a real interrupt to the foreground group.
-            if let Some(writer) = term.writer.as_mut() {
-                let _ = writer.write_all(&[0x03]);
-                let _ = writer.flush();
+            _ => {
+                // ConPTY/PTY: Ctrl-C 以真实中断字节投递给前台进程组。
+                if let Some(writer) = term.writer.as_mut() {
+                    let _ = writer.write_all(&[0x03]);
+                    let _ = writer.flush();
+                }
+                None
             }
-        }
+        };
+        let info = (
+            term.id.clone(),
+            term.name.clone(),
+            term.cwd.clone(),
+            term.shell.clone(),
+            term.child.is_some(),
+        );
+        (info, child)
+    };
+    // kill+wait 可能阻塞，放在注册表锁之外执行。
+    if let Some(ref mut child) = kill_child {
+        let _ = child.kill();
+        let _ = child.wait();
     }
     Ok(TermInfo {
-        id: term.id.clone(),
-        name: term.name.clone(),
-        cwd: term.cwd.clone(),
-        shell: shell_label(term.shell).into(),
-        alive: term.child.is_some(),
+        id: term_info.0,
+        name: term_info.1,
+        cwd: term_info.2,
+        shell: shell_label(term_info.3).into(),
+        alive: term_info.4,
     })
 }
 
@@ -1084,6 +1192,7 @@ fn open_terminal(
                 writer: Some(writer),
                 child: Some(child),
                 _master: Some(pair.master),
+                finished_at: None,
             },
         );
     }
@@ -1132,29 +1241,53 @@ fn shell_label(shell: ShellKind) -> &'static str {
 
 fn pump_term(id: String, reader: &mut impl Read) {
     let mut buf = [0u8; 8 * 1024];
+    // 块边界可能切在多字节字符中间：用增量解码保留残缺序列，避免中文乱码
+    let mut decoder = crate::utf8_stream::Utf8StreamDecoder::new();
+    let emit = |chunk: &str, id: &str| -> bool {
+        // 返回 false 表示终端已被移除，pump 应退出
+        if let Ok(mut map) = terms().lock() {
+            match map.get_mut(id) {
+                Some(term) => {
+                    if term.buffer.len() >= OUTPUT_LIMIT {
+                        term.truncated = true;
+                        return true;
+                    }
+                    let room = OUTPUT_LIMIT - term.buffer.len();
+                    let take = room.min(chunk.len());
+                    term.buffer.push_str(&chunk[..take]);
+                    if take < chunk.len() {
+                        term.truncated = true;
+                    }
+                    true
+                }
+                None => false,
+            }
+        } else {
+            true
+        }
+    };
     loop {
         match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                let tail = decoder.finish();
+                if !tail.is_empty() && !emit(&tail, &id) {
+                    break;
+                }
+                break;
+            }
             Ok(n) => {
-                let chunk = String::from_utf8_lossy(&buf[..n]);
-                if let Ok(mut map) = terms().lock() {
-                    if let Some(term) = map.get_mut(&id) {
-                        if term.buffer.len() >= OUTPUT_LIMIT {
-                            term.truncated = true;
-                            continue;
-                        }
-                        let room = OUTPUT_LIMIT - term.buffer.len();
-                        let take = room.min(chunk.len());
-                        term.buffer.push_str(&chunk[..take]);
-                        if take < chunk.len() {
-                            term.truncated = true;
-                        }
-                    } else {
-                        break;
-                    }
+                let chunk = decoder.push(&buf[..n]);
+                if !chunk.is_empty() && !emit(&chunk, &id) {
+                    break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                let tail = decoder.finish();
+                if !tail.is_empty() && !emit(&tail, &id) {
+                    break;
+                }
+                break;
+            }
         }
     }
 }
@@ -1166,23 +1299,37 @@ fn send_terminal(
     timeout_ms: u64,
 ) -> Result<TermOutputHit, String> {
     {
-        let mut map = terms().lock().expect("terms lock");
-        reap_terms(&mut map);
-        let term = map.get_mut(id).ok_or_else(|| format!("未知终端 {id}"))?;
-        let Some(writer) = term.writer.as_mut() else {
-            return Err("终端已关闭".into());
+        // 先取走 writer 再放注册表锁：ConPTY 输入管道可能长时间阻塞
+        //（前台停读 / 流控），持锁写会拖死同一注册表上的 read/list/close/signal。
+        let mut writer = {
+            let mut map = terms().lock().expect("terms lock");
+            reap_terms(&mut map);
+            let term = map.get_mut(id).ok_or_else(|| format!("未知终端 {id}"))?;
+            term.writer.take().ok_or_else(|| "终端已关闭".to_string())?
         };
-        writer
-            .write_all(text.as_bytes())
-            .map_err(|err| format!("写入失败：{err}"))?;
-        if submit {
-            // PTY / ConPTY expect CR as Enter.
+        let write_result = (|| -> Result<(), String> {
             writer
-                .write_all(b"\r")
+                .write_all(text.as_bytes())
                 .map_err(|err| format!("写入失败：{err}"))?;
+            if submit {
+                // PTY / ConPTY 用 CR 表示回车。
+                writer
+                    .write_all(b"\r")
+                    .map_err(|err| format!("写入失败：{err}"))?;
+            }
+            writer.flush().map_err(|err| format!("写入失败：{err}"))
+        })();
+        {
+            let mut map = terms().lock().expect("terms lock");
+            if let Some(term) = map.get_mut(id) {
+                term.cursor = term.buffer.len();
+                // 写失败多半意味着终端已退出：不归还 writer，避免误当成可用状态
+                if write_result.is_ok() {
+                    term.writer = Some(writer);
+                }
+            }
         }
-        writer.flush().map_err(|err| format!("写入失败：{err}"))?;
-        term.cursor = term.buffer.len();
+        write_result?;
     }
 
     let started = Instant::now();
@@ -1227,6 +1374,21 @@ fn send_terminal(
 }
 
 fn reap_terms(map: &mut HashMap<String, TermState>) {
+    let now = unix_ms();
+    // 先清掉超过保留期的死终端条目，避免注册表随会话数无界增长
+    let expired: Vec<String> = map
+        .iter()
+        .filter(|(_, term)| {
+            term.child.is_none()
+                && term
+                    .finished_at
+                    .is_some_and(|at| now.saturating_sub(at) > FINISHED_TERM_TTL_MS)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in expired {
+        map.remove(&id);
+    }
     for term in map.values_mut() {
         let Some(child) = term.child.as_mut() else {
             continue;
@@ -1236,12 +1398,14 @@ fn reap_terms(map: &mut HashMap<String, TermState>) {
                 term.child = None;
                 term.writer = None;
                 term._master = None;
+                term.finished_at = Some(now);
             }
             Ok(None) => {}
             Err(_) => {
                 term.child = None;
                 term.writer = None;
                 term._master = None;
+                term.finished_at = Some(now);
             }
         }
     }
@@ -1596,9 +1760,11 @@ pub struct RuntimePathsHit {
 }
 
 /// Host PATH probe for `load_workspace_dependencies` (not a DSH payload install).
+/// 同步探测 `where` + `--version` 冷启动可达秒级：挪到 blocking 线程，
+// 避免占住 tokio worker 拖慢同 runtimes 的增量落库与模型请求。
 #[tauri::command]
-pub fn agent_workspace_runtime_paths() -> RuntimePathsHit {
-    RuntimePathsHit {
+pub async fn agent_workspace_runtime_paths() -> RuntimePathsHit {
+    tauri::async_runtime::spawn_blocking(|| RuntimePathsHit {
         node: probe_bin(
             &["node", "node.exe"],
             &["-v"],
@@ -1611,7 +1777,14 @@ pub fn agent_workspace_runtime_paths() -> RuntimePathsHit {
         ),
         pnpm: probe_bin(&["pnpm", "pnpm.cmd"], &["--version"], &[]),
         source: "host-path".into(),
-    }
+    })
+    .await
+    .unwrap_or(RuntimePathsHit {
+        node: None,
+        python: None,
+        pnpm: None,
+        source: "host-path-probe-failed".into(),
+    })
 }
 
 fn probe_bin(names: &[&str], version_args: &[&str], fallbacks: &[&str]) -> Option<RuntimeBin> {

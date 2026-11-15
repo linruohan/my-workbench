@@ -47,6 +47,11 @@ export function getScheduleMeta(id: string): ScheduleMeta | null {
   return all[id] ?? null;
 }
 
+/** 一次读出全部 meta：schedule_list 若逐项 getScheduleMeta 会把整表 parse N 次。 */
+export function listScheduleMetas(): Record<string, ScheduleMeta> {
+  return readJson<Record<string, ScheduleMeta>>(META_KEY, {});
+}
+
 export function setScheduleMeta(id: string, meta: ScheduleMeta): void {
   const all = readJson<Record<string, ScheduleMeta>>(META_KEY, {});
   all[id] = meta;

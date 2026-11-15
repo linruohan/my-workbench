@@ -104,6 +104,7 @@ export function patchTimedTask(
   const fromMs = lastRunAt != null && lastRunAt > 0 ? lastRunAt : nowMs;
 
   // One-off tasks disable themselves after the first run and never reschedule.
+  // 例外：显式重新启用（patch.enabled === true）时重新排期，否则开关打开却永不触发。
   const isOnce = schedule?.kind === "once";
   const hasRun = lastRunAt != null && lastRunAt > 0;
   const enabled =
@@ -111,7 +112,7 @@ export function patchTimedTask(
   const nextRunAt =
     schedule == null
       ? null
-      : isOnce && hasRun
+      : isOnce && hasRun && patch.enabled !== true
         ? null
         : computeNextRunAt(schedule, fromMs);
 
@@ -216,6 +217,18 @@ function applyAtTime(date: Date, atTime: string): void {
   date.setHours(hh ?? 9, mm ?? 0, 0, 0);
 }
 
+/**
+ * 按月推进日历字段，并把日期钳制到目标月最后一天。
+ * 直接 setMonth 会让 1月31日 + 1个月 滚成 3月3日，此后永远停在 3 号。
+ */
+function addMonthsClamped(date: Date, months: number): void {
+  const day = date.getDate();
+  date.setDate(1);
+  date.setMonth(date.getMonth() + months);
+  const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  date.setDate(Math.min(day, lastDay));
+}
+
 /** @deprecated use computeNextRunAt */
 export function computeNextRunFromSchedules(
   schedules: TimedSchedule[] | TimedSchedule | null | undefined,
@@ -307,8 +320,9 @@ export function computeNextRunAt(
   if (d.getTime() <= fromMs) {
     if (s.unit === "day") d.setDate(d.getDate() + every);
     else if (s.unit === "week") d.setDate(d.getDate() + every * 7);
-    else if (s.unit === "month") d.setMonth(d.getMonth() + every);
-    else d.setFullYear(d.getFullYear() + every);
+    // 月/年推进要钳制月末，避免 1月31日 + 1个月 漂移成 3月3日
+    else if (s.unit === "month") addMonthsClamped(d, every);
+    else addMonthsClamped(d, every * 12);
     applyAtTime(d, s.atTime);
   }
 

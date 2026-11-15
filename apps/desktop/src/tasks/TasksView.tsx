@@ -23,6 +23,9 @@ export type TasksViewMode = "list" | "board" | "stats";
 
 const FILTER_KEY = "wb.tasks.filterPrefs";
 
+/** 复用同一空数组引用：每次渲染新建 [] 会打穿 TaskRow 的行级 memo。 */
+const EMPTY_TAGS: Tag[] = [];
+
 type FilterPrefs = {
   status: TaskStatusFilter;
   sortKey: TaskSortKey;
@@ -367,7 +370,7 @@ export const TasksView = memo(function TasksView({
                       <TaskRow
                         key={task.id}
                         task={task}
-                        tags={taskTagMap[task.id] ?? []}
+                        tags={taskTagMap[task.id] ?? EMPTY_TAGS}
                         childCount={childCountByParent[task.id] ?? 0}
                         denseMeta={denseMeta}
                         showDoneStyle

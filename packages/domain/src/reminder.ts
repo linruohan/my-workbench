@@ -41,7 +41,9 @@ export function millisecondsDiffToRemindOption(
   if (diff >= 10 * MIN) return "m10";
   if (diff >= 5 * MIN) return "m5";
   if (diff <= 0) return "at_start";
-  return "none";
+  // 0 < diff < 5min：归入最近的 m5 档。返回 "none" 会在保存时把
+  // 合法的小偏移提醒静默清空（例如计划推迟 3 分钟后提前量只剩 2 分钟）。
+  return "m5";
 }
 
 /** Recompute remindAt from an offset when rescheduling dueWithTime. */

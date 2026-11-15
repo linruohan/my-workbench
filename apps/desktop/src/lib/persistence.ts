@@ -1,4 +1,5 @@
 import { MemoryWorkbenchRepository } from "@wb/db/memory";
+import type { PendingChangesLease } from "@wb/db/memory";
 import {
   applyWorkbenchDbChanges,
   dumpHasRows,
@@ -28,6 +29,8 @@ let pendingStore: MemoryWorkbenchRepository | null = null;
 let pendingTimer: number | null = null;
 let writing = false;
 let lastJsonWriteAt = 0;
+/** 最近一次全量序列化的字节数；跳过序列化时用于保存状态条的体积展示。 */
+let lastSnapshotBytes = 0;
 let lastLog: { at: number; bytes: number } | null = null;
 
 export type SaveStatus = {
@@ -251,6 +254,23 @@ export function saveStore(store: MemoryWorkbenchRepository): void {
   void flushStore();
 }
 
+/**
+ * 立即落盘并等待写库完成：退出流程专用。
+ * saveStore 是 fire-and-forget，webview 销毁后 async 写库随时被掐断；
+ * 关窗前必须 await 到真实落地。已有写入在途时先等它结束（有界轮询）。
+ */
+export async function saveStoreNow(store: MemoryWorkbenchRepository): Promise<void> {
+  pendingStore = store;
+  if (pendingTimer != null) {
+    window.clearTimeout(pendingTimer);
+    pendingTimer = null;
+  }
+  for (let i = 0; writing && i < 150; i += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+  }
+  if (!writing) await flushStore();
+}
+
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
@@ -309,12 +329,12 @@ async function flushStore(): Promise<void> {
   const store = pendingStore;
   if (!store) return;
   pendingStore = null;
-  const exportStart = performance.now();
-  const json = store.exportSnapshot();
-  const exportMs = performance.now() - exportStart;
-  const bytes = json.length;
-  // 浏览器预览态只用 localStorage；桌面端不再双写，避免 WebView 配额溢出。
+  // 浏览器预览态只用 localStorage；桌面端 JSON 是兜底副本，仅在真正写盘时才全量序列化。
   if (!isTauriRuntime()) {
+    const exportStart = performance.now();
+    const json = store.exportSnapshot();
+    const exportMs = performance.now() - exportStart;
+    const bytes = json.length;
     try {
       localStorage.setItem(STORAGE_KEY, json);
       const warning = observeSnapshot({
@@ -334,16 +354,26 @@ async function flushStore(): Promise<void> {
     return;
   }
   writing = true;
+  let bytes = lastSnapshotBytes;
   try {
-    const changes = store.collectPendingChanges();
+    // 原子换出日志：await 落库期间的新变更进入新日志，不会被本次落库误清。
+    const lease: PendingChangesLease | null = store.takePendingChanges();
+    const changes = lease?.changes ?? null;
     const sqliteStart = performance.now();
     const applied = await applyWorkbenchDbChanges(changes);
     const sqliteMs = performance.now() - sqliteStart;
-    if (applied) store.markPersisted();
+    if (!applied && lease) store.mergePendingChanges(lease);
     // SQLite 增量为主路径；JSON 快照降级为兜底副本（失败或到期时重写）。
     const jsonDue = !applied || Date.now() - lastJsonWriteAt >= SNAPSHOT_FALLBACK_MS;
+    let exportMs: number | null = null;
     let jsonMs: number | null = null;
     if (jsonDue) {
+      // 只在需要写 JSON 兜底时才全量序列化（高频路径省一次快照导出）。
+      const exportStart = performance.now();
+      const json = store.exportSnapshot();
+      exportMs = performance.now() - exportStart;
+      bytes = json.length;
+      lastSnapshotBytes = bytes;
       const jsonStart = performance.now();
       await ensureDataDir();
       const path = await dataFilePath(STORE_FILE);

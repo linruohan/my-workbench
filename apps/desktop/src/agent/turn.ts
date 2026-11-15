@@ -159,8 +159,14 @@ export async function startAgentTurn(
     .listAgentApprovals(thread.id)
     .some((item) => item.status === "pending");
   if (pending || thread.queueJson) {
-    say(env, "还有待确认的操作，请先批准或拒绝。", nowMs);
-    return { effects: [] };
+    if (pending) {
+      say(env, "还有待确认的操作，请先批准或拒绝。", nowMs);
+      return { effects: [] };
+    }
+    // 快照残留的无审批队列（崩溃 / 中断后恢复）：没有任何可确认的卡片，
+    // 若不丢弃，发送会被永久拒绝且无恢复路径（切换权限模式还会突然执行遗留调用）。
+    env.store.updateAgentThread(thread.id, { queueJson: null }, nowMs);
+    say(env, "上一轮遗留的未执行调用队列已丢弃，可继续。", nowMs);
   }
   const priorUsers = env.store
     .listAgentMessages(thread.id)
@@ -206,7 +212,7 @@ export async function settleAgentApproval(
       env.store.resolveAgentApproval(pending.id, "denied", nowMs);
       sayTool(env, call, "用户跳过了提问。", nowMs);
       shiftQueue(env, nowMs);
-      return drain(env, 0, true);
+      return drain(env, 0, true, true);
     }
     return { effects: [] };
   }
@@ -222,14 +228,16 @@ export async function settleAgentApproval(
       nowMs,
     );
     shiftQueue(env, nowMs);
-    return drain(env, 0, true);
+    return drain(env, 0, true, true);
   }
 
   env.store.resolveAgentApproval(pending.id, "approved", nowMs);
   const result = await executeCallWithTimeout(env, call, nowMs);
   sayTool(env, call, toolContent(call.name, result), nowMs);
   shiftQueue(env, nowMs);
-  const rest = await drain(env, 0, true);
+  // ranTool=true：工具结果已落消息，模型必须看到它才能继续回合并给出结论；
+  // 否则单工具计划（最常见）在批准后回合会静默终止。
+  const rest = await drain(env, 0, true, true);
   return { effects: [...result.effects, ...rest.effects] };
 }
 
@@ -251,7 +259,8 @@ export async function settleAgentQuestion(
     env.store.resolveAgentApproval(pending.id, "denied", nowMs);
     sayTool(env, call, parsed.reason, nowMs);
     shiftQueue(env, nowMs);
-    return drain(env, 0, true);
+    // 工具结果已落消息，模型需要看到它继续回合
+    return drain(env, 0, true, true);
   }
   const normalized: Record<string, string | string[]> = {};
   for (const question of parsed.questions) {
@@ -286,7 +295,7 @@ export async function settleAgentQuestion(
     nowMs,
   );
   shiftQueue(env, nowMs);
-  return drain(env, 0, true);
+  return drain(env, 0, true, true);
 }
 
 /** Timed ask_user_question expired — continue without answers. */
@@ -314,7 +323,7 @@ export async function settleAgentQuestionTimeout(
     nowMs,
   );
   shiftQueue(env, nowMs);
-  return drain(env, 0, true);
+  return drain(env, 0, true, true);
 }
 
 /** Read timed-ask settings from pending ask_user_question args. */
@@ -331,6 +340,22 @@ export function askUserTimedConfig(args: Record<string, unknown> | null | undefi
 export async function resumeAgentQueue(
   env: AgentTurnEnv,
 ): Promise<{ effects: AgentUiEffect[] }> {
+  const thread = requireThread(env);
+  const nowMs = env.nowMs ?? Date.now();
+  const queue = readQueue(thread.queueJson);
+  const hasPendingApproval = queue.some((call) =>
+    env.store
+      .listAgentApprovals(thread.id)
+      .some((item) => item.status === "pending" && item.toolCallId === call.id),
+  );
+  if (!hasPendingApproval) {
+    // 没有任何待确认的卡片却还有队列：快照残留。丢弃而不是按新权限模式
+    // 静默执行遗留调用（写类工具会在切换权限时突然落盘）。
+    if (queue.length) {
+      env.store.updateAgentThread(thread.id, { queueJson: null }, nowMs);
+    }
+    return { effects: [] };
+  }
   return drain(env, 0, true);
 }
 
@@ -395,10 +420,11 @@ async function drain(
   env: AgentTurnEnv,
   round: number,
   allowFollowUp: boolean,
+  /** 进入前已经执行过一次工具（审批/提问 settle 路径），计入 follow-up 判断。 */
+  ranTool = false,
 ): Promise<{ effects: AgentUiEffect[] }> {
   const effects: AgentUiEffect[] = [];
   const nowMs = env.nowMs ?? Date.now();
-  let ranTool = false;
   try {
     while (true) {
       if (env.signal?.aborted) throw new AgentTurnStopped("");
@@ -483,6 +509,13 @@ async function drain(
   } catch (error) {
     if (isStopped(error)) {
       say(env, "已停止。", nowMs);
+      // 中断后清掉未执行队列：否则 queueJson 残留会让后续消息被
+      // "还有待确认的操作" 守卫永久拒绝，且无任何可确认的卡片。
+      try {
+        env.store.updateAgentThread(env.threadId, { queueJson: null }, nowMs);
+      } catch {
+        // 线程可能已被并发删除
+      }
       return { effects };
     }
     throw error;

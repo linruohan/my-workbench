@@ -44,10 +44,12 @@ import {
   getLastSaveStatus,
   hydrateStore,
   saveStore,
+  saveStoreNow,
   scheduleSaveStore,
   subscribeSaveStatus,
   type SaveStatus,
 } from "./lib/persistence";
+import { flushNoteSaves } from "./lib/note-flush";
 import { applyUiFont, prefetchSystemFonts } from "./lib/fonts";
 import { hydratePrefs, readPrefs, writePrefs, type AppPrefs } from "./lib/prefs";
 import { DEFAULT_DATA_DIR_DISPLAY, isTauriRuntime, resolveDataDir } from "./lib/paths";
@@ -95,6 +97,9 @@ const EMPTY_TIMED_DRAFT: TimedDraft = {
   skillIds: [],
   enabled: true,
 };
+
+/** 复用同一空数组引用：每次渲染新建 [] 会打穿 TaskRow 的行级 memo。 */
+const EMPTY_TAGS: Tag[] = [];
 
 const TASKS_VIEW_KEY = "wb.tasks.viewMode";
 
@@ -196,6 +201,42 @@ export default function App() {
     };
     window.addEventListener("beforeunload", flush);
     return () => window.removeEventListener("beforeunload", flush);
+  }, [store]);
+
+  // 关窗拦截：saveStore 是异步 fire-and-forget，webview 销毁后写库随时被掐断；
+  // 这里先 await 写完笔记挂起内容与工作台变更，再销毁窗口（有界超时兜底）。
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    let closing = false;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        unlisten = await win.onCloseRequested(async (event) => {
+          // 先拦下默认关闭，落盘完成后用 destroy() 强制关窗
+          event.preventDefault();
+          if (closing) return;
+          closing = true;
+          try {
+            await Promise.race([
+              flushNoteSaves().then(() => saveStoreNow(store)),
+              new Promise((resolve) => window.setTimeout(resolve, 4000)),
+            ]);
+          } catch (err) {
+            console.warn("[exit] 退出落盘失败", err);
+          } finally {
+            win.destroy();
+          }
+        });
+      } catch {
+        // 非 Tauri 运行时（浏览器预览）无窗口 API，忽略
+      }
+    })();
+    return () => {
+      closing = true;
+      unlisten?.();
+    };
   }, [store]);
 
   const refresh = useCallback(() => {
@@ -805,7 +846,10 @@ export default function App() {
       if (!draft.isDone && task.isDone) store.uncompleteTask(taskId);
       if (!draft.isDone) store.setTaskBucket(taskId, draft.bucket);
 
-      if (!draft.dueWithTimeLocal) {
+      if (draft.dueDayPreserved) {
+        // 打开时是日计划且未动过时间字段：保持日计划语义，不升级成时刻
+        store.scheduleTask(taskId, { dueDay: draft.dueDayPreserved });
+      } else if (!draft.dueWithTimeLocal) {
         store.scheduleTask(taskId, {
           dueDay: null,
           dueWithTime: null,
@@ -821,7 +865,9 @@ export default function App() {
         });
       }
 
-      if (!draft.deadlineWithTimeLocal) {
+      if (draft.deadlineDayPreserved) {
+        store.scheduleTask(taskId, { deadlineDay: draft.deadlineDayPreserved });
+      } else if (!draft.deadlineWithTimeLocal) {
         store.scheduleTask(taskId, {
           deadlineDay: null,
           deadlineWithTime: null,
@@ -1913,7 +1959,7 @@ const TaskList = memo(function TaskList(props: {
               key={task.id}
               task={task}
               projectTitle={props.projectTitles?.[task.projectId]}
-              tags={props.taskTagMap?.[task.id] ?? []}
+              tags={props.taskTagMap?.[task.id] ?? EMPTY_TAGS}
               denseMeta={props.denseMeta}
               showDoneStyle={props.showDoneStyle}
               nowMs={props.nowMs}

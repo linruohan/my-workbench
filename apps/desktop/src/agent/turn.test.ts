@@ -71,6 +71,28 @@ describe("agent turn", () => {
     expect(saved).toContain("[redacted]");
   });
 
+  it("discards a stale queue without pending approvals instead of blocking sends", async () => {
+    const store = new MemoryWorkbenchRepository();
+    const thread = store.createAgentThread({ nowMs: now });
+    // 模拟崩溃/中断后的残留队列：queueJson 非空但没有任何待确认审批
+    store.updateAgentThread(
+      thread.id,
+      {
+        queueJson: JSON.stringify([{ id: "stale-1", name: "task_list", args: {} }]),
+      },
+      now,
+    );
+    await startAgentTurn({ store, threadId: thread.id, nowMs: now }, "列出全部任务");
+    // 残留队列被丢弃并放行：用户消息已入列，队列最终清空（read 工具自动执行）
+    const messages = store.listAgentMessages(thread.id);
+    expect(
+      messages.some(
+        (item) => item.role === "user" && item.content.includes("列出全部任务"),
+      ),
+    ).toBe(true);
+    expect(store.getAgentThread(thread.id)?.queueJson).toBeNull();
+  });
+
   it("saves a local memory when the session can write", async () => {
     const store = new MemoryWorkbenchRepository();
     const thread = store.createAgentThread({
