@@ -23,6 +23,7 @@ pub struct TasksPane {
     state: AppState,
     capture: Entity<InputState>,
     notes: Entity<InputState>,
+    notes_task_id: Option<String>,
     mode: TasksMode,
     _subs: Vec<Subscription>,
 }
@@ -37,6 +38,7 @@ impl TasksPane {
             state,
             capture: capture.clone(),
             notes: notes.clone(),
+            notes_task_id: None,
             mode: TasksMode::List,
             _subs: Vec::new(),
         };
@@ -398,7 +400,7 @@ impl TasksPane {
 }
 
 impl Render for TasksPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, tasks) = self.filtered_tasks();
         let entity = cx.weak_entity();
         let today = self.state.today();
@@ -410,6 +412,17 @@ impl Render for TasksPane {
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
         let selected_id = self.state.with(|s| s.selected_task_id.clone());
+        if selected_id != self.notes_task_id {
+            match &selected_id {
+                Some(id) => self.load_notes_for(id, window, cx),
+                None => {
+                    self.notes_task_id = None;
+                    self.notes.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                    });
+                }
+            }
+        }
 
         let show_archive = self.state.with(|s| {
             s.nav == AppNav::Projects
