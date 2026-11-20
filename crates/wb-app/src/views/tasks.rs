@@ -1,17 +1,26 @@
 use crate::state::{AppNav, AppState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::*;
+use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    INBOX_PROJECT_ID, SchedulePatch, apply_schedule_patch, filter_tasks, is_today_member,
-    parse_quick_capture, select_planner_tasks, select_today_tasks,
+    INBOX_PROJECT_ID, SchedulePatch, Task, apply_schedule_patch, compute_task_stats, filter_tasks,
+    is_today_member, parse_quick_capture, select_planner_tasks, select_today_tasks,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TasksMode {
+    #[default]
+    List,
+    Board,
+    Stats,
+}
 
 pub struct TasksPane {
     state: AppState,
     capture: Entity<InputState>,
+    mode: TasksMode,
     _subs: Vec<Subscription>,
 }
 
@@ -23,6 +32,7 @@ impl TasksPane {
         let mut this = Self {
             state,
             capture: capture.clone(),
+            mode: TasksMode::List,
             _subs: Vec::new(),
         };
         this._subs.push(
@@ -92,13 +102,21 @@ impl TasksPane {
         self.state.persist_if_dirty();
         cx.notify();
     }
-}
 
-impl Render for TasksPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn create_project(&mut self, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            let p = s.repo.create_project("新项目");
+            s.nav = AppNav::Projects;
+            s.active_project_id = Some(p.id);
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn filtered_tasks(&self) -> (String, Vec<Task>) {
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
-        let (title, tasks) = self.state.with(|s| {
+        self.state.with(|s| {
             let all = s.repo.list_tasks();
             let list: Vec<_> = match nav {
                 AppNav::Today => select_today_tasks(&all, &today, s.repo.today_order())
@@ -130,9 +148,195 @@ impl Render for TasksPane {
                     .collect(),
             };
             (nav.label().to_string(), list)
-        });
+        })
+    }
 
+    fn render_task_row(
+        task: Task,
+        entity: WeakEntity<Self>,
+        radius: Pixels,
+        muted: Hsla,
+        accent: Hsla,
+    ) -> impl IntoElement {
+        let id = task.id.clone();
+        let done = task.is_done;
+        let title = task.title.clone();
+        let plan = task
+            .due_day
+            .clone()
+            .or_else(|| task.due_with_time.map(wb_domain::format_local_day))
+            .unwrap_or_default();
+        h_flex()
+            .id(SharedString::from(format!("task-{}", id)))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .rounded(radius)
+            .hover(move |s| s.bg(accent.opacity(0.4)))
+            .child(
+                Button::new(SharedString::from(format!("done-{id}")))
+                    .ghost()
+                    .label(if done { "☑" } else { "☐" })
+                    .on_click({
+                        let id = id.clone();
+                        move |_, _, app| {
+                            if let Some(entity) = entity.upgrade() {
+                                entity.update(app, |this, cx| {
+                                    this.toggle_done(&id, cx);
+                                });
+                            }
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .when(done, |d| d.text_color(muted))
+                    .child(title),
+            )
+            .when(!plan.is_empty(), |row| {
+                row.child(div().text_xs().text_color(muted).child(plan))
+            })
+    }
+
+    fn mode_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        mode: TasksMode,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new(id)
+            .small()
+            .label(label)
+            .selected(self.mode == mode)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.mode = mode;
+                cx.notify();
+            }))
+    }
+}
+
+impl Render for TasksPane {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, tasks) = self.filtered_tasks();
         let entity = cx.weak_entity();
+        let today = self.state.today();
+        let all_for_stats = self.state.with(|s| s.repo.list_tasks());
+        let stats = compute_task_stats(&all_for_stats, &today);
+        let projects = self.state.with(|s| s.repo.list_projects());
+        let radius = cx.theme().radius;
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+
+        let body = match self.mode {
+            TasksMode::List => {
+                let rows: Vec<_> = tasks
+                    .into_iter()
+                    .map(|task| {
+                        Self::render_task_row(task, entity.clone(), radius, muted, accent)
+                            .into_any_element()
+                    })
+                    .collect();
+                v_flex()
+                    .gap_1()
+                    .flex_1()
+                    .overflow_hidden()
+                    .children(rows)
+                    .into_any_element()
+            }
+            TasksMode::Board => {
+                let todo: Vec<_> = tasks.iter().filter(|t| !t.is_done).cloned().collect();
+                let done: Vec<_> = tasks.iter().filter(|t| t.is_done).cloned().collect();
+                let active: Vec<_> = todo
+                    .iter()
+                    .filter(|t| t.due_day.is_some() || t.due_with_time.is_some())
+                    .cloned()
+                    .collect();
+                let backlog: Vec<_> = todo
+                    .iter()
+                    .filter(|t| t.due_day.is_none() && t.due_with_time.is_none())
+                    .cloned()
+                    .collect();
+                let columns: Vec<_> = [("进行中", active), ("待办箱", backlog), ("已完成", done)]
+                    .into_iter()
+                    .map(|(label, col)| {
+                        let rows: Vec<_> = col
+                            .into_iter()
+                            .map(|task| {
+                                Self::render_task_row(task, entity.clone(), radius, muted, accent)
+                                    .into_any_element()
+                            })
+                            .collect();
+                        v_flex()
+                            .flex_1()
+                            .gap_2()
+                            .p_2()
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(border)
+                            .child(div().font_bold().child(format!("{label} · {}", rows.len())))
+                            .children(rows)
+                            .into_any_element()
+                    })
+                    .collect();
+                h_flex()
+                    .gap_3()
+                    .flex_1()
+                    .children(columns)
+                    .into_any_element()
+            }
+            TasksMode::Stats => {
+                let cards: Vec<_> = [
+                    ("未完成", stats.open.to_string()),
+                    ("已逾期", stats.overdue.to_string()),
+                    ("今日到期", stats.due_today.to_string()),
+                    ("未排期", stats.unscheduled.to_string()),
+                    ("今日完成", stats.done_today.to_string()),
+                    ("完成率", format!("{:.0}%", stats.completion_rate * 100.0)),
+                ]
+                .into_iter()
+                .map(|(k, v)| {
+                    h_flex()
+                        .justify_between()
+                        .p_3()
+                        .rounded(radius)
+                        .border_1()
+                        .border_color(border)
+                        .child(div().child(k))
+                        .child(div().font_bold().child(v))
+                        .into_any_element()
+                })
+                .collect();
+                let project_rows: Vec<_> = stats
+                    .by_project
+                    .into_iter()
+                    .map(|(pid, n)| {
+                        let title = projects
+                            .iter()
+                            .find(|p| p.id == pid)
+                            .map(|p| p.title.clone())
+                            .unwrap_or(pid);
+                        h_flex()
+                            .justify_between()
+                            .text_sm()
+                            .child(title)
+                            .child(n.to_string())
+                            .into_any_element()
+                    })
+                    .collect();
+                v_flex()
+                    .gap_3()
+                    .flex_1()
+                    .children(cards)
+                    .child(div().font_bold().mt_2().child("项目分布"))
+                    .children(project_rows)
+                    .into_any_element()
+            }
+        };
 
         v_flex()
             .size_full()
@@ -141,70 +345,20 @@ impl Render for TasksPane {
             .child(
                 h_flex()
                     .items_center()
-                    .justify_between()
+                    .gap_2()
                     .child(div().text_xl().font_bold().child(title))
+                    .child(div().flex_1())
+                    .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
+                    .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
+                    .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx))
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} 项", tasks.len())),
+                        Button::new("new-project")
+                            .small()
+                            .label("新项目")
+                            .on_click(cx.listener(|this, _, _, cx| this.create_project(cx))),
                     ),
             )
             .child(Input::new(&self.capture).cleanable(true))
-            .child(
-                v_flex()
-                    .gap_1()
-                    .flex_1()
-                    .overflow_hidden()
-                    .children(tasks.into_iter().map(|task| {
-                        let id = task.id.clone();
-                        let done = task.is_done;
-                        let title = task.title.clone();
-                        let plan = task
-                            .due_day
-                            .clone()
-                            .or_else(|| task.due_with_time.map(wb_domain::format_local_day))
-                            .unwrap_or_default();
-                        let entity = entity.clone();
-                        h_flex()
-                            .id(SharedString::from(format!("task-{}", id)))
-                            .w_full()
-                            .items_center()
-                            .gap_2()
-                            .p_2()
-                            .rounded(cx.theme().radius)
-                            .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
-                            .child(
-                                Button::new(SharedString::from(format!("done-{id}")))
-                                    .ghost()
-                                    .label(if done { "☑" } else { "☐" })
-                                    .on_click({
-                                        let id = id.clone();
-                                        move |_, _, app| {
-                                            if let Some(entity) = entity.upgrade() {
-                                                entity.update(app, |this, cx| {
-                                                    this.toggle_done(&id, cx);
-                                                });
-                                            }
-                                        }
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .when(done, |d| d.text_color(cx.theme().muted_foreground))
-                                    .child(title),
-                            )
-                            .when(!plan.is_empty(), |row| {
-                                row.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(plan),
-                                )
-                            })
-                    })),
-            )
+            .child(body)
     }
 }

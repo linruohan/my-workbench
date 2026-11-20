@@ -1,11 +1,20 @@
 use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::*;
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
 use wb_host::{create_markdown, list_files_recursive, pick_directory, read_text, write_text};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum KbMode {
+    #[default]
+    Edit,
+    Preview,
+}
 
 pub struct KnowledgePane {
     state: AppState,
@@ -13,6 +22,7 @@ pub struct KnowledgePane {
     editor: Entity<InputState>,
     current: Option<String>,
     filter: Entity<InputState>,
+    mode: KbMode,
     _subs: Vec<Subscription>,
 }
 
@@ -26,6 +36,7 @@ impl KnowledgePane {
             editor: editor.clone(),
             current: None,
             filter,
+            mode: KbMode::Edit,
             _subs: Vec::new(),
         };
         this.reload_files();
@@ -130,6 +141,8 @@ impl Render for KnowledgePane {
             .unwrap_or_else(|| "未选择知识库".into());
         let entity = cx.weak_entity();
         let current = self.current.clone();
+        let preview_text = self.editor.read(cx).value().to_string();
+        let mode = self.mode;
 
         h_flex()
             .size_full()
@@ -167,8 +180,8 @@ impl Render for KnowledgePane {
                             .child(root_label),
                     )
                     .child(Input::new(&self.filter).cleanable(true))
-                    .child(v_flex().gap_1().flex_1().children(files.into_iter().map(
-                        |(path, rel)| {
+                    .child(v_flex().gap_1().flex_1().overflow_y_scrollbar().children(
+                        files.into_iter().map(|(path, rel)| {
                             let active = current.as_deref() == Some(path.as_str());
                             let entity = entity.clone();
                             div()
@@ -186,15 +199,50 @@ impl Render for KnowledgePane {
                                         });
                                     }
                                 })
-                        },
-                    ))),
+                        }),
+                    )),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .h_full()
                     .p_3()
-                    .child(Input::new(&self.editor)),
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("kb-edit")
+                                    .small()
+                                    .label("编辑")
+                                    .selected(mode == KbMode::Edit)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.mode = KbMode::Edit;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("kb-preview")
+                                    .small()
+                                    .label("预览")
+                                    .selected(mode == KbMode::Preview)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let text = this.editor.read(cx).value().to_string();
+                                        this.save_current(&text);
+                                        this.mode = KbMode::Preview;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(match mode {
+                        KbMode::Edit => Input::new(&self.editor).into_any_element(),
+                        KbMode::Preview => div()
+                            .flex_1()
+                            .w_full()
+                            .overflow_y_scrollbar()
+                            .child(TextView::markdown("kb-preview", preview_text))
+                            .into_any_element(),
+                    }),
             )
     }
 }
