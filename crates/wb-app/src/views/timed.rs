@@ -1,7 +1,9 @@
 use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
     NotificationKind, TimedSchedulePreset, create_timed_task_draft, is_timed_task_auto_due,
@@ -172,77 +174,91 @@ impl Render for TimedPane {
                             )),
                     ),
             )
-            .child(v_flex().gap_2().children(tasks.into_iter().map(|task| {
-                let id = task.id.clone();
-                let title = task.title.clone();
-                let sched = timed_schedule_label(task.schedule.as_ref());
-                let enabled = task.enabled;
-                let entity = entity.clone();
-                h_flex()
-                    .id(SharedString::from(format!("timed-{id}")))
-                    .w_full()
-                    .items_center()
+            .child(if tasks.is_empty() {
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("暂无定时任务。填写标题与指令后，点上方预设即可添加。")
+                    .into_any_element()
+            } else {
+                let radius = cx.theme().radius;
+                let border = cx.theme().border;
+                let muted = cx.theme().muted_foreground;
+                v_flex()
                     .gap_2()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .child(div().font_bold().child(title))
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .children(tasks.into_iter().map(|task| {
+                        let id = task.id.clone();
+                        let title = task.title.clone();
+                        let sched = timed_schedule_label(task.schedule.as_ref());
+                        let enabled = task.enabled;
+                        let entity = entity.clone();
+                        h_flex()
+                            .id(SharedString::from(format!("timed-{id}")))
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .p_3()
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(border)
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
+                                v_flex()
+                                    .flex_1()
+                                    .child(div().font_bold().child(title))
+                                    .child(div().text_xs().text_color(muted).child(format!(
                                         "{sched} · {}",
                                         if enabled { "启用" } else { "停用" }
-                                    )),
-                            ),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("toggle-{id}")))
-                            .small()
-                            .label(if enabled { "停用" } else { "启用" })
-                            .on_click({
-                                let id = id.clone();
-                                let entity = entity.clone();
-                                move |_, _, app| {
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(app, |this, cx| this.toggle_enabled(&id, cx));
-                                    }
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("run-{id}")))
-                            .small()
-                            .label("立即执行")
-                            .on_click({
-                                let id = id.clone();
-                                let entity = entity.clone();
-                                move |_, _, app| {
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(app, |this, cx| this.run_now(&id, cx));
-                                    }
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("del-{id}")))
-                            .small()
-                            .danger()
-                            .label("删除")
-                            .on_click({
-                                let id = id.clone();
-                                move |_, _, app| {
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(app, |this, cx| this.delete(&id, cx));
-                                    }
-                                }
-                            }),
-                    )
-            })))
+                                    ))),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("toggle-{id}")))
+                                    .small()
+                                    .label(if enabled { "停用" } else { "启用" })
+                                    .on_click({
+                                        let id = id.clone();
+                                        let entity = entity.clone();
+                                        move |_, _, app| {
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| {
+                                                    this.toggle_enabled(&id, cx)
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("run-{id}")))
+                                    .small()
+                                    .label("立即执行")
+                                    .on_click({
+                                        let id = id.clone();
+                                        let entity = entity.clone();
+                                        move |_, _, app| {
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| this.run_now(&id, cx));
+                                            }
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("del-{id}")))
+                                    .small()
+                                    .danger()
+                                    .label("删除")
+                                    .on_click({
+                                        let id = id.clone();
+                                        move |_, _, app| {
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| this.delete(&id, cx));
+                                            }
+                                        }
+                                    }),
+                            )
+                    }))
+                    .into_any_element()
+            })
     }
 }
