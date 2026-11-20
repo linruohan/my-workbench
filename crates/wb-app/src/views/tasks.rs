@@ -266,6 +266,7 @@ impl TasksPane {
             .clone()
             .or_else(|| task.due_with_time.map(format_local_day))
             .unwrap_or_default();
+        let has_notes = !task.notes.trim().is_empty();
         let tomorrow = add_local_days(today, 1).unwrap_or_else(|| today.to_string());
         let today_day = today.to_string();
         h_flex()
@@ -294,13 +295,22 @@ impl TasksPane {
                     }),
             )
             .child(
-                div()
+                v_flex()
                     .id(SharedString::from(format!("sel-{id}")))
                     .flex_1()
                     .overflow_hidden()
                     .cursor_pointer()
                     .when(done, |d| d.text_color(muted))
                     .child(title)
+                    .when(has_notes, |col| {
+                        col.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .overflow_hidden()
+                                .child("有备注"),
+                        )
+                    })
                     .on_click({
                         let id = id.clone();
                         let entity = entity.clone();
