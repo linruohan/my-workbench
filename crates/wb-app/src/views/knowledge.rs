@@ -7,7 +7,9 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
-use wb_host::{create_markdown, list_files_recursive, pick_directory, read_text, write_text};
+use wb_host::{
+    create_markdown, list_files_recursive, open_path, pick_directory, read_text, write_text,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum KbMode {
@@ -232,7 +234,21 @@ impl Render for KnowledgePane {
                                         this.mode = KbMode::Preview;
                                         cx.notify();
                                     })),
-                            ),
+                            )
+                            .when(current.is_some(), |row| {
+                                let path = current.clone().unwrap();
+                                row.child(
+                                    Button::new("kb-reveal")
+                                        .small()
+                                        .ghost()
+                                        .label("打开位置")
+                                        .on_click(move |_, _, _| {
+                                            let p = std::path::Path::new(&path);
+                                            let target = p.parent().unwrap_or(p);
+                                            let _ = open_path(target);
+                                        }),
+                                )
+                            }),
                     )
                     .child(match mode {
                         KbMode::Edit => Input::new(&self.editor).into_any_element(),
