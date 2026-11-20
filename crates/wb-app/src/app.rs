@@ -78,6 +78,7 @@ impl WorkbenchApp {
         let now = now_ms();
         self.timed.update(cx, |timed, cx| timed.tick_due(cx));
         self.state.with_mut(|s| {
+            s.repo.wake_snoozed_notifications(now);
             for task in s.repo.list_tasks() {
                 if let Some(at) = task.remind_at {
                     if at <= now && !task.is_done {
@@ -118,6 +119,23 @@ impl WorkbenchApp {
             if nav != AppNav::Projects {
                 s.active_project_id = None;
             }
+        });
+        cx.notify();
+    }
+
+    fn open_notification_task(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            if let Some(task) = s.repo.get_task(task_id).cloned() {
+                s.selected_task_id = Some(task.id.clone());
+                if task.project_id == INBOX_PROJECT_ID {
+                    s.nav = AppNav::Inbox;
+                    s.active_project_id = None;
+                } else {
+                    s.nav = AppNav::Projects;
+                    s.active_project_id = Some(task.project_id);
+                }
+            }
+            s.notifications_open = false;
         });
         cx.notify();
     }
@@ -488,6 +506,7 @@ impl Render for WorkbenchApp {
                                 .gap_2()
                                 .children(visible.into_iter().map(|n| {
                                     let id = n.id.clone();
+                                    let ref_id = n.ref_id.clone();
                                     let entity = entity.clone();
                                     v_flex()
                                         .gap_1()
@@ -502,23 +521,75 @@ impl Render for WorkbenchApp {
                                                 .child(n.body),
                                         )
                                         .child(
-                                            Button::new(SharedString::from(format!(
-                                                "dismiss-{id}"
-                                            )))
-                                            .xsmall()
-                                            .ghost()
-                                            .label("关闭")
-                                            .on_click(move |_, _, app| {
-                                                if let Some(e) = entity.upgrade() {
-                                                    e.update(app, |this, cx| {
-                                                        this.state.with_mut(|s| {
-                                                            s.repo.dismiss_notification(&id);
-                                                        });
-                                                        this.state.persist_if_dirty();
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            }),
+                                            h_flex()
+                                                .gap_1()
+                                                .when(ref_id.is_some(), |row| {
+                                                    let entity = entity.clone();
+                                                    let task_id = ref_id.clone().unwrap();
+                                                    row.child(
+                                                        Button::new(SharedString::from(format!(
+                                                            "open-{id}"
+                                                        )))
+                                                        .xsmall()
+                                                        .ghost()
+                                                        .label("打开")
+                                                        .on_click(move |_, _, app| {
+                                                            if let Some(e) = entity.upgrade() {
+                                                                e.update(app, |this, cx| {
+                                                                    this.open_notification_task(
+                                                                        &task_id, cx,
+                                                                    );
+                                                                });
+                                                            }
+                                                        }),
+                                                    )
+                                                })
+                                                .child({
+                                                    let entity = entity.clone();
+                                                    let id = id.clone();
+                                                    Button::new(SharedString::from(format!(
+                                                        "snooze-{id}"
+                                                    )))
+                                                    .xsmall()
+                                                    .ghost()
+                                                    .label("稍后")
+                                                    .on_click(move |_, _, app| {
+                                                        if let Some(e) = entity.upgrade() {
+                                                            e.update(app, |this, cx| {
+                                                                let until =
+                                                                    now_ms() + 15 * 60 * 1000;
+                                                                this.state.with_mut(|s| {
+                                                                    s.repo.snooze_notification(
+                                                                        &id, until,
+                                                                    );
+                                                                });
+                                                                this.state.persist_if_dirty();
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                })
+                                                .child({
+                                                    let entity = entity.clone();
+                                                    Button::new(SharedString::from(format!(
+                                                        "dismiss-{id}"
+                                                    )))
+                                                    .xsmall()
+                                                    .ghost()
+                                                    .label("关闭")
+                                                    .on_click(move |_, _, app| {
+                                                        if let Some(e) = entity.upgrade() {
+                                                            e.update(app, |this, cx| {
+                                                                this.state.with_mut(|s| {
+                                                                    s.repo
+                                                                        .dismiss_notification(&id);
+                                                                });
+                                                                this.state.persist_if_dirty();
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                }),
                                         )
                                 }))
                                 .into_any_element()

@@ -366,9 +366,39 @@ impl MemoryWorkbenchRepository {
     pub fn dismiss_notification(&mut self, id: &str) {
         if let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) {
             n.status = NotificationStatus::Dismissed;
+            n.snooze_until = None;
             n.updated_at = now_ms();
             self.dirty = true;
         }
+    }
+
+    pub fn snooze_notification(&mut self, id: &str, until_ms: i64) {
+        if let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) {
+            n.status = NotificationStatus::Snoozed;
+            n.snooze_until = Some(until_ms);
+            n.fire_at = until_ms;
+            n.updated_at = now_ms();
+            self.dirty = true;
+        }
+    }
+
+    /// Bring snoozed notifications back when their snooze window ends.
+    pub fn wake_snoozed_notifications(&mut self, now: i64) -> usize {
+        let mut woken = 0usize;
+        for n in &mut self.notifications {
+            if n.status == NotificationStatus::Snoozed
+                && n.snooze_until.map(|t| t <= now).unwrap_or(true)
+            {
+                n.status = NotificationStatus::Delivered;
+                n.snooze_until = None;
+                n.updated_at = now;
+                woken += 1;
+            }
+        }
+        if woken > 0 {
+            self.dirty = true;
+        }
+        woken
     }
 
     pub fn dismiss_all_notifications(&mut self) {

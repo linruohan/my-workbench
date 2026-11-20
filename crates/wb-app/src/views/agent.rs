@@ -6,7 +6,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Disableable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wb_agent::{create_thread, run_user_turn};
+use wb_agent::{begin_user_turn, create_thread, finish_user_turn, resolve_turn_reply};
 use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
 use wb_host::pick_directory;
 
@@ -72,6 +72,9 @@ impl AgentPane {
     }
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         let thread_id = self.ensure_thread();
         let proxy = self.state.with(|s| s.prefs.http_proxy.clone());
         let thread = self.state.with(|s| {
@@ -84,25 +87,41 @@ impl AgentPane {
             return;
         };
 
+        let pending = self
+            .state
+            .with_mut(|s| begin_user_turn(&mut s.repo, &thread, &text));
+        self.state.persist_if_dirty();
+
         self.busy = true;
         self.status.clear();
         cx.notify();
 
-        let result = self.state.with_mut(|s| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime");
-            rt.block_on(run_user_turn(&mut s.repo, &thread, &text, proxy.as_deref()))
-        });
+        cx.spawn(async move |this, cx| {
+            let pending2 = pending.clone();
+            let proxy2 = proxy.clone();
+            let reply = cx
+                .background_executor()
+                .spawn(async move {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio runtime");
+                    rt.block_on(resolve_turn_reply(&pending2, proxy2.as_deref()))
+                })
+                .await;
 
-        match result {
-            Ok(_) => self.status.clear(),
-            Err(e) => self.status = e.to_string(),
-        }
-        self.state.persist_if_dirty();
-        self.busy = false;
-        cx.notify();
+            this.update(cx, move |this, cx| {
+                this.state.with_mut(|s| {
+                    finish_user_turn(&mut s.repo, &pending, reply);
+                });
+                this.state.persist_if_dirty();
+                this.status.clear();
+                this.busy = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn add_workspace(&mut self, cx: &mut Context<Self>) {

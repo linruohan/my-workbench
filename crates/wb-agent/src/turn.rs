@@ -15,12 +15,22 @@ pub struct TurnOutcome {
     pub tool_messages: Vec<AgentMessage>,
 }
 
-pub async fn run_user_turn(
+/// Prepared turn state that can leave the repo lock before awaiting the model.
+#[derive(Debug, Clone)]
+pub struct PendingTurn {
+    pub thread: AgentThread,
+    pub user_text: String,
+    pub history: Vec<AgentMessage>,
+    pub builtin_reply: Option<String>,
+    pub workspace_root: Option<String>,
+}
+
+/// Insert the user message and collect everything needed for the model call.
+pub fn begin_user_turn(
     repo: &mut MemoryWorkbenchRepository,
     thread: &AgentThread,
     user_text: &str,
-    proxy: Option<&str>,
-) -> Result<TurnOutcome> {
+) -> PendingTurn {
     let now = now_ms();
     let user_msg = AgentMessage {
         id: create_id(now),
@@ -35,47 +45,74 @@ pub async fn run_user_turn(
     repo.upsert_agent_message(user_msg);
 
     let history = repo.messages_for_thread(&thread.id);
-    let reply_text =
+    let builtin_reply =
         if thread.model_ref == BUILTIN_MODEL_REF || thread.model_ref.starts_with("builtin:") {
-            builtin_reply(user_text, repo)
+            Some(builtin_reply(user_text, repo))
         } else {
-            call_remote_model(thread, &history, user_text, proxy)
-                .await
-                .unwrap_or_else(|e| format!("模型请求失败：{e}"))
+            None
         };
+    let workspace_root = repo
+        .list_agent_workspaces()
+        .into_iter()
+        .find(|w| w.id == thread.workspace_id)
+        .and_then(|w| w.root_path);
 
-    // Simple slash / tool intent: if user says /task_list
+    PendingTurn {
+        thread: thread.clone(),
+        user_text: user_text.to_string(),
+        history,
+        builtin_reply,
+        workspace_root,
+    }
+}
+
+/// Resolve the assistant text without holding the repository lock.
+pub async fn resolve_turn_reply(pending: &PendingTurn, proxy: Option<&str>) -> String {
+    if let Some(ref text) = pending.builtin_reply {
+        return text.clone();
+    }
+    call_remote_model(&pending.thread, &pending.history, &pending.user_text, proxy)
+        .await
+        .unwrap_or_else(|e| format!("模型请求失败：{e}"))
+}
+
+/// Apply slash tools + assistant message under the repository lock.
+pub fn finish_user_turn(
+    repo: &mut MemoryWorkbenchRepository,
+    pending: &PendingTurn,
+    reply_text: String,
+) -> TurnOutcome {
     let mut tool_messages = Vec::new();
-    if let Some(tool_name) = parse_slash_tool(user_text) {
-        let gate = check_gate(tool_name, thread.permission_mode);
+    if let Some(tool_name) = parse_slash_tool(&pending.user_text) {
+        let gate = check_gate(tool_name, pending.thread.permission_mode);
         match gate {
             ToolGate::Block => {
                 tool_messages.push(system_tool_msg(
-                    &thread.id,
+                    &pending.thread.id,
                     tool_name,
                     "当前权限模式禁止此工具",
                 ));
             }
             ToolGate::Ask | ToolGate::Run => {
-                let ws = repo
-                    .list_agent_workspaces()
-                    .into_iter()
-                    .find(|w| w.id == thread.workspace_id);
-                let root = ws.as_ref().and_then(|w| w.root_path.as_deref());
+                let root = pending.workspace_root.as_deref();
                 let result = execute_tool(repo, tool_name, &json!({}), root).unwrap_or_else(|e| {
                     ToolResult {
                         ok: false,
                         content: e.to_string(),
                     }
                 });
-                tool_messages.push(system_tool_msg(&thread.id, tool_name, &result.content));
+                tool_messages.push(system_tool_msg(
+                    &pending.thread.id,
+                    tool_name,
+                    &result.content,
+                ));
             }
         }
     }
 
     let assistant = AgentMessage {
         id: create_id(now_ms()),
-        thread_id: thread.id.clone(),
+        thread_id: pending.thread.id.clone(),
         role: AgentRole::Assistant,
         content: reply_text,
         tool_name: None,
@@ -88,10 +125,25 @@ pub async fn run_user_turn(
         repo.upsert_agent_message(m.clone());
     }
 
-    Ok(TurnOutcome {
+    let mut thread = pending.thread.clone();
+    thread.updated_at = now_ms();
+    repo.upsert_agent_thread(thread);
+
+    TurnOutcome {
         assistant,
         tool_messages,
-    })
+    }
+}
+
+pub async fn run_user_turn(
+    repo: &mut MemoryWorkbenchRepository,
+    thread: &AgentThread,
+    user_text: &str,
+    proxy: Option<&str>,
+) -> Result<TurnOutcome> {
+    let pending = begin_user_turn(repo, thread, user_text);
+    let reply = resolve_turn_reply(&pending, proxy).await;
+    Ok(finish_user_turn(repo, &pending, reply))
 }
 
 fn system_tool_msg(thread_id: &str, tool: &str, content: &str) -> AgentMessage {
