@@ -22,6 +22,7 @@ enum TasksMode {
 pub struct TasksPane {
     state: AppState,
     capture: Entity<InputState>,
+    notes: Entity<InputState>,
     mode: TasksMode,
     _subs: Vec<Subscription>,
 }
@@ -31,9 +32,11 @@ impl TasksPane {
         let capture = cx.new(|cx| {
             InputState::new(window, cx).placeholder("快速捕获：今天 写报告 #项目 提前10分钟")
         });
+        let notes = cx.new(|cx| InputState::new(window, cx).placeholder("选中任务后编辑备注…"));
         let mut this = Self {
             state,
             capture: capture.clone(),
+            notes: notes.clone(),
             mode: TasksMode::List,
             _subs: Vec::new(),
         };
@@ -47,6 +50,14 @@ impl TasksPane {
                             input.set_value("", window, cx);
                         });
                     }
+                }
+            }),
+        );
+        this._subs.push(
+            cx.subscribe_in(&notes, window, |this, input, event, _window, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    let text = input.read(cx).value().to_string();
+                    this.save_notes(&text, cx);
                 }
             }),
         );
@@ -165,10 +176,32 @@ impl TasksPane {
         cx.notify();
     }
 
-    fn select_task(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn select_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let notes = self.state.with(|s| {
+            s.repo
+                .get_task(id)
+                .map(|t| t.notes.clone())
+                .unwrap_or_default()
+        });
         self.state
             .with_mut(|s| s.selected_task_id = Some(id.to_string()));
+        self.notes.update(cx, |input, cx| {
+            input.set_value(notes, window, cx);
+        });
         cx.notify();
+    }
+
+    fn save_notes(&mut self, text: &str, _cx: &mut Context<Self>) {
+        let Some(id) = self.state.with(|s| s.selected_task_id.clone()) else {
+            return;
+        };
+        self.state.with_mut(|s| {
+            if let Some(mut task) = s.repo.get_task(&id).cloned() {
+                task.notes = text.to_string();
+                s.repo.upsert_task(task);
+            }
+        });
+        self.state.persist_if_dirty();
     }
 
     fn filtered_tasks(&self) -> (String, Vec<Task>) {
@@ -264,9 +297,9 @@ impl TasksPane {
                     .on_click({
                         let id = id.clone();
                         let entity = entity.clone();
-                        move |_, _, app| {
+                        move |_, window, app| {
                             if let Some(e) = entity.upgrade() {
-                                e.update(app, |this, cx| this.select_task(&id, cx));
+                                e.update(app, |this, cx| this.select_task(&id, window, cx));
                             }
                         }
                     }),
@@ -594,5 +627,32 @@ impl Render for TasksPane {
             )
             .child(Input::new(&self.capture).cleanable(true))
             .child(body)
+            .when(selected_id.is_some(), |col| {
+                let label = selected_id
+                    .as_ref()
+                    .and_then(|id| {
+                        all_for_stats
+                            .iter()
+                            .find(|t| &t.id == id)
+                            .map(|t| t.title.clone())
+                    })
+                    .unwrap_or_else(|| "任务备注".into());
+                col.child(
+                    v_flex()
+                        .gap_1()
+                        .p_2()
+                        .rounded(radius)
+                        .border_1()
+                        .border_color(border)
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_bold()
+                                .text_color(muted)
+                                .child(format!("备注 · {label}")),
+                        )
+                        .child(Input::new(&self.notes)),
+                )
+            })
     }
 }
