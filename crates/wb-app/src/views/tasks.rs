@@ -466,6 +466,10 @@ impl TasksPane {
             })
     }
 
+    pub fn focus_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.capture.focus_handle(cx).focus(window, cx);
+    }
+
     fn mode_button(
         &self,
         id: &'static str,

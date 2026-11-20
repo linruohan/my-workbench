@@ -348,7 +348,21 @@ impl Render for WorkbenchApp {
                 });
                 cx.notify();
             }))
-            .on_action(cx.listener(|_this, _: &FocusCapture, _window, _cx| {}))
+            .on_action(cx.listener(|this, _: &FocusCapture, window, cx| {
+                let nav = this.state.with(|s| s.nav);
+                if !matches!(
+                    nav,
+                    AppNav::Today
+                        | AppNav::Inbox
+                        | AppNav::Done
+                        | AppNav::Planner
+                        | AppNav::Projects
+                ) {
+                    this.set_nav(AppNav::Today, cx);
+                }
+                this.tasks
+                    .update(cx, |tasks, cx| tasks.focus_capture(window, cx));
+            }))
             .child(
                 h_flex()
                     .size_full()
