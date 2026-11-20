@@ -487,6 +487,13 @@ impl Render for TasksPane {
                         .overflow_y_scrollbar()
                         .children(sections)
                         .into_any_element()
+                } else if tasks.is_empty() {
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("暂无任务。在上方输入框快速捕获一条吧。")
+                        .into_any_element()
                 } else {
                     let rows: Vec<_> = tasks
                         .into_iter()
