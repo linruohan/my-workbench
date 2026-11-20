@@ -148,29 +148,34 @@ Agent 输入框内以 `/` 开头触发斜杠命令；CapsLock 按住说话由语
 
 ## 6. 系统架构
 
+整仓为纯 Rust Cargo workspace，UI 使用 GPUI + 本地 `gpui-kit`：
+
 ```
-React Renderer（apps/desktop/src）
-├── 任务 / 计划 / 知识库 / 定时 / 通知 / 设置界面
-├── Agent 回合循环、工具分派、审批、子智能体、插件与 MCP
-├── 语音采集与本地 OCR（onnxruntime-web）
-└── MemoryWorkbenchRepository（JSON 快照）
-        │ Tauri invoke / plugin-fs
-Tauri Rust Host（apps/desktop/src-tauri/src）
-├── kb：目录选择、文件读写、base64、重命名、Git 分支、资源管理器
-├── model_http / oc_runtime：模型请求与本机 OpenCode
-├── speech：本地 ASR 模型准备、热备、转写、下载进度
-├── ocr：PaddleOCR 模型下载与读取
-├── agent_workspace：shell / job / PTY 终端 / Office 转 PDF / runtime 探测
-├── fonts：系统字体扫描
-└── web_session：内嵌网页窗口的显示、刷新、隐藏、关闭
+wb-app（GPUI + gpui-kit）
+├── 任务 / 计划 / 知识库 / 定时 / 通知 / 设置 / 命令面板
+└── 调用 wb-agent / wb-store / wb-host
+wb-agent
+├── 回合循环、工具分派、权限门、Provider HTTP
+wb-store
+├── MemoryWorkbenchRepository + workbench.json / prefs.json
+wb-host
+├── kb：目录选择、文件读写、扫描、reveal、Git 分支
+├── model_http：模型请求（可代理）
+├── speech / voice_ptt：本地 ASR 目录与剪贴板粘贴
+├── shell / job：命令执行
+└── fonts：系统字体扫描
+wb-domain
+└── 无 IO 领域规则（任务、定时、快速捕获、Agent 契约）
 ```
 
-与早期设想的差异：
+约定：
 
-- Agent 运行时在 Renderer 内，而不是独立 sidecar 子进程；模型请求经 Rust `model_http` 发起，便于代理与超时控制。
-- 没有「宿主持有数据库、Agent 不直连」的物理隔离；隔离靠领域函数、权限门与工具契约，而不是进程边界。
-- 提醒扫描在界面层 15 秒轮询，不是 Rust 后台调度器；应用未运行时不会触发。
-- 知识库不落 SQLite FTS 索引，检索以文件名 / 内容扫描与命令面板为主。
+- 模型请求经 `wb-host::model_http` 发起，便于代理与超时控制。
+- 隔离靠领域函数、权限门与工具契约，而不是进程边界。
+- 提醒与定时扫描在界面层约 15 秒轮询；应用未运行时不会触发。
+- 知识库不落 SQLite FTS；检索以文件名扫描与命令面板为主。
+- JSON 快照字段保持 camelCase，兼容旧 Tauri 版本数据。
+
 
 ## 7. Agent 设计
 

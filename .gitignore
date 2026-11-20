@@ -1,8 +1,3 @@
-node_modules/
-dist/
-build/
-*.tsbuildinfo
-
 target/
 .DS_Store
 *.local
@@ -14,15 +9,10 @@ coverage/
 *.db-journal
 *.db-wal
 *.db-shm
-apps/desktop/src-tauri/target/
-.turbo/
 *.log
 credentials.bin
 workbench/
 CapsWriter-Offline/
-
 __pycache__/
 *.py[cod]
-
-__pycache__/
-*.py[cod]
+node_modules/

@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wb-domain",
+    "crates/wb-store",
+    "crates/wb-host",
+    "crates/wb-agent",
+    "crates/wb-app",
+]
+default-members = ["crates/wb-app"]
+
+[workspace.package]
+version = "0.1.14"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+wb-domain = { path = "crates/wb-domain" }
+wb-store = { path = "crates/wb-store" }
+wb-host = { path = "crates/wb-host" }
+wb-agent = { path = "crates/wb-agent" }
+
+gpui-kit = { path = "../gpui-kit/crates/kit" }
+
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+dirs = "6"
+log = "0.4"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "charset", "stream", "json"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+font-kit = "0.14"
+url = "2"
+walkdir = "2"
+env_logger = "0.11"
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+strip = "symbols"

@@ -1,0 +1,341 @@
+use serde::{Deserialize, Serialize};
+
+pub const BUILTIN_PROVIDER_ID: &str = "builtin:workbench";
+pub const BUILTIN_MODEL_REF: &str = "builtin:workbench/local";
+pub const DEFAULT_AGENT_WORKSPACE_TITLE: &str = "默认工作区";
+pub const WEB_AGENT_THREAD_TITLE: &str = "网页会话";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermissionMode {
+    #[default]
+    Confirm,
+    SessionAuto,
+    Readonly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    None,
+    Read,
+    Write,
+    Destructive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolGate {
+    Run,
+    Ask,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderKind {
+    Builtin,
+    OpenaiChatCompletions,
+    OpenaiResponses,
+    AnthropicMessages,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspace {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub root_path: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentThread {
+    pub id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub title: String,
+    #[serde(default = "default_model_ref")]
+    pub model_ref: String,
+    #[serde(default)]
+    pub permission_mode: AgentPermissionMode,
+    #[serde(default)]
+    pub queue_json: Option<String>,
+    #[serde(default)]
+    pub web_url: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    #[serde(default)]
+    pub pinned_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn default_model_ref() -> String {
+    BUILTIN_MODEL_REF.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessage {
+    pub id: String,
+    pub thread_id: String,
+    pub role: AgentRole,
+    pub content: String,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub tool_calls_json: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApproval {
+    pub id: String,
+    pub thread_id: String,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    pub tool_name: String,
+    pub args_json: String,
+    pub summary: String,
+    pub status: ApprovalStatus,
+    pub created_at: i64,
+    #[serde(default)]
+    pub resolved_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCaps {
+    pub context: u32,
+    pub output: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smart: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    pub id: String,
+    pub name: String,
+    pub kind: ProviderKind,
+    #[serde(rename = "baseURL")]
+    pub base_url: String,
+    pub api_key_required: bool,
+    pub enabled: bool,
+    pub models: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolSpec {
+    pub name: String,
+    pub effect: ToolEffect,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlannedCall {
+    pub id: String,
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+pub fn gate_tool(effect: ToolEffect, mode: AgentPermissionMode) -> ToolGate {
+    match mode {
+        AgentPermissionMode::Readonly => match effect {
+            ToolEffect::None | ToolEffect::Read => ToolGate::Run,
+            _ => ToolGate::Block,
+        },
+        AgentPermissionMode::SessionAuto => match effect {
+            ToolEffect::Destructive => ToolGate::Ask,
+            _ => ToolGate::Run,
+        },
+        AgentPermissionMode::Confirm => match effect {
+            ToolEffect::None | ToolEffect::Read => ToolGate::Run,
+            _ => ToolGate::Ask,
+        },
+    }
+}
+
+pub fn normalize_agent_web_url(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.starts_with("http://") || t.starts_with("https://") {
+        Some(t.to_string())
+    } else if t.contains('.') {
+        Some(format!("https://{t}"))
+    } else {
+        None
+    }
+}
+
+pub fn agent_workspace_title_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("工作区")
+        .to_string()
+}
+
+pub fn builtin_host_tools() -> Vec<ToolSpec> {
+    vec![
+        tool(
+            "task_list",
+            ToolEffect::Read,
+            "列出任务",
+            serde_json::json!({
+                "projectId": { "type": "string" },
+                "query": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_create",
+            ToolEffect::Write,
+            "创建任务",
+            serde_json::json!({
+                "title": { "type": "string" },
+                "projectId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_complete",
+            ToolEffect::Write,
+            "完成任务",
+            serde_json::json!({
+                "taskId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "note_list",
+            ToolEffect::Read,
+            "列出应用内笔记",
+            serde_json::json!({}),
+        ),
+        tool(
+            "notification_list",
+            ToolEffect::Read,
+            "列出通知",
+            serde_json::json!({}),
+        ),
+        tool(
+            "schedule_list",
+            ToolEffect::Read,
+            "列出定时任务",
+            serde_json::json!({}),
+        ),
+        tool(
+            "ui_open",
+            ToolEffect::None,
+            "打开界面视图",
+            serde_json::json!({
+                "view": { "type": "string" }
+            }),
+        ),
+    ]
+}
+
+pub fn workspace_tools() -> Vec<ToolSpec> {
+    vec![
+        tool(
+            "read",
+            ToolEffect::Read,
+            "读取工作区文件",
+            serde_json::json!({ "path": { "type": "string" } }),
+        ),
+        tool(
+            "write",
+            ToolEffect::Write,
+            "写入工作区文件",
+            serde_json::json!({
+                "path": { "type": "string" },
+                "content": { "type": "string" }
+            }),
+        ),
+        tool(
+            "glob",
+            ToolEffect::Read,
+            "按 glob 查找文件",
+            serde_json::json!({ "pattern": { "type": "string" } }),
+        ),
+        tool(
+            "grep",
+            ToolEffect::Read,
+            "搜索文件内容",
+            serde_json::json!({
+                "pattern": { "type": "string" },
+                "path": { "type": "string" }
+            }),
+        ),
+        tool(
+            "shell",
+            ToolEffect::Write,
+            "在工作区执行 shell",
+            serde_json::json!({
+                "command": { "type": "string" }
+            }),
+        ),
+    ]
+}
+
+fn tool(
+    name: &str,
+    effect: ToolEffect,
+    description: &str,
+    properties: serde_json::Value,
+) -> ToolSpec {
+    ToolSpec {
+        name: name.into(),
+        effect,
+        description: description.into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": false
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_readonly_blocks_write() {
+        assert_eq!(
+            gate_tool(ToolEffect::Write, AgentPermissionMode::Readonly),
+            ToolGate::Block
+        );
+    }
+}

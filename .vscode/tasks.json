@@ -2,32 +2,30 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "桌面端: Vite 热更新",
-      "type": "npm",
-      "script": "dev",
-      "path": "apps/desktop/",
-      "problemMatcher": [],
+      "label": "工作台: 运行",
+      "type": "shell",
+      "command": "cargo run -p wb-app",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$rustc"],
       "presentation": {
         "reveal": "always",
         "panel": "dedicated"
       }
     },
     {
-      "label": "桌面端: Tauri 热启动",
+      "label": "工作台: 门禁",
       "type": "shell",
-      "command": "npm run tauri:dev -w @wb/desktop",
+      "command": "cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace",
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "TAURI_DEBUG": "1"
-        }
+        "cwd": "${workspaceFolder}"
       },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated"
-      },
-      "isBackground": true
+      "problemMatcher": ["$rustc"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
     }
   ]
 }

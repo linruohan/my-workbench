@@ -1,0 +1,21 @@
+[package]
+name = "wb-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Agent turn loop, tools, providers"
+
+[dependencies]
+wb-domain.workspace = true
+wb-host.workspace = true
+wb-store.workspace = true
+anyhow.workspace = true
+log.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
