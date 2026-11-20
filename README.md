@@ -26,12 +26,12 @@ UI 依赖本地 [`../gpui-kit`](../gpui-kit)（path：`../gpui-kit/crates/kit`�
 
 ## 功能概览
 
-- **任务**：今日 / 收件箱 / 已完成 / 计划 / 项目；快速捕获；提醒扫描
-- **定时任务**：预设节奏、立即执行、到期投递通知
-- **知识库**：本机目录建库、文件树、Markdown 编辑
-- **Agent**：工作区、会话、内置与 OpenAI 兼容 Provider、斜杠工具（`/task_list` 等）
-- **设置**：主题、HTTP 代理、语音、Provider、数据目录
-- **命令面板**：`Ctrl+P` / `Ctrl+K`
+- **任务**：今日 / 收件箱 / 已完成 / 计划 / 项目；列表·看板·统计；快速捕获；今/明/清排期；提醒与通知中心
+- **定时任务**：每小时/每天/工作日/每周/每月预设、启停、立即执行、到期投递通知
+- **知识库**：本机目录建库、文件树、Markdown 编辑与预览
+- **Agent**：工作区、会话管理、助手消息 Markdown、内置与 OpenAI 兼容 Provider、斜杠工具（`/task_list` 等）
+- **设置**：主题、HTTP 代理、语音 PTT / SenseVoice 状态、Provider、数据目录
+- **命令面板**：`Ctrl+P` / `Ctrl+K`（任务、项目、会话、笔记、页面）
 
 数据目录：`%APPDATA%\my-workbench\`（`workbench.json`、`prefs.json` 等），与旧 Tauri 版本兼容。
 

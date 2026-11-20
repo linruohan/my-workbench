@@ -104,13 +104,33 @@ impl CommandPalette {
             },
         ];
         self.state.with(|s| {
-            for t in s.repo.list_tasks() {
+            for t in s.repo.list_tasks().into_iter().filter(|t| !t.is_done) {
+                let nav = if t.project_id == wb_domain::INBOX_PROJECT_ID {
+                    AppNav::Inbox
+                } else {
+                    AppNav::Projects
+                };
                 items.push(PaletteItem {
                     id: format!("task-{}", t.id),
                     label: t.title.clone(),
                     kind: "任务",
-                    nav: Some(AppNav::Inbox),
+                    nav: Some(nav),
                     task_id: Some(t.id),
+                    thread_id: None,
+                });
+            }
+            for p in s
+                .repo
+                .list_projects()
+                .into_iter()
+                .filter(|p| p.id != wb_domain::INBOX_PROJECT_ID && !p.is_archived)
+            {
+                items.push(PaletteItem {
+                    id: format!("project-{}", p.id),
+                    label: p.title.clone(),
+                    kind: "项目",
+                    nav: Some(AppNav::Projects),
+                    task_id: None,
                     thread_id: None,
                 });
             }
@@ -152,8 +172,18 @@ impl CommandPalette {
             if let Some(nav) = item.nav {
                 s.nav = nav;
             }
-            if let Some(id) = item.task_id {
+            if let Some(id) = item.task_id.clone() {
+                if let Some(task) = s.repo.get_task(&id) {
+                    if task.project_id != wb_domain::INBOX_PROJECT_ID {
+                        s.active_project_id = Some(task.project_id.clone());
+                        s.nav = AppNav::Projects;
+                    }
+                }
                 s.selected_task_id = Some(id);
+            } else if item.id.starts_with("project-") {
+                let pid = item.id.trim_start_matches("project-").to_string();
+                s.active_project_id = Some(pid);
+                s.nav = AppNav::Projects;
             }
             if let Some(id) = item.thread_id {
                 s.active_thread_id = Some(id);

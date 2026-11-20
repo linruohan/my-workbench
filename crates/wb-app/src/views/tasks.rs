@@ -153,6 +153,17 @@ impl TasksPane {
         cx.notify();
     }
 
+    fn delete_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.repo.delete_task(id);
+            if s.selected_task_id.as_deref() == Some(id) {
+                s.selected_task_id = None;
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn filtered_tasks(&self) -> (String, Vec<Task>) {
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
@@ -293,6 +304,21 @@ impl TasksPane {
                                     e.update(app, |this, cx| {
                                         this.schedule_day(&id, None, cx);
                                     });
+                                }
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("del-{id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("删")
+                        .on_click({
+                            let id = id.clone();
+                            let entity = entity.clone();
+                            move |_, _, app| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(app, |this, cx| this.delete_task(&id, cx));
                                 }
                             }
                         }),
