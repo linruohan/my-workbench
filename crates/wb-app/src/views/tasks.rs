@@ -228,6 +228,17 @@ impl TasksPane {
         cx.notify();
     }
 
+    fn move_task_project(&mut self, id: &str, project_id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            if let Some(mut task) = s.repo.get_task(id).cloned() {
+                task.project_id = project_id.to_string();
+                s.repo.upsert_task(task);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn select_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.state
             .with_mut(|s| s.selected_task_id = Some(id.to_string()));
@@ -744,15 +755,21 @@ impl Render for TasksPane {
             })
             .child(body)
             .when(selected_id.is_some(), |col| {
-                let label = selected_id
-                    .as_ref()
-                    .and_then(|id| {
-                        all_for_stats
-                            .iter()
-                            .find(|t| &t.id == id)
-                            .map(|t| t.title.clone())
-                    })
+                let sid = selected_id.clone().unwrap();
+                let selected_task = all_for_stats.iter().find(|t| t.id == sid);
+                let label = selected_task
+                    .map(|t| t.title.clone())
                     .unwrap_or_else(|| "任务备注".into());
+                let in_inbox = selected_task
+                    .map(|t| t.project_id == INBOX_PROJECT_ID)
+                    .unwrap_or(true);
+                let active_pid = self.state.with(|s| s.active_project_id.clone());
+                let show_to_project = active_pid
+                    .as_ref()
+                    .is_some_and(|pid| pid != INBOX_PROJECT_ID)
+                    && selected_task
+                        .map(|t| Some(&t.project_id) != active_pid.as_ref())
+                        .unwrap_or(false);
                 col.child(
                     v_flex()
                         .gap_1()
@@ -761,11 +778,42 @@ impl Render for TasksPane {
                         .border_1()
                         .border_color(border)
                         .child(
-                            div()
-                                .text_xs()
-                                .font_bold()
-                                .text_color(muted)
-                                .child(format!("备注 · {label}")),
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .font_bold()
+                                        .text_color(muted)
+                                        .child(format!("备注 · {label}")),
+                                )
+                                .when(!in_inbox, |row| {
+                                    let sid = sid.clone();
+                                    row.child(
+                                        Button::new("move-inbox")
+                                            .xsmall()
+                                            .ghost()
+                                            .label("移到收件箱")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.move_task_project(&sid, INBOX_PROJECT_ID, cx);
+                                            })),
+                                    )
+                                })
+                                .when(show_to_project, |row| {
+                                    let sid = sid.clone();
+                                    let pid = active_pid.clone().unwrap();
+                                    row.child(
+                                        Button::new("move-project")
+                                            .xsmall()
+                                            .ghost()
+                                            .label("移到当前项目")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.move_task_project(&sid, &pid, cx);
+                                            })),
+                                    )
+                                }),
                         )
                         .child(Input::new(&self.notes)),
                 )

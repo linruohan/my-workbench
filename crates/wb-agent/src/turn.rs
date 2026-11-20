@@ -127,6 +127,16 @@ pub fn finish_user_turn(
 
     let mut thread = pending.thread.clone();
     thread.updated_at = now_ms();
+    if thread.title == "新会话" {
+        let trimmed = pending.user_text.trim();
+        if !trimmed.is_empty() {
+            let mut title: String = trimmed.chars().take(24).collect();
+            if trimmed.chars().count() > 24 {
+                title.push('…');
+            }
+            thread.title = title;
+        }
+    }
     repo.upsert_agent_thread(thread);
 
     TurnOutcome {
