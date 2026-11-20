@@ -295,7 +295,16 @@ impl TasksPane {
                     .filter(|t| !t.is_done && is_today_member(t, &today))
                     .collect(),
             };
-            (nav.label().to_string(), list)
+            let title = if nav == AppNav::Projects {
+                s.active_project_id
+                    .as_ref()
+                    .and_then(|id| s.repo.list_projects().into_iter().find(|p| &p.id == id))
+                    .map(|p| p.title)
+                    .unwrap_or_else(|| nav.label().to_string())
+            } else {
+                nav.label().to_string()
+            };
+            (title, list)
         })
     }
 
