@@ -179,18 +179,23 @@ impl TasksPane {
     }
 
     fn select_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.state
+            .with_mut(|s| s.selected_task_id = Some(id.to_string()));
+        self.load_notes_for(id, window, cx);
+        cx.notify();
+    }
+
+    fn load_notes_for(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let notes = self.state.with(|s| {
             s.repo
                 .get_task(id)
                 .map(|t| t.notes.clone())
                 .unwrap_or_default()
         });
-        self.state
-            .with_mut(|s| s.selected_task_id = Some(id.to_string()));
+        self.notes_task_id = Some(id.to_string());
         self.notes.update(cx, |input, cx| {
             input.set_value(notes, window, cx);
         });
-        cx.notify();
     }
 
     fn save_notes(&mut self, text: &str, _cx: &mut Context<Self>) {
