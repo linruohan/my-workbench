@@ -23,6 +23,8 @@ pub struct TasksPane {
     state: AppState,
     capture: Entity<InputState>,
     notes: Entity<InputState>,
+    project_title: Entity<InputState>,
+    project_title_id: Option<String>,
     notes_task_id: Option<String>,
     mode: TasksMode,
     _subs: Vec<Subscription>,
@@ -34,10 +36,14 @@ impl TasksPane {
             InputState::new(window, cx).placeholder("快速捕获：今天 写报告 #项目 提前10分钟")
         });
         let notes = cx.new(|cx| InputState::new(window, cx).placeholder("选中任务后编辑备注…"));
+        let project_title =
+            cx.new(|cx| InputState::new(window, cx).placeholder("项目名称，回车保存"));
         let mut this = Self {
             state,
             capture: capture.clone(),
             notes: notes.clone(),
+            project_title: project_title.clone(),
+            project_title_id: None,
             notes_task_id: None,
             mode: TasksMode::List,
             _subs: Vec::new(),
@@ -63,6 +69,16 @@ impl TasksPane {
                 }
             }),
         );
+        this._subs.push(cx.subscribe_in(
+            &project_title,
+            window,
+            |this, input, event, _window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let text = input.read(cx).value().to_string();
+                    this.rename_active_project(&text, cx);
+                }
+            },
+        ));
         this
     }
 
@@ -165,6 +181,40 @@ impl TasksPane {
         });
         self.state.persist_if_dirty();
         cx.notify();
+    }
+
+    fn rename_active_project(&mut self, title: &str, cx: &mut Context<Self>) {
+        let pid = self.state.with(|s| s.active_project_id.clone());
+        let Some(pid) = pid else {
+            return;
+        };
+        if title.trim().is_empty() {
+            return;
+        }
+        self.state.with_mut(|s| {
+            s.repo.rename_project(&pid, title);
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn sync_project_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (pid, title) = self.state.with(|s| {
+            let pid = s.active_project_id.clone();
+            let title = pid
+                .as_ref()
+                .and_then(|id| s.repo.list_projects().into_iter().find(|p| &p.id == id))
+                .map(|p| p.title)
+                .unwrap_or_default();
+            (pid, title)
+        });
+        if pid == self.project_title_id {
+            return;
+        }
+        self.project_title_id = pid;
+        self.project_title.update(cx, |input, cx| {
+            input.set_value(title, window, cx);
+        });
     }
 
     fn delete_task(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -445,6 +495,9 @@ impl Render for TasksPane {
                     .as_deref()
                     .is_some_and(|id| id != INBOX_PROJECT_ID)
         });
+        if show_archive {
+            self.sync_project_title(window, cx);
+        }
 
         let body = match self.mode {
             TasksMode::List => {
@@ -671,6 +724,15 @@ impl Render for TasksPane {
                     }),
             )
             .child(Input::new(&self.capture).cleanable(true))
+            .when(show_archive, |col| {
+                col.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().text_color(muted).child("项目名"))
+                        .child(Input::new(&self.project_title).cleanable(true)),
+                )
+            })
             .child(body)
             .when(selected_id.is_some(), |col| {
                 let label = selected_id
