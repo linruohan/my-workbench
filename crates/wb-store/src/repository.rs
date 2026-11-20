@@ -254,6 +254,33 @@ impl MemoryWorkbenchRepository {
         p
     }
 
+    pub fn rename_project(&mut self, id: &str, title: &str) -> Option<Project> {
+        let p = self.projects.get_mut(id)?;
+        p.title = title.trim().to_string();
+        p.updated_at = now_ms();
+        self.dirty = true;
+        Some(p.clone())
+    }
+
+    pub fn set_project_archived(&mut self, id: &str, archived: bool) -> Option<Project> {
+        if id == INBOX_PROJECT_ID {
+            return None;
+        }
+        let p = self.projects.get_mut(id)?;
+        p.is_archived = archived;
+        p.updated_at = now_ms();
+        self.buckets.insert(
+            id.to_string(),
+            if archived {
+                ProjectBucket::Backlog
+            } else {
+                ProjectBucket::Active
+            },
+        );
+        self.dirty = true;
+        Some(p.clone())
+    }
+
     pub fn today_order(&self) -> &[String] {
         &self.today_order
     }

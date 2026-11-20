@@ -26,11 +26,21 @@ impl SettingsPane {
                 .default_value(proxy_val)
         });
         let font_count = list_system_fonts().map(|f| f.len()).unwrap_or(0);
+        let speech_msg = speech_status("sensevoice")
+            .map(|st| {
+                if st.ready {
+                    format!("SenseVoice 就绪：{}", st.model_dir)
+                } else {
+                    st.message
+                        .unwrap_or_else(|| format!("SenseVoice 未就绪：{}", st.model_dir))
+                }
+            })
+            .unwrap_or_else(|e| e.to_string());
         Self {
             state,
             proxy,
             font_count,
-            speech_msg: String::new(),
+            speech_msg,
         }
     }
 

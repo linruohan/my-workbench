@@ -188,7 +188,7 @@ impl Render for WorkbenchApp {
             s.repo
                 .list_projects()
                 .into_iter()
-                .filter(|p| p.id != INBOX_PROJECT_ID)
+                .filter(|p| p.id != INBOX_PROJECT_ID && !p.is_archived)
                 .map(|p| {
                     let active = nav == AppNav::Projects
                         && s.active_project_id.as_deref() == Some(p.id.as_str());

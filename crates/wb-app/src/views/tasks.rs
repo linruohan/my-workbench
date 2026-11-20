@@ -6,8 +6,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
     INBOX_PROJECT_ID, SchedulePatch, Task, add_local_days, apply_schedule_patch, clear_plan_fields,
-    compute_task_stats, filter_tasks, format_local_day, is_today_member, parse_quick_capture,
-    select_planner_tasks, select_today_tasks,
+    compute_task_stats, filter_tasks, format_local_day, group_tasks_by_plan_day, is_today_member,
+    parse_quick_capture, select_planner_tasks, select_today_tasks,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -134,6 +134,20 @@ impl TasksPane {
                 }
                 s.repo.upsert_task(task);
             }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn archive_active_project(&mut self, cx: &mut Context<Self>) {
+        let pid = self.state.with(|s| s.active_project_id.clone());
+        let Some(pid) = pid else {
+            return;
+        };
+        self.state.with_mut(|s| {
+            s.repo.set_project_archived(&pid, true);
+            s.active_project_id = None;
+            s.nav = AppNav::Inbox;
         });
         self.state.persist_if_dirty();
         cx.notify();
@@ -317,21 +331,84 @@ impl Render for TasksPane {
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
 
+        let show_archive = self.state.with(|s| {
+            s.nav == AppNav::Projects
+                && s.active_project_id
+                    .as_deref()
+                    .is_some_and(|id| id != INBOX_PROJECT_ID)
+        });
+
         let body = match self.mode {
             TasksMode::List => {
-                let rows: Vec<_> = tasks
-                    .into_iter()
-                    .map(|task| {
-                        Self::render_task_row(task, entity.clone(), radius, muted, accent, &today)
+                let is_planner = self.state.with(|s| s.nav == AppNav::Planner);
+                if is_planner {
+                    let groups = group_tasks_by_plan_day(&tasks);
+                    let sections: Vec<_> = groups
+                        .into_iter()
+                        .map(|(day, day_tasks)| {
+                            let label = if day == today {
+                                format!("今天 · {day}")
+                            } else if day.as_str() < today.as_str() {
+                                format!("逾期 · {day}")
+                            } else {
+                                day.clone()
+                            };
+                            let rows: Vec<_> = day_tasks
+                                .into_iter()
+                                .map(|task| {
+                                    Self::render_task_row(
+                                        task,
+                                        entity.clone(),
+                                        radius,
+                                        muted,
+                                        accent,
+                                        &today,
+                                    )
+                                    .into_any_element()
+                                })
+                                .collect();
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_bold()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .mt_2()
+                                        .child(format!("{label} · {}", rows.len())),
+                                )
+                                .children(rows)
+                                .into_any_element()
+                        })
+                        .collect();
+                    v_flex()
+                        .gap_2()
+                        .flex_1()
+                        .overflow_hidden()
+                        .children(sections)
+                        .into_any_element()
+                } else {
+                    let rows: Vec<_> = tasks
+                        .into_iter()
+                        .map(|task| {
+                            Self::render_task_row(
+                                task,
+                                entity.clone(),
+                                radius,
+                                muted,
+                                accent,
+                                &today,
+                            )
                             .into_any_element()
-                    })
-                    .collect();
-                v_flex()
-                    .gap_1()
-                    .flex_1()
-                    .overflow_hidden()
-                    .children(rows)
-                    .into_any_element()
+                        })
+                        .collect();
+                    v_flex()
+                        .gap_1()
+                        .flex_1()
+                        .overflow_hidden()
+                        .children(rows)
+                        .into_any_element()
+                }
             }
             TasksMode::Board => {
                 let todo: Vec<_> = tasks.iter().filter(|t| !t.is_done).cloned().collect();
@@ -448,7 +525,18 @@ impl Render for TasksPane {
                             .small()
                             .label("新项目")
                             .on_click(cx.listener(|this, _, _, cx| this.create_project(cx))),
-                    ),
+                    )
+                    .when(show_archive, |row| {
+                        row.child(
+                            Button::new("archive-project")
+                                .small()
+                                .danger()
+                                .label("归档项目")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.archive_active_project(cx);
+                                })),
+                        )
+                    }),
             )
             .child(Input::new(&self.capture).cleanable(true))
             .child(body)

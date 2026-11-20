@@ -162,6 +162,19 @@ pub fn select_planner_tasks(tasks: &[Task]) -> Vec<&Task> {
     out
 }
 
+/// Group already-sorted planner tasks into (day, tasks) buckets.
+pub fn group_tasks_by_plan_day(tasks: &[Task]) -> Vec<(String, Vec<Task>)> {
+    let mut groups: Vec<(String, Vec<Task>)> = Vec::new();
+    for task in tasks {
+        let day = task_plan_day(task).unwrap_or_else(|| "未排期".into());
+        match groups.last_mut() {
+            Some((d, list)) if *d == day => list.push(task.clone()),
+            _ => groups.push((day, vec![task.clone()])),
+        }
+    }
+    groups
+}
+
 pub fn filter_tasks<'a>(
     tasks: &'a [Task],
     project_id: Option<&str>,
@@ -222,6 +235,25 @@ pub fn default_bucket() -> ProjectBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_planner_by_day() {
+        let mut a = create_task_draft("a", None, None, Some(1));
+        a.due_day = Some("2026-01-02".into());
+        let mut b = create_task_draft("b", None, None, Some(2));
+        b.due_day = Some("2026-01-01".into());
+        let mut c = create_task_draft("c", None, None, Some(3));
+        c.due_day = Some("2026-01-01".into());
+        let sorted: Vec<Task> = select_planner_tasks(&[a.clone(), b.clone(), c.clone()])
+            .into_iter()
+            .cloned()
+            .collect();
+        let groups = group_tasks_by_plan_day(&sorted);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "2026-01-01");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "2026-01-02");
+    }
 
     #[test]
     fn today_member_overdue() {
