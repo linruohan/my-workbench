@@ -440,53 +440,63 @@ impl Render for TasksPane {
             TasksMode::List => {
                 let is_planner = self.state.with(|s| s.nav == AppNav::Planner);
                 if is_planner {
-                    let groups = group_tasks_by_plan_day(&tasks);
-                    let sections: Vec<_> = groups
-                        .into_iter()
-                        .map(|(day, day_tasks)| {
-                            let label = if day == today {
-                                format!("今天 · {day}")
-                            } else if day.as_str() < today.as_str() {
-                                format!("逾期 · {day}")
-                            } else {
-                                day.clone()
-                            };
-                            let rows: Vec<_> = day_tasks
-                                .into_iter()
-                                .map(|task| {
-                                    let selected = selected_id.as_deref() == Some(task.id.as_str());
-                                    Self::render_task_row(
-                                        task,
-                                        entity.clone(),
-                                        radius,
-                                        muted,
-                                        accent,
-                                        &today,
-                                        selected,
+                    if tasks.is_empty() {
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("计划为空。用快速捕获写「今天 …」或「明天 …」来排期。")
+                            .into_any_element()
+                    } else {
+                        let groups = group_tasks_by_plan_day(&tasks);
+                        let sections: Vec<_> = groups
+                            .into_iter()
+                            .map(|(day, day_tasks)| {
+                                let label = if day == today {
+                                    format!("今天 · {day}")
+                                } else if day.as_str() < today.as_str() {
+                                    format!("逾期 · {day}")
+                                } else {
+                                    day.clone()
+                                };
+                                let rows: Vec<_> = day_tasks
+                                    .into_iter()
+                                    .map(|task| {
+                                        let selected =
+                                            selected_id.as_deref() == Some(task.id.as_str());
+                                        Self::render_task_row(
+                                            task,
+                                            entity.clone(),
+                                            radius,
+                                            muted,
+                                            accent,
+                                            &today,
+                                            selected,
+                                        )
+                                        .into_any_element()
+                                    })
+                                    .collect();
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_bold()
+                                            .text_sm()
+                                            .text_color(muted)
+                                            .mt_2()
+                                            .child(format!("{label} · {}", rows.len())),
                                     )
+                                    .children(rows)
                                     .into_any_element()
-                                })
-                                .collect();
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .font_bold()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .mt_2()
-                                        .child(format!("{label} · {}", rows.len())),
-                                )
-                                .children(rows)
-                                .into_any_element()
-                        })
-                        .collect();
-                    v_flex()
-                        .gap_2()
-                        .flex_1()
-                        .overflow_y_scrollbar()
-                        .children(sections)
-                        .into_any_element()
+                            })
+                            .collect();
+                        v_flex()
+                            .gap_2()
+                            .flex_1()
+                            .overflow_y_scrollbar()
+                            .children(sections)
+                            .into_any_element()
+                    }
                 } else if tasks.is_empty() {
                     div()
                         .flex_1()
