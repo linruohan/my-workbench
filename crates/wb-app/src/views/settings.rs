@@ -8,7 +8,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_agent::{load_providers, save_providers};
 use wb_domain::ThemeModePref;
-use wb_host::{list_system_fonts, speech_ensure_models, speech_status, voice_ptt_set_enabled};
+use wb_host::{
+    list_system_fonts, open_path, speech_ensure_models, speech_status, voice_ptt_set_enabled,
+};
 
 pub struct SettingsPane {
     state: AppState,
@@ -230,6 +232,16 @@ impl Render for SettingsPane {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("数据目录：{data_dir}")),
+                    )
+                    .child(
+                        Button::new("open-data-dir")
+                            .small()
+                            .label("打开数据目录")
+                            .on_click(|_, _, _| {
+                                if let Ok(dir) = wb_store::resolve_data_dir() {
+                                    let _ = open_path(&dir);
+                                }
+                            }),
                     )
                     .child(div().text_sm().child(format!(
                         "版本 {} · GPUI + gpui-kit",
