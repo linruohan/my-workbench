@@ -3,7 +3,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::*;
+use gpui_kit::component::{Disableable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_agent::{create_thread, run_user_turn};
@@ -313,6 +313,28 @@ impl Render for AgentPane {
                     .when(!status.is_empty(), |col| {
                         col.child(div().text_sm().text_color(danger).child(status))
                     })
+                    .child(
+                        h_flex().gap_2().flex_wrap().children(
+                            ["/task_list", "/note_list", "/schedule_list"]
+                                .into_iter()
+                                .map(|cmd| {
+                                    Button::new(SharedString::from(format!("slash-{cmd}")))
+                                        .xsmall()
+                                        .ghost()
+                                        .label(cmd)
+                                        .disabled(self.busy)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if this.busy {
+                                                return;
+                                            }
+                                            this.input.update(cx, |i, cx| {
+                                                i.set_value(cmd, window, cx);
+                                            });
+                                            this.send(cmd.to_string(), cx);
+                                        }))
+                                }),
+                        ),
+                    )
                     .child(
                         h_flex().gap_2().child(Input::new(&self.input)).child(
                             Button::new("send")

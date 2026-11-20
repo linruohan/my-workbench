@@ -1,6 +1,7 @@
 use crate::state::{AppNav, AppState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -164,6 +165,12 @@ impl TasksPane {
         cx.notify();
     }
 
+    fn select_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.state
+            .with_mut(|s| s.selected_task_id = Some(id.to_string()));
+        cx.notify();
+    }
+
     fn filtered_tasks(&self) -> (String, Vec<Task>) {
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
@@ -209,6 +216,7 @@ impl TasksPane {
         muted: Hsla,
         accent: Hsla,
         today: &str,
+        selected: bool,
     ) -> impl IntoElement {
         let id = task.id.clone();
         let done = task.is_done;
@@ -227,6 +235,7 @@ impl TasksPane {
             .gap_2()
             .p_2()
             .rounded(radius)
+            .when(selected, |row| row.bg(accent.opacity(0.55)))
             .hover(move |s| s.bg(accent.opacity(0.4)))
             .child(
                 Button::new(SharedString::from(format!("done-{id}")))
@@ -246,10 +255,21 @@ impl TasksPane {
             )
             .child(
                 div()
+                    .id(SharedString::from(format!("sel-{id}")))
                     .flex_1()
                     .overflow_hidden()
+                    .cursor_pointer()
                     .when(done, |d| d.text_color(muted))
-                    .child(title),
+                    .child(title)
+                    .on_click({
+                        let id = id.clone();
+                        let entity = entity.clone();
+                        move |_, _, app| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(app, |this, cx| this.select_task(&id, cx));
+                            }
+                        }
+                    }),
             )
             .when(!plan.is_empty(), |row| {
                 row.child(div().text_xs().text_color(muted).child(plan))
@@ -356,6 +376,7 @@ impl Render for TasksPane {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
+        let selected_id = self.state.with(|s| s.selected_task_id.clone());
 
         let show_archive = self.state.with(|s| {
             s.nav == AppNav::Projects
@@ -382,6 +403,7 @@ impl Render for TasksPane {
                             let rows: Vec<_> = day_tasks
                                 .into_iter()
                                 .map(|task| {
+                                    let selected = selected_id.as_deref() == Some(task.id.as_str());
                                     Self::render_task_row(
                                         task,
                                         entity.clone(),
@@ -389,6 +411,7 @@ impl Render for TasksPane {
                                         muted,
                                         accent,
                                         &today,
+                                        selected,
                                     )
                                     .into_any_element()
                                 })
@@ -410,13 +433,14 @@ impl Render for TasksPane {
                     v_flex()
                         .gap_2()
                         .flex_1()
-                        .overflow_hidden()
+                        .overflow_y_scrollbar()
                         .children(sections)
                         .into_any_element()
                 } else {
                     let rows: Vec<_> = tasks
                         .into_iter()
                         .map(|task| {
+                            let selected = selected_id.as_deref() == Some(task.id.as_str());
                             Self::render_task_row(
                                 task,
                                 entity.clone(),
@@ -424,6 +448,7 @@ impl Render for TasksPane {
                                 muted,
                                 accent,
                                 &today,
+                                selected,
                             )
                             .into_any_element()
                         })
@@ -431,7 +456,7 @@ impl Render for TasksPane {
                     v_flex()
                         .gap_1()
                         .flex_1()
-                        .overflow_hidden()
+                        .overflow_y_scrollbar()
                         .children(rows)
                         .into_any_element()
                 }
@@ -455,6 +480,7 @@ impl Render for TasksPane {
                         let rows: Vec<_> = col
                             .into_iter()
                             .map(|task| {
+                                let selected = selected_id.as_deref() == Some(task.id.as_str());
                                 Self::render_task_row(
                                     task,
                                     entity.clone(),
@@ -462,6 +488,7 @@ impl Render for TasksPane {
                                     muted,
                                     accent,
                                     &today,
+                                    selected,
                                 )
                                 .into_any_element()
                             })
@@ -473,6 +500,7 @@ impl Render for TasksPane {
                             .rounded(radius)
                             .border_1()
                             .border_color(border)
+                            .overflow_y_scrollbar()
                             .child(div().font_bold().child(format!("{label} · {}", rows.len())))
                             .children(rows)
                             .into_any_element()
