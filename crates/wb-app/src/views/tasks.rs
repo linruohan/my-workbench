@@ -5,8 +5,9 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    INBOX_PROJECT_ID, SchedulePatch, Task, apply_schedule_patch, compute_task_stats, filter_tasks,
-    is_today_member, parse_quick_capture, select_planner_tasks, select_today_tasks,
+    INBOX_PROJECT_ID, SchedulePatch, Task, add_local_days, apply_schedule_patch, clear_plan_fields,
+    compute_task_stats, filter_tasks, format_local_day, is_today_member, parse_quick_capture,
+    select_planner_tasks, select_today_tasks,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,6 +114,31 @@ impl TasksPane {
         cx.notify();
     }
 
+    fn schedule_day(&mut self, id: &str, day: Option<String>, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            if let Some(mut task) = s.repo.get_task(id).cloned() {
+                if day.is_none() {
+                    clear_plan_fields(&mut task);
+                } else {
+                    apply_schedule_patch(
+                        &mut task,
+                        &SchedulePatch {
+                            due_day: Some(day),
+                            due_with_time: Some(None),
+                            deadline_day: None,
+                            deadline_with_time: None,
+                            remind_at: None,
+                            deadline_remind_at: None,
+                        },
+                    );
+                }
+                s.repo.upsert_task(task);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn filtered_tasks(&self) -> (String, Vec<Task>) {
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
@@ -157,6 +183,7 @@ impl TasksPane {
         radius: Pixels,
         muted: Hsla,
         accent: Hsla,
+        today: &str,
     ) -> impl IntoElement {
         let id = task.id.clone();
         let done = task.is_done;
@@ -164,8 +191,10 @@ impl TasksPane {
         let plan = task
             .due_day
             .clone()
-            .or_else(|| task.due_with_time.map(wb_domain::format_local_day))
+            .or_else(|| task.due_with_time.map(format_local_day))
             .unwrap_or_default();
+        let tomorrow = add_local_days(today, 1).unwrap_or_else(|| today.to_string());
+        let today_day = today.to_string();
         h_flex()
             .id(SharedString::from(format!("task-{}", id)))
             .w_full()
@@ -180,6 +209,7 @@ impl TasksPane {
                     .label(if done { "☑" } else { "☐" })
                     .on_click({
                         let id = id.clone();
+                        let entity = entity.clone();
                         move |_, _, app| {
                             if let Some(entity) = entity.upgrade() {
                                 entity.update(app, |this, cx| {
@@ -198,6 +228,61 @@ impl TasksPane {
             )
             .when(!plan.is_empty(), |row| {
                 row.child(div().text_xs().text_color(muted).child(plan))
+            })
+            .when(!done, |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("today-{id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("今")
+                        .on_click({
+                            let id = id.clone();
+                            let entity = entity.clone();
+                            let day = today_day.clone();
+                            move |_, _, app| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(app, |this, cx| {
+                                        this.schedule_day(&id, Some(day.clone()), cx);
+                                    });
+                                }
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("tmr-{id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("明")
+                        .on_click({
+                            let id = id.clone();
+                            let entity = entity.clone();
+                            let day = tomorrow.clone();
+                            move |_, _, app| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(app, |this, cx| {
+                                        this.schedule_day(&id, Some(day.clone()), cx);
+                                    });
+                                }
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("clr-{id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("清")
+                        .on_click({
+                            let id = id.clone();
+                            let entity = entity.clone();
+                            move |_, _, app| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(app, |this, cx| {
+                                        this.schedule_day(&id, None, cx);
+                                    });
+                                }
+                            }
+                        }),
+                )
             })
     }
 
@@ -237,7 +322,7 @@ impl Render for TasksPane {
                 let rows: Vec<_> = tasks
                     .into_iter()
                     .map(|task| {
-                        Self::render_task_row(task, entity.clone(), radius, muted, accent)
+                        Self::render_task_row(task, entity.clone(), radius, muted, accent, &today)
                             .into_any_element()
                     })
                     .collect();
@@ -267,8 +352,15 @@ impl Render for TasksPane {
                         let rows: Vec<_> = col
                             .into_iter()
                             .map(|task| {
-                                Self::render_task_row(task, entity.clone(), radius, muted, accent)
-                                    .into_any_element()
+                                Self::render_task_row(
+                                    task,
+                                    entity.clone(),
+                                    radius,
+                                    muted,
+                                    accent,
+                                    &today,
+                                )
+                                .into_any_element()
                             })
                             .collect();
                         v_flex()

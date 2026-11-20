@@ -1,6 +1,8 @@
 use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -127,6 +129,22 @@ impl AgentPane {
         self.state.persist_if_dirty();
         cx.notify();
     }
+
+    fn delete_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.repo.delete_agent_thread(id);
+            if s.active_thread_id.as_deref() == Some(id) {
+                s.active_thread_id = None;
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| s.active_thread_id = Some(id));
+        cx.notify();
+    }
 }
 
 impl Render for AgentPane {
@@ -146,6 +164,97 @@ impl Render for AgentPane {
         let entity = cx.weak_entity();
         let active = self.state.with(|s| s.active_thread_id.clone());
         let status = self.status.clone();
+        let radius = cx.theme().radius;
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+        let secondary = cx.theme().secondary;
+        let border = cx.theme().border;
+        let danger = cx.theme().danger;
+
+        let thread_rows: Vec<_> = threads
+            .into_iter()
+            .map(|t| {
+                let id = t.id.clone();
+                let selected = active.as_deref() == Some(id.as_str());
+                let entity = entity.clone();
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_1()
+                    .p_2()
+                    .rounded(radius)
+                    .when(selected, |d| d.bg(accent))
+                    .hover(|d| d.bg(accent.opacity(0.5)))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("thread-{id}")))
+                            .flex_1()
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            .child(t.title)
+                            .on_click({
+                                let id = id.clone();
+                                let entity = entity.clone();
+                                move |_, _, app| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(app, |this, cx| {
+                                            this.select_thread(id.clone(), cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("del-thread-{id}")))
+                            .xsmall()
+                            .ghost()
+                            .label("×")
+                            .on_click({
+                                let id = id.clone();
+                                move |_, _, app| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(app, |this, cx| this.delete_thread(&id, cx));
+                                    }
+                                }
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let message_rows: Vec<_> = messages
+            .into_iter()
+            .map(|m| {
+                let role = match m.role {
+                    AgentRole::User => "你",
+                    AgentRole::Assistant => "Agent",
+                    AgentRole::Tool => m.tool_name.as_deref().unwrap_or("tool"),
+                    AgentRole::System => "系统",
+                };
+                let content = m.content.clone();
+                let use_md = matches!(m.role, AgentRole::Assistant | AgentRole::System);
+                let msg_id = m.id.clone();
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .rounded(radius)
+                    .bg(secondary)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_bold()
+                            .text_color(muted)
+                            .child(role.to_string()),
+                    )
+                    .child(if use_md {
+                        TextView::markdown(SharedString::from(format!("msg-{msg_id}")), content)
+                            .into_any_element()
+                    } else {
+                        div().child(content).into_any_element()
+                    })
+                    .into_any_element()
+            })
+            .collect();
 
         h_flex()
             .size_full()
@@ -154,7 +263,7 @@ impl Render for AgentPane {
                     .w(px(240.))
                     .h_full()
                     .border_r_1()
-                    .border_color(cx.theme().border)
+                    .border_color(border)
                     .p_3()
                     .gap_2()
                     .child(
@@ -177,31 +286,16 @@ impl Render for AgentPane {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(muted)
                             .child(format!("{} 个工作区", workspaces.len())),
                     )
-                    .child(v_flex().gap_1().children(threads.into_iter().map(|t| {
-                        let id = t.id.clone();
-                        let selected = active.as_deref() == Some(id.as_str());
-                        let entity = entity.clone();
-                        div()
-                            .id(SharedString::from(format!("thread-{id}")))
-                            .p_2()
-                            .rounded(cx.theme().radius)
-                            .when(selected, |d| d.bg(cx.theme().accent))
-                            .hover(|d| d.bg(cx.theme().accent.opacity(0.5)))
-                            .cursor_pointer()
-                            .child(t.title)
-                            .on_click(move |_, _, app| {
-                                if let Some(e) = entity.upgrade() {
-                                    e.update(app, |this, cx| {
-                                        this.state
-                                            .with_mut(|s| s.active_thread_id = Some(id.clone()));
-                                        cx.notify();
-                                    });
-                                }
-                            })
-                    }))),
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .flex_1()
+                            .overflow_y_scrollbar()
+                            .children(thread_rows),
+                    ),
             )
             .child(
                 v_flex()
@@ -209,31 +303,15 @@ impl Render for AgentPane {
                     .h_full()
                     .p_3()
                     .gap_2()
-                    .child(v_flex().flex_1().gap_2().overflow_hidden().children(
-                        messages.into_iter().map(|m| {
-                            let role = match m.role {
-                                AgentRole::User => "你",
-                                AgentRole::Assistant => "Agent",
-                                AgentRole::Tool => m.tool_name.as_deref().unwrap_or("tool"),
-                                AgentRole::System => "系统",
-                            };
-                            v_flex()
-                                .gap_1()
-                                .p_2()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().secondary)
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_bold()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(role.to_string()),
-                                )
-                                .child(div().child(m.content))
-                        }),
-                    ))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_2()
+                            .overflow_y_scrollbar()
+                            .children(message_rows),
+                    )
                     .when(!status.is_empty(), |col| {
-                        col.child(div().text_sm().text_color(cx.theme().danger).child(status))
+                        col.child(div().text_sm().text_color(danger).child(status))
                     })
                     .child(
                         h_flex().gap_2().child(Input::new(&self.input)).child(

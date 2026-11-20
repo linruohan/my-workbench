@@ -202,21 +202,39 @@ impl Render for WorkbenchApp {
         let entity = cx.weak_entity();
         let collapsed = self.collapsed;
 
+        let today_label = if today_count > 0 {
+            format!("今日 ({today_count})")
+        } else {
+            "今日".into()
+        };
+        let inbox_label = if inbox_count > 0 {
+            format!("收件箱 ({inbox_count})")
+        } else {
+            "收件箱".into()
+        };
         let task_menu = SidebarMenu::new().children([
-            Self::menu_item(
-                "今日",
-                IconName::Calendar,
-                AppNav::Today,
-                nav == AppNav::Today,
-                entity.clone(),
-            ),
-            Self::menu_item(
-                "收件箱",
-                IconName::Inbox,
-                AppNav::Inbox,
-                nav == AppNav::Inbox,
-                entity.clone(),
-            ),
+            {
+                let entity = entity.clone();
+                SidebarMenuItem::new(today_label)
+                    .icon(IconName::Calendar)
+                    .active(nav == AppNav::Today)
+                    .on_click(move |_, _, app| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(app, |this, cx| this.set_nav(AppNav::Today, cx));
+                        }
+                    })
+            },
+            {
+                let entity = entity.clone();
+                SidebarMenuItem::new(inbox_label)
+                    .icon(IconName::Inbox)
+                    .active(nav == AppNav::Inbox)
+                    .on_click(move |_, _, app| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(app, |this, cx| this.set_nav(AppNav::Inbox, cx));
+                        }
+                    })
+            },
             Self::menu_item(
                 "已完成",
                 IconName::Check,
@@ -239,7 +257,6 @@ impl Render for WorkbenchApp {
                 entity.clone(),
             ),
         ]);
-        let _ = (today_count, inbox_count);
 
         let project_menu =
             SidebarMenu::new().children(project_items.into_iter().map(|(id, title, active)| {
@@ -409,23 +426,67 @@ impl Render for WorkbenchApp {
             })
             .when(notifications_open, |root| {
                 let entity = entity.clone();
+                let visible: Vec<_> = notes
+                    .into_iter()
+                    .filter(|n| {
+                        matches!(
+                            n.status,
+                            NotificationStatus::Pending | NotificationStatus::Delivered
+                        )
+                    })
+                    .take(20)
+                    .collect();
                 root.child(
                     div()
                         .absolute()
                         .top(px(48.))
                         .right(px(12.))
                         .w(px(320.))
-                        .max_h(px(400.))
+                        .max_h(px(420.))
                         .rounded(cx.theme().radius)
                         .border_1()
                         .border_color(cx.theme().border)
                         .bg(cx.theme().background)
                         .p_3()
-                        .child(div().font_bold().mb_2().child("通知"))
+                        .shadow_md()
                         .child(
+                            h_flex()
+                                .items_center()
+                                .mb_2()
+                                .gap_2()
+                                .child(div().font_bold().child("通知"))
+                                .child(div().flex_1())
+                                .when(!visible.is_empty(), |row| {
+                                    let entity = entity.clone();
+                                    row.child(
+                                        Button::new("dismiss-all")
+                                            .xsmall()
+                                            .ghost()
+                                            .label("全部关闭")
+                                            .on_click(move |_, _, app| {
+                                                if let Some(e) = entity.upgrade() {
+                                                    e.update(app, |this, cx| {
+                                                        this.state.with_mut(|s| {
+                                                            s.repo.dismiss_all_notifications();
+                                                        });
+                                                        this.state.persist_if_dirty();
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                }),
+                        )
+                        .child(if visible.is_empty() {
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("暂无通知")
+                                .into_any_element()
+                        } else {
                             v_flex()
                                 .gap_2()
-                                .children(notes.into_iter().take(20).map(|n| {
+                                .children(visible.into_iter().map(|n| {
                                     let id = n.id.clone();
                                     let entity = entity.clone();
                                     v_flex()
@@ -459,8 +520,9 @@ impl Render for WorkbenchApp {
                                                 }
                                             }),
                                         )
-                                })),
-                        ),
+                                }))
+                                .into_any_element()
+                        }),
                 )
             })
     }

@@ -344,6 +344,21 @@ impl MemoryWorkbenchRepository {
         }
     }
 
+    pub fn dismiss_all_notifications(&mut self) {
+        let now = now_ms();
+        let mut changed = false;
+        for n in &mut self.notifications {
+            if !matches!(n.status, NotificationStatus::Dismissed) {
+                n.status = NotificationStatus::Dismissed;
+                n.updated_at = now;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty = true;
+        }
+    }
+
     pub fn list_timed_tasks(&self) -> Vec<TimedTask> {
         let mut v: Vec<_> = self.timed_tasks.values().cloned().collect();
         v.sort_by_key(|a| a.created_at);
@@ -378,6 +393,12 @@ impl MemoryWorkbenchRepository {
 
     pub fn upsert_agent_thread(&mut self, thread: AgentThread) {
         self.agent_threads.insert(thread.id.clone(), thread);
+        self.dirty = true;
+    }
+
+    pub fn delete_agent_thread(&mut self, id: &str) {
+        self.agent_threads.remove(id);
+        self.agent_messages.retain(|_, m| m.thread_id != id);
         self.dirty = true;
     }
 
