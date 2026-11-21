@@ -1,7 +1,6 @@
-//! Local speech model catalog + status. Transcription uses an external CLI when available.
-//!
-//! In-process sherpa-onnx is not linked on Windows yet: official prebuilts use MT CRT,
-//! which conflicts with paddle-ocr-rs → clipper-sys (MD). Prefer `sherpa-onnx-offline` CLI.
+//! Local speech model catalog + status.
+//! Transcription prefers the `wb-asr` helper (sherpa-onnx in a separate process),
+//! then falls back to `sherpa-onnx-offline` / `sensevoice` CLI.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -92,21 +91,18 @@ pub fn speech_status(engine: &str) -> Result<SpeechStatus> {
             .collect()
     };
     let ready = missing.is_empty();
-    let has_cli = crate::shell::which_bin("sherpa-onnx-offline")
-        .or_else(|| crate::shell::which_bin("sensevoice"))
-        .is_some();
+    let has_worker = find_wb_asr().is_some()
+        || crate::shell::which_bin("sherpa-onnx-offline").is_some()
+        || crate::shell::which_bin("sensevoice").is_some();
     Ok(SpeechStatus {
         engine: engine.into(),
         ready,
         model_dir: dir.to_string_lossy().to_string(),
         missing: missing.clone(),
-        message: if ready && has_cli {
-            Some("SenseVoice 模型已就绪（sherpa-onnx CLI）".into())
+        message: if ready && has_worker {
+            Some("SenseVoice 模型已就绪（wb-asr / sherpa CLI）".into())
         } else if ready {
-            Some(
-                "SenseVoice 模型已就绪；请安装 sherpa-onnx-offline CLI（Windows 暂无法同进程链接 sherpa MT CRT）"
-                    .into(),
-            )
+            Some("SenseVoice 模型已就绪；请构建/安装 wb-asr，或安装 sherpa-onnx-offline CLI".into())
         } else {
             Some(format!(
                 "模型尚未就绪，缺少 {} 个文件。可在设置中准备/下载。",
@@ -180,7 +176,87 @@ pub fn speech_warm(engine: &str) -> Result<SpeechStatus> {
     speech_status(engine)
 }
 
-/// Transcribe a WAV file. Tries `sherpa-onnx-offline` / `sensevoice` CLI when present.
+fn find_wb_asr() -> Option<PathBuf> {
+    if let Some(p) = crate::shell::which_bin("wb-asr") {
+        return Some(PathBuf::from(p));
+    }
+    let exe_name = if cfg!(windows) {
+        "wb-asr.exe"
+    } else {
+        "wb-asr"
+    };
+    if let Ok(current) = std::env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let sibling = dir.join(exe_name);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+        // cargo run: target/debug/wb-app.exe → look for target/debug/wb-asr.exe
+        // also try ../ if nested
+        for up in [dir.to_path_buf(), dir.join(".."), dir.join("../..")] {
+            for profile in ["debug", "release"] {
+                let cand = up.join(profile).join(exe_name);
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn run_wb_asr(bin: &Path, model_dir: &str, wav_path: &str, language: &str) -> Result<String> {
+    let tokens = Path::new(model_dir).join("sensevoice-onnx/tokens.txt");
+    let model = Path::new(model_dir).join("sensevoice-onnx/model.int8.onnx");
+    let out = Command::new(bin)
+        .arg("--tokens")
+        .arg(&tokens)
+        .arg("--model")
+        .arg(&model)
+        .arg("--language")
+        .arg(language)
+        .arg(wav_path)
+        .output()
+        .context("启动 wb-asr 失败")?;
+    if out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    bail!("wb-asr 失败：{err}")
+}
+
+fn run_sherpa_cli(model_dir: &str, wav_path: &str, language: &str) -> Option<Result<String>> {
+    let bin = crate::shell::which_bin("sherpa-onnx-offline")
+        .or_else(|| crate::shell::which_bin("sensevoice"))?;
+    let tokens = Path::new(model_dir).join("sensevoice-onnx/tokens.txt");
+    let model = Path::new(model_dir).join("sensevoice-onnx/model.int8.onnx");
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--tokens")
+        .arg(&tokens)
+        .arg("--sense-voice-model")
+        .arg(&model)
+        .arg("--language")
+        .arg(language)
+        .arg(wav_path);
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => return Some(Err(e).context("启动语音 CLI 失败")),
+    };
+    if out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !text.is_empty() {
+            return Some(Ok(text));
+        }
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Some(Err(anyhow::anyhow!("语音 CLI 失败：{err}")))
+}
+
+/// Transcribe a WAV file via `wb-asr` helper, then sherpa CLI fallback.
 pub fn speech_transcribe(engine: &str, wav_path: &str, language: Option<&str>) -> Result<String> {
     let wav = Path::new(wav_path);
     if !wav.is_file() {
@@ -189,38 +265,27 @@ pub fn speech_transcribe(engine: &str, wav_path: &str, language: Option<&str>) -
     let status = speech_status(engine)?;
     let lang = language.unwrap_or("auto");
 
-    if let Some(bin) = crate::shell::which_bin("sherpa-onnx-offline")
-        .or_else(|| crate::shell::which_bin("sensevoice"))
+    if status.ready
+        && let Some(bin) = find_wb_asr()
     {
-        let tokens = Path::new(&status.model_dir).join("sensevoice-onnx/tokens.txt");
-        let model = Path::new(&status.model_dir).join("sensevoice-onnx/model.int8.onnx");
-        let mut cmd = Command::new(&bin);
-        cmd.arg("--tokens")
-            .arg(&tokens)
-            .arg("--sense-voice-model")
-            .arg(&model)
-            .arg("--language")
-            .arg(lang)
-            .arg(wav_path);
-        let out = cmd.output().context("启动语音 CLI 失败")?;
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !text.is_empty() {
-                return Ok(text);
-            }
+        match run_wb_asr(&bin, &status.model_dir, wav_path, lang) {
+            Ok(text) => return Ok(text),
+            Err(e) => log::warn!("wb-asr failed: {e}"),
         }
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("语音 CLI 失败：{err}");
+    }
+
+    if let Some(result) = run_sherpa_cli(&status.model_dir, wav_path, lang) {
+        return result;
     }
 
     if !status.ready {
         bail!(
-            "语音模型未就绪（{}）。请在设置中下载 SenseVoice，或安装 sherpa-onnx-offline。",
+            "语音模型未就绪（{}）。请在设置中下载 SenseVoice，并构建 wb-asr 或安装 sherpa-onnx-offline。",
             status.message.unwrap_or_else(|| status.model_dir.clone())
         );
     }
     bail!(
-        "SenseVoice 模型已在 {}，但未找到 sherpa-onnx-offline / sensevoice CLI。Windows 上暂无法与 OCR 同进程链接 sherpa（MT/MD CRT 冲突）。",
+        "SenseVoice 模型已在 {}，但未找到 wb-asr / sherpa-onnx-offline / sensevoice。请 `cargo build -p wb-asr`。",
         status.model_dir
     )
 }

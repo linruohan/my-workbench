@@ -146,7 +146,7 @@ cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --wor
 
 ### 阶段 6 — 语音 / OCR / 其它原生
 
-- speech 模型目录/下载；CapsLock LL hook + cpal 录音写 `ptt-last.wav`；转写走 sherpa-onnx CLI（Windows 与 OCR 的 MT/MD CRT 冲突，暂不同进程链接）。
+- speech 模型目录/下载；CapsLock LL hook + cpal 录音写 `ptt-last.wav`；转写走独立 `wb-asr`（sherpa-onnx 子进程，避开 OCR CRT 冲突）或 CLI。
 - PaddleOCR 模型下载 + 内置 paddle-ocr-rs ONNX（tesseract / CLI 回退）。
 - 系统字体扫描、HTTP 代理、`.wb/spill` 落盘与 30 天 GC；MCP HTTP JSON-RPC/SSE。
 - 子智能体：`wait=true`/`send_message` 走完整 `run_user_turn` 工具环；异步托管后台 resume。

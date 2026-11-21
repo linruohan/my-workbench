@@ -990,7 +990,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         tool(
             "speech_transcribe",
             ToolEffect::Read,
-            "转写本机 WAV 录音（SenseVoice 模型 + sherpa-onnx-offline CLI）",
+            "转写本机 WAV 录音（SenseVoice：wb-asr 子进程 / sherpa CLI）",
             serde_json::json!({
                 "path": { "type": "string" },
                 "language": { "type": "string" }

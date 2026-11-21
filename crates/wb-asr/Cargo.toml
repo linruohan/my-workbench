@@ -1,0 +1,15 @@
+[package]
+name = "wb-asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SenseVoice ASR helper process (isolates sherpa-onnx MT CRT from OCR)"
+
+[[bin]]
+name = "wb-asr"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+sherpa-onnx.workspace = true
