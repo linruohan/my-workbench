@@ -6,7 +6,8 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use wb_domain::{body_links_to, extract_wikilinks, resolve_wikilink};
 use wb_host::{
     create_markdown, git_branch, list_files_recursive, open_path, pick_directory, read_text,
     write_text,
@@ -204,6 +205,49 @@ impl KnowledgePane {
         self.replace_status = format!("已全部替换 {count} 处");
         cx.notify();
     }
+
+    /// Outgoing wikilinks from `body`: (display label, resolved abs path if any).
+    fn outgoing_links(&self, body: &str) -> Vec<(String, Option<String>)> {
+        let files = &self.files;
+        extract_wikilinks(body)
+            .into_iter()
+            .map(|target| {
+                let resolved = resolve_wikilink(&target, files).map(str::to_string);
+                (target, resolved)
+            })
+            .collect()
+    }
+
+    /// Files that `[[link]]` to the current note (scan markdown only, cap reads).
+    fn backlinks(&self, current_abs: &str) -> Vec<(String, String)> {
+        let files = &self.files;
+        let mut out = Vec::new();
+        for (abs, rel) in files {
+            if abs == current_abs {
+                continue;
+            }
+            let is_md = Path::new(abs)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| {
+                    let e = e.to_ascii_lowercase();
+                    e == "md" || e == "markdown"
+                });
+            if !is_md {
+                continue;
+            }
+            if out.len() >= 40 {
+                break;
+            }
+            let Ok(text) = read_text(Path::new(abs)) else {
+                continue;
+            };
+            if body_links_to(&text, current_abs, files) {
+                out.push((abs.clone(), rel.clone()));
+            }
+        }
+        out
+    }
 }
 
 impl Render for KnowledgePane {
@@ -397,8 +441,93 @@ impl Render for KnowledgePane {
                             .flex_1()
                             .w_full()
                             .overflow_y_scrollbar()
-                            .child(TextView::markdown("kb-preview", preview_text))
+                            .child(TextView::markdown("kb-preview", preview_text.clone()))
                             .into_any_element(),
+                    })
+                    .when_some(current.clone(), |col, cur| {
+                        let outgoing = self.outgoing_links(&preview_text);
+                        let backs = self.backlinks(&cur);
+                        let out_n = outgoing.len();
+                        let back_n = backs.len();
+                        let entity = entity.clone();
+                        col.child(
+                            v_flex()
+                                .gap_1()
+                                .p_2()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(border)
+                                .max_h(px(160.))
+                                .overflow_y_scrollbar()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_bold()
+                                        .text_color(muted)
+                                        .child(format!("双向链接 · 出链 {out_n} · 反向 {back_n}")),
+                                )
+                                .when(out_n > 0, |box_| {
+                                    box_.child(h_flex().gap_1().flex_wrap().children(
+                                        outgoing.into_iter().enumerate().map(
+                                            |(i, (label, path))| {
+                                                let entity = entity.clone();
+                                                let resolved = path.clone();
+                                                let title = if path.is_some() {
+                                                    format!("→ [[{label}]]")
+                                                } else {
+                                                    format!("→ [[{label}]] ?")
+                                                };
+                                                Button::new(SharedString::from(format!(
+                                                    "wiki-out-{i}"
+                                                )))
+                                                .xsmall()
+                                                .ghost()
+                                                .label(title)
+                                                .disabled(path.is_none())
+                                                .on_click(move |_, window, app| {
+                                                    if let (Some(p), Some(e)) =
+                                                        (resolved.as_ref(), entity.upgrade())
+                                                    {
+                                                        let p = p.clone();
+                                                        e.update(app, |this, cx| {
+                                                            this.open_file(&p, window, cx);
+                                                        });
+                                                    }
+                                                })
+                                            },
+                                        ),
+                                    ))
+                                })
+                                .when(back_n > 0, |box_| {
+                                    box_.child(h_flex().gap_1().flex_wrap().children(
+                                        backs.into_iter().enumerate().map(|(i, (path, rel))| {
+                                            let entity = entity.clone();
+                                            Button::new(SharedString::from(format!(
+                                                "wiki-back-{i}"
+                                            )))
+                                            .xsmall()
+                                            .ghost()
+                                            .label(format!("← {rel}"))
+                                            .on_click(move |_, window, app| {
+                                                if let Some(e) = entity.upgrade() {
+                                                    let p = path.clone();
+                                                    e.update(app, |this, cx| {
+                                                        this.open_file(&p, window, cx);
+                                                    });
+                                                }
+                                            })
+                                        }),
+                                    ))
+                                })
+                                .when(out_n == 0 && back_n == 0, |box_| {
+                                    box_.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child("在正文写 [[笔记名]] 即可建立链接"),
+                                    )
+                                }),
+                        )
                     }),
             )
     }
