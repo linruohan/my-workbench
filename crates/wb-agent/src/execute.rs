@@ -4,9 +4,10 @@ use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
 use wb_domain::{
-    AgentPermissionMode, NotificationKind, TimedIntervalUnit, TimedSchedulePreset, ToolEffect,
-    ToolGate, ToolSpec, builtin_host_tools, create_timed_task_draft, format_local_day, gate_tool,
-    make_custom_schedule, make_preset_schedule, now_ms, settle_timer_segment, workspace_tools,
+    AgentMessage, AgentPermissionMode, NotificationKind, TimedIntervalUnit, TimedSchedulePreset,
+    ToolEffect, ToolGate, ToolSpec, builtin_host_tools, create_timed_task_draft, format_local_day,
+    gate_tool, make_custom_schedule, make_preset_schedule, now_ms, settle_timer_segment,
+    workspace_tools,
 };
 use wb_host::{
     global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
@@ -55,6 +56,49 @@ fn effective_root(workspace_root: Option<&str>) -> Result<String> {
     workspace_root
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow::anyhow!("未绑定工作区"))
+}
+
+fn resolve_thread_id(repo: &MemoryWorkbenchRepository, args: &Value) -> Option<String> {
+    args.get("threadId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| repo.list_agent_threads().into_iter().next().map(|t| t.id))
+}
+
+/// 1-based seq list; when `before_last_user`, cut off at the last user message (exclusive).
+fn thread_events(
+    repo: &MemoryWorkbenchRepository,
+    thread_id: &str,
+    before_last_user: bool,
+) -> Vec<(usize, AgentMessage)> {
+    let mut msgs = repo.messages_for_thread(thread_id);
+    if before_last_user {
+        if let Some(pos) = msgs
+            .iter()
+            .rposition(|m| matches!(m.role, wb_domain::AgentRole::User))
+        {
+            msgs.truncate(pos);
+        }
+    }
+    msgs.into_iter()
+        .enumerate()
+        .map(|(i, m)| (i + 1, m))
+        .collect()
+}
+
+fn format_event(seq: usize, m: &AgentMessage) -> String {
+    let role = format!("{:?}", m.role).to_lowercase();
+    let tool = m
+        .tool_name
+        .as_deref()
+        .map(|n| format!(" tool={n}"))
+        .unwrap_or_default();
+    let call = m
+        .tool_call_id
+        .as_deref()
+        .map(|id| format!(" call={id}"))
+        .unwrap_or_default();
+    format!("#{seq} [{role}]{tool}{call}\n{}", m.content)
 }
 
 pub fn all_tools() -> Vec<ToolSpec> {
@@ -661,6 +705,137 @@ pub fn execute_tool(
                 "会话 {tid} 近 {} 条：\n{body}",
                 lines.len()
             )))
+        }
+        "session_event_search" => {
+            let q = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if q.is_empty() {
+                return Ok(ToolResult::err_text("缺少 query"));
+            }
+            let tid = resolve_thread_id(repo, args);
+            let Some(tid) = tid else {
+                return Ok(ToolResult::ok_text("（无会话）"));
+            };
+            let before_last_user = args
+                .get("beforeLastUser")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let events = thread_events(repo, &tid, before_last_user);
+            let mut hits = Vec::new();
+            for (seq, m) in events {
+                if m.content.to_lowercase().contains(&q)
+                    || m.tool_name
+                        .as_deref()
+                        .is_some_and(|n| n.to_lowercase().contains(&q))
+                {
+                    let snippet: String = m.content.chars().take(100).collect();
+                    hits.push(format!(
+                        "#{seq} [{}] {}",
+                        format!("{:?}", m.role).to_lowercase(),
+                        snippet.replace('\n', " ")
+                    ));
+                }
+                if hits.len() >= 40 {
+                    break;
+                }
+            }
+            Ok(ToolResult::ok_text(if hits.is_empty() {
+                "（无匹配事件）".into()
+            } else {
+                hits.join("\n")
+            }))
+        }
+        "session_event_read" => {
+            let tid = resolve_thread_id(repo, args);
+            let Some(tid) = tid else {
+                return Ok(ToolResult::ok_text("（无会话）"));
+            };
+            let seq = args.get("seq").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if seq == 0 {
+                return Ok(ToolResult::err_text("缺少 seq（从 1 起）"));
+            }
+            let neighbors = args
+                .get("neighbors")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .clamp(0, 5) as usize;
+            let events = thread_events(repo, &tid, false);
+            let Some((_, target)) = events.iter().find(|(s, _)| *s == seq) else {
+                return Ok(ToolResult::err_text(format!(
+                    "seq={seq} 不存在（共 {} 条）",
+                    events.len()
+                )));
+            };
+            let mut lines = vec![format_event(seq, target)];
+            if neighbors > 0 {
+                let start = seq.saturating_sub(neighbors).max(1);
+                let end = (seq + neighbors).min(events.len());
+                for (s, m) in &events {
+                    if *s >= start && *s <= end && *s != seq {
+                        lines.push(format_event(*s, m));
+                    }
+                }
+                lines.sort_by(|a, b| {
+                    let sa = a
+                        .strip_prefix('#')
+                        .and_then(|x| x.split_whitespace().next());
+                    let sb = b
+                        .strip_prefix('#')
+                        .and_then(|x| x.split_whitespace().next());
+                    sa.cmp(&sb)
+                });
+            }
+            Ok(ToolResult::ok_text(lines.join("\n\n")))
+        }
+        "session_event_trace" => {
+            let tid = resolve_thread_id(repo, args);
+            let Some(tid) = tid else {
+                return Ok(ToolResult::ok_text("（无会话）"));
+            };
+            let events = thread_events(repo, &tid, false);
+            if events.is_empty() {
+                return Ok(ToolResult::ok_text("（无事件）"));
+            }
+            let seq = args
+                .get("seq")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or_else(|| events.last().map(|(s, _)| *s).unwrap_or(1));
+            let window = args
+                .get("window")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2)
+                .clamp(1, 8) as usize;
+            let Some((_, center)) = events.iter().find(|(s, _)| *s == seq) else {
+                return Ok(ToolResult::err_text(format!("seq={seq} 不存在")));
+            };
+            let start = seq.saturating_sub(window).max(1);
+            let end = (seq + window).min(events.len());
+            let mut lines: Vec<_> = events
+                .iter()
+                .filter(|(s, _)| *s >= start && *s <= end)
+                .map(|(s, m)| format_event(*s, m))
+                .collect();
+            if let Some(ref call_id) = center.tool_call_id {
+                let related: Vec<_> = events
+                    .iter()
+                    .filter(|(s, m)| {
+                        *s != seq
+                            && (m.tool_call_id.as_deref() == Some(call_id.as_str())
+                                || m.content.contains(call_id.as_str()))
+                    })
+                    .map(|(s, m)| format_event(*s, m))
+                    .collect();
+                if !related.is_empty() {
+                    lines.push("--- 同 toolCallId ---".into());
+                    lines.extend(related);
+                }
+            }
+            Ok(ToolResult::ok_text(lines.join("\n\n")))
         }
         "get_goal" => match get_goal() {
             Some(g) => Ok(ToolResult::ok_text(format!(
@@ -1537,6 +1712,26 @@ mod tests {
             tool_calls_json: None,
             created_at: now,
         });
+        repo.upsert_agent_message(AgentMessage {
+            id: "m2".into(),
+            thread_id: "th-goal".into(),
+            role: AgentRole::Assistant,
+            content: "助手回复 alpha".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now + 1,
+        });
+        repo.upsert_agent_message(AgentMessage {
+            id: "m3".into(),
+            thread_id: "th-goal".into(),
+            role: AgentRole::User,
+            content: "最新用户".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now + 2,
+        });
         let created = execute_tool(
             &mut repo,
             "create_goal",
@@ -1556,6 +1751,38 @@ mod tests {
         )
         .unwrap();
         assert!(trace.content.contains("goal-trace"));
+
+        let ev = execute_tool(
+            &mut repo,
+            "session_event_search",
+            &json!({ "query": "alpha", "threadId": "th-goal" }),
+            None,
+        )
+        .unwrap();
+        assert!(ev.ok);
+        assert!(ev.content.contains("alpha"));
+
+        let read = execute_tool(
+            &mut repo,
+            "session_event_read",
+            &json!({ "seq": 2, "threadId": "th-goal", "neighbors": 1 }),
+            None,
+        )
+        .unwrap();
+        assert!(read.content.contains("#2"));
+
+        let et = execute_tool(
+            &mut repo,
+            "session_event_trace",
+            &json!({ "seq": 2, "threadId": "th-goal" }),
+            None,
+        )
+        .unwrap();
+        assert!(et.ok);
+
+        let idle = crate::prepare_goal_idle_round();
+        assert!(idle.is_some());
+
         let _ = execute_tool(
             &mut repo,
             "update_goal",

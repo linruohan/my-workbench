@@ -87,3 +87,26 @@ pub fn update_goal(action: &str, objective: Option<&str>) -> Result<SessionGoal,
 pub fn clear_goal() {
     *store().lock().unwrap() = None;
 }
+
+/// If an active goal should drive another idle round, tick it and return a prompt.
+/// Returns `None` when there is no active goal or the goal is paused/completed.
+pub fn prepare_goal_idle_round() -> Option<String> {
+    let g = get_goal()?;
+    if g.status != "active" {
+        return None;
+    }
+    let updated = update_goal("tick", None).ok()?;
+    if updated.status == "blocked" {
+        return Some(format!(
+            "[Goal] 已达回合上限并标记 blocked。目标：{}\n请总结进度或 update_goal(action=complete)。",
+            updated.objective
+        ));
+    }
+    if updated.status != "active" {
+        return None;
+    }
+    Some(format!(
+        "[Goal Round {}] 继续推进目标：{}\n完成后调用 update_goal(action=complete)，受阻则 blocked。",
+        updated.rounds_started, updated.objective
+    ))
+}

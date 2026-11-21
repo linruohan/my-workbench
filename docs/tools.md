@@ -383,10 +383,11 @@ DSH：统一协作式取消 + 超时错误映射。
 | `present` | ✅ 系统打开 + 可选资源管理器选中 |
 | `web_search` | ✅ DuckDuckGo HTML（无 Key） |
 | `session_trace` | ✅ 近期消息摘要 |
-| `get_goal` / `create_goal` / `update_goal` | 🟡 进程内轻量 goal（无空闲续行驱动） |
-| 真 PTY / MCP 协议 / `session_event_*` / 完整 goal 续行 | ❌ 未迁 |
+| `session_event_search` / `session_event_read` / `session_event_trace` | ✅ 消息即事件（1-based seq） |
+| `get_goal` / `create_goal` / `update_goal` | 🟡 进程内 goal；回合结束后最多 2 次空闲续行 |
+| 真 PTY / MCP 协议 / 完整 goal 策略与 blocked 阈值 | ❌ 未迁 |
 
-斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list`。
+斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list` `/goal …`。
 
 另：`shell` 是本仓库的跨平台入口（对齐 DSH `dsh-shell` 抽象 + bash/pwsh 二选一），DSH 目录里没有名为 `dsh-tool-shell` 的包。
 

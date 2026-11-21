@@ -415,6 +415,36 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "session_event_search",
+            ToolEffect::Read,
+            "单会话消息事件搜索（1-based seq）；beforeLastUser 默认 true",
+            serde_json::json!({
+                "query": { "type": "string" },
+                "threadId": { "type": "string" },
+                "beforeLastUser": { "type": "boolean" }
+            }),
+        ),
+        tool(
+            "session_event_read",
+            ToolEffect::Read,
+            "按 1-based seq 读取消息，可选前后邻居",
+            serde_json::json!({
+                "seq": { "type": "integer" },
+                "threadId": { "type": "string" },
+                "neighbors": { "type": "integer" }
+            }),
+        ),
+        tool(
+            "session_event_trace",
+            ToolEffect::Read,
+            "围绕 seq 的邻居与同 toolCallId 关联",
+            serde_json::json!({
+                "seq": { "type": "integer" },
+                "threadId": { "type": "string" },
+                "window": { "type": "integer" }
+            }),
+        ),
+        tool(
             "get_goal",
             ToolEffect::Read,
             "查看当前会话 goal",

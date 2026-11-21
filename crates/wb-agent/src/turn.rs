@@ -499,6 +499,7 @@ fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
         ("/ui_open", "ui_open"),
         ("/search", "search"),
         ("/host_tool_list", "host_tool_list"),
+        ("/get_goal", "get_goal"),
     ];
     for (prefix, name) in COMMANDS {
         if t == *prefix || t.starts_with(&format!("{prefix} ")) {
@@ -510,6 +511,21 @@ fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
             };
             return Some((name, args));
         }
+    }
+    // /goal [status|clear] — map to get_goal / update_goal
+    if t == "/goal" || t.starts_with("/goal ") {
+        let rest = t.trim_start_matches("/goal").trim();
+        return match rest {
+            "" | "status" => Some(("get_goal", json!({}))),
+            "clear" => Some(("update_goal", json!({ "action": "clear" }))),
+            "pause" => Some(("update_goal", json!({ "action": "pause" }))),
+            "resume" => Some(("update_goal", json!({ "action": "resume" }))),
+            other if other.starts_with("create ") => Some((
+                "create_goal",
+                json!({ "objective": other.trim_start_matches("create ").trim() }),
+            )),
+            other => Some(("create_goal", json!({ "objective": other }))),
+        };
     }
     None
 }

@@ -9,7 +9,7 @@ use gpui_kit::*;
 use wb_agent::{
     TurnPhase, begin_user_turn, continue_turn_reply, create_thread, cycle_permission_mode,
     finish_continue_turn, finish_user_turn, load_providers, pending_approvals_for_thread,
-    permission_mode_label, resolve_approval, resolve_turn_reply,
+    permission_mode_label, prepare_goal_idle_round, resolve_approval, resolve_turn_reply,
 };
 use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
@@ -129,9 +129,62 @@ impl AgentPane {
                 })
                 .ok();
 
-            while let Some(TurnPhase::Continue(cont, _)) = phase {
-                let proxy3 = proxy.clone();
-                let cont2 = cont.clone();
+            let mut goal_followups = 0u32;
+            loop {
+                while let Some(TurnPhase::Continue(cont, _)) = phase {
+                    let proxy3 = proxy.clone();
+                    let cont2 = (*cont).clone();
+                    let reply = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("tokio runtime");
+                            rt.block_on(continue_turn_reply(&cont2, proxy3.as_deref()))
+                        })
+                        .await;
+                    phase = this
+                        .update(cx, |this, cx| {
+                            let next = this
+                                .state
+                                .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
+                            this.apply_open_view(next.open_view());
+                            this.state.persist_if_dirty();
+                            cx.notify();
+                            next
+                        })
+                        .ok();
+                }
+
+                if goal_followups >= 2 {
+                    break;
+                }
+                let Some(goal_prompt) = prepare_goal_idle_round() else {
+                    break;
+                };
+                goal_followups += 1;
+                let pending_goal = match this.update(cx, |this, cx| {
+                    let tid = this.ensure_thread();
+                    let thread = this.state.with(|s| {
+                        s.repo
+                            .list_agent_threads()
+                            .into_iter()
+                            .find(|t| t.id == tid)
+                    });
+                    let thread = thread?;
+                    let pending = this
+                        .state
+                        .with_mut(|s| begin_user_turn(&mut s.repo, &thread, &goal_prompt));
+                    this.state.persist_if_dirty();
+                    cx.notify();
+                    Some(pending)
+                }) {
+                    Ok(Some(p)) => p,
+                    _ => break,
+                };
+                let pending2 = pending_goal.clone();
+                let proxy2 = proxy.clone();
                 let reply = cx
                     .background_executor()
                     .spawn(async move {
@@ -139,14 +192,14 @@ impl AgentPane {
                             .enable_all()
                             .build()
                             .expect("tokio runtime");
-                        rt.block_on(continue_turn_reply(&cont2, proxy3.as_deref()))
+                        rt.block_on(resolve_turn_reply(&pending2, proxy2.as_deref()))
                     })
                     .await;
                 phase = this
                     .update(cx, |this, cx| {
                         let next = this
                             .state
-                            .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
+                            .with_mut(|s| finish_user_turn(&mut s.repo, &pending_goal, reply));
                         this.apply_open_view(next.open_view());
                         this.state.persist_if_dirty();
                         cx.notify();
