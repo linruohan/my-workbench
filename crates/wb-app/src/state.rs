@@ -133,8 +133,8 @@ impl AppState {
         format_local_day(now_ms())
     }
 
-    pub fn theme_is_dark(&self) -> bool {
-        self.with(|s| matches!(s.prefs.theme_mode, ThemeModePref::Dark))
+    pub fn theme_mode(&self) -> ThemeModePref {
+        self.with(|s| s.prefs.theme_mode)
     }
 
     /// Push an in-app notification and optionally a desktop toast.

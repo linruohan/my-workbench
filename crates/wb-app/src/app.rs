@@ -1,3 +1,4 @@
+use crate::appearance::{apply_theme_pref, apply_ui_font};
 use crate::command_palette::CommandPalette;
 use crate::state::{AppNav, AppState};
 use crate::views::{AgentPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
@@ -35,9 +36,8 @@ impl WorkbenchApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::load();
         let collapsed = state.with(|s| s.prefs.sidebar_collapsed);
-        if state.theme_is_dark() {
-            Theme::change(ThemeMode::Dark, None, cx);
-        }
+        apply_theme_pref(state.theme_mode(), Some(window), cx);
+        apply_ui_font(state.with(|s| s.prefs.ui_font.clone()), cx);
 
         let tasks = cx.new(|cx| TasksPane::new(state.clone(), window, cx));
         let timed = cx.new(|cx| TimedPane::new(state.clone(), window, cx));
@@ -81,6 +81,14 @@ impl WorkbenchApp {
                     this.on_ptt_poll(cx);
                 })
                 .ok();
+            }
+        })
+        .detach();
+
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if matches!(this.state.theme_mode(), wb_domain::ThemeModePref::System) {
+                Theme::sync_system_appearance(Some(window), cx);
+                cx.notify();
             }
         })
         .detach();

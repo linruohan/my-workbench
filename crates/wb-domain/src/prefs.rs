@@ -66,6 +66,35 @@ pub enum ThemeModePref {
     #[default]
     Light,
     Dark,
+    /// 跟随操作系统浅色 / 深色
+    System,
+}
+
+impl ThemeModePref {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "浅色",
+            Self::Dark => "深色",
+            Self::System => "跟随系统",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Light => Self::Dark,
+            Self::Dark => Self::System,
+            Self::System => Self::Light,
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "light" | "浅色" => Some(Self::Light),
+            "dark" | "深色" => Some(Self::Dark),
+            "system" | "auto" | "跟随系统" => Some(Self::System),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

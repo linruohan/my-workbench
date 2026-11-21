@@ -882,7 +882,14 @@ pub fn execute_tool(
                 .trim();
             let prefs = load_prefs().unwrap_or_default();
             let value = match key {
-                "themeMode" => Some(format!("{:?}", prefs.theme_mode).to_lowercase()),
+                "themeMode" => Some(
+                    match prefs.theme_mode {
+                        wb_domain::ThemeModePref::Light => "light",
+                        wb_domain::ThemeModePref::Dark => "dark",
+                        wb_domain::ThemeModePref::System => "system",
+                    }
+                    .into(),
+                ),
                 "systemNotifications" => Some(prefs.system_notifications.to_string()),
                 "httpProxy" => Some(prefs.http_proxy.clone().unwrap_or_default()),
                 "defaultModelRef" => Some(
@@ -939,14 +946,10 @@ pub fn execute_tool(
             let result = update_prefs(|prefs| {
                 match key {
                     "themeMode" => {
-                        let v = as_str().to_lowercase();
-                        prefs.theme_mode = match v.as_str() {
-                            "dark" => wb_domain::ThemeModePref::Dark,
-                            "light" => wb_domain::ThemeModePref::Light,
-                            _ => {
-                                return Ok(ToolResult::err_text("themeMode 仅支持 light/dark"));
-                            }
+                        let Some(mode) = wb_domain::ThemeModePref::parse(&as_str()) else {
+                            return Ok(ToolResult::err_text("themeMode 仅支持 light/dark/system"));
                         };
+                        prefs.theme_mode = mode;
                     }
                     "systemNotifications" => {
                         let on = raw.as_bool().unwrap_or_else(|| {

@@ -106,11 +106,7 @@ struct ThemeFile {
 }
 
 fn parse_theme_mode(raw: &str) -> Option<ThemeModePref> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "dark" => Some(ThemeModePref::Dark),
-        "light" => Some(ThemeModePref::Light),
-        _ => None,
-    }
+    ThemeModePref::parse(raw)
 }
 
 fn load_theme_file_mode() -> Option<ThemeModePref> {
@@ -131,6 +127,7 @@ fn save_theme_file(mode: ThemeModePref) -> Result<()> {
     let mode = match mode {
         ThemeModePref::Dark => "dark",
         ThemeModePref::Light => "light",
+        ThemeModePref::System => "system",
     };
     let json = serde_json::to_string_pretty(&ThemeFile {
         mode: Some(mode.into()),
@@ -243,6 +240,7 @@ mod tests {
             parse_theme_mode(b.theme.as_deref().unwrap()),
             Some(ThemeModePref::Light)
         );
+        assert_eq!(parse_theme_mode("system"), Some(ThemeModePref::System));
     }
 
     #[test]

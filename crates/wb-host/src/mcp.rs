@@ -177,7 +177,7 @@ pub fn mcp_stdio_call(
 ) -> Result<String> {
     let command = command.trim();
     if command.is_empty() {
-        bail!("MCP 服务器没有 command（HTTP 端点尚未接通）");
+        bail!("MCP 服务器没有 command（HTTP 请走 mcp_http_call / 配置 url）");
     }
     let mut child = Command::new(command)
         .args(args)

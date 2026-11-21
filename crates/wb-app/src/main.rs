@@ -1,4 +1,5 @@
 mod app;
+mod appearance;
 mod command_palette;
 mod state;
 mod timed_deliver;

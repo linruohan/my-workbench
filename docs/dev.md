@@ -29,10 +29,11 @@ cargo clippy --workspace -- -D warnings
 ## 数据
 
 - 快照：`%APPDATA%\my-workbench\workbench.json`
-- 偏好：`prefs.json`
+- 偏好：`prefs.json`（含 `themeMode` / `uiFont`）
+- 主题镜像：`theme.json`（与 prefs 同步，兼容旧数据）
 - Provider：`providers.json`
 - 密钥：`credentials.json`
-- 语音模型：`models/<engine>/`
+- 语音 / OCR 模型：`models/<engine>/`
 
 JSON 字段名保持 camelCase，与历史 Tauri 快照兼容。
 

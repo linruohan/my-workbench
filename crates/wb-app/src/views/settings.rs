@@ -1,3 +1,4 @@
+use crate::appearance::{apply_theme_pref, apply_ui_font};
 use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
@@ -8,7 +9,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
 use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
-use wb_domain::ThemeModePref;
 use wb_host::{
     list_system_fonts, ocr_ensure_models, ocr_status, open_path, speech_ensure_models,
     speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
@@ -17,6 +17,7 @@ use wb_host::{
 pub struct SettingsPane {
     state: AppState,
     proxy: Entity<InputState>,
+    ui_font: Entity<InputState>,
     personality: Entity<InputState>,
     memory_input: Entity<InputState>,
     skills_dirs: Entity<InputState>,
@@ -35,6 +36,7 @@ pub struct SettingsPane {
 impl SettingsPane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let proxy_val = state.with(|s| s.prefs.http_proxy.clone().unwrap_or_default());
+        let ui_font_val = state.with(|s| s.prefs.ui_font.clone().unwrap_or_default());
         let persona = state
             .with(|s| s.prefs.agent.personality.clone())
             .unwrap_or_default();
@@ -42,6 +44,11 @@ impl SettingsPane {
             InputState::new(window, cx)
                 .placeholder("http://127.0.0.1:7890")
                 .default_value(proxy_val)
+        });
+        let ui_font = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("界面字体（留空=系统 UI 字体）")
+                .default_value(ui_font_val)
         });
         let personality = cx.new(|cx| {
             InputState::new(window, cx)
@@ -123,6 +130,7 @@ impl SettingsPane {
         Self {
             state,
             proxy,
+            ui_font,
             personality,
             memory_input,
             skills_dirs,
@@ -176,24 +184,28 @@ impl SettingsPane {
         cx.notify();
     }
 
-    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        let dark = self.state.with_mut(|s| {
-            s.prefs.theme_mode = match s.prefs.theme_mode {
-                ThemeModePref::Light => ThemeModePref::Dark,
-                ThemeModePref::Dark => ThemeModePref::Light,
-            };
-            matches!(s.prefs.theme_mode, ThemeModePref::Dark)
+    fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.state.with_mut(|s| {
+            s.prefs.theme_mode = s.prefs.theme_mode.cycle();
+            s.prefs.theme_mode
         });
         self.state.persist_prefs();
-        Theme::change(
-            if dark {
-                ThemeMode::Dark
+        apply_theme_pref(mode, Some(window), cx);
+        cx.notify();
+    }
+
+    fn save_ui_font(&mut self, cx: &mut Context<Self>) {
+        let value = self.ui_font.read(cx).value().to_string();
+        let family = self.state.with_mut(|s| {
+            s.prefs.ui_font = if value.trim().is_empty() {
+                None
             } else {
-                ThemeMode::Light
-            },
-            None,
-            cx,
-        );
+                Some(value.trim().to_string())
+            };
+            s.prefs.ui_font.clone()
+        });
+        self.state.persist_prefs();
+        apply_ui_font(family, cx);
         cx.notify();
     }
 
@@ -615,7 +627,7 @@ impl SettingsPane {
 
 impl Render for SettingsPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dark = self.state.theme_is_dark();
+        let theme_mode = self.state.theme_mode();
         let voice = self.state.with(|s| s.prefs.voice.enabled);
         let sys_notify = self.state.with(|s| s.prefs.system_notifications);
 
@@ -634,17 +646,35 @@ impl Render for SettingsPane {
                     .border_color(cx.theme().border)
                     .child(div().font_bold().child("外观"))
                     .child(
-                        h_flex().items_center().gap_3().child("深色模式").child(
-                            Switch::new("theme-dark")
-                                .checked(dark)
-                                .on_change(cx.listener(|this, _, _, cx| this.toggle_theme(cx))),
-                        ),
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(format!("主题：{}", theme_mode.label()))
+                            .child(
+                                Button::new("cycle-theme")
+                                    .small()
+                                    .label("切换")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cycle_theme(window, cx);
+                                    })),
+                            ),
+                    )
+                    .child(Input::new(&self.ui_font))
+                    .child(
+                        Button::new("save-ui-font")
+                            .small()
+                            .primary()
+                            .label("应用界面字体")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_ui_font(cx))),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("已扫描系统字体 {} 个", self.font_count)),
+                            .child(format!(
+                                "浅色 / 深色 / 跟随系统；已扫描系统字体 {} 个",
+                                self.font_count
+                            )),
                     ),
             )
             .child(
