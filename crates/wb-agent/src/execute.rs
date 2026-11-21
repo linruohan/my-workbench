@@ -1,3 +1,4 @@
+use crate::session_goal::{create_goal, get_goal, update_goal};
 use crate::session_todo::{SessionTodo, list_todos, write_todos};
 use anyhow::Result;
 use serde_json::Value;
@@ -10,7 +11,7 @@ use wb_domain::{
 use wb_host::{
     global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
     present_path, read_image_info, read_text, resolve_agent_cwd, run_shell, set_agent_cwd,
-    web_fetch, write_text,
+    web_fetch, web_search, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
 
@@ -624,6 +625,92 @@ pub fn execute_tool(
                 hits.join("\n")
             }))
         }
+        "session_trace" => {
+            let thread_id = args
+                .get("threadId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| repo.list_agent_threads().into_iter().next().map(|t| t.id));
+            let Some(tid) = thread_id else {
+                return Ok(ToolResult::ok_text("（无会话）"));
+            };
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(12)
+                .clamp(1, 40) as usize;
+            let msgs = repo.messages_for_thread(&tid);
+            let start = msgs.len().saturating_sub(limit);
+            let lines: Vec<_> = msgs[start..]
+                .iter()
+                .map(|m| {
+                    let snippet: String = m.content.chars().take(100).collect();
+                    format!(
+                        "- [{}] {}",
+                        format!("{:?}", m.role).to_lowercase(),
+                        snippet.replace('\n', " ")
+                    )
+                })
+                .collect();
+            let body = if lines.is_empty() {
+                "（无消息）".to_string()
+            } else {
+                lines.join("\n")
+            };
+            Ok(ToolResult::ok_text(format!(
+                "会话 {tid} 近 {} 条：\n{body}",
+                lines.len()
+            )))
+        }
+        "get_goal" => match get_goal() {
+            Some(g) => Ok(ToolResult::ok_text(format!(
+                "goal [{}] rounds={}/{:?} · {}",
+                g.status, g.rounds_started, g.max_rounds, g.objective
+            ))),
+            None => Ok(ToolResult::ok_text("（无 goal）")),
+        },
+        "create_goal" => {
+            let objective = args
+                .get("objective")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if objective.is_empty() {
+                return Ok(ToolResult::err_text("缺少 objective"));
+            }
+            let max_rounds = args
+                .get("maxRounds")
+                .or_else(|| args.get("max_rounds"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
+            let g = create_goal(objective, max_rounds);
+            Ok(ToolResult::ok_text(format!(
+                "已创建 goal · {}{}",
+                g.objective,
+                max_rounds
+                    .map(|m| format!(" · maxRounds={m}"))
+                    .unwrap_or_default()
+            )))
+        }
+        "update_goal" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if action.is_empty() {
+                return Ok(ToolResult::err_text("缺少 action"));
+            }
+            let objective = args.get("objective").and_then(|v| v.as_str());
+            match update_goal(action, objective) {
+                Ok(g) if g.status == "cleared" => Ok(ToolResult::ok_text("已清除 goal")),
+                Ok(g) => Ok(ToolResult::ok_text(format!(
+                    "goal [{}] rounds={} · {}",
+                    g.status, g.rounds_started, g.objective
+                ))),
+                Err(e) => Ok(ToolResult::err_text(e)),
+            }
+        }
         "memory_list" => {
             let prefs = load_prefs().unwrap_or_default();
             let lines: Vec<_> = prefs
@@ -918,6 +1005,35 @@ pub fn execute_tool(
                 ),
                 open_view: None,
             })
+        }
+        "web_search" => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if query.is_empty() {
+                return Ok(ToolResult::err_text("缺少 query"));
+            }
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5)
+                .clamp(1, 10) as usize;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let hits = rt.block_on(web_search(query, None, limit))?;
+            let lines: Vec<_> = hits
+                .into_iter()
+                .enumerate()
+                .map(|(i, h)| format!("{}. {} · {}\n   {}", i + 1, h.title, h.url, h.snippet))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无搜索结果；网络或页面结构可能变化）".into()
+            } else {
+                lines.join("\n")
+            }))
         }
         "present" => {
             let rel = args
@@ -1389,6 +1505,63 @@ mod tests {
         );
         set_agent_cwd(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goal_and_session_trace() {
+        use wb_domain::{AgentMessage, AgentRole, AgentThread, now_ms};
+        let mut repo = MemoryWorkbenchRepository::default();
+        let now = now_ms();
+        let thread = AgentThread {
+            id: "th-goal".into(),
+            workspace_id: "ws".into(),
+            project_id: None,
+            title: "t".into(),
+            model_ref: wb_domain::BUILTIN_MODEL_REF.into(),
+            permission_mode: Default::default(),
+            queue_json: None,
+            web_url: None,
+            archived_at: None,
+            pinned_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        repo.upsert_agent_thread(thread);
+        repo.upsert_agent_message(AgentMessage {
+            id: "m1".into(),
+            thread_id: "th-goal".into(),
+            role: AgentRole::User,
+            content: "你好 goal-trace".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now,
+        });
+        let created = execute_tool(
+            &mut repo,
+            "create_goal",
+            &json!({ "objective": "完成迁移", "maxRounds": 3 }),
+            None,
+        )
+        .unwrap();
+        assert!(created.ok);
+        let got = execute_tool(&mut repo, "get_goal", &json!({}), None).unwrap();
+        assert!(got.content.contains("完成迁移"));
+        let _ = execute_tool(&mut repo, "update_goal", &json!({ "action": "tick" }), None).unwrap();
+        let trace = execute_tool(
+            &mut repo,
+            "session_trace",
+            &json!({ "threadId": "th-goal" }),
+            None,
+        )
+        .unwrap();
+        assert!(trace.content.contains("goal-trace"));
+        let _ = execute_tool(
+            &mut repo,
+            "update_goal",
+            &json!({ "action": "clear" }),
+            None,
+        );
     }
 
     #[test]

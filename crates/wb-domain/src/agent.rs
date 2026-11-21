@@ -406,6 +406,39 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "session_trace",
+            ToolEffect::Read,
+            "摘要指定/最近会话的近期消息",
+            serde_json::json!({
+                "threadId": { "type": "string" },
+                "limit": { "type": "integer" }
+            }),
+        ),
+        tool(
+            "get_goal",
+            ToolEffect::Read,
+            "查看当前会话 goal",
+            serde_json::json!({}),
+        ),
+        tool(
+            "create_goal",
+            ToolEffect::Write,
+            "创建会话 goal",
+            serde_json::json!({
+                "objective": { "type": "string" },
+                "maxRounds": { "type": "integer" }
+            }),
+        ),
+        tool(
+            "update_goal",
+            ToolEffect::Write,
+            "更新 goal：edit/pause/resume/complete/blocked/clear/tick",
+            serde_json::json!({
+                "action": { "type": "string" },
+                "objective": { "type": "string" }
+            }),
+        ),
+        tool(
             "memory_list",
             ToolEffect::Read,
             "列出 Agent 记忆短事实",
@@ -567,6 +600,15 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             "抓取网页/HTTP 文本（有体积上限）",
             serde_json::json!({
                 "url": { "type": "string" }
+            }),
+        ),
+        tool(
+            "web_search",
+            ToolEffect::Read,
+            "网页搜索（DuckDuckGo HTML，无需 API Key）",
+            serde_json::json!({
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
             }),
         ),
         tool(

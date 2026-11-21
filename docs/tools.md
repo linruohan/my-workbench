@@ -381,7 +381,10 @@ DSH：统一协作式取消 + 超时错误映射。
 | `host_tool_list` | ✅ |
 | `session_search` | ✅ 消息全文 |
 | `present` | ✅ 系统打开 + 可选资源管理器选中 |
-| 真 PTY / MCP 协议 / `web_search` / `session_trace` / 完整 `host_tool_*` | ❌ 未迁 |
+| `web_search` | ✅ DuckDuckGo HTML（无 Key） |
+| `session_trace` | ✅ 近期消息摘要 |
+| `get_goal` / `create_goal` / `update_goal` | 🟡 进程内轻量 goal（无空闲续行驱动） |
+| 真 PTY / MCP 协议 / `session_event_*` / 完整 goal 续行 | ❌ 未迁 |
 
 斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list`。
 
