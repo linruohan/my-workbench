@@ -366,6 +366,46 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "search",
+            ToolEffect::Read,
+            "在任务/笔记/项目/标签中全文搜索",
+            serde_json::json!({
+                "query": { "type": "string" }
+            }),
+        ),
+        tool(
+            "settings_get",
+            ToolEffect::Read,
+            "读取安全设置项（themeMode/systemNotifications/httpProxy/defaultModelRef/personality/skillsDirs/pluginsDirs）",
+            serde_json::json!({
+                "key": { "type": "string" }
+            }),
+        ),
+        tool(
+            "settings_set",
+            ToolEffect::Write,
+            "写入安全设置项（同上 key 白名单）",
+            serde_json::json!({
+                "key": { "type": "string" },
+                "value": {}
+            }),
+        ),
+        tool(
+            "host_tool_list",
+            ToolEffect::Read,
+            "列出已注册的 Agent 工具名与效果",
+            serde_json::json!({}),
+        ),
+        tool(
+            "session_search",
+            ToolEffect::Read,
+            "在 Agent 会话消息中搜索",
+            serde_json::json!({
+                "query": { "type": "string" },
+                "threadId": { "type": "string" }
+            }),
+        ),
+        tool(
             "memory_list",
             ToolEffect::Read,
             "列出 Agent 记忆短事实",
@@ -527,6 +567,15 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             "抓取网页/HTTP 文本（有体积上限）",
             serde_json::json!({
                 "url": { "type": "string" }
+            }),
+        ),
+        tool(
+            "present",
+            ToolEffect::None,
+            "用系统默认应用打开工作区路径；reveal=true 时在资源管理器选中",
+            serde_json::json!({
+                "path": { "type": "string" },
+                "reveal": { "type": "boolean" }
             }),
         ),
         tool(

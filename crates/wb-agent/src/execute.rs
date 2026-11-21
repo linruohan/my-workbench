@@ -9,7 +9,8 @@ use wb_domain::{
 };
 use wb_host::{
     global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
-    read_image_info, read_text, resolve_agent_cwd, run_shell, set_agent_cwd, web_fetch, write_text,
+    present_path, read_image_info, read_text, resolve_agent_cwd, run_shell, set_agent_cwd,
+    web_fetch, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
 
@@ -414,6 +415,215 @@ pub fn execute_tool(
                 ))),
             }
         }
+        "search" => {
+            let q = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if q.is_empty() {
+                return Ok(ToolResult::err_text("缺少 query"));
+            }
+            let mut hits = Vec::new();
+            for t in repo.list_tasks() {
+                if t.title.to_lowercase().contains(&q) || t.notes.to_lowercase().contains(&q) {
+                    hits.push(format!(
+                        "task · {} · {}{}",
+                        t.id,
+                        t.title,
+                        if t.is_done { " [done]" } else { "" }
+                    ));
+                }
+            }
+            for n in repo.list_notes() {
+                if n.title.to_lowercase().contains(&q) || n.body_md.to_lowercase().contains(&q) {
+                    hits.push(format!("note · {} · {}", n.id, n.title));
+                }
+            }
+            for p in repo.list_projects() {
+                if p.title.to_lowercase().contains(&q) {
+                    hits.push(format!("project · {} · {}", p.id, p.title));
+                }
+            }
+            for t in repo.list_tags() {
+                if t.title.to_lowercase().contains(&q) {
+                    hits.push(format!("tag · {} · {}", t.id, t.title));
+                }
+            }
+            hits.truncate(40);
+            Ok(ToolResult::ok_text(if hits.is_empty() {
+                "（无匹配）".into()
+            } else {
+                hits.join("\n")
+            }))
+        }
+        "settings_get" => {
+            let key = args
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let prefs = load_prefs().unwrap_or_default();
+            let value = match key {
+                "themeMode" => Some(format!("{:?}", prefs.theme_mode).to_lowercase()),
+                "systemNotifications" => Some(prefs.system_notifications.to_string()),
+                "httpProxy" => Some(prefs.http_proxy.clone().unwrap_or_default()),
+                "defaultModelRef" => Some(
+                    prefs
+                        .agent
+                        .default_model_ref
+                        .clone()
+                        .unwrap_or_else(|| wb_domain::BUILTIN_MODEL_REF.to_string()),
+                ),
+                "personality" => Some(prefs.agent.personality.clone().unwrap_or_default()),
+                "skillsDirs" => Some(prefs.agent.skills_dirs.join(";")),
+                "pluginsDirs" => Some(prefs.agent.plugins_dirs.join(";")),
+                "" => None,
+                other => {
+                    return Ok(ToolResult::err_text(format!(
+                        "不支持的设置键：{other}（白名单：themeMode/systemNotifications/httpProxy/defaultModelRef/personality/skillsDirs/pluginsDirs）"
+                    )));
+                }
+            };
+            match value {
+                Some(v) => Ok(ToolResult::ok_text(format!("{key} = {v}"))),
+                None => Ok(ToolResult::err_text("缺少 key")),
+            }
+        }
+        "settings_set" => {
+            let key = args
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let raw = args.get("value").cloned().unwrap_or(Value::Null);
+            let as_str = || {
+                raw.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        if raw.is_null() {
+                            Some(String::new())
+                        } else {
+                            Some(raw.to_string().trim_matches('"').to_string())
+                        }
+                    })
+                    .unwrap_or_default()
+            };
+            let split_dirs = |s: &str| -> Vec<String> {
+                s.split([';', ','])
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(|x| x.to_string())
+                    .collect()
+            };
+            let mut prefs = load_prefs().unwrap_or_default();
+            match key {
+                "themeMode" => {
+                    let v = as_str().to_lowercase();
+                    prefs.theme_mode = match v.as_str() {
+                        "dark" => wb_domain::ThemeModePref::Dark,
+                        "light" => wb_domain::ThemeModePref::Light,
+                        _ => {
+                            return Ok(ToolResult::err_text("themeMode 仅支持 light/dark"));
+                        }
+                    };
+                }
+                "systemNotifications" => {
+                    let on = raw.as_bool().unwrap_or_else(|| {
+                        matches!(
+                            as_str().to_lowercase().as_str(),
+                            "1" | "true" | "yes" | "on"
+                        )
+                    });
+                    prefs.system_notifications = on;
+                }
+                "httpProxy" => {
+                    let v = as_str();
+                    prefs.http_proxy = if v.trim().is_empty() {
+                        None
+                    } else {
+                        Some(v.trim().to_string())
+                    };
+                }
+                "defaultModelRef" => {
+                    let v = as_str();
+                    prefs.agent.default_model_ref = if v.trim().is_empty() {
+                        None
+                    } else {
+                        Some(v.trim().to_string())
+                    };
+                }
+                "personality" => {
+                    let v = as_str();
+                    prefs.agent.personality = if v.trim().is_empty() {
+                        None
+                    } else {
+                        Some(v.trim().to_string())
+                    };
+                }
+                "skillsDirs" => prefs.agent.skills_dirs = split_dirs(&as_str()),
+                "pluginsDirs" => prefs.agent.plugins_dirs = split_dirs(&as_str()),
+                "" => return Ok(ToolResult::err_text("缺少 key")),
+                other => {
+                    return Ok(ToolResult::err_text(format!(
+                        "不支持写入：{other}（白名单同上）"
+                    )));
+                }
+            }
+            save_prefs(&prefs)?;
+            Ok(ToolResult::ok_text(format!("已更新 {key}")))
+        }
+        "host_tool_list" => {
+            let lines: Vec<_> = all_tools()
+                .into_iter()
+                .map(|t| {
+                    format!(
+                        "- {} [{}]",
+                        t.name,
+                        format!("{:?}", t.effect).to_lowercase()
+                    )
+                })
+                .collect();
+            Ok(ToolResult::ok_text(lines.join("\n")))
+        }
+        "session_search" => {
+            let q = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if q.is_empty() {
+                return Ok(ToolResult::err_text("缺少 query"));
+            }
+            let thread_id = args.get("threadId").and_then(|v| v.as_str());
+            let mut hits = Vec::new();
+            for m in repo.list_agent_messages() {
+                if let Some(tid) = thread_id {
+                    if m.thread_id != tid {
+                        continue;
+                    }
+                }
+                if m.content.to_lowercase().contains(&q) {
+                    let snippet: String = m.content.chars().take(120).collect();
+                    hits.push(format!(
+                        "- [{}] {} · {}…",
+                        format!("{:?}", m.role).to_lowercase(),
+                        m.thread_id,
+                        snippet.replace('\n', " ")
+                    ));
+                }
+                if hits.len() >= 40 {
+                    break;
+                }
+            }
+            Ok(ToolResult::ok_text(if hits.is_empty() {
+                "（无匹配消息）".into()
+            } else {
+                hits.join("\n")
+            }))
+        }
         "memory_list" => {
             let prefs = load_prefs().unwrap_or_default();
             let lines: Vec<_> = prefs
@@ -708,6 +918,28 @@ pub fn execute_tool(
                 ),
                 open_view: None,
             })
+        }
+        "present" => {
+            let rel = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+            let root = effective_root(workspace_root)?;
+            let path = if Path::new(rel).is_absolute() {
+                if !rel.starts_with(root.as_str()) {
+                    return Ok(ToolResult::err_text("路径必须在工作区内"));
+                }
+                Path::new(rel).to_path_buf()
+            } else {
+                safe_join(&root, rel)?
+            };
+            let reveal = args.get("reveal").and_then(|v| v.as_bool()).unwrap_or(true);
+            present_path(&path, reveal)?;
+            Ok(ToolResult::ok_text(format!(
+                "已打开{}：{}",
+                if reveal { "并选中" } else { "" },
+                path.display()
+            )))
         }
         "glob" => {
             let pattern = args
@@ -1157,6 +1389,37 @@ mod tests {
         );
         set_agent_cwd(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_settings_and_host_tool_list() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let _ = repo.create_task("搜索专用任务 xyz", None);
+        let _ = repo.create_note("note", "正文含 xyz 关键字");
+        let found = execute_tool(&mut repo, "search", &json!({ "query": "xyz" }), None).unwrap();
+        assert!(found.ok);
+        assert!(found.content.contains("xyz"));
+
+        let set = execute_tool(
+            &mut repo,
+            "settings_set",
+            &json!({ "key": "personality", "value": "简洁" }),
+            None,
+        )
+        .unwrap();
+        assert!(set.ok);
+        let get = execute_tool(
+            &mut repo,
+            "settings_get",
+            &json!({ "key": "personality" }),
+            None,
+        )
+        .unwrap();
+        assert!(get.content.contains("简洁"));
+
+        let tools = execute_tool(&mut repo, "host_tool_list", &json!({}), None).unwrap();
+        assert!(tools.content.contains("search"));
+        assert!(tools.content.contains("present"));
     }
 
     #[test]

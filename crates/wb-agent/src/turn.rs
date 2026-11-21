@@ -497,14 +497,16 @@ fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
         ("/schedule_list", "schedule_list"),
         ("/notification_list", "notification_list"),
         ("/ui_open", "ui_open"),
+        ("/search", "search"),
+        ("/host_tool_list", "host_tool_list"),
     ];
     for (prefix, name) in COMMANDS {
         if t == *prefix || t.starts_with(&format!("{prefix} ")) {
             let rest = t[prefix.len()..].trim();
-            let args = if *name == "ui_open" {
-                json!({ "view": rest })
-            } else {
-                json!({})
+            let args = match *name {
+                "ui_open" => json!({ "view": rest }),
+                "search" => json!({ "query": rest }),
+                _ => json!({}),
             };
             return Some((name, args));
         }
@@ -534,7 +536,7 @@ fn builtin_reply(user_text: &str, repo: &MemoryWorkbenchRepository) -> String {
         )
     };
     format!(
-        "（内置通道）已收到：{}\n\n当前未完成任务 {open} 条。可用斜杠：/task_list /project_list /tag_list /note_list /schedule_list /notification_list /ui_open <view>{mem}",
+        "（内置通道）已收到：{}\n\n当前未完成任务 {open} 条。可用斜杠：/task_list /project_list /tag_list /note_list /schedule_list /notification_list /ui_open <view> /search <q> /host_tool_list{mem}",
         user_text.trim()
     )
 }

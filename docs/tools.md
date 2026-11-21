@@ -376,9 +376,14 @@ DSH：统一协作式取消 + 超时错误映射。
 | `skill_list` / `skill_load` / `plugin_list` / `mcp_list` | ✅（目录扫描 / prefs） |
 | `working_directory` | ✅ 会话 cwd |
 | `terminal_open/send/read/list/close/signal` | 🟡 轻量命令日志会话（非 ConPTY） |
-| `search` / `settings_*` / 真 PTY / MCP 协议 / `host_tool_*` / `session_*` | ❌ 未迁 |
+| `search` | ✅ 任务/笔记/项目/标签 |
+| `settings_get` / `settings_set` | ✅ 白名单安全项 |
+| `host_tool_list` | ✅ |
+| `session_search` | ✅ 消息全文 |
+| `present` | ✅ 系统打开 + 可选资源管理器选中 |
+| 真 PTY / MCP 协议 / `web_search` / `session_trace` / 完整 `host_tool_*` | ❌ 未迁 |
 
-斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>`（skill/terminal 等走模型 tool-call 或 `execute_tool`）。
+斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list`。
 
 另：`shell` 是本仓库的跨平台入口（对齐 DSH `dsh-shell` 抽象 + bash/pwsh 二选一），DSH 目录里没有名为 `dsh-tool-shell` 的包。
 
