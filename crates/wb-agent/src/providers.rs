@@ -19,6 +19,22 @@ pub struct CredentialStore {
     pub keys: HashMap<String, String>,
 }
 
+fn model_caps(title: &str) -> serde_json::Value {
+    serde_json::json!({
+        "context": 128000,
+        "output": 8192,
+        "title": title
+    })
+}
+
+fn models(entries: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (id, title) in entries {
+        map.insert((*id).into(), model_caps(title));
+    }
+    map
+}
+
 pub fn default_providers() -> ProviderStore {
     ProviderStore {
         providers: vec![
@@ -29,7 +45,7 @@ pub fn default_providers() -> ProviderStore {
                 base_url: String::new(),
                 api_key_required: false,
                 enabled: true,
-                models: serde_json::Map::new(),
+                models: models(&[("local", "本地内置")]),
             },
             ProviderConfig {
                 id: "ollama".into(),
@@ -38,7 +54,7 @@ pub fn default_providers() -> ProviderStore {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 api_key_required: false,
                 enabled: true,
-                models: serde_json::Map::new(),
+                models: models(&[("llama3.2", "Llama 3.2"), ("qwen2.5", "Qwen 2.5")]),
             },
             ProviderConfig {
                 id: "openai".into(),
@@ -47,7 +63,7 @@ pub fn default_providers() -> ProviderStore {
                 base_url: "https://api.openai.com/v1".into(),
                 api_key_required: true,
                 enabled: true,
-                models: serde_json::Map::new(),
+                models: models(&[("gpt-4o-mini", "GPT-4o mini"), ("gpt-4o", "GPT-4o")]),
             },
             ProviderConfig {
                 id: "deepseek".into(),
@@ -56,7 +72,10 @@ pub fn default_providers() -> ProviderStore {
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key_required: true,
                 enabled: true,
-                models: serde_json::Map::new(),
+                models: models(&[
+                    ("deepseek-chat", "DeepSeek Chat"),
+                    ("deepseek-reasoner", "DeepSeek Reasoner"),
+                ]),
             },
         ],
         default_model_ref: Some(BUILTIN_MODEL_REF.into()),

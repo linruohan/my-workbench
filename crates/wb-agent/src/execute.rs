@@ -2,8 +2,9 @@ use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
 use wb_domain::{
-    AgentPermissionMode, ToolEffect, ToolGate, ToolSpec, builtin_host_tools, format_local_day,
-    gate_tool, now_ms, settle_timer_segment, workspace_tools,
+    AgentPermissionMode, TimedIntervalUnit, TimedSchedulePreset, ToolEffect, ToolGate, ToolSpec,
+    builtin_host_tools, create_timed_task_draft, format_local_day, gate_tool, make_custom_schedule,
+    make_preset_schedule, now_ms, settle_timer_segment, workspace_tools,
 };
 use wb_host::{list_files_recursive, read_text, run_shell, write_text};
 use wb_store::MemoryWorkbenchRepository;
@@ -229,14 +230,99 @@ pub fn execute_tool(
                 .iter()
                 .map(|t| {
                     format!(
-                        "- {} [{}] next={:?}",
+                        "- {} [{}] next={:?} ({})",
                         t.title,
                         if t.enabled { "on" } else { "off" },
-                        t.next_run_at
+                        t.next_run_at,
+                        t.id
                     )
                 })
                 .collect();
             Ok(ToolResult::ok_text(lines.join("\n")))
+        }
+        "schedule_create" => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("定时任务");
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let at_time = args
+                .get("atTime")
+                .or_else(|| args.get("at_time"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("09:00");
+            let schedule = if let Some(every) = args.get("every").and_then(|v| v.as_i64()) {
+                let unit = match args
+                    .get("unit")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("day")
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "minute" | "分钟" => TimedIntervalUnit::Minute,
+                    "hour" | "小时" => TimedIntervalUnit::Hour,
+                    "week" | "周" => TimedIntervalUnit::Week,
+                    "month" | "月" | "个月" => TimedIntervalUnit::Month,
+                    "year" | "年" => TimedIntervalUnit::Year,
+                    _ => TimedIntervalUnit::Day,
+                };
+                make_custom_schedule(every, unit, at_time)
+            } else {
+                let preset = match args
+                    .get("preset")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("daily")
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "hourly" | "每小时" => TimedSchedulePreset::Hourly,
+                    "weekdays" | "工作日" | "每工作日" => TimedSchedulePreset::Weekdays,
+                    "weekly" | "每周" => TimedSchedulePreset::Weekly,
+                    "monthly" | "每月" => TimedSchedulePreset::Monthly,
+                    _ => TimedSchedulePreset::Daily,
+                };
+                make_preset_schedule(preset, at_time)
+            };
+            let task = create_timed_task_draft(Some(title), Some(command), Some(schedule), None);
+            let id = task.id.clone();
+            let label = task.title.clone();
+            repo.upsert_timed_task(task);
+            Ok(ToolResult::ok_text(format!(
+                "已创建定时任务 {id} · {label}"
+            )))
+        }
+        "schedule_enable" => {
+            let id = args
+                .get("scheduleId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 scheduleId"))?;
+            let enabled = args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let Some(mut task) = repo.get_timed_task(id).cloned() else {
+                return Ok(ToolResult::err_text("定时任务不存在"));
+            };
+            task.enabled = enabled;
+            let title = task.title.clone();
+            repo.upsert_timed_task(task);
+            Ok(ToolResult::ok_text(format!(
+                "已{}：{title}",
+                if enabled { "启用" } else { "停用" }
+            )))
+        }
+        "schedule_delete" => {
+            let id = args
+                .get("scheduleId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 scheduleId"))?;
+            if repo.get_timed_task(id).is_none() {
+                return Ok(ToolResult::err_text("定时任务不存在"));
+            }
+            repo.delete_timed_task(id);
+            Ok(ToolResult::ok_text(format!("已删除定时任务 {id}")))
         }
         "timer_status" => {
             let id = args
@@ -596,5 +682,42 @@ mod tests {
         .unwrap();
         assert!(r.ok);
         assert_eq!(repo.get_task(&id).unwrap().time_spent, 120_000);
+    }
+
+    #[test]
+    fn schedule_create_enable_delete() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let created = execute_tool(
+            &mut repo,
+            "schedule_create",
+            &json!({
+                "title": "晨报",
+                "command": "总结今日任务",
+                "preset": "daily",
+                "atTime": "08:30"
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(created.ok);
+        let id = repo.list_timed_tasks()[0].id.clone();
+        let off = execute_tool(
+            &mut repo,
+            "schedule_enable",
+            &json!({ "scheduleId": id, "enabled": false }),
+            None,
+        )
+        .unwrap();
+        assert!(off.ok);
+        assert!(!repo.get_timed_task(&id).unwrap().enabled);
+        let del = execute_tool(
+            &mut repo,
+            "schedule_delete",
+            &json!({ "scheduleId": id }),
+            None,
+        )
+        .unwrap();
+        assert!(del.ok);
+        assert!(repo.list_timed_tasks().is_empty());
     }
 }

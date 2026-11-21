@@ -262,9 +262,23 @@ impl Render for SettingsPane {
                                 "内置".to_string(),
                             ))
                             .chain(providers.providers.iter().flat_map(|p| {
-                                p.models.keys().map(|mid| {
-                                    (format!("{}/{}", p.id, mid), format!("{} / {mid}", p.name))
-                                })
+                                if p.id.starts_with("builtin") {
+                                    return Vec::new().into_iter();
+                                }
+                                let items: Vec<(String, String)> = if p.models.is_empty() {
+                                    vec![(format!("{}/default", p.id), p.name.clone())]
+                                } else {
+                                    p.models
+                                        .keys()
+                                        .map(|mid| {
+                                            (
+                                                format!("{}/{}", p.id, mid),
+                                                format!("{} / {mid}", p.name),
+                                            )
+                                        })
+                                        .collect()
+                                };
+                                items.into_iter()
                             }))
                             .map(|(model_ref, label)| {
                                 let selected = model_ref == default_model;

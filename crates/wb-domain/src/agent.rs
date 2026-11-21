@@ -310,6 +310,36 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             serde_json::json!({}),
         ),
         tool(
+            "schedule_create",
+            ToolEffect::Write,
+            "创建定时任务（preset: hourly/daily/weekdays/weekly/monthly，或 every+unit）",
+            serde_json::json!({
+                "title": { "type": "string" },
+                "command": { "type": "string" },
+                "preset": { "type": "string" },
+                "atTime": { "type": "string" },
+                "every": { "type": "integer" },
+                "unit": { "type": "string" }
+            }),
+        ),
+        tool(
+            "schedule_enable",
+            ToolEffect::Write,
+            "启用或停用定时任务",
+            serde_json::json!({
+                "scheduleId": { "type": "string" },
+                "enabled": { "type": "boolean" }
+            }),
+        ),
+        tool(
+            "schedule_delete",
+            ToolEffect::Destructive,
+            "删除定时任务",
+            serde_json::json!({
+                "scheduleId": { "type": "string" }
+            }),
+        ),
+        tool(
             "timer_status",
             ToolEffect::Read,
             "查看任务累计计时",
