@@ -1,11 +1,13 @@
-//! Local OCR model catalog (PaddleOCR) and optional tesseract fallback.
+//! Local OCR model catalog (PaddleOCR) and built-in ONNX runtime, with CLI fallbacks.
 
 use anyhow::{Context, Result, bail};
+use paddle_ocr_rs::ocr_lite::OcrLite;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use wb_store::ensure_data_dir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,11 @@ pub fn paddleocr_files() -> Vec<OcrFileSpec> {
             name: "PP-OCRv6_det_small.onnx".into(),
             url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx".into(),
             min_bytes: 800_000,
+        },
+        OcrFileSpec {
+            name: "ch_ptocr_mobile_v2.0_cls_infer.onnx".into(),
+            url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv4/cls/ch_ptocr_mobile_v2.0_cls_infer.onnx".into(),
+            min_bytes: 500_000,
         },
         OcrFileSpec {
             name: "PP-OCRv6_rec_small.onnx".into(),
@@ -68,7 +75,7 @@ pub fn ocr_status() -> Result<OcrStatus> {
         model_dir: dir.to_string_lossy().to_string(),
         missing: missing.clone(),
         message: if ready {
-            Some("PaddleOCR 模型已就绪（运行时可用 tesseract 回退）".into())
+            Some("PaddleOCR 模型已就绪（内置 ONNX；亦可回退 tesseract / CLI）".into())
         } else {
             Some(format!("缺少 {} 个模型文件", missing.len()))
         },
@@ -121,10 +128,79 @@ fn download_file(
     Ok(())
 }
 
-/// Prefer tesseract / RapidOCR Python / paddleocr CLI; otherwise report model readiness.
+fn ocr_engine() -> &'static Mutex<Option<OcrLite>> {
+    static ENGINE: OnceLock<Mutex<Option<OcrLite>>> = OnceLock::new();
+    ENGINE.get_or_init(|| Mutex::new(None))
+}
+
+fn ensure_onnx_engine(dir: &Path) -> Result<()> {
+    let mut slot = ocr_engine()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("OCR 引擎锁损坏"))?;
+    if slot.is_some() {
+        return Ok(());
+    }
+    let det = dir.join("PP-OCRv6_det_small.onnx");
+    let cls = dir.join("ch_ptocr_mobile_v2.0_cls_infer.onnx");
+    let rec = dir.join("PP-OCRv6_rec_small.onnx");
+    let dict = dir.join("ppocrv6_dict.txt");
+    // load-dynamic：确保运行时已加载 onnxruntime.dll
+    let _ = ort::init().commit();
+    let mut ocr = OcrLite::new();
+    ocr.init_models_with_dict(
+        det.to_str().context("det 路径无效")?,
+        cls.to_str().context("cls 路径无效")?,
+        rec.to_str().context("rec 路径无效")?,
+        dict.to_str().context("dict 路径无效")?,
+        2,
+    )
+    .map_err(|e| anyhow::anyhow!("初始化 PaddleOCR ONNX 失败：{e}"))?;
+    *slot = Some(ocr);
+    Ok(())
+}
+
+fn try_onnx_paddle(path: &Path) -> Option<String> {
+    let status = ocr_status().ok()?;
+    if !status.ready {
+        return None;
+    }
+    let dir = PathBuf::from(&status.model_dir);
+    if let Err(e) = ensure_onnx_engine(&dir) {
+        log::warn!("OCR ONNX init failed: {e}");
+        return None;
+    }
+    let mut slot = ocr_engine().lock().ok()?;
+    let ocr = slot.as_mut()?;
+    let img = path.to_str()?;
+    match ocr.detect_from_path(img, 50, 1024, 0.5, 0.3, 1.6, false, false) {
+        Ok(res) => {
+            let text = res
+                .text_blocks
+                .iter()
+                .map(|b| b.text.trim())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(if text.is_empty() {
+                "没有识别到文字。".into()
+            } else {
+                text
+            })
+        }
+        Err(e) => {
+            log::warn!("OCR ONNX detect failed: {e}");
+            None
+        }
+    }
+}
+
+/// Prefer built-in ONNX, then tesseract / RapidOCR Python / paddleocr CLI.
 pub fn ocr_image(path: &Path) -> Result<String> {
     if !path.is_file() {
         bail!("图片不存在：{}", path.display());
+    }
+    if let Some(text) = try_onnx_paddle(path) {
+        return Ok(text);
     }
     if let Some(text) = try_tesseract(path) {
         return Ok(text);
@@ -138,7 +214,7 @@ pub fn ocr_image(path: &Path) -> Result<String> {
     let status = ocr_status()?;
     if status.ready {
         bail!(
-            "PaddleOCR 模型已在 {}，但未找到 tesseract / rapidocr_onnxruntime / paddleocr CLI，且尚未接入内置 ONNX 运行时。",
+            "PaddleOCR 模型已在 {}，但内置 ONNX 推理失败，且未找到 tesseract / rapidocr_onnxruntime / paddleocr CLI。",
             status.model_dir
         );
     }
@@ -229,7 +305,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_three_files() {
-        assert_eq!(paddleocr_files().len(), 3);
+    fn catalog_has_four_files() {
+        assert_eq!(paddleocr_files().len(), 4);
+        assert!(paddleocr_files().iter().any(|f| f.name.contains("cls")));
     }
 }

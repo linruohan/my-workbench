@@ -367,8 +367,8 @@ DSH：统一协作式取消 + 超时错误映射。
 | `str_replace_editor` | ✅ view/create/str_replace/insert |
 | `load_workspace_dependencies` | ✅ PATH 探测 |
 | `read_image` | ✅ 元数据；超 4MiB/长边 2048 给 `<image_offload>` 提示 |
-| `ocr` | 🟡 tesseract / rapidocr_onnxruntime / paddleocr CLI；模型目录可下载（内置 ONNX 待接） |
-| `speech_transcribe` | 🟡 SenseVoice 模型 + sherpa-onnx-offline / sensevoice CLI |
+| `ocr` | ✅ 内置 paddle-ocr-rs ONNX；回退 tesseract / rapidocr / paddleocr CLI |
+| `speech_transcribe` | 🟡 SenseVoice 模型 + sherpa-onnx-offline CLI（Windows 与 OCR 的 MT/MD CRT 冲突，暂不同进程链接） |
 | `job_start` / `job_output` / `job_list` / `job_kill` | ✅ 后台 shell（非 PTY） |
 | `web_fetch` | ✅ HTTP GET + 体积截断 |
 | `glob` / `grep` | ✅（自实现；grep 内联 250，超额 spill 至 `.wb/spill`） |

@@ -26,6 +26,8 @@ walkdir.workspace = true
 portable-pty.workspace = true
 cpal.workspace = true
 hound.workspace = true
+paddle-ocr-rs.workspace = true
+ort.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

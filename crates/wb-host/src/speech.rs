@@ -1,4 +1,7 @@
 //! Local speech model catalog + status. Transcription uses an external CLI when available.
+//!
+//! In-process sherpa-onnx is not linked on Windows yet: official prebuilts use MT CRT,
+//! which conflicts with paddle-ocr-rs → clipper-sys (MD). Prefer `sherpa-onnx-offline` CLI.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -89,13 +92,21 @@ pub fn speech_status(engine: &str) -> Result<SpeechStatus> {
             .collect()
     };
     let ready = missing.is_empty();
+    let has_cli = crate::shell::which_bin("sherpa-onnx-offline")
+        .or_else(|| crate::shell::which_bin("sensevoice"))
+        .is_some();
     Ok(SpeechStatus {
         engine: engine.into(),
         ready,
         model_dir: dir.to_string_lossy().to_string(),
         missing: missing.clone(),
-        message: if ready {
-            None
+        message: if ready && has_cli {
+            Some("SenseVoice 模型已就绪（sherpa-onnx CLI）".into())
+        } else if ready {
+            Some(
+                "SenseVoice 模型已就绪；请安装 sherpa-onnx-offline CLI（Windows 暂无法同进程链接 sherpa MT CRT）"
+                    .into(),
+            )
         } else {
             Some(format!(
                 "模型尚未就绪，缺少 {} 个文件。可在设置中准备/下载。",
@@ -209,7 +220,7 @@ pub fn speech_transcribe(engine: &str, wav_path: &str, language: Option<&str>) -
         );
     }
     bail!(
-        "SenseVoice 模型已在 {}，但未找到 sherpa-onnx-offline / sensevoice CLI，也尚未接入内置 worker。",
+        "SenseVoice 模型已在 {}，但未找到 sherpa-onnx-offline / sensevoice CLI。Windows 上暂无法与 OCR 同进程链接 sherpa（MT/MD CRT 冲突）。",
         status.model_dir
     )
 }

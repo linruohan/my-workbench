@@ -984,13 +984,13 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         tool(
             "ocr",
             ToolEffect::Read,
-            "对工作区图片做 OCR 文字识别（tesseract / rapidocr / paddleocr CLI）",
+            "对工作区图片做 OCR 文字识别（内置 PaddleOCR ONNX；可回退 tesseract / CLI）",
             serde_json::json!({ "path": { "type": "string" } }),
         ),
         tool(
             "speech_transcribe",
             ToolEffect::Read,
-            "转写本机 WAV 录音（SenseVoice / sherpa-onnx-offline CLI）",
+            "转写本机 WAV 录音（SenseVoice 模型 + sherpa-onnx-offline CLI）",
             serde_json::json!({
                 "path": { "type": "string" },
                 "language": { "type": "string" }

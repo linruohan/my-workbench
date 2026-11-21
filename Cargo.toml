@@ -45,6 +45,10 @@ env_logger = "0.11"
 portable-pty = "0.8"
 cpal = "0.15"
 hound = "3.5"
+# paddle-ocr-rs 0.6.1 与 ort >= rc.11 API 不兼容；用 load-dynamic 避开 copy-dylibs 在 Windows 上的路径坑
+# 注意：sherpa-onnx 官方 Windows 预编译为 MT CRT，与 clipper-sys(MD) 无法同链，语音暂用 CLI
+paddle-ocr-rs = { version = "0.6.1", default-features = false, features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries", "load-dynamic"] }
 
 [profile.dev]
 debug = "limited"
