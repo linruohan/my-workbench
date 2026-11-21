@@ -12,6 +12,23 @@ pub fn format_local_day(ms: i64) -> String {
     format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day())
 }
 
+/// Compact local stamp for backup folder names: `2026-11-21_164512`.
+pub fn format_local_stamp(ms: i64) -> String {
+    let dt = Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(Local::now);
+    format!(
+        "{:04}-{:02}-{:02}_{:02}{:02}{:02}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
 pub fn parse_local_day(day: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()
 }

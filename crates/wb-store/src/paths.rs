@@ -7,6 +7,9 @@ pub const STORE_FILE: &str = "workbench.json";
 pub const PREFS_FILE: &str = "prefs.json";
 pub const THEME_FILE: &str = "theme.json";
 pub const CREDENTIALS_FILE: &str = "credentials.json";
+pub const PROVIDERS_FILE: &str = "providers.json";
+/// Manual backups live under `<data>/exports/`.
+pub const EXPORTS_DIR: &str = "exports";
 
 pub fn resolve_data_dir() -> Result<PathBuf> {
     let base = dirs::data_dir().context("无法解析系统数据目录")?;

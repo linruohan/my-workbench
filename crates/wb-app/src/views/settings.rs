@@ -31,6 +31,7 @@ pub struct SettingsPane {
     ocr_msg: String,
     cred_msg: String,
     agent_json_msg: String,
+    data_msg: String,
 }
 
 impl SettingsPane {
@@ -144,6 +145,7 @@ impl SettingsPane {
             ocr_msg,
             cred_msg: String::new(),
             agent_json_msg: String::new(),
+            data_msg: String::new(),
         }
     }
 
@@ -591,6 +593,31 @@ impl SettingsPane {
             })
     }
 
+    fn backup_data_here(&mut self, cx: &mut Context<Self>) {
+        self.data_msg = match wb_store::backup_core_data() {
+            Ok(dest) => {
+                let _ = open_path(&dest);
+                format!("已备份到 {}", dest.display())
+            }
+            Err(e) => format!("备份失败：{e}"),
+        };
+        cx.notify();
+    }
+
+    fn backup_data_pick(&mut self, cx: &mut Context<Self>) {
+        self.data_msg = match wb_host::pick_directory() {
+            Some(parent) => match wb_store::backup_core_data_to(&parent) {
+                Ok(dest) => {
+                    let _ = open_path(&dest);
+                    format!("已备份到 {}", dest.display())
+                }
+                Err(e) => format!("备份失败：{e}"),
+            },
+            None => "已取消选择备份目录".into(),
+        };
+        cx.notify();
+    }
+
     fn render_data_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let data_dir = wb_store::resolve_data_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -609,15 +636,48 @@ impl SettingsPane {
                     .child(format!("数据目录：{data_dir}")),
             )
             .child(
-                Button::new("open-data-dir")
-                    .small()
-                    .label("打开数据目录")
-                    .on_click(|_, _, _| {
-                        if let Ok(dir) = wb_store::resolve_data_dir() {
-                            let _ = open_path(&dir);
-                        }
-                    }),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("open-data-dir")
+                            .small()
+                            .label("打开数据目录")
+                            .on_click(|_, _, _| {
+                                if let Ok(dir) = wb_store::resolve_data_dir() {
+                                    let _ = open_path(&dir);
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("backup-data")
+                            .small()
+                            .primary()
+                            .label("一键备份")
+                            .on_click(cx.listener(|this, _, _, cx| this.backup_data_here(cx))),
+                    )
+                    .child(
+                        Button::new("backup-data-pick")
+                            .small()
+                            .label("备份到…")
+                            .on_click(cx.listener(|this, _, _, cx| this.backup_data_pick(cx))),
+                    ),
             )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "备份含 workbench/prefs/theme/credentials/providers（不含语音 OCR 模型）",
+                    ),
+            )
+            .when(!self.data_msg.is_empty(), |col| {
+                col.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.data_msg.clone()),
+                )
+            })
             .child(div().text_sm().child(format!(
                 "版本 {} · GPUI + gpui-kit",
                 env!("CARGO_PKG_VERSION")
