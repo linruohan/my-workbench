@@ -18,6 +18,8 @@ pub struct SettingsPane {
     proxy: Entity<InputState>,
     personality: Entity<InputState>,
     memory_input: Entity<InputState>,
+    skills_dirs: Entity<InputState>,
+    plugins_dirs: Entity<InputState>,
     key_inputs: HashMap<String, Entity<InputState>>,
     font_count: usize,
     speech_msg: String,
@@ -42,6 +44,18 @@ impl SettingsPane {
         });
         let memory_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("新记忆，回车或点添加"));
+        let skills_val = state.with(|s| s.prefs.agent.skills_dirs.join(";"));
+        let plugins_val = state.with(|s| s.prefs.agent.plugins_dirs.join(";"));
+        let skills_dirs = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("技能目录，多个用 ; 分隔")
+                .default_value(skills_val)
+        });
+        let plugins_dirs = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("插件目录，多个用 ; 分隔")
+                .default_value(plugins_val)
+        });
         let creds = load_credentials();
         let providers = load_providers();
         let mut key_inputs = HashMap::new();
@@ -71,6 +85,8 @@ impl SettingsPane {
             proxy,
             personality,
             memory_input,
+            skills_dirs,
+            plugins_dirs,
             key_inputs,
             font_count,
             speech_msg,
@@ -179,6 +195,25 @@ impl SettingsPane {
         cx.notify();
     }
 
+    fn save_dirs(&mut self, cx: &mut Context<Self>) {
+        let skills = self.skills_dirs.read(cx).value().to_string();
+        let plugins = self.plugins_dirs.read(cx).value().to_string();
+        let split = |s: &str| -> Vec<String> {
+            s.split([';', ','])
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(|x| x.to_string())
+                .collect()
+        };
+        self.state.with_mut(|s| {
+            s.prefs.agent.skills_dirs = split(&skills);
+            s.prefs.agent.plugins_dirs = split(&plugins);
+        });
+        self.state.persist_prefs();
+        self.cred_msg = "技能/插件目录已保存".into();
+        cx.notify();
+    }
+
     fn save_api_keys(&mut self, cx: &mut Context<Self>) {
         let mut creds = load_credentials();
         for (pid, input) in &self.key_inputs {
@@ -225,13 +260,8 @@ impl SettingsPane {
         let _ = speech_status("sensevoice");
         cx.notify();
     }
-}
 
-impl Render for SettingsPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dark = self.state.theme_is_dark();
-        let voice = self.state.with(|s| s.prefs.voice.enabled);
-        let sys_notify = self.state.with(|s| s.prefs.system_notifications);
+    fn render_agent_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let default_model = self
             .state
             .with(|s| s.prefs.agent.default_model_ref.clone())
@@ -239,9 +269,194 @@ impl Render for SettingsPane {
         let memories = self.state.with(|s| s.prefs.agent.memories.clone());
         let providers = load_providers();
         let creds = load_credentials();
+
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(div().font_bold().child("Agent 模型与记忆"))
+            .child(Input::new(&self.personality))
+            .child(
+                Button::new("save-persona")
+                    .small()
+                    .label("保存个性化")
+                    .on_click(cx.listener(|this, _, _, cx| this.save_personality(cx))),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Input::new(&self.memory_input))
+                    .child(
+                        Button::new("add-mem")
+                            .small()
+                            .primary()
+                            .label("添加记忆")
+                            .on_click(cx.listener(|this, _, _, cx| this.add_memory(cx))),
+                    ),
+            )
+            .when(!memories.is_empty(), |col| {
+                col.child(
+                    v_flex()
+                        .gap_1()
+                        .children(memories.into_iter().enumerate().map(|(i, m)| {
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().flex_1().text_sm().child(format!("{}. {m}", i + 1)))
+                                .child(
+                                    Button::new(SharedString::from(format!("rm-mem-{i}")))
+                                        .xsmall()
+                                        .ghost()
+                                        .label("删除")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_memory(i, cx);
+                                        })),
+                                )
+                        })),
+                )
+            })
+            .child(Input::new(&self.skills_dirs))
+            .child(Input::new(&self.plugins_dirs))
+            .child(
+                Button::new("save-dirs")
+                    .small()
+                    .label("保存技能/插件目录")
+                    .on_click(cx.listener(|this, _, _, cx| this.save_dirs(cx))),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("新会话默认模型：{default_model}")),
+            )
+            .child(
+                h_flex().gap_2().flex_wrap().children(
+                    std::iter::once((wb_domain::BUILTIN_MODEL_REF.to_string(), "内置".to_string()))
+                        .chain(providers.providers.iter().flat_map(|p| {
+                            if p.id.starts_with("builtin") {
+                                return Vec::new().into_iter();
+                            }
+                            let items: Vec<(String, String)> = if p.models.is_empty() {
+                                vec![(format!("{}/default", p.id), p.name.clone())]
+                            } else {
+                                p.models
+                                    .keys()
+                                    .map(|mid| {
+                                        (format!("{}/{}", p.id, mid), format!("{} / {mid}", p.name))
+                                    })
+                                    .collect()
+                            };
+                            items.into_iter()
+                        }))
+                        .map(|(model_ref, label)| {
+                            let selected = model_ref == default_model;
+                            let mr = model_ref.clone();
+                            Button::new(SharedString::from(format!("model-{model_ref}")))
+                                .xsmall()
+                                .when(selected, |b| b.primary())
+                                .when(!selected, |b| b.ghost())
+                                .label(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_default_model(&mr, cx);
+                                }))
+                        }),
+                ),
+            )
+            .children(providers.providers.iter().map(|p| {
+                let has_key = creds.keys.contains_key(&p.id);
+                div().text_sm().child(format!(
+                    "{} · {} {}{}",
+                    p.name,
+                    p.base_url,
+                    if p.enabled { "" } else { "(停用) " },
+                    if p.api_key_required {
+                        if has_key { "· Key✓" } else { "· 缺 Key" }
+                    } else {
+                        ""
+                    }
+                ))
+            }))
+            .children(
+                self.key_inputs
+                    .values()
+                    .map(|input| Input::new(input).into_any_element()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("save-keys")
+                            .small()
+                            .primary()
+                            .label("保存 API Key")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_api_keys(cx))),
+                    )
+                    .child(
+                        Button::new("save-providers")
+                            .small()
+                            .label("写入默认 Provider 配置")
+                            .on_click(|_, _, _| {
+                                let _ = save_providers(&load_providers());
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("输入 Key 后点保存；输入单独的 - 可清除该 Provider 的 Key"),
+            )
+            .when(!self.cred_msg.is_empty(), |col| {
+                col.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.cred_msg.clone()),
+                )
+            })
+    }
+
+    fn render_data_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let data_dir = wb_store::resolve_data_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "%APPDATA%\\my-workbench".into());
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(div().font_bold().child("数据与关于"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("数据目录：{data_dir}")),
+            )
+            .child(
+                Button::new("open-data-dir")
+                    .small()
+                    .label("打开数据目录")
+                    .on_click(|_, _, _| {
+                        if let Ok(dir) = wb_store::resolve_data_dir() {
+                            let _ = open_path(&dir);
+                        }
+                    }),
+            )
+            .child(div().text_sm().child(format!(
+                "版本 {} · GPUI + gpui-kit",
+                env!("CARGO_PKG_VERSION")
+            )))
+    }
+}
+
+impl Render for SettingsPane {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dark = self.state.theme_is_dark();
+        let voice = self.state.with(|s| s.prefs.voice.enabled);
+        let sys_notify = self.state.with(|s| s.prefs.system_notifications);
 
         v_flex()
             .size_full()
@@ -346,185 +561,7 @@ impl Render for SettingsPane {
                         )
                     }),
             )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(div().font_bold().child("Agent 模型与记忆"))
-                    .child(Input::new(&self.personality))
-                    .child(
-                        Button::new("save-persona")
-                            .small()
-                            .label("保存个性化")
-                            .on_click(cx.listener(|this, _, _, cx| this.save_personality(cx))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Input::new(&self.memory_input))
-                            .child(
-                                Button::new("add-mem")
-                                    .small()
-                                    .primary()
-                                    .label("添加记忆")
-                                    .on_click(cx.listener(|this, _, _, cx| this.add_memory(cx))),
-                            ),
-                    )
-                    .when(!memories.is_empty(), |col| {
-                        col.child(
-                            v_flex()
-                                .gap_1()
-                                .children(memories.into_iter().enumerate().map(|(i, m)| {
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .text_sm()
-                                                .child(format!("{}. {m}", i + 1)),
-                                        )
-                                        .child(
-                                            Button::new(SharedString::from(format!("rm-mem-{i}")))
-                                                .xsmall()
-                                                .ghost()
-                                                .label("删除")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.remove_memory(i, cx);
-                                                })),
-                                        )
-                                })),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("新会话默认模型：{default_model}")),
-                    )
-                    .child(
-                        h_flex().gap_2().flex_wrap().children(
-                            std::iter::once((
-                                wb_domain::BUILTIN_MODEL_REF.to_string(),
-                                "内置".to_string(),
-                            ))
-                            .chain(providers.providers.iter().flat_map(|p| {
-                                if p.id.starts_with("builtin") {
-                                    return Vec::new().into_iter();
-                                }
-                                let items: Vec<(String, String)> = if p.models.is_empty() {
-                                    vec![(format!("{}/default", p.id), p.name.clone())]
-                                } else {
-                                    p.models
-                                        .keys()
-                                        .map(|mid| {
-                                            (
-                                                format!("{}/{}", p.id, mid),
-                                                format!("{} / {mid}", p.name),
-                                            )
-                                        })
-                                        .collect()
-                                };
-                                items.into_iter()
-                            }))
-                            .map(|(model_ref, label)| {
-                                let selected = model_ref == default_model;
-                                let mr = model_ref.clone();
-                                Button::new(SharedString::from(format!("model-{model_ref}")))
-                                    .xsmall()
-                                    .when(selected, |b| b.primary())
-                                    .when(!selected, |b| b.ghost())
-                                    .label(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_default_model(&mr, cx);
-                                    }))
-                            }),
-                        ),
-                    )
-                    .children(providers.providers.iter().map(|p| {
-                        let has_key = creds.keys.contains_key(&p.id);
-                        div().text_sm().child(format!(
-                            "{} · {} {}{}",
-                            p.name,
-                            p.base_url,
-                            if p.enabled { "" } else { "(停用) " },
-                            if p.api_key_required {
-                                if has_key { "· Key✓" } else { "· 缺 Key" }
-                            } else {
-                                ""
-                            }
-                        ))
-                    }))
-                    .children(
-                        self.key_inputs
-                            .values()
-                            .map(|input| Input::new(input).into_any_element()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("save-keys")
-                                    .small()
-                                    .primary()
-                                    .label("保存 API Key")
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_api_keys(cx))),
-                            )
-                            .child(
-                                Button::new("save-providers")
-                                    .small()
-                                    .label("写入默认 Provider 配置")
-                                    .on_click(|_, _, _| {
-                                        let _ = save_providers(&load_providers());
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("输入 Key 后点保存；输入单独的 - 可清除该 Provider 的 Key"),
-                    )
-                    .when(!self.cred_msg.is_empty(), |col| {
-                        col.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(self.cred_msg.clone()),
-                        )
-                    }),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(div().font_bold().child("数据与关于"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("数据目录：{data_dir}")),
-                    )
-                    .child(
-                        Button::new("open-data-dir")
-                            .small()
-                            .label("打开数据目录")
-                            .on_click(|_, _, _| {
-                                if let Ok(dir) = wb_store::resolve_data_dir() {
-                                    let _ = open_path(&dir);
-                                }
-                            }),
-                    )
-                    .child(div().text_sm().child(format!(
-                        "版本 {} · GPUI + gpui-kit",
-                        env!("CARGO_PKG_VERSION")
-                    ))),
-            )
+            .child(self.render_agent_section(cx))
+            .child(self.render_data_section(cx))
     }
 }

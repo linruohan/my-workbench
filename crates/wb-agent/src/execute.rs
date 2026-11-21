@@ -8,7 +8,8 @@ use wb_domain::{
     make_custom_schedule, make_preset_schedule, now_ms, settle_timer_segment, workspace_tools,
 };
 use wb_host::{
-    global_jobs, list_files_recursive, read_image_info, read_text, run_shell, web_fetch, write_text,
+    global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
+    read_image_info, read_text, resolve_agent_cwd, run_shell, set_agent_cwd, web_fetch, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
 
@@ -43,6 +44,15 @@ fn safe_join(root: &str, rel: &str) -> Result<std::path::PathBuf> {
         anyhow::bail!("路径越界：不允许 ..");
     }
     Ok(Path::new(root).join(rel))
+}
+
+fn effective_root(workspace_root: Option<&str>) -> Result<String> {
+    if let Some(cwd) = resolve_agent_cwd(workspace_root) {
+        return Ok(cwd.to_string_lossy().to_string());
+    }
+    workspace_root
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("未绑定工作区"))
 }
 
 pub fn all_tools() -> Vec<ToolSpec> {
@@ -519,8 +529,8 @@ pub fn execute_tool(
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
-            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
-            let path = safe_join(root, rel)?;
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
             let text = read_text(&path)?;
             Ok(ToolResult::ok_text(text))
         }
@@ -530,8 +540,8 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
-            let path = safe_join(root, rel)?;
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
             write_text(&path, content)?;
             Ok(ToolResult::ok_text(format!("已写入 {rel}")))
         }
@@ -555,8 +565,8 @@ pub fn execute_tool(
                 .or_else(|| args.get("replace_all"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
-            let path = safe_join(root, rel)?;
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
             let text = read_text(&path)?;
             if old.is_empty() {
                 return Ok(ToolResult::err_text("oldString 不能为空"));
@@ -586,7 +596,8 @@ pub fn execute_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
-            let result = run_shell(command, workspace_root, 120)?;
+            let root = effective_root(workspace_root).ok();
+            let result = run_shell(command, root.as_deref(), 120)?;
             Ok(ToolResult {
                 ok: result.code == 0,
                 content: format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr),
@@ -598,8 +609,8 @@ pub fn execute_tool(
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
-            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
-            let path = safe_join(root, rel)?;
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
             let info = read_image_info(&path)?;
             Ok(ToolResult::ok_text(format!(
                 "{} · {} · {} bytes · {}x{} · {}",
@@ -616,7 +627,8 @@ pub fn execute_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
-            let id = global_jobs().start(command, workspace_root)?;
+            let root = effective_root(workspace_root).ok();
+            let id = global_jobs().start(command, root.as_deref())?;
             Ok(ToolResult::ok_text(format!("已启动后台任务 {id}")))
         }
         "job_output" => {
@@ -703,8 +715,8 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("*")
                 .to_lowercase();
-            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
-            let entries = list_files_recursive(Path::new(root), 500)?;
+            let root = effective_root(workspace_root)?;
+            let entries = list_files_recursive(Path::new(&root), 500)?;
             let lines: Vec<_> = entries
                 .into_iter()
                 .filter(|e| {
@@ -732,11 +744,11 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 pattern"))?;
             let sub = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
+            let root = effective_root(workspace_root)?;
             let base = if sub.is_empty() {
-                Path::new(root).to_path_buf()
+                Path::new(&root).to_path_buf()
             } else {
-                safe_join(root, sub)?
+                safe_join(&root, sub)?
             };
             let entries = list_files_recursive(&base, 200)?;
             let mut hits = Vec::new();
@@ -764,6 +776,164 @@ pub fn execute_tool(
             } else {
                 hits.join("\n")
             }))
+        }
+        "skill_list" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let skills = list_skills(&prefs.agent.skills_dirs);
+            let lines: Vec<_> = skills
+                .into_iter()
+                .map(|s| format!("- {} · {} ({})", s.name, s.summary, s.path))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无技能；请在设置中配置 skillsDirs）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "skill_load" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 name"))?;
+            let prefs = load_prefs().unwrap_or_default();
+            let text = load_skill(&prefs.agent.skills_dirs, name)?;
+            Ok(ToolResult::ok_text(text))
+        }
+        "plugin_list" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let plugins = list_plugins(&prefs.agent.plugins_dirs);
+            let lines: Vec<_> = plugins
+                .into_iter()
+                .map(|p| format!("- {} ({})", p.name, p.path))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无插件；请在设置中配置 pluginsDirs）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "mcp_list" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let lines: Vec<_> = prefs
+                .agent
+                .mcp_servers
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let name = v
+                        .get("name")
+                        .or_else(|| v.get("id"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("mcp");
+                    format!("{}. {} · {}", i + 1, name, v)
+                })
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（未配置 MCP 服务器）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "working_directory" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.trim().is_empty() {
+                let cur = resolve_agent_cwd(workspace_root)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| workspace_root.unwrap_or("（未设置）").to_string());
+                return Ok(ToolResult::ok_text(format!("当前工作目录：{cur}")));
+            }
+            let ws = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
+            let next = if Path::new(path).is_absolute() {
+                if !path.starts_with(ws) {
+                    return Ok(ToolResult::err_text("工作目录必须在工作区内"));
+                }
+                Path::new(path).to_path_buf()
+            } else {
+                safe_join(ws, path)?
+            };
+            set_agent_cwd(Some(next.clone()));
+            Ok(ToolResult::ok_text(format!(
+                "已设置工作目录：{}",
+                next.display()
+            )))
+        }
+        "terminal_open" => {
+            let shell = args.get("shell").and_then(|v| v.as_str()).unwrap_or("");
+            let cwd = resolve_agent_cwd(workspace_root);
+            let id = global_terminals().open(shell, cwd.as_deref())?;
+            Ok(ToolResult::ok_text(format!("已打开终端 {id}")))
+        }
+        "terminal_send" => {
+            let id = args
+                .get("terminalId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 terminalId"))?;
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            let buf = global_terminals().send(id, command)?;
+            let tail = if buf.len() > 8_000 {
+                format!("…\n{}", &buf[buf.len() - 8_000..])
+            } else {
+                buf
+            };
+            Ok(ToolResult::ok_text(tail))
+        }
+        "terminal_read" => {
+            let id = args
+                .get("terminalId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 terminalId"))?;
+            let buf = global_terminals().read(id)?;
+            Ok(ToolResult::ok_text(buf))
+        }
+        "terminal_list" => {
+            let lines: Vec<_> = global_terminals()
+                .list()
+                .into_iter()
+                .map(|t| {
+                    format!(
+                        "- {} [{}] {} · {}",
+                        t.id,
+                        t.shell,
+                        if t.closed { "closed" } else { "open" },
+                        t.cwd
+                    )
+                })
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无终端会话）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "terminal_close" => {
+            let id = args
+                .get("terminalId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 terminalId"))?;
+            if global_terminals().close(id) {
+                Ok(ToolResult::ok_text(format!("已关闭终端 {id}")))
+            } else {
+                Ok(ToolResult::err_text("终端不存在"))
+            }
+        }
+        "terminal_signal" => {
+            let id = args
+                .get("terminalId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 terminalId"))?;
+            let signal = args
+                .get("signal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SIGINT");
+            let msg = global_terminals().signal(id, signal)?;
+            Ok(ToolResult::ok_text(msg))
         }
         other => Ok(ToolResult::err_text(format!("未知工具: {other}"))),
     }
@@ -943,6 +1113,49 @@ mod tests {
         }
         let out = execute_tool(&mut repo, "job_output", &json!({ "jobId": id }), None).unwrap();
         assert!(out.ok);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_and_cwd_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("wb-agent-term-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut repo = MemoryWorkbenchRepository::default();
+        let root = dir.to_string_lossy().to_string();
+        let cwd = execute_tool(
+            &mut repo,
+            "working_directory",
+            &json!({ "path": "." }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(cwd.ok);
+        let open = execute_tool(
+            &mut repo,
+            "terminal_open",
+            &json!({ "shell": "cmd" }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(open.ok);
+        let id = open.content.split_whitespace().last().unwrap().to_string();
+        let sent = execute_tool(
+            &mut repo,
+            "terminal_send",
+            &json!({ "terminalId": id, "command": "echo hi-term" }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(sent.ok);
+        let listed = execute_tool(&mut repo, "terminal_list", &json!({}), None).unwrap();
+        assert!(listed.content.contains(&id));
+        let _ = execute_tool(
+            &mut repo,
+            "terminal_close",
+            &json!({ "terminalId": id }),
+            None,
+        );
+        set_agent_cwd(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -411,6 +411,32 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
                 "question": { "type": "string" }
             }),
         ),
+        tool(
+            "skill_list",
+            ToolEffect::Read,
+            "列出技能目录中的技能",
+            serde_json::json!({}),
+        ),
+        tool(
+            "skill_load",
+            ToolEffect::Read,
+            "加载指定技能全文",
+            serde_json::json!({
+                "name": { "type": "string" }
+            }),
+        ),
+        tool(
+            "plugin_list",
+            ToolEffect::Read,
+            "列出插件目录",
+            serde_json::json!({}),
+        ),
+        tool(
+            "mcp_list",
+            ToolEffect::Read,
+            "列出已配置的 MCP 服务器",
+            serde_json::json!({}),
+        ),
     ]
 }
 
@@ -501,6 +527,62 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             "抓取网页/HTTP 文本（有体积上限）",
             serde_json::json!({
                 "url": { "type": "string" }
+            }),
+        ),
+        tool(
+            "working_directory",
+            ToolEffect::None,
+            "设置或查看会话工作目录（相对工作区）",
+            serde_json::json!({
+                "path": { "type": "string" }
+            }),
+        ),
+        tool(
+            "terminal_open",
+            ToolEffect::Write,
+            "打开轻量终端会话（非 PTY）",
+            serde_json::json!({
+                "shell": { "type": "string" }
+            }),
+        ),
+        tool(
+            "terminal_send",
+            ToolEffect::Write,
+            "向终端会话发送命令",
+            serde_json::json!({
+                "terminalId": { "type": "string" },
+                "command": { "type": "string" }
+            }),
+        ),
+        tool(
+            "terminal_read",
+            ToolEffect::Read,
+            "读取终端会话输出缓冲",
+            serde_json::json!({
+                "terminalId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "terminal_list",
+            ToolEffect::Read,
+            "列出终端会话",
+            serde_json::json!({}),
+        ),
+        tool(
+            "terminal_close",
+            ToolEffect::Write,
+            "关闭终端会话",
+            serde_json::json!({
+                "terminalId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "terminal_signal",
+            ToolEffect::Write,
+            "向终端记录信号（轻量实现无进程组）",
+            serde_json::json!({
+                "terminalId": { "type": "string" },
+                "signal": { "type": "string" }
             }),
         ),
     ]
