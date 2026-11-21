@@ -5,7 +5,7 @@ use wb_domain::{
     AgentPermissionMode, ToolEffect, ToolGate, ToolSpec, builtin_host_tools, gate_tool,
     workspace_tools,
 };
-use wb_host::{read_text, run_shell, write_text};
+use wb_host::{list_files_recursive, read_text, run_shell, write_text};
 use wb_store::MemoryWorkbenchRepository;
 
 #[derive(Debug, Clone)]
@@ -95,6 +95,102 @@ pub fn execute_tool(
                 }),
             }
         }
+        "task_incomplete" => {
+            let id = args
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 taskId"))?;
+            match repo.incomplete_task(id) {
+                Some(t) => Ok(ToolResult {
+                    ok: true,
+                    content: format!("已重开：{}", t.title),
+                }),
+                None => Ok(ToolResult {
+                    ok: false,
+                    content: "任务不存在".into(),
+                }),
+            }
+        }
+        "project_list" => {
+            let lines: Vec<_> = repo
+                .list_projects()
+                .into_iter()
+                .filter(|p| !p.is_archived)
+                .map(|p| format!("- {} ({})", p.title, p.id))
+                .collect();
+            Ok(ToolResult {
+                ok: true,
+                content: if lines.is_empty() {
+                    "（无项目）".into()
+                } else {
+                    lines.join("\n")
+                },
+            })
+        }
+        "project_create" => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未命名项目");
+            let p = repo.create_project(title);
+            Ok(ToolResult {
+                ok: true,
+                content: format!("已创建项目 {} · {}", p.id, p.title),
+            })
+        }
+        "tag_list" => {
+            let lines: Vec<_> = repo
+                .list_tags()
+                .into_iter()
+                .map(|t| format!("- #{} ({})", t.title, t.id))
+                .collect();
+            Ok(ToolResult {
+                ok: true,
+                content: if lines.is_empty() {
+                    "（无标签）".into()
+                } else {
+                    lines.join("\n")
+                },
+            })
+        }
+        "tag_create" => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未命名");
+            let t = repo.create_tag(title);
+            Ok(ToolResult {
+                ok: true,
+                content: format!("已创建标签 #{} · {}", t.title, t.id),
+            })
+        }
+        "tag_add" => {
+            let task_id = args
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 taskId"))?;
+            let tag_id = args
+                .get("tagId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 tagId"))?;
+            if repo.get_task(task_id).is_none() {
+                return Ok(ToolResult {
+                    ok: false,
+                    content: "任务不存在".into(),
+                });
+            }
+            if !repo.list_tags().iter().any(|t| t.id == tag_id) {
+                return Ok(ToolResult {
+                    ok: false,
+                    content: "标签不存在".into(),
+                });
+            }
+            repo.add_tag_to_task(task_id, tag_id);
+            Ok(ToolResult {
+                ok: true,
+                content: format!("已将标签 {tag_id} 加到任务 {task_id}"),
+            })
+        }
         "note_list" => {
             let notes = repo.list_notes();
             let lines: Vec<_> = notes
@@ -108,6 +204,18 @@ pub fn execute_tool(
                 } else {
                     lines.join("\n")
                 },
+            })
+        }
+        "note_create" => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未命名笔记");
+            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let n = repo.create_note(title, body);
+            Ok(ToolResult {
+                ok: true,
+                content: format!("已创建笔记 {} · {}", n.id, n.title),
             })
         }
         "notification_list" => {
@@ -182,13 +290,181 @@ pub fn execute_tool(
                 content: format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr),
             })
         }
-        "glob" | "grep" => Ok(ToolResult {
-            ok: true,
-            content: format!("{name} 已注册；完整索引扫描将在后续迭代增强"),
-        }),
+        "glob" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("*")
+                .to_lowercase();
+            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
+            let entries = list_files_recursive(Path::new(root), 500)?;
+            let lines: Vec<_> = entries
+                .into_iter()
+                .filter(|e| {
+                    let rel = e.relative.to_lowercase();
+                    if pattern == "*" || pattern == "**/*" {
+                        true
+                    } else if let Some(ext) = pattern.strip_prefix("*.") {
+                        rel.ends_with(&format!(".{ext}"))
+                    } else {
+                        rel.contains(&pattern.trim_matches('*').to_string())
+                    }
+                })
+                .take(100)
+                .map(|e| e.relative)
+                .collect();
+            Ok(ToolResult {
+                ok: true,
+                content: if lines.is_empty() {
+                    "（无匹配文件）".into()
+                } else {
+                    lines.join("\n")
+                },
+            })
+        }
+        "grep" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 pattern"))?;
+            let sub = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
+            let base = if sub.is_empty() {
+                Path::new(root).to_path_buf()
+            } else {
+                Path::new(root).join(sub)
+            };
+            let entries = list_files_recursive(&base, 200)?;
+            let mut hits = Vec::new();
+            for e in entries {
+                if e.is_dir {
+                    continue;
+                }
+                let Ok(text) = read_text(Path::new(&e.path)) else {
+                    continue;
+                };
+                for (i, line) in text.lines().enumerate() {
+                    if line.contains(pattern) {
+                        hits.push(format!("{}:{}:{}", e.relative, i + 1, line.trim()));
+                        if hits.len() >= 50 {
+                            break;
+                        }
+                    }
+                }
+                if hits.len() >= 50 {
+                    break;
+                }
+            }
+            Ok(ToolResult {
+                ok: true,
+                content: if hits.is_empty() {
+                    "（无匹配）".into()
+                } else {
+                    hits.join("\n")
+                },
+            })
+        }
         other => Ok(ToolResult {
             ok: false,
             content: format!("未知工具: {other}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn task_project_tag_note_roundtrip() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let t = execute_tool(
+            &mut repo,
+            "task_create",
+            &json!({ "title": "写工具" }),
+            None,
+        )
+        .unwrap();
+        assert!(t.ok);
+        let task_id = repo.list_tasks()[0].id.clone();
+
+        let p = execute_tool(
+            &mut repo,
+            "project_create",
+            &json!({ "title": "Agent" }),
+            None,
+        )
+        .unwrap();
+        assert!(p.ok);
+
+        let tag = execute_tool(&mut repo, "tag_create", &json!({ "title": "核心" }), None).unwrap();
+        assert!(tag.ok);
+        let tag_id = repo.list_tags()[0].id.clone();
+
+        let add = execute_tool(
+            &mut repo,
+            "tag_add",
+            &json!({ "taskId": task_id, "tagId": tag_id }),
+            None,
+        )
+        .unwrap();
+        assert!(add.ok);
+
+        let note = execute_tool(
+            &mut repo,
+            "note_create",
+            &json!({ "title": "备忘", "body": "hello" }),
+            None,
+        )
+        .unwrap();
+        assert!(note.ok);
+
+        let incomplete = execute_tool(
+            &mut repo,
+            "task_complete",
+            &json!({ "taskId": task_id }),
+            None,
+        )
+        .unwrap();
+        assert!(incomplete.ok);
+        let reopen = execute_tool(
+            &mut repo,
+            "task_incomplete",
+            &json!({ "taskId": task_id }),
+            None,
+        )
+        .unwrap();
+        assert!(reopen.ok);
+        assert!(!repo.get_task(&task_id).unwrap().is_done);
+
+        let list = execute_tool(&mut repo, "project_list", &json!({}), None).unwrap();
+        assert!(list.content.contains("Agent"));
+    }
+
+    #[test]
+    fn glob_and_grep_scan_workspace() {
+        let dir = std::env::temp_dir().join(format!("wb-agent-glob-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hello.rs");
+        std::fs::write(&file, "fn main() { println!(\"gap\"); }\n").unwrap();
+        let mut repo = MemoryWorkbenchRepository::default();
+        let root = dir.to_string_lossy().to_string();
+
+        let g = execute_tool(
+            &mut repo,
+            "glob",
+            &json!({ "pattern": "*.rs" }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(g.ok);
+        assert!(g.content.contains("hello.rs"));
+
+        let hits =
+            execute_tool(&mut repo, "grep", &json!({ "pattern": "gap" }), Some(&root)).unwrap();
+        assert!(hits.ok);
+        assert!(hits.content.contains("gap"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

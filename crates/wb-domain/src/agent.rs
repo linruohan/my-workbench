@@ -238,10 +238,64 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "task_incomplete",
+            ToolEffect::Write,
+            "取消完成任务",
+            serde_json::json!({
+                "taskId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "project_list",
+            ToolEffect::Read,
+            "列出项目",
+            serde_json::json!({}),
+        ),
+        tool(
+            "project_create",
+            ToolEffect::Write,
+            "创建项目",
+            serde_json::json!({
+                "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "tag_list",
+            ToolEffect::Read,
+            "列出标签",
+            serde_json::json!({}),
+        ),
+        tool(
+            "tag_create",
+            ToolEffect::Write,
+            "创建标签",
+            serde_json::json!({
+                "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "tag_add",
+            ToolEffect::Write,
+            "给任务添加标签",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "tagId": { "type": "string" }
+            }),
+        ),
+        tool(
             "note_list",
             ToolEffect::Read,
             "列出应用内笔记",
             serde_json::json!({}),
+        ),
+        tool(
+            "note_create",
+            ToolEffect::Write,
+            "创建应用内笔记",
+            serde_json::json!({
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            }),
         ),
         tool(
             "notification_list",

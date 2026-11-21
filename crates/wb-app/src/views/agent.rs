@@ -20,8 +20,10 @@ pub struct AgentPane {
 
 impl AgentPane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("给 Agent 发消息，或 /task_list"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("给 Agent 发消息，或 /task_list /project_list …")
+        });
         let mut this = Self {
             state,
             input: input.clone(),
@@ -334,24 +336,31 @@ impl Render for AgentPane {
                     })
                     .child(
                         h_flex().gap_2().flex_wrap().children(
-                            ["/task_list", "/note_list", "/schedule_list"]
-                                .into_iter()
-                                .map(|cmd| {
-                                    Button::new(SharedString::from(format!("slash-{cmd}")))
-                                        .xsmall()
-                                        .ghost()
-                                        .label(cmd)
-                                        .disabled(self.busy)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if this.busy {
-                                                return;
-                                            }
-                                            this.input.update(cx, |i, cx| {
-                                                i.set_value(cmd, window, cx);
-                                            });
-                                            this.send(cmd.to_string(), cx);
-                                        }))
-                                }),
+                            [
+                                "/task_list",
+                                "/project_list",
+                                "/tag_list",
+                                "/note_list",
+                                "/schedule_list",
+                                "/notification_list",
+                            ]
+                            .into_iter()
+                            .map(|cmd| {
+                                Button::new(SharedString::from(format!("slash-{cmd}")))
+                                    .xsmall()
+                                    .ghost()
+                                    .label(cmd)
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if this.busy {
+                                            return;
+                                        }
+                                        this.input.update(cx, |i, cx| {
+                                            i.set_value(cmd, window, cx);
+                                        });
+                                        this.send(cmd.to_string(), cx);
+                                    }))
+                            }),
                         ),
                     )
                     .child(

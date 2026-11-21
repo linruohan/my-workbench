@@ -171,22 +171,27 @@ fn system_tool_msg(thread_id: &str, tool: &str, content: &str) -> AgentMessage {
 
 fn parse_slash_tool(text: &str) -> Option<&'static str> {
     let t = text.trim();
-    if t.starts_with("/task_list") {
-        Some("task_list")
-    } else if t.starts_with("/note_list") {
-        Some("note_list")
-    } else if t.starts_with("/schedule_list") {
-        Some("schedule_list")
-    } else {
-        None
+    const COMMANDS: &[(&str, &str)] = &[
+        ("/task_list", "task_list"),
+        ("/project_list", "project_list"),
+        ("/tag_list", "tag_list"),
+        ("/note_list", "note_list"),
+        ("/schedule_list", "schedule_list"),
+        ("/notification_list", "notification_list"),
+    ];
+    for (prefix, name) in COMMANDS {
+        if t.starts_with(prefix) {
+            return Some(name);
+        }
     }
+    None
 }
 
 fn builtin_reply(user_text: &str, repo: &MemoryWorkbenchRepository) -> String {
     let tasks = repo.list_tasks();
     let open = tasks.iter().filter(|t| !t.is_done).count();
     format!(
-        "（内置通道）已收到：{}\n\n当前未完成任务 {open} 条。可用斜杠命令：/task_list /note_list /schedule_list",
+        "（内置通道）已收到：{}\n\n当前未完成任务 {open} 条。可用斜杠：/task_list /project_list /tag_list /note_list /schedule_list /notification_list",
         user_text.trim()
     )
 }

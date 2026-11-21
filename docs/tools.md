@@ -349,6 +349,24 @@ DSH：统一协作式取消 + 超时错误映射。
 
 这些不属于 DSH `dsh-tool-*` 对照范围，但与 Agent 共用同一套权限与回合管线。
 
+### Rust / GPUI 落地（`wb-agent`）
+
+已接入并可经斜杠或 `execute_tool` 调用：
+
+| 工具 | 状态 |
+| --- | --- |
+| `task_list` / `task_create` / `task_complete` / `task_incomplete` | ✅ |
+| `project_list` / `project_create` | ✅ |
+| `tag_list` / `tag_create` / `tag_add` | ✅ |
+| `note_list` / `note_create` | ✅ |
+| `notification_list` / `schedule_list` | ✅ |
+| `read` / `write` / `shell` | ✅（工作区相对路径；尚无完整 jail / spill） |
+| `glob` / `grep` | ✅（自实现扫描 + 结果上限；非 ripgrep） |
+| `ui_open` | 🟡 仅回显参数，未切视图 |
+| `timer_*` / `search` / `settings_*` / `memory_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `schedule_*` 写 / `session_*` | ❌ 未迁 |
+
+斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list`。
+
 另：`shell` 是本仓库的跨平台入口（对齐 DSH `dsh-shell` 抽象 + bash/pwsh 二选一），DSH 目录里没有名为 `dsh-tool-shell` 的包。
 
 ---
