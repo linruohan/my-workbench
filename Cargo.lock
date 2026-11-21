@@ -9448,11 +9448,13 @@ version = "0.1.14"
 dependencies = [
  "anyhow",
  "chrono",
+ "embed-resource",
  "env_logger",
  "gpui-kit",
  "gpui-webview",
  "lb-wry",
  "log",
+ "resvg 0.46.0",
  "serde",
  "serde_json",
  "tokio",

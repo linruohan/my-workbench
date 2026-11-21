@@ -23,8 +23,18 @@ pub fn is_force_quit() -> bool {
     FORCE_QUIT.load(Ordering::SeqCst)
 }
 
-/// 32×32 solid accent-like icon (RGBA).
+/// Application icon embedded from `data/icons/app.svg` (Windows resource id 1).
 fn make_icon() -> Option<Icon> {
+    #[cfg(windows)]
+    match Icon::from_resource(1, Some((32, 32))) {
+        Ok(icon) => return Some(icon),
+        Err(err) => log::warn!("加载应用图标失败，使用占位图标: {err}"),
+    }
+    solid_icon()
+}
+
+/// 32×32 solid accent-like icon (RGBA). Used when the embedded icon is unavailable.
+fn solid_icon() -> Option<Icon> {
     const SIZE: u32 = 32;
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     for y in 0..SIZE {
