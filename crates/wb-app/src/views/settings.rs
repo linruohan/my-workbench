@@ -1,5 +1,6 @@
-use crate::appearance::{apply_theme_pref, apply_ui_font};
+use crate::appearance::apply_ui_font;
 use crate::state::AppState;
+use crate::themes;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -187,12 +188,8 @@ impl SettingsPane {
     }
 
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mode = self.state.with_mut(|s| {
-            s.prefs.theme_mode = s.prefs.theme_mode.cycle();
-            s.prefs.theme_mode
-        });
-        self.state.persist_prefs();
-        apply_theme_pref(mode, Some(window), cx);
+        let mode = self.state.theme_mode().cycle();
+        themes::set_theme_mode(mode, &self.state, Some(window), cx);
         cx.notify();
     }
 
@@ -775,6 +772,7 @@ impl Render for SettingsPane {
     #[allow(clippy::large_unopt_stack_frames)]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_mode = self.state.theme_mode();
+        let theme_name = cx.theme().theme_name().clone();
         let voice = self.state.with(|s| s.prefs.voice.enabled);
         let sys_notify = self.state.with(|s| s.prefs.system_notifications);
         let tray_on = self.state.with(|s| s.prefs.tray_enabled);
@@ -798,7 +796,7 @@ impl Render for SettingsPane {
                         h_flex()
                             .items_center()
                             .gap_3()
-                            .child(format!("主题：{}", theme_mode.label()))
+                            .child(format!("主题：{} · {}", theme_mode.label(), theme_name))
                             .child(
                                 Button::new("cycle-theme")
                                     .small()
@@ -821,7 +819,7 @@ impl Render for SettingsPane {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "浅色 / 深色 / 跟随系统；已扫描系统字体 {} 个",
+                                "标题栏齿轮可调整字号、圆角、滚动条和配色；已扫描系统字体 {} 个",
                                 self.font_count
                             )),
                     ),

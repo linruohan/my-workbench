@@ -1,6 +1,7 @@
-use crate::appearance::{apply_theme_pref, apply_ui_font};
 use crate::command_palette::CommandPalette;
 use crate::state::{AppNav, AppState};
+use crate::themes;
+use crate::title_bar::workbench_title_bar;
 use crate::tray::{self, TrayAction};
 use crate::views::{AgentPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -39,8 +40,7 @@ impl WorkbenchApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::load();
         let collapsed = state.with(|s| s.prefs.sidebar_collapsed);
-        apply_theme_pref(state.theme_mode(), Some(window), cx);
-        apply_ui_font(state.with(|s| s.prefs.ui_font.clone()), cx);
+        themes::apply_saved_appearance(Some(window), cx);
 
         let tasks = cx.new(|cx| TasksPane::new(state.clone(), window, cx));
         let timed = cx.new(|cx| TimedPane::new(state.clone(), window, cx));
@@ -91,6 +91,7 @@ impl WorkbenchApp {
         cx.observe_window_appearance(window, |this, window, cx| {
             if matches!(this.state.theme_mode(), wb_domain::ThemeModePref::System) {
                 Theme::sync_system_appearance(Some(window), cx);
+                themes::reapply_overrides(&this.state, cx);
                 cx.notify();
             }
         })
@@ -322,7 +323,7 @@ impl Render for WorkbenchApp {
             .state
             .with(|s| clamp_sidebar_width(s.prefs.sidebar_width));
         let today = self.state.today();
-        let (today_count, inbox_count, pending_notifications) = self.state.with(|s| {
+        let (today_count, inbox_count) = self.state.with(|s| {
             let tasks = s.repo.list_tasks();
             let today_count = tasks
                 .iter()
@@ -332,18 +333,7 @@ impl Render for WorkbenchApp {
                 .iter()
                 .filter(|t| !t.is_done && t.project_id == INBOX_PROJECT_ID && t.parent_id.is_none())
                 .count();
-            let pending = s
-                .repo
-                .list_notifications()
-                .into_iter()
-                .filter(|n| {
-                    matches!(
-                        n.status,
-                        NotificationStatus::Pending | NotificationStatus::Delivered
-                    )
-                })
-                .count();
-            (today_count, inbox_count, pending)
+            (today_count, inbox_count)
         });
         let project_items: Vec<(String, String, bool)> = self.state.with(|s| {
             s.repo
@@ -371,7 +361,6 @@ impl Render for WorkbenchApp {
         });
         let palette_open = self.state.with(|s| s.palette_open);
         let notifications_open = self.state.with(|s| s.notifications_open);
-        let save_ok = self.state.with(|s| s.save_status.ok);
         let entity = cx.weak_entity();
         let collapsed = self.collapsed;
         let ptt_held = self.ptt_held;
@@ -553,131 +542,120 @@ impl Render for WorkbenchApp {
                 this.tasks
                     .update(cx, |tasks, cx| tasks.focus_capture(window, cx));
             }))
-            .child({
-                let sidebar = Sidebar::new("wb-sidebar")
-                    .collapsible(SidebarCollapsible::Icon)
-                    .collapsed(collapsed)
-                    .header(
-                        SidebarHeader::new().child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(Icon::new(IconName::LayoutDashboard))
-                                .when(!collapsed, |row| {
-                                    row.child(div().font_bold().child("个人工作台"))
-                                }),
-                        ),
-                    )
-                    .child(SidebarGroup::new("任务").child(task_menu))
-                    .child(SidebarGroup::new("项目").child(project_menu))
-                    .child(SidebarGroup::new("标签").child(tag_menu))
-                    .child(SidebarGroup::new("更多").child(more_menu))
-                    .footer(
-                        SidebarFooter::new().child(
-                            Button::new("search")
-                                .ghost()
-                                .icon(IconName::Search)
-                                .label(if collapsed { "" } else { "搜索 Ctrl+P" })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_palette(window, cx);
-                                })),
-                        ),
-                    );
-                let main = v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .child(
-                        h_flex()
-                            .h(px(44.))
-                            .px_3()
-                            .items_center()
-                            .gap_2()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_collapsed(cx);
-                                }),
-                            ))
-                            .child(div().font_bold().child(nav.label()))
-                            .child(div().flex_1())
-                            .when(ptt_held, |row| {
-                                row.child(
-                                    div()
-                                        .text_xs()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_md()
-                                        .bg(cx.theme().danger)
-                                        .text_color(cx.theme().danger_foreground)
-                                        .child("正在录音… 松开 CapsLock 结束"),
-                                )
-                            })
-                            .child(
-                                Button::new("bell")
-                                    .ghost()
-                                    .icon(IconName::Bell)
-                                    .label(if pending_notifications > 0 {
-                                        pending_notifications.to_string()
-                                    } else {
-                                        String::new()
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.state.with_mut(|s| {
-                                            s.notifications_open = !s.notifications_open;
-                                        });
-                                        cx.notify();
-                                    })),
+            .child(
+                v_flex()
+                    .size_full()
+                    .child(workbench_title_bar(
+                        self.state.clone(),
+                        cx.weak_entity(),
+                        cx,
+                    ))
+                    .child(div().flex_1().min_h_0().child({
+                        let sidebar = Sidebar::new("wb-sidebar")
+                            .collapsible(SidebarCollapsible::Icon)
+                            .collapsed(collapsed)
+                            .header(
+                                SidebarHeader::new().child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(Icon::new(IconName::LayoutDashboard))
+                                        .when(!collapsed, |row| {
+                                            row.child(div().font_bold().child("个人工作台"))
+                                        }),
+                                ),
                             )
+                            .child(SidebarGroup::new("任务").child(task_menu))
+                            .child(SidebarGroup::new("项目").child(project_menu))
+                            .child(SidebarGroup::new("标签").child(tag_menu))
+                            .child(SidebarGroup::new("更多").child(more_menu))
+                            .footer(
+                                SidebarFooter::new().child(
+                                    Button::new("search")
+                                        .ghost()
+                                        .icon(IconName::Search)
+                                        .label(if collapsed { "" } else { "搜索 Ctrl+P" })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_palette(window, cx);
+                                        })),
+                                ),
+                            );
+                        let main = v_flex()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if save_ok {
-                                        cx.theme().muted_foreground
-                                    } else {
-                                        cx.theme().danger
-                                    })
-                                    .child(if save_ok { "已保存" } else { "保存失败" }),
-                            ),
-                    )
-                    .child(div().flex_1().min_h_0().child(main_view));
+                                h_flex()
+                                    .h(px(44.))
+                                    .px_3()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        SidebarToggleButton::new().collapsed(collapsed).on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.toggle_collapsed(cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(div().font_bold().child(nav.label()))
+                                    .child(div().flex_1())
+                                    .when(ptt_held, |row| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .bg(cx.theme().danger)
+                                                .text_color(cx.theme().danger_foreground)
+                                                .child("正在录音… 松开 CapsLock 结束"),
+                                        )
+                                    }),
+                            )
+                            .child(div().flex_1().min_h_0().child(main_view));
 
-                if collapsed {
-                    h_flex()
-                        .size_full()
-                        .child(sidebar.w(px(64.)))
-                        .child(main)
-                        .into_any_element()
-                } else {
-                    let entity = entity.clone();
-                    div()
-                        .size_full()
-                        .child(
-                            h_resizable("wb-layout")
-                                .with_state(&self.sidebar_panels)
-                                .on_resize(move |state, _, app| {
-                                    let w = state
-                                        .read(app)
-                                        .sizes()
-                                        .first()
-                                        .map(|p| f32::from(*p))
-                                        .unwrap_or(width);
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(app, |this, cx| this.set_sidebar_width(w, cx));
-                                    }
-                                })
+                        if collapsed {
+                            h_flex()
+                                .size_full()
+                                .child(sidebar.w(px(64.)))
+                                .child(main)
+                                .into_any_element()
+                        } else {
+                            let entity = entity.clone();
+                            div()
+                                .size_full()
                                 .child(
-                                    resizable_panel()
-                                        .size(px(width))
-                                        .size_range(px(SIDEBAR_WIDTH_MIN)..px(SIDEBAR_WIDTH_MAX))
-                                        .child(sidebar),
+                                    h_resizable("wb-layout")
+                                        .with_state(&self.sidebar_panels)
+                                        .on_resize(move |state, _, app| {
+                                            let w = state
+                                                .read(app)
+                                                .sizes()
+                                                .first()
+                                                .map(|p| f32::from(*p))
+                                                .unwrap_or(width);
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| {
+                                                    this.set_sidebar_width(w, cx)
+                                                });
+                                            }
+                                        })
+                                        .child(
+                                            resizable_panel()
+                                                .size(px(width))
+                                                .size_range(
+                                                    px(SIDEBAR_WIDTH_MIN)..px(SIDEBAR_WIDTH_MAX),
+                                                )
+                                                .child(sidebar),
+                                        )
+                                        .child(resizable_panel().child(main)),
                                 )
-                                .child(resizable_panel().child(main)),
-                        )
-                        .into_any_element()
-                }
-            })
+                                .into_any_element()
+                        }
+                    })),
+            )
             .when(palette_open, |root| {
                 root.child(self.palette.clone().into_any_element())
             })
@@ -696,7 +674,7 @@ impl Render for WorkbenchApp {
                 root.child(
                     div()
                         .absolute()
-                        .top(px(48.))
+                        .top(TITLE_BAR_HEIGHT)
                         .right(px(12.))
                         .w(px(320.))
                         .max_h(px(420.))

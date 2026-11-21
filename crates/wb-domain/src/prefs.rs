@@ -17,6 +17,18 @@ pub struct AppPrefs {
     pub sidebar_collapsed: bool,
     #[serde(default)]
     pub theme_mode: ThemeModePref,
+    /// Named theme from the theme registry, for example "Catppuccin Mocha".
+    #[serde(default)]
+    pub theme_name: Option<String>,
+    /// Corner radius in px. Empty keeps the theme file's radius.
+    #[serde(default)]
+    pub ui_radius: Option<f32>,
+    /// Interface font size in px. Empty keeps the theme file's size.
+    #[serde(default)]
+    pub font_size: Option<f32>,
+    /// `scrolling` | `hover` | `always`.
+    #[serde(default)]
+    pub scrollbar_mode: Option<String>,
     #[serde(default)]
     pub ui_font: Option<String>,
     #[serde(default)]
@@ -60,6 +72,10 @@ impl Default for AppPrefs {
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
             sidebar_collapsed: false,
             theme_mode: ThemeModePref::Light,
+            theme_name: None,
+            ui_radius: None,
+            font_size: None,
+            scrollbar_mode: None,
             ui_font: None,
             web_font: None,
             system_notifications: false,
