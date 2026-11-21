@@ -304,10 +304,28 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             serde_json::json!({}),
         ),
         tool(
+            "notification_create",
+            ToolEffect::Write,
+            "创建一条通知（写入通知中心）",
+            serde_json::json!({
+                "title": { "type": "string" },
+                "body": { "type": "string" },
+                "kind": { "type": "string" }
+            }),
+        ),
+        tool(
             "schedule_list",
             ToolEffect::Read,
             "列出定时任务",
             serde_json::json!({}),
+        ),
+        tool(
+            "schedule_view",
+            ToolEffect::Read,
+            "查看单个定时任务详情",
+            serde_json::json!({
+                "scheduleId": { "type": "string" }
+            }),
         ),
         tool(
             "schedule_create",
@@ -320,6 +338,18 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
                 "atTime": { "type": "string" },
                 "every": { "type": "integer" },
                 "unit": { "type": "string" }
+            }),
+        ),
+        tool(
+            "schedule_edit",
+            ToolEffect::Write,
+            "编辑定时任务标题/命令；action=delete 时删除",
+            serde_json::json!({
+                "scheduleId": { "type": "string" },
+                "action": { "type": "string" },
+                "title": { "type": "string" },
+                "command": { "type": "string" },
+                "enabled": { "type": "boolean" }
             }),
         ),
         tool(

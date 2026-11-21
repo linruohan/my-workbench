@@ -309,7 +309,38 @@ pub fn execute_tool(
                 .take(20)
                 .map(|n| format!("- {} · {}", n.title, n.body))
                 .collect();
-            Ok(ToolResult::ok_text(lines.join("\n")))
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无通知）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "notification_create" => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("通知")
+                .trim();
+            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = match args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent")
+                .to_lowercase()
+                .as_str()
+            {
+                "task" | "task_remind" => NotificationKind::TaskRemind,
+                "deadline" | "deadline_remind" => NotificationKind::DeadlineRemind,
+                "event" | "event_remind" => NotificationKind::EventRemind,
+                "system" => NotificationKind::System,
+                _ => NotificationKind::Agent,
+            };
+            let n = repo.push_notification(kind, title, body, None);
+            let _ = wb_host::show_system_notification(title, body);
+            Ok(ToolResult::ok_text(format!(
+                "已创建通知 {} · {}",
+                n.id, n.title
+            )))
         }
         "schedule_list" => {
             let tasks = repo.list_timed_tasks();
@@ -325,7 +356,34 @@ pub fn execute_tool(
                     )
                 })
                 .collect();
-            Ok(ToolResult::ok_text(lines.join("\n")))
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无定时任务）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "schedule_view" => {
+            let id = args
+                .get("scheduleId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 scheduleId"))?;
+            match repo.get_timed_task(id) {
+                Some(t) => Ok(ToolResult::ok_text(format!(
+                    "id: {}\ntitle: {}\nenabled: {}\ncommand: {}\nnext_run_at: {:?}\nlast_run_at: {:?}\nschedule: {}",
+                    t.id,
+                    t.title,
+                    t.enabled,
+                    t.command,
+                    t.next_run_at,
+                    t.last_run_at,
+                    t.schedule
+                        .as_ref()
+                        .map(|s| format!("{s:?}"))
+                        .unwrap_or_else(|| "（无）".into())
+                ))),
+                None => Ok(ToolResult::err_text("定时任务不存在")),
+            }
         }
         "schedule_create" => {
             let title = args
@@ -377,6 +435,43 @@ pub fn execute_tool(
             Ok(ToolResult::ok_text(format!(
                 "已创建定时任务 {id} · {label}"
             )))
+        }
+        "schedule_edit" => {
+            let id = args
+                .get("scheduleId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 scheduleId"))?;
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("update")
+                .to_lowercase();
+            if action == "delete" {
+                if repo.get_timed_task(id).is_none() {
+                    return Ok(ToolResult::err_text("定时任务不存在"));
+                }
+                repo.delete_timed_task(id);
+                return Ok(ToolResult::ok_text(format!("已删除定时任务 {id}")));
+            }
+            let Some(mut task) = repo.get_timed_task(id).cloned() else {
+                return Ok(ToolResult::err_text("定时任务不存在"));
+            };
+            if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+                if !title.trim().is_empty() {
+                    task.title = title.trim().to_string();
+                }
+            }
+            if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+                task.command = command.to_string();
+            }
+            if let Some(enabled) = args.get("enabled").and_then(|v| v.as_bool()) {
+                task.enabled = enabled;
+            }
+            task.updated_at = now_ms();
+            let title = task.title.clone();
+            repo.upsert_timed_task(task);
+            Ok(ToolResult::ok_text(format!("已更新定时任务：{title}")))
         }
         "schedule_enable" => {
             let id = args
@@ -2090,6 +2185,32 @@ mod tests {
         .unwrap();
         assert!(created.ok);
         let id = repo.list_timed_tasks()[0].id.clone();
+        let viewed = execute_tool(
+            &mut repo,
+            "schedule_view",
+            &json!({ "scheduleId": id }),
+            None,
+        )
+        .unwrap();
+        assert!(viewed.content.contains("晨报"));
+        let edited = execute_tool(
+            &mut repo,
+            "schedule_edit",
+            &json!({ "scheduleId": id, "title": "晚报" }),
+            None,
+        )
+        .unwrap();
+        assert!(edited.ok);
+        assert_eq!(repo.get_timed_task(&id).unwrap().title, "晚报");
+        let note = execute_tool(
+            &mut repo,
+            "notification_create",
+            &json!({ "title": "测试通知", "body": "hello" }),
+            None,
+        )
+        .unwrap();
+        assert!(note.ok);
+        assert!(!repo.list_notifications().is_empty());
         let off = execute_tool(
             &mut repo,
             "schedule_enable",

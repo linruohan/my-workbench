@@ -359,7 +359,8 @@ DSH：统一协作式取消 + 超时错误映射。
 | `project_list` / `project_create` | ✅ |
 | `tag_list` / `tag_create` / `tag_add` | ✅ |
 | `note_list` / `note_create` | ✅ |
-| `notification_list` / `schedule_list` / `schedule_create` / `schedule_enable` / `schedule_delete` | ✅ |
+| `notification_list` / `notification_create` | ✅ |
+| `schedule_list` / `schedule_view` / `schedule_create` / `schedule_edit` / `schedule_enable` / `schedule_delete` | ✅ |
 | `timer_status` / `timer_add` | ✅（记入当日用时；非 UI 实时跑表） |
 | `read` / `write` / `str_replace` / `edit` / `shell` / `bash` / `pwsh` | ✅（拒绝 `..` 越界；尚无 spill） |
 | `apply_patch` | ✅ Codex Add/Update/Delete |
