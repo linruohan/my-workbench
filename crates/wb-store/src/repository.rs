@@ -356,6 +356,21 @@ impl MemoryWorkbenchRepository {
         }
     }
 
+    /// Root-level incomplete tasks that carry `tag_id` (or all tagged roots if looking up counts).
+    pub fn task_has_tag(&self, task_id: &str, tag_id: &str) -> bool {
+        self.task_tags
+            .get(task_id)
+            .map(|set| set.contains(tag_id))
+            .unwrap_or(false)
+    }
+
+    pub fn count_tasks_for_tag(&self, tag_id: &str) -> usize {
+        self.task_tags
+            .values()
+            .filter(|set| set.contains(tag_id))
+            .count()
+    }
+
     pub fn list_notes(&self) -> Vec<Note> {
         let mut v: Vec<_> = self.notes.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.updated_at));

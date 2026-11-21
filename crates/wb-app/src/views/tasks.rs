@@ -399,6 +399,28 @@ impl TasksPane {
                         .cloned()
                         .collect()
                 }
+                AppNav::Tags => {
+                    if let Some(tid) = s.active_tag_id.as_deref() {
+                        all.iter()
+                            .filter(|t| {
+                                t.parent_id.is_none()
+                                    && !t.is_done
+                                    && s.repo.task_has_tag(&t.id, tid)
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        // 未选标签：展示所有带标签的未完成根任务
+                        all.iter()
+                            .filter(|t| {
+                                t.parent_id.is_none()
+                                    && !t.is_done
+                                    && !s.repo.tags_for_task(&t.id).is_empty()
+                            })
+                            .cloned()
+                            .collect()
+                    }
+                }
                 _ => all
                     .iter()
                     .filter(|t| t.parent_id.is_none() && !t.is_done && is_today_member(t, &today))
@@ -427,6 +449,12 @@ impl TasksPane {
                     .and_then(|id| s.repo.list_projects().into_iter().find(|p| &p.id == id))
                     .map(|p| p.title)
                     .unwrap_or_else(|| nav.label().to_string())
+            } else if nav == AppNav::Tags {
+                s.active_tag_id
+                    .as_ref()
+                    .and_then(|id| s.repo.list_tags().into_iter().find(|t| &t.id == id))
+                    .map(|t| format!("#{}", t.title))
+                    .unwrap_or_else(|| "全部标签".into())
             } else {
                 nav.label().to_string()
             };

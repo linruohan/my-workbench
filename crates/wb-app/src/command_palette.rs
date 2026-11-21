@@ -89,6 +89,16 @@ impl CommandPalette {
                 kb_path: None,
             },
             PaletteItem {
+                id: "nav-tags".into(),
+                label: "标签".into(),
+                kind: "页面",
+                nav: Some(AppNav::Tags),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
                 id: "nav-kb".into(),
                 label: "知识库".into(),
                 kind: "页面",
@@ -148,6 +158,18 @@ impl CommandPalette {
                     label: p.title.clone(),
                     kind: "项目",
                     nav: Some(AppNav::Projects),
+                    task_id: None,
+                    thread_id: None,
+                    note_id: None,
+                    kb_path: None,
+                });
+            }
+            for tag in s.repo.list_tags() {
+                items.push(PaletteItem {
+                    id: format!("tag-{}", tag.id),
+                    label: format!("#{}", tag.title),
+                    kind: "标签",
+                    nav: Some(AppNav::Tags),
                     task_id: None,
                     thread_id: None,
                     note_id: None,
@@ -228,7 +250,13 @@ impl CommandPalette {
             } else if item.id.starts_with("project-") {
                 let pid = item.id.trim_start_matches("project-").to_string();
                 s.active_project_id = Some(pid);
+                s.active_tag_id = None;
                 s.nav = AppNav::Projects;
+            } else if item.id.starts_with("tag-") {
+                let tid = item.id.trim_start_matches("tag-").to_string();
+                s.active_tag_id = Some(tid);
+                s.active_project_id = None;
+                s.nav = AppNav::Tags;
             }
             if let Some(id) = item.thread_id {
                 s.active_thread_id = Some(id);

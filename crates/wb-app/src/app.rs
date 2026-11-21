@@ -208,6 +208,9 @@ impl WorkbenchApp {
             if nav != AppNav::Projects {
                 s.active_project_id = None;
             }
+            if nav != AppNav::Tags {
+                s.active_tag_id = None;
+            }
         });
         cx.notify();
     }
@@ -303,6 +306,18 @@ impl Render for WorkbenchApp {
                 })
                 .collect()
         });
+        let tag_items: Vec<(String, String, usize, bool)> = self.state.with(|s| {
+            s.repo
+                .list_tags()
+                .into_iter()
+                .map(|t| {
+                    let count = s.repo.count_tasks_for_tag(&t.id);
+                    let active =
+                        nav == AppNav::Tags && s.active_tag_id.as_deref() == Some(t.id.as_str());
+                    (t.id, t.title, count, active)
+                })
+                .collect()
+        });
         let palette_open = self.state.with(|s| s.palette_open);
         let notifications_open = self.state.with(|s| s.notifications_open);
         let save_ok = self.state.with(|s| s.save_status.ok);
@@ -378,6 +393,32 @@ impl Render for WorkbenchApp {
                                 this.state.with_mut(|s| {
                                     s.nav = AppNav::Projects;
                                     s.active_project_id = Some(id.clone());
+                                    s.active_tag_id = None;
+                                });
+                                cx.notify();
+                            });
+                        }
+                    })
+            }));
+
+        let tag_menu =
+            SidebarMenu::new().children(tag_items.into_iter().map(|(id, title, count, active)| {
+                let entity = entity.clone();
+                let label = if count > 0 {
+                    format!("#{title} ({count})")
+                } else {
+                    format!("#{title}")
+                };
+                SidebarMenuItem::new(label)
+                    .icon(IconName::Star)
+                    .active(active)
+                    .on_click(move |_, _, app| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(app, |this, cx| {
+                                this.state.with_mut(|s| {
+                                    s.nav = AppNav::Tags;
+                                    s.active_tag_id = Some(id.clone());
+                                    s.active_project_id = None;
                                 });
                                 cx.notify();
                             });
@@ -386,6 +427,13 @@ impl Render for WorkbenchApp {
             }));
 
         let more_menu = SidebarMenu::new().children([
+            Self::menu_item(
+                "标签",
+                IconName::Star,
+                AppNav::Tags,
+                nav == AppNav::Tags && self.state.with(|s| s.active_tag_id.is_none()),
+                entity.clone(),
+            ),
             Self::menu_item(
                 "知识库",
                 IconName::BookOpen,
@@ -447,6 +495,7 @@ impl Render for WorkbenchApp {
                         | AppNav::Done
                         | AppNav::Planner
                         | AppNav::Projects
+                        | AppNav::Tags
                 ) {
                     this.set_nav(AppNav::Today, cx);
                 }
@@ -470,6 +519,7 @@ impl Render for WorkbenchApp {
                     )
                     .child(SidebarGroup::new("任务").child(task_menu))
                     .child(SidebarGroup::new("项目").child(project_menu))
+                    .child(SidebarGroup::new("标签").child(tag_menu))
                     .child(SidebarGroup::new("更多").child(more_menu))
                     .footer(
                         SidebarFooter::new().child(
