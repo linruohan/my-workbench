@@ -1,3 +1,4 @@
+use crate::fs_observe::{observe_path, require_observed_for_existing};
 use crate::session_goal::{create_goal, get_goal, update_goal};
 use crate::session_todo::{SessionTodo, list_todos, write_todos};
 use anyhow::Result;
@@ -962,8 +963,8 @@ pub fn execute_tool(
         }
         "get_goal" => match get_goal() {
             Some(g) => Ok(ToolResult::ok_text(format!(
-                "goal [{}] rounds={}/{:?} · {}",
-                g.status, g.rounds_started, g.max_rounds, g.objective
+                "goal [{}] rounds={}/{:?} blockedAfter={} · {}",
+                g.status, g.rounds_started, g.max_rounds, g.blocked_after, g.objective
             ))),
             None => Ok(ToolResult::ok_text("（无 goal）")),
         },
@@ -1127,6 +1128,7 @@ pub fn execute_tool(
             let root = effective_root(workspace_root)?;
             let path = safe_join(&root, rel)?;
             let text = read_text(&path)?;
+            observe_path(&path);
             Ok(ToolResult::ok_text(text))
         }
         "write" => {
@@ -1137,7 +1139,11 @@ pub fn execute_tool(
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let root = effective_root(workspace_root)?;
             let path = safe_join(&root, rel)?;
+            if let Err(msg) = require_observed_for_existing(&path) {
+                return Ok(ToolResult::err_text(msg));
+            }
             write_text(&path, content)?;
+            observe_path(&path);
             Ok(ToolResult::ok_text(format!("已写入 {rel}")))
         }
         "str_replace" | "edit" => {
@@ -1162,6 +1168,9 @@ pub fn execute_tool(
                 .unwrap_or(false);
             let root = effective_root(workspace_root)?;
             let path = safe_join(&root, rel)?;
+            if let Err(msg) = require_observed_for_existing(&path) {
+                return Ok(ToolResult::err_text(msg));
+            }
             let text = read_text(&path)?;
             if old.is_empty() {
                 return Ok(ToolResult::err_text("oldString 不能为空"));
@@ -1181,6 +1190,7 @@ pub fn execute_tool(
                 text.replacen(old, new, 1)
             };
             write_text(&path, &next)?;
+            observe_path(&path);
             Ok(ToolResult::ok_text(format!(
                 "已替换 {rel}（{} 处）",
                 if replace_all { count } else { 1 }
@@ -1203,10 +1213,14 @@ pub fn execute_tool(
                             std::fs::create_dir_all(parent)?;
                         }
                         write_text(&path, &content)?;
+                        observe_path(&path);
                         summary.push(format!("+ {rel}"));
                     }
                     PatchAction::Delete { path: rel } => {
                         let path = safe_join(&root, &rel)?;
+                        if let Err(msg) = require_observed_for_existing(&path) {
+                            return Ok(ToolResult::err_text(msg));
+                        }
                         if path.exists() {
                             std::fs::remove_file(&path)?;
                             summary.push(format!("- {rel}"));
@@ -1216,10 +1230,14 @@ pub fn execute_tool(
                     }
                     PatchAction::Update { path: rel, hunks } => {
                         let path = safe_join(&root, &rel)?;
+                        if let Err(msg) = require_observed_for_existing(&path) {
+                            return Ok(ToolResult::err_text(msg));
+                        }
                         let text = read_text(&path)?;
                         let next =
                             apply_hunks(&text, &hunks).map_err(|e| anyhow::anyhow!("{e}"))?;
                         write_text(&path, &next)?;
+                        observe_path(&path);
                         summary.push(format!("~ {rel}（{} hunk）", hunks.len()));
                     }
                 }
@@ -1245,6 +1263,7 @@ pub fn execute_tool(
             match command.as_str() {
                 "view" => {
                     let text = read_text(&path)?;
+                    observe_path(&path);
                     let numbered = number_lines(&text, args.get("view_range"));
                     Ok(ToolResult::ok_text(numbered))
                 }
@@ -1254,13 +1273,22 @@ pub fn execute_tool(
                         .or_else(|| args.get("fileText"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
+                    if path.exists() {
+                        if let Err(msg) = require_observed_for_existing(&path) {
+                            return Ok(ToolResult::err_text(msg));
+                        }
+                    }
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
                     write_text(&path, content)?;
+                    observe_path(&path);
                     Ok(ToolResult::ok_text(format!("已创建 {rel}")))
                 }
                 "str_replace" => {
+                    if let Err(msg) = require_observed_for_existing(&path) {
+                        return Ok(ToolResult::err_text(msg));
+                    }
                     let old = args
                         .get("old_str")
                         .or_else(|| args.get("oldStr"))
@@ -1284,9 +1312,13 @@ pub fn execute_tool(
                         )));
                     }
                     write_text(&path, &text.replacen(old, new, 1))?;
+                    observe_path(&path);
                     Ok(ToolResult::ok_text(format!("已替换 {rel}")))
                 }
                 "insert" => {
+                    if let Err(msg) = require_observed_for_existing(&path) {
+                        return Ok(ToolResult::err_text(msg));
+                    }
                     let insert_line = args
                         .get("insert_line")
                         .or_else(|| args.get("insertLine"))
@@ -1301,13 +1333,13 @@ pub fn execute_tool(
                     let text = read_text(&path)?;
                     let mut lines: Vec<&str> = text.lines().collect();
                     let at = insert_line.min(lines.len());
-                    // insert_line is 0-based "after this line" in Claude Code; treat as index.
                     lines.insert(at, new);
                     let mut out = lines.join("\n");
                     if text.ends_with('\n') {
                         out.push('\n');
                     }
                     write_text(&path, &out)?;
+                    observe_path(&path);
                     Ok(ToolResult::ok_text(format!("已在 {rel} 第 {at} 行后插入")))
                 }
                 other => Ok(ToolResult::err_text(format!(
@@ -1367,6 +1399,7 @@ pub fn execute_tool(
             let root = effective_root(workspace_root)?;
             let path = safe_join(&root, rel)?;
             let info = read_image_info(&path)?;
+            observe_path(&path);
             Ok(ToolResult::ok_text(format!(
                 "{} · {} · {} bytes · {}x{} · {}",
                 info.path,
@@ -1839,6 +1872,28 @@ mod tests {
             execute_tool(&mut repo, "grep", &json!({ "pattern": "gap" }), Some(&root)).unwrap();
         assert!(hits.ok);
         assert!(hits.content.contains("gap"));
+
+        let blocked = execute_tool(
+            &mut repo,
+            "str_replace",
+            &json!({
+                "path": "hello.rs",
+                "oldString": "gap",
+                "newString": "done"
+            }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(!blocked.ok);
+        assert!(blocked.content.contains("FS_NOT_OBSERVED"));
+
+        let _ = execute_tool(
+            &mut repo,
+            "read",
+            &json!({ "path": "hello.rs" }),
+            Some(&root),
+        )
+        .unwrap();
 
         let edited = execute_tool(
             &mut repo,

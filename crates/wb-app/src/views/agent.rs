@@ -7,9 +7,10 @@ use gpui_kit::component::{Disableable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_agent::{
-    TurnPhase, begin_user_turn, continue_turn_reply, create_thread, cycle_permission_mode,
-    finish_continue_turn, finish_user_turn, load_providers, pending_approvals_for_thread,
-    permission_mode_label, prepare_goal_idle_round, resolve_approval, resolve_turn_reply,
+    TurnPhase, begin_user_turn, clear_goal_round_flag, continue_turn_reply, create_thread,
+    cycle_permission_mode, finish_continue_turn, finish_user_turn, load_providers,
+    pending_approvals_for_thread, permission_mode_label, prepare_goal_idle_round, resolve_approval,
+    resolve_turn_reply,
 };
 use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
@@ -82,6 +83,7 @@ impl AgentPane {
         if self.busy {
             return;
         }
+        clear_goal_round_flag();
         let thread_id = self.ensure_thread();
         let proxy = self.state.with(|s| s.prefs.http_proxy.clone());
         let thread = self.state.with(|s| {
