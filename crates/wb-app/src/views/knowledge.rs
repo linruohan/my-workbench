@@ -6,6 +6,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use wb_domain::{body_links_to, extract_wikilinks, resolve_wikilink};
 use wb_host::{
@@ -23,7 +24,11 @@ enum KbMode {
 
 pub struct KnowledgePane {
     state: AppState,
+    /// Absolute path and path relative to the library root.
     files: Vec<(String, String)>,
+    /// Slash-separated directory keys that are expanded in the file tree.
+    expanded: HashSet<String>,
+    loaded_root: Option<String>,
     editor: Entity<InputState>,
     find: Entity<InputState>,
     replace: Entity<InputState>,
@@ -32,6 +37,15 @@ pub struct KnowledgePane {
     mode: KbMode,
     replace_status: String,
     _subs: Vec<Subscription>,
+}
+
+struct KbTreeNode {
+    name: String,
+    /// Slash-separated path from the library root.
+    key: String,
+    file_path: Option<String>,
+    snippet: Option<String>,
+    children: Vec<KbTreeNode>,
 }
 
 impl KnowledgePane {
@@ -43,6 +57,8 @@ impl KnowledgePane {
         let mut this = Self {
             state,
             files: Vec::new(),
+            expanded: HashSet::new(),
+            loaded_root: None,
             editor: editor.clone(),
             find,
             replace,
@@ -75,6 +91,12 @@ impl KnowledgePane {
     }
 
     fn reload_files(&mut self) {
+        let root_key = self.root().map(|p| p.to_string_lossy().to_string());
+        let root_changed = self.loaded_root.as_deref() != root_key.as_deref();
+        if root_changed {
+            self.expanded.clear();
+            self.loaded_root = root_key;
+        }
         self.files.clear();
         if let Some(root) = self.root() {
             if let Ok(entries) = list_files_recursive(&root, 2000) {
@@ -252,6 +274,166 @@ impl KnowledgePane {
     }
 }
 
+fn build_kb_tree(entries: &[(String, String, Option<String>)]) -> Vec<KbTreeNode> {
+    let mut roots = Vec::new();
+    for (path, relative, snippet) in entries {
+        let parts: Vec<&str> = relative
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        insert_kb_node(&mut roots, &parts, path, "", snippet.clone());
+    }
+    sort_kb_tree(&mut roots);
+    roots
+}
+
+fn insert_kb_node(
+    nodes: &mut Vec<KbTreeNode>,
+    parts: &[&str],
+    path: &str,
+    parent_key: &str,
+    snippet: Option<String>,
+) {
+    let name = parts[0];
+    let key = if parent_key.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent_key}/{name}")
+    };
+    if parts.len() == 1 {
+        if let Some(existing) = nodes
+            .iter_mut()
+            .find(|node| node.file_path.is_some() && node.name == name)
+        {
+            if snippet.is_some() {
+                existing.snippet = snippet;
+            }
+            return;
+        }
+        nodes.push(KbTreeNode {
+            name: name.to_string(),
+            key,
+            file_path: Some(path.to_string()),
+            snippet,
+            children: Vec::new(),
+        });
+        return;
+    }
+    if let Some(index) = nodes
+        .iter()
+        .position(|node| node.file_path.is_none() && node.name == name)
+    {
+        let dir_key = nodes[index].key.clone();
+        insert_kb_node(
+            &mut nodes[index].children,
+            &parts[1..],
+            path,
+            &dir_key,
+            snippet,
+        );
+        return;
+    }
+    let mut dir = KbTreeNode {
+        name: name.to_string(),
+        key: key.clone(),
+        file_path: None,
+        snippet: None,
+        children: Vec::new(),
+    };
+    insert_kb_node(&mut dir.children, &parts[1..], path, &key, snippet);
+    nodes.push(dir);
+}
+
+fn sort_kb_tree(nodes: &mut [KbTreeNode]) {
+    nodes.sort_by(|a, b| {
+        a.file_path
+            .is_some()
+            .cmp(&b.file_path.is_some())
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    for node in nodes.iter_mut() {
+        sort_kb_tree(&mut node.children);
+    }
+}
+
+fn kb_tree_rows(
+    nodes: &[KbTreeNode],
+    depth: usize,
+    force_open: bool,
+    expanded: &HashSet<String>,
+    current: Option<&str>,
+    entity: &WeakEntity<KnowledgePane>,
+    cx: &mut Context<KnowledgePane>,
+) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+    let accent = cx.theme().accent;
+    let muted = cx.theme().muted_foreground;
+    let radius = cx.theme().radius;
+    for node in nodes {
+        let is_dir = node.file_path.is_none();
+        let open = is_dir && (force_open || expanded.contains(&node.key));
+        let active = node.file_path.as_deref() == current;
+        let label = if is_dir {
+            format!("{} {}", if open { "▾" } else { "▸" }, node.name)
+        } else {
+            node.name.clone()
+        };
+        let key = node.key.clone();
+        let file_path = node.file_path.clone();
+        let row_entity = entity.clone();
+        let row = v_flex()
+            .id(SharedString::from(format!("kb-tree-{key}")))
+            .gap_0p5()
+            .py_1()
+            .pr_2()
+            .pl(px(8. + depth as f32 * 14.))
+            .rounded(radius)
+            .when(active, |row| row.bg(accent))
+            .hover(|row| row.bg(accent))
+            .cursor_pointer()
+            .child(
+                div()
+                    .when(is_dir, |name| name.text_color(muted))
+                    .child(label),
+            )
+            .when_some(node.snippet.clone(), |col, snippet| {
+                col.child(div().text_xs().text_color(muted).child(snippet))
+            })
+            .on_click(move |_, window, app| {
+                let Some(view) = row_entity.upgrade() else {
+                    return;
+                };
+                if let Some(path) = file_path.clone() {
+                    view.update(app, |this, cx| this.open_file(&path, window, cx));
+                } else {
+                    let key = key.clone();
+                    view.update(app, |this, cx| {
+                        if !this.expanded.remove(&key) {
+                            this.expanded.insert(key);
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        rows.push(row.into_any_element());
+        if open {
+            rows.extend(kb_tree_rows(
+                &node.children,
+                depth + 1,
+                force_open,
+                expanded,
+                current,
+                entity,
+                cx,
+            ));
+        }
+    }
+    rows
+}
+
 impl Render for KnowledgePane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pending = self.state.with(|s| s.kb_current_file.clone());
@@ -262,8 +444,9 @@ impl Render for KnowledgePane {
         }
         let filter_raw = self.filter.read(cx).value().to_string();
         let filter = filter_raw.trim().to_lowercase();
+        let filtering = !filter.is_empty();
         // (path, relative, optional body snippet)
-        let files: Vec<(String, String, Option<String>)> = if filter.is_empty() {
+        let entries: Vec<(String, String, Option<String>)> = if !filtering {
             self.files
                 .iter()
                 .map(|(p, r)| (p.clone(), r.clone(), None))
@@ -299,6 +482,18 @@ impl Render for KnowledgePane {
                 .map(|(p, r)| (p.clone(), r.clone(), None))
                 .collect()
         };
+        let tree = build_kb_tree(&entries);
+        let entity = cx.weak_entity();
+        let current = self.current.clone();
+        let tree_rows = kb_tree_rows(
+            &tree,
+            0,
+            filtering,
+            &self.expanded,
+            current.as_deref(),
+            &entity,
+            cx,
+        );
         let root_label = self
             .root()
             .map(|p| {
@@ -309,8 +504,6 @@ impl Render for KnowledgePane {
                 }
             })
             .unwrap_or_else(|| "未选择知识库".into());
-        let entity = cx.weak_entity();
-        let current = self.current.clone();
         let preview_text = self.editor.read(cx).value().to_string();
         let mode = self.mode;
         let replace_status = self.replace_status.clone();
@@ -349,31 +542,20 @@ impl Render for KnowledgePane {
                     )
                     .child(div().text_xs().text_color(muted).child(root_label))
                     .child(Input::new(&self.filter).cleanable(true))
-                    .child(v_flex().gap_1().flex_1().overflow_y_scrollbar().children(
-                        files.into_iter().map(|(path, rel, snip)| {
-                            let active = current.as_deref() == Some(path.as_str());
-                            let entity = entity.clone();
-                            v_flex()
-                                .id(SharedString::from(path.clone()))
-                                .gap_0p5()
-                                .p_2()
-                                .rounded(radius)
-                                .when(active, |d| d.bg(cx.theme().accent))
-                                .hover(|d| d.bg(cx.theme().accent))
-                                .cursor_pointer()
-                                .child(div().child(rel))
-                                .when_some(snip, |col, s| {
-                                    col.child(div().text_xs().text_color(muted).child(s))
-                                })
-                                .on_click(move |_, window, app| {
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(app, |this, cx| {
-                                            this.open_file(&path, window, cx);
-                                        });
-                                    }
-                                })
-                        }),
-                    )),
+                    .child({
+                        let mut list = v_flex().gap_0p5().flex_1().overflow_y_scrollbar();
+                        if tree_rows.is_empty() {
+                            list =
+                                list.child(div().text_xs().text_color(muted).child(if filtering {
+                                    "没有匹配的文件"
+                                } else {
+                                    "库中没有可打开的文件"
+                                }));
+                        } else {
+                            list = list.children(tree_rows);
+                        }
+                        list
+                    }),
             )
             .child(
                 v_flex()
@@ -566,5 +748,35 @@ impl Render for KnowledgePane {
                         )
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_kb_tree;
+
+    #[test]
+    fn nests_files_under_directories() {
+        let entries = vec![
+            ("/lib/readme.md".into(), "readme.md".into(), None),
+            ("/lib/notes/a.md".into(), "notes/a.md".into(), None),
+            (
+                "/lib/notes/2024/b.md".into(),
+                "notes\\2024\\b.md".into(),
+                Some("L2 · hello".into()),
+            ),
+        ];
+        let tree = build_kb_tree(&entries);
+        assert_eq!(tree.len(), 2);
+        assert!(tree[0].file_path.is_none());
+        assert_eq!(tree[0].name, "notes");
+        assert_eq!(tree[1].name, "readme.md");
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].name, "2024");
+        assert_eq!(tree[0].children[1].name, "a.md");
+        assert_eq!(
+            tree[0].children[0].children[0].snippet.as_deref(),
+            Some("L2 · hello")
+        );
     }
 }
