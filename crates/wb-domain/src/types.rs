@@ -23,6 +23,33 @@ pub enum ReminderOptionId {
     H1,
 }
 
+impl ReminderOptionId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::AtStart => "at_start",
+            Self::M5 => "m5",
+            Self::M10 => "m10",
+            Self::M15 => "m15",
+            Self::M30 => "m30",
+            Self::H1 => "h1",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "none" => Some(Self::None),
+            "at_start" => Some(Self::AtStart),
+            "m5" => Some(Self::M5),
+            "m10" => Some(Self::M10),
+            "m15" => Some(Self::M15),
+            "m30" => Some(Self::M30),
+            "h1" => Some(Self::H1),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {

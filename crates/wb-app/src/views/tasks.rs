@@ -6,12 +6,13 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    INBOX_PROJECT_ID, PLANNER_CALENDAR_COLUMNS, SchedulePatch, Task, TimedSchedulePreset,
-    add_local_days, apply_schedule_patch, at_local_time, bucket_tasks_for_calendar,
-    bucket_tasks_for_day_schedule, clear_plan_fields, compute_task_stats, create_task_draft,
-    filter_tasks, format_local_day, group_tasks_by_plan_day, is_today_member, now_ms,
-    parse_quick_capture, planner_day_columns, select_planner_tasks, select_today_tasks,
-    set_task_repeat_preset, settle_timer_segment, task_repeat_label, weekday_cn_short,
+    INBOX_PROJECT_ID, PLANNER_CALENDAR_COLUMNS, ReminderOptionId, SchedulePatch, Task,
+    TimedSchedulePreset, add_local_days, apply_schedule_patch, at_local_time,
+    bucket_tasks_for_calendar, bucket_tasks_for_day_schedule, clear_plan_fields,
+    compute_task_stats, create_task_draft, filter_tasks, format_local_day, group_tasks_by_plan_day,
+    is_today_member, now_ms, parse_quick_capture, planner_day_columns, select_planner_tasks,
+    select_today_tasks, set_task_repeat_preset, settle_timer_segment, shift_remind_at,
+    start_of_week, task_repeat_label, weekday_cn_short,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,7 +36,14 @@ pub struct TasksPane {
     mode: TasksMode,
     /// Day offset from today for the hourly schedule view.
     schedule_day_offset: i64,
+    /// When confirm-before-delete is on, first click stores the id here.
+    pending_delete_id: Option<String>,
     _subs: Vec<Subscription>,
+}
+
+fn default_remind_at(state: &AppState, due_ms: i64) -> Option<i64> {
+    let raw = state.with(|s| s.prefs.general.default_remind.clone());
+    ReminderOptionId::parse(&raw).and_then(|option| shift_remind_at(due_ms, option))
 }
 
 impl TasksPane {
@@ -57,6 +65,7 @@ impl TasksPane {
             notes_task_id: None,
             mode: TasksMode::List,
             schedule_day_offset: 0,
+            pending_delete_id: None,
             _subs: Vec::new(),
         };
         this._subs.push(
@@ -108,7 +117,12 @@ impl TasksPane {
 
     fn submit_capture(&mut self, text: &str, cx: &mut Context<Self>) {
         let now = wb_domain::now_ms();
-        let parsed = parse_quick_capture(text, now, None);
+        let mut parsed = parse_quick_capture(text, now, None);
+        if parsed.remind_at.is_none()
+            && let Some(due) = parsed.due_with_time
+        {
+            parsed.remind_at = default_remind_at(&self.state, due);
+        }
         self.state.with_mut(|s| {
             let mut project_id = parsed
                 .project_id
@@ -200,6 +214,7 @@ impl TasksPane {
         let Some(ms) = at_local_time(day, hour, 0) else {
             return;
         };
+        let remind_at = default_remind_at(&self.state, ms);
         self.state.with_mut(|s| {
             if let Some(mut task) = s.repo.get_task(&id).cloned() {
                 apply_schedule_patch(
@@ -209,7 +224,7 @@ impl TasksPane {
                         due_with_time: Some(Some(ms)),
                         deadline_day: None,
                         deadline_with_time: None,
-                        remind_at: None,
+                        remind_at: Some(remind_at),
                         deadline_remind_at: None,
                     },
                 );
@@ -453,6 +468,13 @@ impl TasksPane {
     }
 
     fn delete_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        let confirm = self.state.with(|s| s.prefs.general.confirm_before_delete);
+        if confirm && self.pending_delete_id.as_deref() != Some(id) {
+            self.pending_delete_id = Some(id.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_delete_id = None;
         self.state.with_mut(|s| {
             s.repo.delete_task(id);
             if s.selected_task_id.as_deref() == Some(id) {
@@ -691,6 +713,7 @@ impl TasksPane {
         indent: usize,
         timing: bool,
         tag_label: String,
+        pending_delete: bool,
     ) -> impl IntoElement {
         let id = task.id.clone();
         let done = task.is_done;
@@ -851,7 +874,7 @@ impl TasksPane {
                     Button::new(SharedString::from(format!("del-{id}")))
                         .xsmall()
                         .ghost()
-                        .label("删")
+                        .label(if pending_delete { "确认删" } else { "删" })
                         .on_click({
                             let id = id.clone();
                             let entity = entity.clone();
@@ -1024,6 +1047,8 @@ impl Render for TasksPane {
                                                 .collect::<Vec<_>>()
                                                 .join(" ")
                                         });
+                                        let pending_delete = self.pending_delete_id.as_deref()
+                                            == Some(task.id.as_str());
                                         Self::render_task_row(
                                             task,
                                             entity.clone(),
@@ -1035,6 +1060,7 @@ impl Render for TasksPane {
                                             0,
                                             timing,
                                             tag_label,
+                                            pending_delete,
                                         )
                                         .into_any_element()
                                     })
@@ -1061,11 +1087,16 @@ impl Render for TasksPane {
                             .into_any_element()
                     }
                 } else if tasks.is_empty() {
+                    let hint = self.state.with(|s| s.prefs.general.show_empty_hints);
                     div()
                         .flex_1()
                         .text_sm()
                         .text_color(muted)
-                        .child("暂无任务。在上方输入框快速捕获一条吧。")
+                        .child(if hint {
+                            "暂无任务。在上方输入框快速捕获一条吧。"
+                        } else {
+                            "暂无任务"
+                        })
                         .into_any_element()
                 } else {
                     let rows: Vec<_> = tasks
@@ -1081,6 +1112,8 @@ impl Render for TasksPane {
                                     .collect::<Vec<_>>()
                                     .join(" ")
                             });
+                            let pending_delete =
+                                self.pending_delete_id.as_deref() == Some(task.id.as_str());
                             Self::render_task_row(
                                 task,
                                 entity.clone(),
@@ -1092,6 +1125,7 @@ impl Render for TasksPane {
                                 indent,
                                 timing,
                                 tag_label,
+                                pending_delete,
                             )
                             .into_any_element()
                         })
@@ -1138,6 +1172,8 @@ impl Render for TasksPane {
                                         .collect::<Vec<_>>()
                                         .join(" ")
                                 });
+                                let pending_delete =
+                                    self.pending_delete_id.as_deref() == Some(task.id.as_str());
                                 Self::render_task_row(
                                     task,
                                     entity.clone(),
@@ -1149,6 +1185,7 @@ impl Render for TasksPane {
                                     0,
                                     timing,
                                     tag_label,
+                                    pending_delete,
                                 )
                                 .into_any_element()
                             })
@@ -1173,8 +1210,14 @@ impl Render for TasksPane {
                     .into_any_element()
             }
             TasksMode::Calendar => {
-                let skip = self.state.with(|s| s.prefs.planner_skip_weekends);
-                let day_cols = planner_day_columns(&today, PLANNER_CALENDAR_COLUMNS, skip);
+                let (skip, monday) = self.state.with(|s| {
+                    (
+                        s.prefs.planner_skip_weekends,
+                        s.prefs.general.week_starts_on != "sunday",
+                    )
+                });
+                let week_start = start_of_week(&today, monday);
+                let day_cols = planner_day_columns(&week_start, PLANNER_CALENDAR_COLUMNS, skip);
                 let roots: Vec<Task> = tasks
                     .iter()
                     .filter(|(_, d)| *d == 0)

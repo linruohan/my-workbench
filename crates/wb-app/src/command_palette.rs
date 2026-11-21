@@ -281,6 +281,9 @@ impl CommandPalette {
     fn activate(&mut self, item: PaletteItem, cx: &mut Context<Self>) {
         self.state.with_mut(|s| {
             if let Some(nav) = item.nav {
+                if nav == AppNav::Settings && s.nav != AppNav::Settings {
+                    s.nav_before_settings = s.nav;
+                }
                 s.nav = nav;
             }
             if let Some(id) = item.task_id.clone() {

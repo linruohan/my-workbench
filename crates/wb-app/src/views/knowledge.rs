@@ -1,9 +1,10 @@
 use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState, TabSize};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::text::TextView;
-use gpui_kit::component::{Selectable as _, *};
+use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::{ActiveTheme as _, Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -29,7 +30,8 @@ pub struct KnowledgePane {
     /// Slash-separated directory keys that are expanded in the file tree.
     expanded: HashSet<String>,
     loaded_root: Option<String>,
-    editor: Entity<InputState>,
+    editor: Entity<EditorState>,
+    preview: Entity<TextViewState>,
     find: Entity<InputState>,
     replace: Entity<InputState>,
     current: Option<String>,
@@ -50,7 +52,17 @@ struct KbTreeNode {
 
 impl KnowledgePane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| InputState::new(window, cx).placeholder("选择文件开始编辑…"));
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("markdown")
+                .line_number(true)
+                .tab_size(TabSize {
+                    tab_size: 2,
+                    ..Default::default()
+                })
+                .placeholder("选择文件开始编辑…")
+        });
+        let preview = cx.new(|cx| TextViewState::markdown("", cx));
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("筛选文件名或正文"));
         let find = cx.new(|cx| InputState::new(window, cx).placeholder("查找"));
         let replace = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
@@ -60,6 +72,7 @@ impl KnowledgePane {
             expanded: HashSet::new(),
             loaded_root: None,
             editor: editor.clone(),
+            preview,
             find,
             replace,
             current: None,
@@ -69,6 +82,18 @@ impl KnowledgePane {
             _subs: Vec::new(),
         };
         this.reload_files();
+        let last_note = this.state.with(|s| {
+            if s.prefs.general.remember_last_note {
+                s.prefs.general.last_note_path.clone()
+            } else {
+                None
+            }
+        });
+        if let Some(path) = last_note.filter(|path| std::path::Path::new(path).is_file()) {
+            this.open_file(&path, window, cx);
+        }
+        this._subs
+            .push(cx.subscribe(&editor, |_, _, _: &InputEvent, cx| cx.notify()));
         this._subs.push(
             cx.subscribe_in(&editor, window, |this, input, event, _window, cx| {
                 if matches!(event, InputEvent::Blur) {
@@ -78,6 +103,48 @@ impl KnowledgePane {
             }),
         );
         this
+    }
+
+    fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let source = self.editor.read(cx).value();
+        let rendered = wikilinks_for_preview(source.as_str());
+        self.preview.update(cx, |state, cx| {
+            state.set_text(&rendered, cx);
+        });
+    }
+
+    fn kb_preview(&self, entity: &WeakEntity<KnowledgePane>) -> TextView {
+        let entity = entity.clone();
+        TextView::new(&self.preview)
+            .scrollable(true)
+            .selectable(true)
+            .on_link_click(move |url, event, window, cx| {
+                if event.is_right_click() {
+                    return;
+                }
+                let url = url.as_str();
+                if let Some(target) = url.strip_prefix("wiki:///") {
+                    if let Some(view) = entity.upgrade() {
+                        view.update(cx, |this, cx| {
+                            let files = this.files.clone();
+                            if let Some(path) = resolve_wikilink(target, &files).map(str::to_string)
+                            {
+                                this.open_file(&path, window, cx);
+                            }
+                        });
+                    }
+                    return;
+                }
+                cx.open_url(url);
+            })
+    }
+
+    fn kb_source_editor(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_size(cx.theme().mono_font_size)
+            .child(Editor::new(&self.editor).h(relative(1.)).p_0().border_0())
     }
 
     fn root(&self) -> Option<PathBuf> {
@@ -130,10 +197,21 @@ impl KnowledgePane {
         match read_text(std::path::Path::new(path)) {
             Ok(text) => {
                 self.current = Some(path.to_string());
-                self.state
-                    .with_mut(|s| s.kb_current_file = Some(path.to_string()));
+                let remember = self.state.with(|s| s.prefs.general.remember_last_note);
+                self.state.with_mut(|s| {
+                    s.kb_current_file = Some(path.to_string());
+                    if remember {
+                        s.prefs.general.last_note_path = Some(path.to_string());
+                    }
+                });
+                if remember {
+                    self.state.persist_prefs();
+                }
                 self.editor.update(cx, |input, cx| {
-                    input.set_value(text, window, cx);
+                    input.set_value(text.clone(), window, cx);
+                });
+                self.preview.update(cx, |state, cx| {
+                    state.set_text(&wikilinks_for_preview(&text), cx);
                 });
                 self.replace_status.clear();
                 cx.notify();
@@ -272,6 +350,36 @@ impl KnowledgePane {
         }
         out
     }
+}
+
+/// Turn `[[note]]` / `[[note|别名]]` into Markdown links for the preview pane.
+fn wikilinks_for_preview(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 3 < bytes.len() && bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(rel) = body[i + 2..].find("]]") {
+                let inner = &body[i + 2..i + 2 + rel];
+                let target = inner.split('|').next().unwrap_or(inner).trim();
+                let label = inner.split('|').nth(1).unwrap_or(target).trim();
+                if !target.is_empty() {
+                    out.push('[');
+                    out.push_str(label);
+                    out.push_str("](wiki:///");
+                    out.push_str(target);
+                    out.push(')');
+                    i = i + 2 + rel + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = body[i..].chars().next().unwrap();
+        let len = ch.len_utf8();
+        out.push(ch);
+        i += len;
+    }
+    out
 }
 
 fn build_kb_tree(entries: &[(String, String, Option<String>)]) -> Vec<KbTreeNode> {
@@ -651,16 +759,45 @@ impl Render for KnowledgePane {
                             )
                         },
                     )
-                    .child(match mode {
-                        KbMode::Live | KbMode::Source => {
-                            Input::new(&self.editor).into_any_element()
+                    .child({
+                        let entity = entity.clone();
+                        match mode {
+                            KbMode::Live => {
+                                self.sync_preview(cx);
+                                div()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .child(
+                                        h_resizable("kb-live")
+                                            .child(
+                                                resizable_panel().child(self.kb_source_editor(cx)),
+                                            )
+                                            .child(
+                                                resizable_panel().child(
+                                                    div()
+                                                        .size_full()
+                                                        .overflow_hidden()
+                                                        .child(self.kb_preview(&entity)),
+                                                ),
+                                            ),
+                                    )
+                                    .into_any_element()
+                            }
+                            KbMode::Source => div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(self.kb_source_editor(cx))
+                                .into_any_element(),
+                            KbMode::Preview => {
+                                self.sync_preview(cx);
+                                div()
+                                    .flex_1()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .child(self.kb_preview(&entity))
+                                    .into_any_element()
+                            }
                         }
-                        KbMode::Preview => div()
-                            .flex_1()
-                            .w_full()
-                            .overflow_y_scrollbar()
-                            .child(TextView::markdown("kb-preview", preview_text.clone()))
-                            .into_any_element(),
                     })
                     .when_some(current.clone(), |col, cur| {
                         let outgoing = self.outgoing_links(&preview_text);
@@ -753,7 +890,16 @@ impl Render for KnowledgePane {
 
 #[cfg(test)]
 mod tests {
-    use super::build_kb_tree;
+    use super::{build_kb_tree, wikilinks_for_preview};
+
+    #[test]
+    fn wikilinks_become_preview_links() {
+        let md = "见 [[note]] 与 [[other|其它]]。";
+        assert_eq!(
+            wikilinks_for_preview(md),
+            "见 [note](wiki:///note) 与 [其它](wiki:///other)。"
+        );
+    }
 
     #[test]
     fn nests_files_under_directories() {

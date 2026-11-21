@@ -3,20 +3,22 @@ use crate::state::{AppNav, AppState};
 use crate::themes;
 use crate::title_bar::workbench_title_bar;
 use crate::tray::{self, TrayAction};
-use crate::views::{AgentPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
+use crate::views::{AgentPane, InspectorPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
+use gpui_kit::component::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu,
-    SidebarMenuItem, SidebarToggleButton,
+    Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarMenu, SidebarMenuItem,
+    SidebarToggleButton,
 };
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
 use wb_domain::{
-    INBOX_PROJECT_ID, NotificationStatus, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
-    clamp_sidebar_width, is_today_member, now_ms,
+    INBOX_PROJECT_ID, NotificationStatus, RIGHT_SIDEBAR_WIDTH_MAX, RIGHT_SIDEBAR_WIDTH_MIN,
+    SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, clamp_right_sidebar_width, clamp_sidebar_width,
+    is_today_member, now_ms,
 };
 
 actions!(workbench, [OpenPalette, FocusCapture, Escape]);
@@ -31,6 +33,7 @@ pub struct WorkbenchApp {
     knowledge: Entity<KnowledgePane>,
     agent: Entity<AgentPane>,
     settings: Entity<SettingsPane>,
+    inspector: Entity<InspectorPane>,
     palette: Entity<CommandPalette>,
     /// Kept alive so the OS tray icon is not dropped.
     _tray: Option<tray_icon::TrayIcon>,
@@ -48,6 +51,8 @@ impl WorkbenchApp {
         let agent = cx.new(|cx| AgentPane::new(state.clone(), window, cx));
         timed.update(cx, |timed, _| timed.bind_agent(agent.clone()));
         let settings = cx.new(|cx| SettingsPane::new(state.clone(), window, cx));
+        let host = cx.weak_entity();
+        let inspector = cx.new(|cx| InspectorPane::new(state.clone(), host, window, cx));
         let palette = cx.new(|cx| CommandPalette::new(state.clone(), window, cx));
         let sidebar_panels = cx.new(|_| ResizableState::default());
 
@@ -137,6 +142,7 @@ impl WorkbenchApp {
             knowledge,
             agent,
             settings,
+            inspector,
             palette,
             _tray: tray_icon,
         }
@@ -166,6 +172,22 @@ impl WorkbenchApp {
                 false
             } else {
                 s.prefs.sidebar_width = width;
+                true
+            }
+        });
+        if changed {
+            self.state.persist_prefs();
+            cx.notify();
+        }
+    }
+
+    fn set_right_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = clamp_right_sidebar_width(width);
+        let changed = self.state.with_mut(|s| {
+            if (s.prefs.right_sidebar_width - width).abs() < 0.5 {
+                false
+            } else {
+                s.prefs.right_sidebar_width = width;
                 true
             }
         });
@@ -256,6 +278,9 @@ impl WorkbenchApp {
             self.agent.update(cx, |pane, cx| pane.hide_webview(cx));
         }
         self.state.with_mut(|s| {
+            if nav == AppNav::Settings && s.nav != AppNav::Settings {
+                s.nav_before_settings = s.nav;
+            }
             s.nav = nav;
             if nav != AppNav::Projects {
                 s.active_project_id = None;
@@ -284,11 +309,20 @@ impl WorkbenchApp {
         cx.notify();
     }
 
-    fn toggle_collapsed(&mut self, cx: &mut Context<Self>) {
+    fn toggle_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.collapsed = !self.collapsed;
         self.state
             .with_mut(|s| s.prefs.sidebar_collapsed = self.collapsed);
         self.state.persist_prefs();
+        let width = if self.collapsed {
+            48.0
+        } else {
+            self.state
+                .with(|s| clamp_sidebar_width(s.prefs.sidebar_width))
+        };
+        self.sidebar_panels.update(cx, |state, cx| {
+            state.resize_panel(0, px(width), window, cx);
+        });
         cx.notify();
     }
 
@@ -322,6 +356,9 @@ impl Render for WorkbenchApp {
         let width = self
             .state
             .with(|s| clamp_sidebar_width(s.prefs.sidebar_width));
+        let right_width = self
+            .state
+            .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width));
         let today = self.state.today();
         let (today_count, inbox_count) = self.state.with(|s| {
             let tasks = s.repo.list_tasks();
@@ -488,13 +525,6 @@ impl Render for WorkbenchApp {
                 nav == AppNav::Agent,
                 entity.clone(),
             ),
-            Self::menu_item(
-                "设置",
-                IconName::Settings,
-                AppNav::Settings,
-                nav == AppNav::Settings,
-                entity.clone(),
-            ),
         ]);
 
         let main_view = match nav {
@@ -550,35 +580,30 @@ impl Render for WorkbenchApp {
                         cx.weak_entity(),
                         cx,
                     ))
-                    .child(div().flex_1().min_h_0().child({
+                    .child(div().flex_1().min_h_0().child(if nav == AppNav::Settings {
+                        self.settings.clone().into_any_element()
+                    } else {
                         let sidebar = Sidebar::new("wb-sidebar")
+                            .w_full()
                             .collapsible(SidebarCollapsible::Icon)
                             .collapsed(collapsed)
-                            .header(
-                                SidebarHeader::new().child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(Icon::new(IconName::LayoutDashboard))
-                                        .when(!collapsed, |row| {
-                                            row.child(div().font_bold().child("个人工作台"))
-                                        }),
-                                ),
-                            )
                             .child(SidebarGroup::new("任务").child(task_menu))
                             .child(SidebarGroup::new("项目").child(project_menu))
                             .child(SidebarGroup::new("标签").child(tag_menu))
                             .child(SidebarGroup::new("更多").child(more_menu))
                             .footer(
-                                SidebarFooter::new().child(
-                                    Button::new("search")
-                                        .ghost()
-                                        .icon(IconName::Search)
-                                        .label(if collapsed { "" } else { "搜索 Ctrl+P" })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_palette(window, cx);
-                                        })),
-                                ),
+                                SidebarFooter::new()
+                                    .selected(nav == AppNav::Settings)
+                                    .child(
+                                        Button::new("settings-nav")
+                                            .ghost()
+                                            .icon(IconName::Settings)
+                                            .selected(nav == AppNav::Settings)
+                                            .label(if collapsed { "" } else { "设置" })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.set_nav(AppNav::Settings, cx);
+                                            })),
+                                    ),
                             );
                         let main = v_flex()
                             .flex_1()
@@ -594,8 +619,8 @@ impl Render for WorkbenchApp {
                                     .border_color(cx.theme().border)
                                     .child(
                                         SidebarToggleButton::new().collapsed(collapsed).on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.toggle_collapsed(cx);
+                                            cx.listener(|this, _, window, cx| {
+                                                this.toggle_collapsed(window, cx);
                                             }),
                                         ),
                                     )
@@ -616,44 +641,56 @@ impl Render for WorkbenchApp {
                             )
                             .child(div().flex_1().min_h_0().child(main_view));
 
-                        if collapsed {
-                            h_flex()
-                                .size_full()
-                                .child(sidebar.w(px(64.)))
-                                .child(main)
-                                .into_any_element()
+                        let entity = entity.clone();
+                        let inspector = self.inspector.clone();
+                        let left_width = if collapsed { 48.0 } else { width };
+                        let left_range = if collapsed {
+                            px(48.)..px(48.)
                         } else {
-                            let entity = entity.clone();
-                            div()
-                                .size_full()
-                                .child(
-                                    h_resizable("wb-layout")
-                                        .with_state(&self.sidebar_panels)
-                                        .on_resize(move |state, _, app| {
-                                            let w = state
-                                                .read(app)
-                                                .sizes()
-                                                .first()
-                                                .map(|p| f32::from(*p))
-                                                .unwrap_or(width);
-                                            if let Some(e) = entity.upgrade() {
-                                                e.update(app, |this, cx| {
-                                                    this.set_sidebar_width(w, cx)
-                                                });
-                                            }
-                                        })
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(width))
-                                                .size_range(
-                                                    px(SIDEBAR_WIDTH_MIN)..px(SIDEBAR_WIDTH_MAX),
-                                                )
-                                                .child(sidebar),
-                                        )
-                                        .child(resizable_panel().child(main)),
-                                )
-                                .into_any_element()
-                        }
+                            px(SIDEBAR_WIDTH_MIN)..px(SIDEBAR_WIDTH_MAX)
+                        };
+                        div()
+                            .size_full()
+                            .child(
+                                h_resizable("wb-layout")
+                                    .with_state(&self.sidebar_panels)
+                                    .on_resize(move |state, _, app| {
+                                        let sizes = state.read(app).sizes().clone();
+                                        let left = sizes.first().copied().map(f32::from);
+                                        let right = sizes.get(2).copied().map(f32::from);
+                                        if let Some(e) = entity.upgrade() {
+                                            e.update(app, |this, cx| {
+                                                if let Some(w) = left {
+                                                    if !this.collapsed {
+                                                        this.set_sidebar_width(w, cx);
+                                                    }
+                                                }
+                                                if let Some(w) = right {
+                                                    this.set_right_sidebar_width(w, cx);
+                                                }
+                                            });
+                                        }
+                                    })
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(left_width))
+                                            .size_range(left_range)
+                                            .fixed()
+                                            .child(sidebar),
+                                    )
+                                    .child(resizable_panel().child(main))
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(right_width))
+                                            .size_range(
+                                                px(RIGHT_SIDEBAR_WIDTH_MIN)
+                                                    ..px(RIGHT_SIDEBAR_WIDTH_MAX),
+                                            )
+                                            .fixed()
+                                            .child(inspector),
+                                    ),
+                            )
+                            .into_any_element()
                     })),
             )
             .when(palette_open, |root| {

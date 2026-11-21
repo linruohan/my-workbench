@@ -60,6 +60,8 @@ pub struct AppStateInner {
     pub repo: MemoryWorkbenchRepository,
     pub prefs: AppPrefs,
     pub nav: AppNav,
+    /// View to restore when leaving Settings.
+    pub nav_before_settings: AppNav,
     pub active_project_id: Option<String>,
     pub active_tag_id: Option<String>,
     pub active_thread_id: Option<String>,
@@ -80,11 +82,20 @@ impl AppState {
             MemoryWorkbenchRepository::new()
         });
         let prefs = load_prefs().unwrap_or_default();
+        let nav = AppNav::from_view_id(&prefs.general.startup_view)
+            .filter(|nav| {
+                !matches!(
+                    nav,
+                    AppNav::Settings | AppNav::Projects | AppNav::Tags | AppNav::Done
+                )
+            })
+            .unwrap_or(AppNav::Today);
         Self {
             inner: Arc::new(Mutex::new(AppStateInner {
                 repo,
                 prefs,
-                nav: AppNav::Today,
+                nav,
+                nav_before_settings: AppNav::Today,
                 active_project_id: None,
                 active_tag_id: None,
                 active_thread_id: None,

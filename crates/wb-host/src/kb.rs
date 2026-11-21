@@ -128,6 +128,94 @@ pub fn git_branch(root: &Path) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitChange {
+    pub status: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitSnapshot {
+    pub branch: String,
+    pub changes: Vec<GitChange>,
+}
+
+/// Parse `git status --porcelain -b` output.
+pub fn parse_git_status(text: &str) -> GitSnapshot {
+    let mut branch = String::new();
+    let mut changes = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            branch = rest.trim().to_string();
+            continue;
+        }
+        if line.len() < 4 {
+            continue;
+        }
+        let status = line[..2].trim().to_string();
+        let path = line[3..].trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+        changes.push(GitChange { status, path });
+    }
+    GitSnapshot { branch, changes }
+}
+
+pub fn git_snapshot(root: &Path) -> Option<GitSnapshot> {
+    let out = Command::new("git")
+        .args(["status", "--porcelain", "-b"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_git_status(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Files under `root`, skipping hidden and heavy build directories.
+pub fn list_worktree_files(root: &Path, max: usize) -> Result<Vec<KbEntry>> {
+    let mut out = Vec::new();
+    let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.starts_with('.') {
+            return false;
+        }
+        !matches!(
+            name.as_ref(),
+            "node_modules" | "target" | "dist" | "build" | "vendor"
+        )
+    });
+    for entry in walker.filter_map(|entry| entry.ok()) {
+        if out.len() >= max {
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let relative = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| name.clone());
+        out.push(KbEntry {
+            path: path.to_string_lossy().to_string(),
+            name,
+            is_dir: false,
+            relative,
+        });
+    }
+    Ok(out)
+}
+
 pub fn list_files_recursive(root: &Path, max: usize) -> Result<Vec<KbEntry>> {
     let mut out = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
@@ -255,5 +343,16 @@ mod search_tests {
         assert_eq!(hits[0].relative, "a.md");
         assert_eq!(hits[0].line, 2);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_branch_and_porcelain_lines() {
+        let snap = parse_git_status("## main...origin/main [ahead 1]\n M src/a.rs\n?? new.txt\n");
+        assert_eq!(snap.branch, "main...origin/main [ahead 1]");
+        assert_eq!(snap.changes.len(), 2);
+        assert_eq!(snap.changes[0].status, "M");
+        assert_eq!(snap.changes[0].path, "src/a.rs");
+        assert_eq!(snap.changes[1].status, "??");
+        assert_eq!(snap.changes[1].path, "new.txt");
     }
 }

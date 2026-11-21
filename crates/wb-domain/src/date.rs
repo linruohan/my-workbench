@@ -73,6 +73,21 @@ pub fn weekday_cn_short(day: &str) -> &'static str {
     }
 }
 
+/// First day of the week that contains `day`.
+///
+/// `monday` starts the week on Monday; otherwise it starts on Sunday.
+pub fn start_of_week(day: &str, monday: bool) -> String {
+    let Some(date) = parse_local_day(day) else {
+        return day.to_string();
+    };
+    let offset = if monday {
+        date.weekday().num_days_from_monday() as i64
+    } else {
+        date.weekday().num_days_from_sunday() as i64
+    };
+    add_local_days(day, -offset).unwrap_or_else(|| day.to_string())
+}
+
 /// Build `count` planner day columns starting at `start` (inclusive).
 /// When `skip_weekends` is true, Saturday/Sunday are omitted until enough weekdays are collected.
 pub fn planner_day_columns(start: &str, count: usize, skip_weekends: bool) -> Vec<String> {
@@ -112,6 +127,13 @@ mod tests {
         let day = format_local_day(1_700_000_000_000);
         assert_eq!(day.len(), 10);
         assert!(parse_local_day(&day).is_some());
+    }
+
+    #[test]
+    fn week_starts_on_monday_or_sunday() {
+        // 2026-11-21 is Saturday.
+        assert_eq!(start_of_week("2026-11-21", true), "2026-11-16");
+        assert_eq!(start_of_week("2026-11-21", false), "2026-11-15");
     }
 
     #[test]

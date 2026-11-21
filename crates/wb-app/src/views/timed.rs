@@ -21,6 +21,7 @@ pub struct TimedPane {
     custom_at: Entity<InputState>,
     custom_unit: TimedIntervalUnit,
     agent: Option<Entity<AgentPane>>,
+    pending_delete_id: Option<String>,
 }
 
 impl TimedPane {
@@ -42,6 +43,7 @@ impl TimedPane {
             }),
             custom_unit: TimedIntervalUnit::Day,
             agent: None,
+            pending_delete_id: None,
         }
     }
 
@@ -118,6 +120,13 @@ impl TimedPane {
     }
 
     fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
+        let confirm = self.state.with(|s| s.prefs.general.confirm_before_delete);
+        if confirm && self.pending_delete_id.as_deref() != Some(id) {
+            self.pending_delete_id = Some(id.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_delete_id = None;
         self.state.with_mut(|s| s.repo.delete_timed_task(id));
         self.state.persist_if_dirty();
         cx.notify();
@@ -277,6 +286,7 @@ impl Render for TimedPane {
                 let radius = cx.theme().radius;
                 let border = cx.theme().border;
                 let muted = cx.theme().muted_foreground;
+                let pending_delete_id = self.pending_delete_id.clone();
                 v_flex()
                     .gap_2()
                     .flex_1()
@@ -286,6 +296,7 @@ impl Render for TimedPane {
                         let title = task.title.clone();
                         let sched = timed_schedule_label(task.schedule.as_ref());
                         let enabled = task.enabled;
+                        let pending_delete = pending_delete_id.as_deref() == Some(id.as_str());
                         let entity = entity.clone();
                         h_flex()
                             .id(SharedString::from(format!("timed-{id}")))
@@ -354,7 +365,11 @@ impl Render for TimedPane {
                                 Button::new(SharedString::from(format!("del-{id}")))
                                     .small()
                                     .danger()
-                                    .label("删除")
+                                    .label(if pending_delete {
+                                        "确认删除"
+                                    } else {
+                                        "删除"
+                                    })
                                     .on_click({
                                         let id = id.clone();
                                         move |_, _, app| {
