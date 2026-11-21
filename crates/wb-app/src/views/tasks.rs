@@ -7,11 +7,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
     INBOX_PROJECT_ID, PLANNER_CALENDAR_COLUMNS, SchedulePatch, Task, TimedSchedulePreset,
-    add_local_days, apply_schedule_patch, bucket_tasks_for_calendar, clear_plan_fields,
-    compute_task_stats, create_task_draft, filter_tasks, format_local_day, group_tasks_by_plan_day,
-    is_today_member, now_ms, parse_quick_capture, planner_day_columns, select_planner_tasks,
-    select_today_tasks, set_task_repeat_preset, settle_timer_segment, task_repeat_label,
-    weekday_cn_short,
+    add_local_days, apply_schedule_patch, at_local_time, bucket_tasks_for_calendar,
+    bucket_tasks_for_day_schedule, clear_plan_fields, compute_task_stats, create_task_draft,
+    filter_tasks, format_local_day, group_tasks_by_plan_day, is_today_member, now_ms,
+    parse_quick_capture, planner_day_columns, select_planner_tasks, select_today_tasks,
+    set_task_repeat_preset, settle_timer_segment, task_repeat_label, weekday_cn_short,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,6 +20,7 @@ enum TasksMode {
     List,
     Board,
     Calendar,
+    Schedule,
     Stats,
 }
 
@@ -32,6 +33,8 @@ pub struct TasksPane {
     project_title_id: Option<String>,
     notes_task_id: Option<String>,
     mode: TasksMode,
+    /// Day offset from today for the hourly schedule view.
+    schedule_day_offset: i64,
     _subs: Vec<Subscription>,
 }
 
@@ -53,6 +56,7 @@ impl TasksPane {
             project_title_id: None,
             notes_task_id: None,
             mode: TasksMode::List,
+            schedule_day_offset: 0,
             _subs: Vec::new(),
         };
         this._subs.push(
@@ -187,6 +191,217 @@ impl TasksPane {
         });
         self.state.persist_if_dirty();
         cx.notify();
+    }
+
+    fn schedule_selected_at_hour(&mut self, day: &str, hour: u32, cx: &mut Context<Self>) {
+        let Some(id) = self.state.with(|s| s.selected_task_id.clone()) else {
+            return;
+        };
+        let Some(ms) = at_local_time(day, hour, 0) else {
+            return;
+        };
+        self.state.with_mut(|s| {
+            if let Some(mut task) = s.repo.get_task(&id).cloned() {
+                apply_schedule_patch(
+                    &mut task,
+                    &SchedulePatch {
+                        due_day: Some(None),
+                        due_with_time: Some(Some(ms)),
+                        deadline_day: None,
+                        deadline_with_time: None,
+                        remind_at: None,
+                        deadline_remind_at: None,
+                    },
+                );
+                s.repo.upsert_task(task);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn schedule_view_day(&self) -> String {
+        let today = self.state.today();
+        add_local_days(&today, self.schedule_day_offset).unwrap_or(today)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_schedule_body(
+        &self,
+        tasks: &[(Task, usize)],
+        today: &str,
+        selected_id: &Option<String>,
+        entity: WeakEntity<Self>,
+        radius: Pixels,
+        muted: Hsla,
+        accent: Hsla,
+        border: Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let day = self.schedule_view_day();
+        let is_today = day == today;
+        let weekday = weekday_cn_short(&day);
+        let roots: Vec<Task> = tasks
+            .iter()
+            .filter(|(_, d)| *d == 0)
+            .map(|(t, _)| t.clone())
+            .collect();
+        let pool: Vec<Task> = if roots
+            .iter()
+            .any(|t| t.due_day.is_some() || t.due_with_time.is_some())
+        {
+            roots
+        } else {
+            self.state.with(|s| {
+                select_planner_tasks(&s.repo.list_tasks())
+                    .into_iter()
+                    .filter(|t| t.parent_id.is_none())
+                    .cloned()
+                    .collect()
+            })
+        };
+        let (all_day, hours) = bucket_tasks_for_day_schedule(&pool, &day);
+        let mut rows: Vec<AnyElement> = Vec::new();
+        rows.push(
+            v_flex()
+                .gap_1()
+                .p_2()
+                .rounded(radius)
+                .border_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .text_xs()
+                        .font_bold()
+                        .text_color(muted)
+                        .child(format!("全天 · {}", all_day.len())),
+                )
+                .children(all_day.into_iter().map(|task| {
+                    let selected = selected_id.as_deref() == Some(task.id.as_str());
+                    Self::render_calendar_chip(
+                        task,
+                        entity.clone(),
+                        radius,
+                        muted,
+                        accent,
+                        border,
+                        selected,
+                    )
+                    .into_any_element()
+                }))
+                .into_any_element(),
+        );
+        for (hour, hour_tasks) in hours {
+            let label = format!("{hour:02}:00");
+            let chips: Vec<_> = hour_tasks
+                .into_iter()
+                .map(|task| {
+                    let selected = selected_id.as_deref() == Some(task.id.as_str());
+                    Self::render_calendar_chip(
+                        task,
+                        entity.clone(),
+                        radius,
+                        muted,
+                        accent,
+                        border,
+                        selected,
+                    )
+                    .into_any_element()
+                })
+                .collect();
+            let count = chips.len();
+            let day_for_click = day.clone();
+            rows.push(
+                h_flex()
+                    .id(SharedString::from(format!("sched-h-{hour}")))
+                    .w_full()
+                    .gap_2()
+                    .items_start()
+                    .p_2()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(border)
+                    .hover(|s| s.bg(accent.opacity(0.25)))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.schedule_selected_at_hour(&day_for_click, hour, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(56.))
+                            .text_xs()
+                            .font_bold()
+                            .text_color(muted)
+                            .child(label),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_1()
+                            .when(count == 0, |col| {
+                                col.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child("点击：把选中任务排到此时刻"),
+                                )
+                            })
+                            .children(chips),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let day_label = if is_today {
+            format!("今天 · 周{weekday} · {day}")
+        } else {
+            format!("周{weekday} · {day}")
+        };
+        v_flex()
+            .gap_2()
+            .flex_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(Button::new("sched-prev").xsmall().label("前一天").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.schedule_day_offset -= 1;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(
+                        Button::new("sched-today")
+                            .xsmall()
+                            .label("今天")
+                            .selected(is_today)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.schedule_day_offset = 0;
+                                cx.notify();
+                            })),
+                    )
+                    .child(Button::new("sched-next").xsmall().label("后一天").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.schedule_day_offset += 1;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().text_sm().font_bold().child(day_label))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("06:00–22:00 · 先选任务再点时刻"),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .children(rows),
+            )
+            .into_any_element()
     }
 
     fn archive_active_project(&mut self, cx: &mut Context<Self>) {
@@ -1083,6 +1298,17 @@ impl Render for TasksPane {
                     )
                     .into_any_element()
             }
+            TasksMode::Schedule => self.render_schedule_body(
+                &tasks,
+                &today,
+                &selected_id,
+                entity.clone(),
+                radius,
+                muted,
+                accent,
+                border,
+                cx,
+            ),
             TasksMode::Stats => {
                 let cards: Vec<_> = [
                     ("未完成", stats.open.to_string()),
@@ -1145,6 +1371,7 @@ impl Render for TasksPane {
                     .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
                     .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
                     .child(self.mode_button("mode-calendar", "日历", TasksMode::Calendar, cx))
+                    .child(self.mode_button("mode-schedule", "时间表", TasksMode::Schedule, cx))
                     .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx))
                     .child(
                         Button::new("new-project")

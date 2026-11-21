@@ -293,6 +293,46 @@ pub fn bucket_tasks_for_calendar(
     (overdue, columns)
 }
 
+/// Hourly schedule grid: first visible hour (inclusive) through last (exclusive).
+pub const SCHEDULE_HOUR_START: u32 = 6;
+pub const SCHEDULE_HOUR_END: u32 = 23;
+
+/// Bucket root tasks for a single day's hourly schedule.
+/// Returns `(all_day, by_hour)` where `by_hour[i]` is hour `SCHEDULE_HOUR_START + i`.
+/// Timed tasks outside the visible window still appear under the clamped hour.
+pub fn bucket_tasks_for_day_schedule(
+    tasks: &[Task],
+    day: &str,
+) -> (Vec<Task>, Vec<(u32, Vec<Task>)>) {
+    let hour_count = SCHEDULE_HOUR_END.saturating_sub(SCHEDULE_HOUR_START) as usize;
+    let mut all_day = Vec::new();
+    let mut by_hour: Vec<(u32, Vec<Task>)> = (0..hour_count)
+        .map(|i| (SCHEDULE_HOUR_START + i as u32, Vec::new()))
+        .collect();
+    for task in tasks {
+        if task.parent_id.is_some() || task.is_done {
+            continue;
+        }
+        let Some(plan) = task_plan_day(task) else {
+            continue;
+        };
+        if plan != day {
+            continue;
+        }
+        match task.due_with_time {
+            Some(ms) => {
+                let (h, _) = local_hour_minute(ms);
+                let clamped = h.clamp(SCHEDULE_HOUR_START, SCHEDULE_HOUR_END.saturating_sub(1));
+                if let Some((_, list)) = by_hour.iter_mut().find(|(hour, _)| *hour == clamped) {
+                    list.push(task.clone());
+                }
+            }
+            None => all_day.push(task.clone()),
+        }
+    }
+    (all_day, by_hour)
+}
+
 pub fn filter_tasks<'a>(
     tasks: &'a [Task],
     project_id: Option<&str>,
@@ -416,5 +456,25 @@ mod tests {
         assert!(buckets[1].is_empty());
         assert_eq!(buckets[2].len(), 1);
         assert_eq!(buckets[2][0].title, "后");
+    }
+
+    #[test]
+    fn day_schedule_splits_all_day_and_hours() {
+        let day = "2026-11-21";
+        let mut all = create_task_draft("整天", None, None, Some(1));
+        all.due_day = Some(day.into());
+        let mut timed = create_task_draft("开会", None, None, Some(2));
+        timed.due_with_time = crate::date::at_local_time(day, 10, 30);
+        let mut early = create_task_draft("早", None, None, Some(3));
+        early.due_with_time = crate::date::at_local_time(day, 3, 0);
+        let (ad, hours) = bucket_tasks_for_day_schedule(&[all, timed, early], day);
+        assert_eq!(ad.len(), 1);
+        assert_eq!(ad[0].title, "整天");
+        let h10 = hours.iter().find(|(h, _)| *h == 10).unwrap();
+        assert_eq!(h10.1.len(), 1);
+        assert_eq!(h10.1[0].title, "开会");
+        let h6 = hours.iter().find(|(h, _)| *h == 6).unwrap();
+        assert_eq!(h6.1.len(), 1);
+        assert_eq!(h6.1[0].title, "早");
     }
 }
