@@ -310,9 +310,27 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             serde_json::json!({}),
         ),
         tool(
+            "timer_status",
+            ToolEffect::Read,
+            "查看任务累计计时",
+            serde_json::json!({
+                "taskId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "timer_add",
+            ToolEffect::Write,
+            "为任务记入一段用时（毫秒或分钟）",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "elapsedMs": { "type": "integer" },
+                "minutes": { "type": "integer" }
+            }),
+        ),
+        tool(
             "ui_open",
             ToolEffect::None,
-            "打开界面视图",
+            "打开界面视图（today/inbox/done/planner/timed/projects/knowledge/agent/settings）",
             serde_json::json!({
                 "view": { "type": "string" }
             }),
@@ -335,6 +353,17 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             serde_json::json!({
                 "path": { "type": "string" },
                 "content": { "type": "string" }
+            }),
+        ),
+        tool(
+            "str_replace",
+            ToolEffect::Write,
+            "精确替换工作区文件中的字符串",
+            serde_json::json!({
+                "path": { "type": "string" },
+                "oldString": { "type": "string" },
+                "newString": { "type": "string" },
+                "replaceAll": { "type": "boolean" }
             }),
         ),
         tool(

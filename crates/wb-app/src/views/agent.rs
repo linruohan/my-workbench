@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppNav, AppState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -6,7 +6,10 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Disableable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wb_agent::{begin_user_turn, create_thread, finish_user_turn, resolve_turn_reply};
+use wb_agent::{
+    begin_user_turn, create_thread, finish_user_turn, pending_approvals_for_thread,
+    resolve_approval, resolve_turn_reply,
+};
 use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
 use wb_host::pick_directory;
 
@@ -113,9 +116,10 @@ impl AgentPane {
                 .await;
 
             this.update(cx, move |this, cx| {
-                this.state.with_mut(|s| {
-                    finish_user_turn(&mut s.repo, &pending, reply);
-                });
+                let open_view = this
+                    .state
+                    .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply).open_view);
+                this.apply_open_view(open_view.as_deref());
                 this.state.persist_if_dirty();
                 this.status.clear();
                 this.busy = false;
@@ -124,6 +128,42 @@ impl AgentPane {
             .ok();
         })
         .detach();
+    }
+
+    fn apply_open_view(&mut self, view: Option<&str>) {
+        let Some(view) = view else {
+            return;
+        };
+        if let Some(nav) = AppNav::from_view_id(view) {
+            self.state.with_mut(|s| s.nav = nav);
+        }
+    }
+
+    fn decide_approval(&mut self, approval_id: String, approved: bool, cx: &mut Context<Self>) {
+        let root = self.state.with(|s| {
+            let tid = s.active_thread_id.clone()?;
+            let thread = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)?;
+            s.repo
+                .list_agent_workspaces()
+                .into_iter()
+                .find(|w| w.id == thread.workspace_id)
+                .and_then(|w| w.root_path)
+        });
+        let open_view = self.state.with_mut(|s| {
+            resolve_approval(&mut s.repo, &approval_id, approved, root.as_deref())
+                .map(|o| o.open_view)
+                .unwrap_or_else(|e| {
+                    log::warn!("审批失败: {e}");
+                    None
+                })
+        });
+        self.apply_open_view(open_view.as_deref());
+        self.state.persist_if_dirty();
+        cx.notify();
     }
 
     fn add_workspace(&mut self, cx: &mut Context<Self>) {
@@ -170,16 +210,21 @@ impl AgentPane {
 
 impl Render for AgentPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (threads, messages, workspaces) = self.state.with(|s| {
+        let (threads, messages, workspaces, approvals) = self.state.with(|s| {
             let tid = s.active_thread_id.clone();
             let messages = tid
                 .as_deref()
                 .map(|id| s.repo.messages_for_thread(id))
                 .unwrap_or_default();
+            let approvals = tid
+                .as_deref()
+                .map(|id| pending_approvals_for_thread(&s.repo, id))
+                .unwrap_or_default();
             (
                 s.repo.list_agent_threads(),
                 messages,
                 s.repo.list_agent_workspaces(),
+                approvals,
             )
         });
         let entity = cx.weak_entity();
@@ -191,6 +236,49 @@ impl Render for AgentPane {
         let secondary = cx.theme().secondary;
         let border = cx.theme().border;
         let danger = cx.theme().danger;
+
+        let approval_rows: Vec<_> = approvals
+            .into_iter()
+            .map(|a| {
+                let id_ok = a.id.clone();
+                let id_no = a.id.clone();
+                let summary = a.summary.clone();
+                let tool = a.tool_name.clone();
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(border)
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().text_xs().font_bold().child(format!("审批 · {tool}")))
+                            .child(div().text_xs().text_color(muted).child(summary)),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("appr-ok-{id_ok}")))
+                            .xsmall()
+                            .primary()
+                            .label("批准")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.decide_approval(id_ok.clone(), true, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("appr-no-{id_no}")))
+                            .xsmall()
+                            .ghost()
+                            .label("拒绝")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.decide_approval(id_no.clone(), false, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
 
         let thread_rows: Vec<_> = threads
             .into_iter()
@@ -324,6 +412,9 @@ impl Render for AgentPane {
                     .h_full()
                     .p_3()
                     .gap_2()
+                    .when(!approval_rows.is_empty(), |col| {
+                        col.child(v_flex().gap_2().children(approval_rows))
+                    })
                     .child(
                         v_flex()
                             .flex_1()
@@ -343,6 +434,7 @@ impl Render for AgentPane {
                                 "/note_list",
                                 "/schedule_list",
                                 "/notification_list",
+                                "/ui_open today",
                             ]
                             .into_iter()
                             .map(|cmd| {

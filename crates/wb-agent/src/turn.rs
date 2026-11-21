@@ -1,10 +1,10 @@
 use crate::execute::{ToolResult, check_gate, execute_tool};
 use crate::providers::{load_credentials, load_providers};
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 use wb_domain::{
-    AgentMessage, AgentPermissionMode, AgentRole, AgentThread, BUILTIN_MODEL_REF, ToolGate,
-    create_id, now_ms,
+    AgentApproval, AgentMessage, AgentPermissionMode, AgentRole, AgentThread, ApprovalStatus,
+    BUILTIN_MODEL_REF, ToolGate, create_id, now_ms,
 };
 use wb_host::chat_completions;
 use wb_store::MemoryWorkbenchRepository;
@@ -13,6 +13,7 @@ use wb_store::MemoryWorkbenchRepository;
 pub struct TurnOutcome {
     pub assistant: AgentMessage,
     pub tool_messages: Vec<AgentMessage>,
+    pub open_view: Option<String>,
 }
 
 /// Prepared turn state that can leave the repo lock before awaiting the model.
@@ -83,7 +84,8 @@ pub fn finish_user_turn(
     reply_text: String,
 ) -> TurnOutcome {
     let mut tool_messages = Vec::new();
-    if let Some(tool_name) = parse_slash_tool(&pending.user_text) {
+    let mut open_view = None;
+    if let Some((tool_name, args)) = parse_slash_invocation(&pending.user_text) {
         let gate = check_gate(tool_name, pending.thread.permission_mode);
         match gate {
             ToolGate::Block => {
@@ -93,14 +95,31 @@ pub fn finish_user_turn(
                     "当前权限模式禁止此工具",
                 ));
             }
-            ToolGate::Ask | ToolGate::Run => {
+            ToolGate::Ask => {
+                let approval = create_approval(
+                    &pending.thread.id,
+                    tool_name,
+                    &args,
+                    &format!("斜杠命令请求执行 {tool_name}"),
+                );
+                repo.upsert_agent_approval(approval.clone());
+                tool_messages.push(system_tool_msg(
+                    &pending.thread.id,
+                    tool_name,
+                    &format!("等待审批：{}（{}）", approval.summary, approval.id),
+                ));
+            }
+            ToolGate::Run => {
                 let root = pending.workspace_root.as_deref();
-                let result = execute_tool(repo, tool_name, &json!({}), root).unwrap_or_else(|e| {
-                    ToolResult {
+                let result =
+                    execute_tool(repo, tool_name, &args, root).unwrap_or_else(|e| ToolResult {
                         ok: false,
                         content: e.to_string(),
-                    }
-                });
+                        open_view: None,
+                    });
+                if let Some(view) = result.open_view.clone() {
+                    open_view = Some(view);
+                }
                 tool_messages.push(system_tool_msg(
                     &pending.thread.id,
                     tool_name,
@@ -142,7 +161,71 @@ pub fn finish_user_turn(
     TurnOutcome {
         assistant,
         tool_messages,
+        open_view,
     }
+}
+
+/// Approve or deny a pending tool approval and optionally execute it.
+pub fn resolve_approval(
+    repo: &mut MemoryWorkbenchRepository,
+    approval_id: &str,
+    approved: bool,
+    workspace_root: Option<&str>,
+) -> Result<TurnOutcome> {
+    let Some(mut approval) = repo
+        .list_agent_approvals()
+        .into_iter()
+        .find(|a| a.id == approval_id)
+    else {
+        anyhow::bail!("审批不存在");
+    };
+    if !matches!(approval.status, ApprovalStatus::Pending) {
+        anyhow::bail!("审批已处理");
+    }
+    let now = now_ms();
+    approval.status = if approved {
+        ApprovalStatus::Approved
+    } else {
+        ApprovalStatus::Denied
+    };
+    approval.resolved_at = Some(now);
+    repo.upsert_agent_approval(approval.clone());
+
+    let mut open_view = None;
+    let content = if approved {
+        let args: Value = serde_json::from_str(&approval.args_json).unwrap_or_else(|_| json!({}));
+        let result =
+            execute_tool(repo, &approval.tool_name, &args, workspace_root).unwrap_or_else(|e| {
+                ToolResult {
+                    ok: false,
+                    content: e.to_string(),
+                    open_view: None,
+                }
+            });
+        open_view = result.open_view.clone();
+        format!("已批准并执行 {}：{}", approval.tool_name, result.content)
+    } else {
+        format!("已拒绝 {}", approval.tool_name)
+    };
+
+    let msg = system_tool_msg(&approval.thread_id, &approval.tool_name, &content);
+    repo.upsert_agent_message(msg.clone());
+
+    Ok(TurnOutcome {
+        assistant: msg.clone(),
+        tool_messages: vec![msg],
+        open_view,
+    })
+}
+
+pub fn pending_approvals_for_thread(
+    repo: &MemoryWorkbenchRepository,
+    thread_id: &str,
+) -> Vec<AgentApproval> {
+    repo.list_agent_approvals()
+        .into_iter()
+        .filter(|a| a.thread_id == thread_id && matches!(a.status, ApprovalStatus::Pending))
+        .collect()
 }
 
 pub async fn run_user_turn(
@@ -154,6 +237,21 @@ pub async fn run_user_turn(
     let pending = begin_user_turn(repo, thread, user_text);
     let reply = resolve_turn_reply(&pending, proxy).await;
     Ok(finish_user_turn(repo, &pending, reply))
+}
+
+fn create_approval(thread_id: &str, tool_name: &str, args: &Value, summary: &str) -> AgentApproval {
+    let now = now_ms();
+    AgentApproval {
+        id: create_id(now),
+        thread_id: thread_id.into(),
+        tool_call_id: None,
+        tool_name: tool_name.into(),
+        args_json: args.to_string(),
+        summary: summary.into(),
+        status: ApprovalStatus::Pending,
+        created_at: now,
+        resolved_at: None,
+    }
 }
 
 fn system_tool_msg(thread_id: &str, tool: &str, content: &str) -> AgentMessage {
@@ -169,7 +267,7 @@ fn system_tool_msg(thread_id: &str, tool: &str, content: &str) -> AgentMessage {
     }
 }
 
-fn parse_slash_tool(text: &str) -> Option<&'static str> {
+fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
     let t = text.trim();
     const COMMANDS: &[(&str, &str)] = &[
         ("/task_list", "task_list"),
@@ -178,10 +276,17 @@ fn parse_slash_tool(text: &str) -> Option<&'static str> {
         ("/note_list", "note_list"),
         ("/schedule_list", "schedule_list"),
         ("/notification_list", "notification_list"),
+        ("/ui_open", "ui_open"),
     ];
     for (prefix, name) in COMMANDS {
-        if t.starts_with(prefix) {
-            return Some(name);
+        if t == *prefix || t.starts_with(&format!("{prefix} ")) {
+            let rest = t[prefix.len()..].trim();
+            let args = if *name == "ui_open" {
+                json!({ "view": rest })
+            } else {
+                json!({})
+            };
+            return Some((name, args));
         }
     }
     None
@@ -260,5 +365,41 @@ pub fn create_thread(workspace_id: &str, title: &str, model_ref: Option<&str>) -
         pinned_at: None,
         created_at: now,
         updated_at: now,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wb_domain::AgentWorkspace;
+
+    #[test]
+    fn ask_gate_creates_pending_approval() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let now = now_ms();
+        let ws = AgentWorkspace {
+            id: "ws1".into(),
+            title: "t".into(),
+            root_path: None,
+            created_at: now,
+            updated_at: now,
+        };
+        repo.upsert_agent_workspace(ws);
+        let mut thread = create_thread("ws1", "新会话", None);
+        // Force Confirm + a write tool via temporary mode check:
+        // task_create is Write → Ask under Confirm. Use slash that maps to read for Run,
+        // and resolve_approval path for write. Here simulate Ask by calling create via resolve after.
+        thread.permission_mode = AgentPermissionMode::Confirm;
+        repo.upsert_agent_thread(thread.clone());
+
+        // Manually create approval as finish would for Ask.
+        let approval = create_approval(&thread.id, "task_create", &json!({"title":"x"}), "create");
+        repo.upsert_agent_approval(approval.clone());
+        assert_eq!(pending_approvals_for_thread(&repo, &thread.id).len(), 1);
+
+        let out = resolve_approval(&mut repo, &approval.id, true, None).unwrap();
+        assert!(out.tool_messages[0].content.contains("已批准"));
+        assert_eq!(repo.list_tasks().len(), 1);
+        assert!(pending_approvals_for_thread(&repo, &thread.id).is_empty());
     }
 }

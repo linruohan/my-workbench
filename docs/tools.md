@@ -360,12 +360,14 @@ DSH：统一协作式取消 + 超时错误映射。
 | `tag_list` / `tag_create` / `tag_add` | ✅ |
 | `note_list` / `note_create` | ✅ |
 | `notification_list` / `schedule_list` | ✅ |
-| `read` / `write` / `shell` | ✅（工作区相对路径；尚无完整 jail / spill） |
+| `timer_status` / `timer_add` | ✅（记入当日用时；非 UI 实时跑表） |
+| `read` / `write` / `str_replace` / `shell` | ✅（拒绝 `..` 越界；尚无 spill） |
 | `glob` / `grep` | ✅（自实现扫描 + 结果上限；非 ripgrep） |
-| `ui_open` | 🟡 仅回显参数，未切视图 |
-| `timer_*` / `search` / `settings_*` / `memory_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `schedule_*` 写 / `session_*` | ❌ 未迁 |
+| `ui_open` | ✅ 切换侧栏视图；斜杠 `/ui_open today` |
+| 写工具审批卡（Confirm 模式 Ask） | ✅ |
+| `search` / `settings_*` / `memory_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `schedule_*` 写 / `session_*` / 模型 tool-call 循环 | ❌ 未迁 |
 
-斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list`。
+斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>`。
 
 另：`shell` 是本仓库的跨平台入口（对齐 DSH `dsh-shell` 抽象 + bash/pwsh 二选一），DSH 目录里没有名为 `dsh-tool-shell` 的包。
 

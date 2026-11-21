@@ -31,6 +31,21 @@ impl AppNav {
             Self::Settings => "设置",
         }
     }
+
+    pub fn from_view_id(id: &str) -> Option<Self> {
+        match id.trim().to_lowercase().as_str() {
+            "today" => Some(Self::Today),
+            "inbox" => Some(Self::Inbox),
+            "done" => Some(Self::Done),
+            "planner" => Some(Self::Planner),
+            "timed" => Some(Self::Timed),
+            "projects" => Some(Self::Projects),
+            "knowledge" | "kb" => Some(Self::Knowledge),
+            "agent" => Some(Self::Agent),
+            "settings" => Some(Self::Settings),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
