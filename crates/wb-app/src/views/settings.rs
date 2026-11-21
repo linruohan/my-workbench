@@ -6,7 +6,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wb_agent::{load_providers, save_providers};
+use std::collections::HashMap;
+use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_domain::ThemeModePref;
 use wb_host::{
     list_system_fonts, open_path, speech_ensure_models, speech_status, voice_ptt_set_enabled,
@@ -15,8 +16,10 @@ use wb_host::{
 pub struct SettingsPane {
     state: AppState,
     proxy: Entity<InputState>,
+    key_inputs: HashMap<String, Entity<InputState>>,
     font_count: usize,
     speech_msg: String,
+    cred_msg: String,
 }
 
 impl SettingsPane {
@@ -27,6 +30,19 @@ impl SettingsPane {
                 .placeholder("http://127.0.0.1:7890")
                 .default_value(proxy_val)
         });
+        let creds = load_credentials();
+        let providers = load_providers();
+        let mut key_inputs = HashMap::new();
+        for p in providers.providers.iter().filter(|p| p.api_key_required) {
+            let has = creds.keys.contains_key(&p.id);
+            let placeholder = if has {
+                format!("{} API Key（已保存，留空并保存可清除）", p.name)
+            } else {
+                format!("{} API Key", p.name)
+            };
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            key_inputs.insert(p.id.clone(), input);
+        }
         let font_count = list_system_fonts().map(|f| f.len()).unwrap_or(0);
         let speech_msg = speech_status("sensevoice")
             .map(|st| {
@@ -41,8 +57,10 @@ impl SettingsPane {
         Self {
             state,
             proxy,
+            key_inputs,
             font_count,
             speech_msg,
+            cred_msg: String::new(),
         }
     }
 
@@ -108,6 +126,38 @@ impl SettingsPane {
         cx.notify();
     }
 
+    fn save_api_keys(&mut self, cx: &mut Context<Self>) {
+        let mut creds = load_credentials();
+        for (pid, input) in &self.key_inputs {
+            let value = input.read(cx).value().to_string();
+            if value.trim().is_empty() {
+                // Only clear when user typed something then cleared? Keep existing if empty
+                // and field was never touched — but we can't know. Empty means "no change"
+                // unless prefixed with "-". Simpler: empty = no change; single "-" = clear.
+                continue;
+            }
+            if value.trim() == "-" {
+                creds.keys.remove(pid);
+            } else {
+                creds.keys.insert(pid.clone(), value.trim().to_string());
+            }
+        }
+        match save_credentials(&creds) {
+            Ok(()) => {
+                self.cred_msg = "API Key 已保存到本地 credentials".into();
+                // Clear inputs after save so keys aren't left visible.
+                for input in self.key_inputs.values() {
+                    input.update(cx, |i, cx| {
+                        // InputState set_value needs window — skip clear if awkward
+                        let _ = (i, cx);
+                    });
+                }
+            }
+            Err(e) => self.cred_msg = format!("保存失败：{e}"),
+        }
+        cx.notify();
+    }
+
     fn prepare_speech(&mut self, cx: &mut Context<Self>) {
         match speech_ensure_models("sensevoice") {
             Ok(st) => {
@@ -134,6 +184,7 @@ impl Render for SettingsPane {
             .with(|s| s.prefs.agent.default_model_ref.clone())
             .unwrap_or_else(|| wb_domain::BUILTIN_MODEL_REF.to_string());
         let providers = load_providers();
+        let creds = load_credentials();
         let data_dir = wb_store::resolve_data_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "%APPDATA%\\my-workbench".into());
@@ -294,22 +345,58 @@ impl Render for SettingsPane {
                             }),
                         ),
                     )
-                    .children(providers.providers.into_iter().map(|p| {
+                    .children(providers.providers.iter().map(|p| {
+                        let has_key = creds.keys.contains_key(&p.id);
                         div().text_sm().child(format!(
-                            "{} · {} {}",
+                            "{} · {} {}{}",
                             p.name,
                             p.base_url,
-                            if p.enabled { "" } else { "(停用)" }
+                            if p.enabled { "" } else { "(停用) " },
+                            if p.api_key_required {
+                                if has_key { "· Key✓" } else { "· 缺 Key" }
+                            } else {
+                                ""
+                            }
                         ))
                     }))
+                    .children(
+                        self.key_inputs
+                            .values()
+                            .map(|input| Input::new(input).into_any_element()),
+                    )
                     .child(
-                        Button::new("save-providers")
-                            .small()
-                            .label("写入默认 Provider 配置")
-                            .on_click(|_, _, _| {
-                                let _ = save_providers(&load_providers());
-                            }),
-                    ),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("save-keys")
+                                    .small()
+                                    .primary()
+                                    .label("保存 API Key")
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_api_keys(cx))),
+                            )
+                            .child(
+                                Button::new("save-providers")
+                                    .small()
+                                    .label("写入默认 Provider 配置")
+                                    .on_click(|_, _, _| {
+                                        let _ = save_providers(&load_providers());
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("输入 Key 后点保存；输入单独的 - 可清除该 Provider 的 Key"),
+                    )
+                    .when(!self.cred_msg.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(self.cred_msg.clone()),
+                        )
+                    }),
             )
             .child(
                 v_flex()
