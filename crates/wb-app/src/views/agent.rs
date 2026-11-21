@@ -7,7 +7,8 @@ use gpui_kit::component::{Disableable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_agent::{
-    begin_user_turn, create_thread, finish_user_turn, pending_approvals_for_thread,
+    TurnPhase, begin_user_turn, continue_turn_reply, create_thread, cycle_permission_mode,
+    finish_continue_turn, finish_user_turn, pending_approvals_for_thread, permission_mode_label,
     resolve_approval, resolve_turn_reply,
 };
 use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
@@ -115,12 +116,45 @@ impl AgentPane {
                 })
                 .await;
 
-            this.update(cx, move |this, cx| {
-                let open_view = this
-                    .state
-                    .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply).open_view);
-                this.apply_open_view(open_view.as_deref());
-                this.state.persist_if_dirty();
+            let mut phase = this
+                .update(cx, |this, cx| {
+                    let phase = this
+                        .state
+                        .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply));
+                    this.apply_open_view(phase.open_view());
+                    this.state.persist_if_dirty();
+                    cx.notify();
+                    phase
+                })
+                .ok();
+
+            while let Some(TurnPhase::Continue(cont, _)) = phase {
+                let proxy3 = proxy.clone();
+                let cont2 = cont.clone();
+                let reply = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("tokio runtime");
+                        rt.block_on(continue_turn_reply(&cont2, proxy3.as_deref()))
+                    })
+                    .await;
+                phase = this
+                    .update(cx, |this, cx| {
+                        let next = this
+                            .state
+                            .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
+                        this.apply_open_view(next.open_view());
+                        this.state.persist_if_dirty();
+                        cx.notify();
+                        next
+                    })
+                    .ok();
+            }
+
+            this.update(cx, |this, cx| {
                 this.status.clear();
                 this.busy = false;
                 cx.notify();
@@ -128,6 +162,23 @@ impl AgentPane {
             .ok();
         })
         .detach();
+    }
+
+    fn cycle_thread_permission(&mut self, cx: &mut Context<Self>) {
+        let tid = self.ensure_thread();
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+            {
+                t.permission_mode = cycle_permission_mode(t.permission_mode);
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
     }
 
     fn apply_open_view(&mut self, view: Option<&str>) {
@@ -210,7 +261,7 @@ impl AgentPane {
 
 impl Render for AgentPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (threads, messages, workspaces, approvals) = self.state.with(|s| {
+        let (threads, messages, workspaces, approvals, perm_label) = self.state.with(|s| {
             let tid = s.active_thread_id.clone();
             let messages = tid
                 .as_deref()
@@ -220,11 +271,22 @@ impl Render for AgentPane {
                 .as_deref()
                 .map(|id| pending_approvals_for_thread(&s.repo, id))
                 .unwrap_or_default();
+            let perm = tid
+                .as_deref()
+                .and_then(|id| {
+                    s.repo
+                        .list_agent_threads()
+                        .into_iter()
+                        .find(|t| t.id == id)
+                        .map(|t| permission_mode_label(t.permission_mode))
+                })
+                .unwrap_or("确认");
             (
                 s.repo.list_agent_threads(),
                 messages,
                 s.repo.list_agent_workspaces(),
                 approvals,
+                perm,
             )
         });
         let entity = cx.weak_entity();
@@ -378,6 +440,7 @@ impl Render for AgentPane {
                     .child(
                         h_flex()
                             .gap_2()
+                            .flex_wrap()
                             .child(
                                 Button::new("agent-new")
                                     .small()
@@ -390,6 +453,15 @@ impl Render for AgentPane {
                                     .small()
                                     .label("工作区")
                                     .on_click(cx.listener(|this, _, _, cx| this.add_workspace(cx))),
+                            )
+                            .child(
+                                Button::new("agent-perm")
+                                    .small()
+                                    .ghost()
+                                    .label(format!("权限:{perm_label}"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cycle_thread_permission(cx)
+                                    })),
                             ),
                     )
                     .child(

@@ -365,7 +365,9 @@ DSH：统一协作式取消 + 超时错误映射。
 | `glob` / `grep` | ✅（自实现扫描 + 结果上限；非 ripgrep） |
 | `ui_open` | ✅ 切换侧栏视图；斜杠 `/ui_open today` |
 | 写工具审批卡（Confirm 模式 Ask） | ✅ |
-| `search` / `settings_*` / `memory_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `schedule_*` 写 / `session_*` / 模型 tool-call 循环 | ❌ 未迁 |
+| 会话权限切换（确认 / 会话自动 / 只读） | ✅ |
+| 远程模型 tool-call 循环（最多 4 轮） | ✅ |
+| `search` / `settings_*` / `memory_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `schedule_*` 写 / `session_*` | ❌ 未迁 |
 
 斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>`。
 
