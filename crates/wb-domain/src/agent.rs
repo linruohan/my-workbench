@@ -365,6 +365,52 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
                 "view": { "type": "string" }
             }),
         ),
+        tool(
+            "memory_list",
+            ToolEffect::Read,
+            "列出 Agent 记忆短事实",
+            serde_json::json!({}),
+        ),
+        tool(
+            "memory_add",
+            ToolEffect::Write,
+            "添加一条 Agent 记忆",
+            serde_json::json!({
+                "text": { "type": "string" }
+            }),
+        ),
+        tool(
+            "memory_remove",
+            ToolEffect::Write,
+            "按序号或全文删除一条记忆（index 从 1 起）",
+            serde_json::json!({
+                "index": { "type": "integer" },
+                "text": { "type": "string" }
+            }),
+        ),
+        tool(
+            "todo_write",
+            ToolEffect::Write,
+            "写入/合并 Agent 会话待办",
+            serde_json::json!({
+                "todos": { "type": "array" },
+                "merge": { "type": "boolean" }
+            }),
+        ),
+        tool(
+            "todo_list",
+            ToolEffect::Read,
+            "列出 Agent 会话待办",
+            serde_json::json!({}),
+        ),
+        tool(
+            "ask_user_question",
+            ToolEffect::None,
+            "向用户提问并等待回复",
+            serde_json::json!({
+                "question": { "type": "string" }
+            }),
+        ),
     ]
 }
 

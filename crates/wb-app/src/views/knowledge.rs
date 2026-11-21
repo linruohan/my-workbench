@@ -13,8 +13,10 @@ use wb_host::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum KbMode {
+    /// 实时编辑（与源码同编辑器，保留三态入口）
     #[default]
-    Edit,
+    Live,
+    Source,
     Preview,
 }
 
@@ -45,7 +47,7 @@ impl KnowledgePane {
             replace,
             current: None,
             filter,
-            mode: KbMode::Edit,
+            mode: KbMode::Live,
             replace_status: String::new(),
             _subs: Vec::new(),
         };
@@ -288,12 +290,22 @@ impl Render for KnowledgePane {
                         h_flex()
                             .gap_2()
                             .child(
-                                Button::new("kb-edit")
+                                Button::new("kb-live")
                                     .small()
-                                    .label("编辑")
-                                    .selected(mode == KbMode::Edit)
+                                    .label("实时")
+                                    .selected(mode == KbMode::Live)
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.mode = KbMode::Edit;
+                                        this.mode = KbMode::Live;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("kb-source")
+                                    .small()
+                                    .label("源码")
+                                    .selected(mode == KbMode::Source)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.mode = KbMode::Source;
                                         cx.notify();
                                     })),
                             )
@@ -324,45 +336,50 @@ impl Render for KnowledgePane {
                                 )
                             }),
                     )
-                    .when(mode == KbMode::Edit && current.is_some(), |col| {
-                        col.child(
-                            h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .items_center()
-                                .child(Input::new(&self.find).cleanable(true))
-                                .child(Input::new(&self.replace).cleanable(true))
-                                .child(Button::new("kb-find").xsmall().label("查找").on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.find_next(window, cx);
-                                    }),
-                                ))
-                                .child(Button::new("kb-repl").xsmall().label("替换").on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.replace_once(window, cx);
-                                    }),
-                                ))
-                                .child(
-                                    Button::new("kb-repl-all")
-                                        .xsmall()
-                                        .primary()
-                                        .label("全部替换")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.replace_all(window, cx);
-                                        })),
-                                )
-                                .when(!replace_status.is_empty(), |row| {
-                                    row.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(replace_status.clone()),
+                    .when(
+                        matches!(mode, KbMode::Live | KbMode::Source) && current.is_some(),
+                        |col| {
+                            col.child(
+                                h_flex()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .child(Input::new(&self.find).cleanable(true))
+                                    .child(Input::new(&self.replace).cleanable(true))
+                                    .child(Button::new("kb-find").xsmall().label("查找").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.find_next(window, cx);
+                                        }),
+                                    ))
+                                    .child(Button::new("kb-repl").xsmall().label("替换").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.replace_once(window, cx);
+                                        }),
+                                    ))
+                                    .child(
+                                        Button::new("kb-repl-all")
+                                            .xsmall()
+                                            .primary()
+                                            .label("全部替换")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.replace_all(window, cx);
+                                            })),
                                     )
-                                }),
-                        )
-                    })
+                                    .when(!replace_status.is_empty(), |row| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(replace_status.clone()),
+                                        )
+                                    }),
+                            )
+                        },
+                    )
                     .child(match mode {
-                        KbMode::Edit => Input::new(&self.editor).into_any_element(),
+                        KbMode::Live | KbMode::Source => {
+                            Input::new(&self.editor).into_any_element()
+                        }
                         KbMode::Preview => div()
                             .flex_1()
                             .w_full()

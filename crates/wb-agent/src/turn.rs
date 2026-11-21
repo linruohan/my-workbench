@@ -515,8 +515,26 @@ fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
 fn builtin_reply(user_text: &str, repo: &MemoryWorkbenchRepository) -> String {
     let tasks = repo.list_tasks();
     let open = tasks.iter().filter(|t| !t.is_done).count();
+    let memories = wb_store::load_prefs()
+        .ok()
+        .map(|p| p.agent.memories)
+        .unwrap_or_default();
+    let mem = if memories.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n记忆：\n{}",
+            memories
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(i, m)| format!("{}. {m}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
     format!(
-        "（内置通道）已收到：{}\n\n当前未完成任务 {open} 条。可用斜杠：/task_list /project_list /tag_list /note_list /schedule_list /notification_list /ui_open <view>",
+        "（内置通道）已收到：{}\n\n当前未完成任务 {open} 条。可用斜杠：/task_list /project_list /tag_list /note_list /schedule_list /notification_list /ui_open <view>{mem}",
         user_text.trim()
     )
 }
@@ -612,9 +630,31 @@ async fn call_remote_model(
     let creds = load_credentials();
     let key = creds.keys.get(&provider.id).map(|s| s.as_str());
 
+    let mut msgs = messages.to_vec();
+    if let Ok(prefs) = wb_store::load_prefs() {
+        if !prefs.agent.memories.is_empty() {
+            let mem = prefs.agent.memories.join("；");
+            let personality = prefs
+                .agent
+                .personality
+                .as_deref()
+                .unwrap_or("你是工作台助手。");
+            msgs.insert(
+                0,
+                json!({
+                    "role": "system",
+                    "content": format!("{personality}\n记忆：{mem}")
+                }),
+            );
+        } else if let Some(ref p) = prefs.agent.personality {
+            if !p.trim().is_empty() {
+                msgs.insert(0, json!({ "role": "system", "content": p }));
+            }
+        }
+    }
     let mut body = json!({
         "model": model_id,
-        "messages": messages,
+        "messages": msgs,
     });
     if with_tools {
         if let Some(obj) = body.as_object_mut() {

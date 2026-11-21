@@ -1,15 +1,16 @@
+use crate::session_todo::{SessionTodo, list_todos, write_todos};
 use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
 use wb_domain::{
-    AgentPermissionMode, TimedIntervalUnit, TimedSchedulePreset, ToolEffect, ToolGate, ToolSpec,
-    builtin_host_tools, create_timed_task_draft, format_local_day, gate_tool, make_custom_schedule,
-    make_preset_schedule, now_ms, settle_timer_segment, workspace_tools,
+    AgentPermissionMode, NotificationKind, TimedIntervalUnit, TimedSchedulePreset, ToolEffect,
+    ToolGate, ToolSpec, builtin_host_tools, create_timed_task_draft, format_local_day, gate_tool,
+    make_custom_schedule, make_preset_schedule, now_ms, settle_timer_segment, workspace_tools,
 };
 use wb_host::{
     global_jobs, list_files_recursive, read_image_info, read_text, run_shell, web_fetch, write_text,
 };
-use wb_store::MemoryWorkbenchRepository;
+use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolResult {
@@ -402,6 +403,116 @@ pub fn execute_tool(
                     "未知视图：{view}（可用 today/inbox/done/planner/timed/projects/knowledge/agent/settings）"
                 ))),
             }
+        }
+        "memory_list" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let lines: Vec<_> = prefs
+                .agent
+                .memories
+                .iter()
+                .enumerate()
+                .map(|(i, m)| format!("{}. {m}", i + 1))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无记忆）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "memory_add" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if text.is_empty() {
+                return Ok(ToolResult::err_text("记忆内容不能为空"));
+            }
+            let mut prefs = load_prefs().unwrap_or_default();
+            if !prefs.agent.memories.iter().any(|m| m == text) {
+                prefs.agent.memories.push(text.to_string());
+                save_prefs(&prefs)?;
+            }
+            Ok(ToolResult::ok_text(format!("已记住：{text}")))
+        }
+        "memory_remove" => {
+            let mut prefs = load_prefs().unwrap_or_default();
+            let before = prefs.agent.memories.len();
+            if let Some(idx) = args.get("index").and_then(|v| v.as_u64()) {
+                let i = idx.saturating_sub(1) as usize;
+                if i < prefs.agent.memories.len() {
+                    prefs.agent.memories.remove(i);
+                }
+            } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+                prefs.agent.memories.retain(|m| m != text);
+            } else {
+                return Ok(ToolResult::err_text("需要 index 或 text"));
+            }
+            save_prefs(&prefs)?;
+            Ok(ToolResult::ok_text(format!(
+                "已删除 {} 条记忆",
+                before.saturating_sub(prefs.agent.memories.len())
+            )))
+        }
+        "todo_list" => {
+            let lines: Vec<_> = list_todos()
+                .into_iter()
+                .map(|t| format!("- [{}] {} ({})", t.status, t.content, t.id))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无待办）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "todo_write" => {
+            let merge = args.get("merge").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut parsed = Vec::new();
+            if let Some(arr) = args.get("todos").and_then(|v| v.as_array()) {
+                for (i, item) in arr.iter().enumerate() {
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("todo-{}", i + 1));
+                    let content = item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let status = item
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending")
+                        .to_string();
+                    if !content.is_empty() {
+                        parsed.push(SessionTodo {
+                            id,
+                            content,
+                            status,
+                        });
+                    }
+                }
+            }
+            let out = write_todos(parsed, merge);
+            Ok(ToolResult::ok_text(format!(
+                "待办已更新，共 {} 条",
+                out.len()
+            )))
+        }
+        "ask_user_question" => {
+            let question = args
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if question.is_empty() {
+                return Ok(ToolResult::err_text("问题不能为空"));
+            }
+            repo.push_notification(NotificationKind::System, "Agent 提问", question, None);
+            Ok(ToolResult::ok_text(format!(
+                "已向用户提问（见通知中心）：{question}"
+            )))
         }
         "read" => {
             let rel = args
@@ -833,6 +944,35 @@ mod tests {
         let out = execute_tool(&mut repo, "job_output", &json!({ "jobId": id }), None).unwrap();
         assert!(out.ok);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memory_and_todo_tools() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let add = execute_tool(
+            &mut repo,
+            "memory_add",
+            &json!({ "text": "喜欢简洁回复" }),
+            None,
+        )
+        .unwrap();
+        assert!(add.ok);
+        let list = execute_tool(&mut repo, "memory_list", &json!({}), None).unwrap();
+        assert!(list.content.contains("喜欢简洁回复"));
+
+        let todos = execute_tool(
+            &mut repo,
+            "todo_write",
+            &json!({
+                "merge": false,
+                "todos": [{ "id": "1", "content": "写测试", "status": "pending" }]
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(todos.ok);
+        let listed = execute_tool(&mut repo, "todo_list", &json!({}), None).unwrap();
+        assert!(listed.content.contains("写测试"));
     }
 
     #[test]

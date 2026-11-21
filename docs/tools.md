@@ -370,7 +370,10 @@ DSH：统一协作式取消 + 超时错误映射。
 | 写工具审批卡（Confirm 模式 Ask） | ✅ |
 | 会话权限切换（确认 / 会话自动 / 只读） | ✅ |
 | 远程模型 tool-call 循环（最多 4 轮） | ✅ |
-| `terminal_*`（PTY）/ `search` / `settings_*` / `memory_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `session_*` | ❌ 未迁 |
+| `memory_list` / `memory_add` / `memory_remove` | ✅（prefs.json） |
+| `todo_write` / `todo_list` | ✅（进程内会话待办） |
+| `ask_user_question` | ✅（写入通知中心） |
+| `terminal_*`（PTY）/ `search` / `settings_*` / `plugin_*` / `mcp_*` / `host_tool_*` / `session_*` | ❌ 未迁 |
 
 斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>`。
 

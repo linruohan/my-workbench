@@ -16,6 +16,8 @@ use wb_host::{
 pub struct SettingsPane {
     state: AppState,
     proxy: Entity<InputState>,
+    personality: Entity<InputState>,
+    memory_input: Entity<InputState>,
     key_inputs: HashMap<String, Entity<InputState>>,
     font_count: usize,
     speech_msg: String,
@@ -25,18 +27,28 @@ pub struct SettingsPane {
 impl SettingsPane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let proxy_val = state.with(|s| s.prefs.http_proxy.clone().unwrap_or_default());
+        let persona = state
+            .with(|s| s.prefs.agent.personality.clone())
+            .unwrap_or_default();
         let proxy = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("http://127.0.0.1:7890")
                 .default_value(proxy_val)
         });
+        let personality = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Agent 个性化 system 提示")
+                .default_value(persona)
+        });
+        let memory_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("新记忆，回车或点添加"));
         let creds = load_credentials();
         let providers = load_providers();
         let mut key_inputs = HashMap::new();
         for p in providers.providers.iter().filter(|p| p.api_key_required) {
             let has = creds.keys.contains_key(&p.id);
             let placeholder = if has {
-                format!("{} API Key（已保存，留空并保存可清除）", p.name)
+                format!("{} API Key（已保存，输入 - 可清除）", p.name)
             } else {
                 format!("{} API Key", p.name)
             };
@@ -57,6 +69,8 @@ impl SettingsPane {
         Self {
             state,
             proxy,
+            personality,
+            memory_input,
             key_inputs,
             font_count,
             speech_msg,
@@ -126,6 +140,45 @@ impl SettingsPane {
         cx.notify();
     }
 
+    fn save_personality(&mut self, cx: &mut Context<Self>) {
+        let text = self.personality.read(cx).value().to_string();
+        self.state.with_mut(|s| {
+            s.prefs.agent.personality = if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.trim().to_string())
+            };
+        });
+        self.state.persist_prefs();
+        self.cred_msg = "个性化已保存".into();
+        cx.notify();
+    }
+
+    fn add_memory(&mut self, cx: &mut Context<Self>) {
+        let text = self.memory_input.read(cx).value().to_string();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.state.with_mut(|s| {
+            if !s.prefs.agent.memories.iter().any(|m| m == &text) {
+                s.prefs.agent.memories.push(text);
+            }
+        });
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
+    fn remove_memory(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            if index < s.prefs.agent.memories.len() {
+                s.prefs.agent.memories.remove(index);
+            }
+        });
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
     fn save_api_keys(&mut self, cx: &mut Context<Self>) {
         let mut creds = load_credentials();
         for (pid, input) in &self.key_inputs {
@@ -183,6 +236,7 @@ impl Render for SettingsPane {
             .state
             .with(|s| s.prefs.agent.default_model_ref.clone())
             .unwrap_or_else(|| wb_domain::BUILTIN_MODEL_REF.to_string());
+        let memories = self.state.with(|s| s.prefs.agent.memories.clone());
         let providers = load_providers();
         let creds = load_credentials();
         let data_dir = wb_store::resolve_data_dir()
@@ -299,7 +353,52 @@ impl Render for SettingsPane {
                     .rounded(cx.theme().radius)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().font_bold().child("Agent 模型"))
+                    .child(div().font_bold().child("Agent 模型与记忆"))
+                    .child(Input::new(&self.personality))
+                    .child(
+                        Button::new("save-persona")
+                            .small()
+                            .label("保存个性化")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_personality(cx))),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Input::new(&self.memory_input))
+                            .child(
+                                Button::new("add-mem")
+                                    .small()
+                                    .primary()
+                                    .label("添加记忆")
+                                    .on_click(cx.listener(|this, _, _, cx| this.add_memory(cx))),
+                            ),
+                    )
+                    .when(!memories.is_empty(), |col| {
+                        col.child(
+                            v_flex()
+                                .gap_1()
+                                .children(memories.into_iter().enumerate().map(|(i, m)| {
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_sm()
+                                                .child(format!("{}. {m}", i + 1)),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!("rm-mem-{i}")))
+                                                .xsmall()
+                                                .ghost()
+                                                .label("删除")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.remove_memory(i, cx);
+                                                })),
+                                        )
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .text_sm()
