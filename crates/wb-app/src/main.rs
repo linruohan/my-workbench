@@ -1,6 +1,7 @@
 mod app;
 mod command_palette;
 mod state;
+mod timed_deliver;
 mod views;
 
 use gpui_kit::assets::Assets;

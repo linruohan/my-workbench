@@ -1,18 +1,21 @@
 use crate::state::AppState;
+use crate::timed_deliver::{fire_timed_task, skip_timed_task};
+use crate::views::agent::AgentPane;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use wb_domain::{
-    NotificationKind, TimedSchedulePreset, create_timed_task_draft, is_timed_task_auto_due,
-    make_preset_schedule, mark_timed_task_ran, now_ms, timed_preset_label, timed_schedule_label,
+    TimedSchedulePreset, create_timed_task_draft, is_timed_task_auto_due, make_preset_schedule,
+    now_ms, timed_preset_label, timed_schedule_label,
 };
 
 pub struct TimedPane {
     state: AppState,
     title: Entity<InputState>,
     command: Entity<InputState>,
+    agent: Option<Entity<AgentPane>>,
 }
 
 impl TimedPane {
@@ -22,7 +25,12 @@ impl TimedPane {
             title: cx.new(|cx| InputState::new(window, cx).placeholder("标题")),
             command: cx
                 .new(|cx| InputState::new(window, cx).placeholder("投递给 Agent 的指令或技能")),
+            agent: None,
         }
+    }
+
+    pub fn bind_agent(&mut self, agent: Entity<AgentPane>) {
+        self.agent = Some(agent);
     }
 
     fn add_preset(&mut self, preset: TimedSchedulePreset, at_time: &str, cx: &mut Context<Self>) {
@@ -44,20 +52,30 @@ impl TimedPane {
         cx.notify();
     }
 
+    fn after_deliver(&mut self, cx: &mut Context<Self>) {
+        if let Some(agent) = &self.agent {
+            agent.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
     fn run_now(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.state.with_mut(|s| {
-            if let Some(task) = s.repo.get_timed_task(id).cloned() {
-                let updated = mark_timed_task_ran(&task, now_ms());
-                s.repo.upsert_timed_task(updated);
-                s.repo.push_notification(
-                    NotificationKind::System,
-                    &format!("定时任务：{}", task.title),
-                    &task.command,
-                    Some(&task.id),
-                );
-            }
+        let task = self.state.with(|s| s.repo.get_timed_task(id).cloned());
+        let Some(task) = task else {
+            return;
+        };
+        fire_timed_task(&self.state, &task, cx, |this, cx| {
+            this.after_deliver(cx);
         });
-        self.state.persist_if_dirty();
+        self.after_deliver(cx);
+    }
+
+    fn skip_once(&mut self, id: &str, cx: &mut Context<Self>) {
+        let task = self.state.with(|s| s.repo.get_timed_task(id).cloned());
+        let Some(task) = task else {
+            return;
+        };
+        skip_timed_task(&self.state, &task);
         cx.notify();
     }
 
@@ -80,30 +98,22 @@ impl TimedPane {
 
     pub fn tick_due(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
-        let mut fired = false;
-        self.state.with_mut(|s| {
-            let due: Vec<_> = s
-                .repo
+        let due: Vec<_> = self.state.with(|s| {
+            s.repo
                 .list_timed_tasks()
                 .into_iter()
                 .filter(|t| is_timed_task_auto_due(t, now))
-                .collect();
-            for task in due {
-                let updated = mark_timed_task_ran(&task, now);
-                s.repo.upsert_timed_task(updated);
-                s.repo.push_notification(
-                    NotificationKind::System,
-                    &format!("定时任务：{}", task.title),
-                    &task.command,
-                    Some(&task.id),
-                );
-                fired = true;
-            }
+                .collect()
         });
-        if fired {
-            self.state.persist_if_dirty();
-            cx.notify();
+        if due.is_empty() {
+            return;
         }
+        for task in due {
+            fire_timed_task(&self.state, &task, cx, |this, cx| {
+                this.after_deliver(cx);
+            });
+        }
+        self.after_deliver(cx);
     }
 
     fn preset_button(
@@ -178,7 +188,9 @@ impl Render for TimedPane {
                     .flex_1()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("暂无定时任务。填写标题与指令后，点上方预设即可添加。")
+                    .child(
+                        "暂无定时任务。填写标题与指令后，点上方预设即可添加；到期会投递到 Agent。",
+                    )
                     .into_any_element()
             } else {
                 let radius = cx.theme().radius;
@@ -238,6 +250,21 @@ impl Render for TimedPane {
                                         move |_, _, app| {
                                             if let Some(e) = entity.upgrade() {
                                                 e.update(app, |this, cx| this.run_now(&id, cx));
+                                            }
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("skip-{id}")))
+                                    .small()
+                                    .ghost()
+                                    .label("跳过")
+                                    .on_click({
+                                        let id = id.clone();
+                                        let entity = entity.clone();
+                                        move |_, _, app| {
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| this.skip_once(&id, cx));
                                             }
                                         }
                                     }),

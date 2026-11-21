@@ -50,6 +50,8 @@ pub struct AppStateInner {
     pub selected_task_id: Option<String>,
     pub kb_current_file: Option<String>,
     pub last_tick: i64,
+    /// Active timer: (task_id, started_at_ms)
+    pub active_timer: Option<(String, i64)>,
 }
 
 impl AppState {
@@ -72,6 +74,7 @@ impl AppState {
                 selected_task_id: None,
                 kb_current_file: None,
                 last_tick: now_ms(),
+                active_timer: None,
             })),
         }
     }

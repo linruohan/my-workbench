@@ -308,6 +308,49 @@ impl MemoryWorkbenchRepository {
         v
     }
 
+    pub fn create_tag(&mut self, title: &str) -> Tag {
+        let title = title.trim();
+        if let Some(existing) = self.tags.values().find(|t| t.title == title) {
+            return existing.clone();
+        }
+        let now = now_ms();
+        let tag = Tag {
+            id: create_id(now),
+            title: title.to_string(),
+            color: None,
+        };
+        self.tags.insert(tag.id.clone(), tag.clone());
+        self.dirty = true;
+        tag
+    }
+
+    pub fn tags_for_task(&self, task_id: &str) -> Vec<Tag> {
+        let Some(ids) = self.task_tags.get(task_id) else {
+            return Vec::new();
+        };
+        let mut v: Vec<_> = ids
+            .iter()
+            .filter_map(|id| self.tags.get(id).cloned())
+            .collect();
+        v.sort_by_key(|a| a.title.clone());
+        v
+    }
+
+    pub fn add_tag_to_task(&mut self, task_id: &str, tag_id: &str) {
+        self.task_tags
+            .entry(task_id.to_string())
+            .or_default()
+            .insert(tag_id.to_string());
+        self.dirty = true;
+    }
+
+    pub fn remove_tag_from_task(&mut self, task_id: &str, tag_id: &str) {
+        if let Some(set) = self.task_tags.get_mut(task_id) {
+            set.remove(tag_id);
+            self.dirty = true;
+        }
+    }
+
     pub fn list_notes(&self) -> Vec<Note> {
         let mut v: Vec<_> = self.notes.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.updated_at));

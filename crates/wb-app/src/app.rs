@@ -39,6 +39,7 @@ impl WorkbenchApp {
         let timed = cx.new(|cx| TimedPane::new(state.clone(), window, cx));
         let knowledge = cx.new(|cx| KnowledgePane::new(state.clone(), window, cx));
         let agent = cx.new(|cx| AgentPane::new(state.clone(), window, cx));
+        timed.update(cx, |timed, _| timed.bind_agent(agent.clone()));
         let settings = cx.new(|cx| SettingsPane::new(state.clone(), window, cx));
         let palette = cx.new(|cx| CommandPalette::new(state.clone(), window, cx));
 
@@ -77,6 +78,11 @@ impl WorkbenchApp {
     fn on_tick(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
         self.timed.update(cx, |timed, cx| timed.tick_due(cx));
+        // Keep timer UI fresh while a timer is running.
+        let timing = self.state.with(|s| s.active_timer.is_some());
+        if timing {
+            self.tasks.update(cx, |_, cx| cx.notify());
+        }
         self.state.with_mut(|s| {
             s.repo.wake_snoozed_notifications(now);
             for task in s.repo.list_tasks() {

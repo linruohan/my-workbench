@@ -7,8 +7,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
     INBOX_PROJECT_ID, SchedulePatch, Task, add_local_days, apply_schedule_patch, clear_plan_fields,
-    compute_task_stats, filter_tasks, format_local_day, group_tasks_by_plan_day, is_today_member,
-    parse_quick_capture, select_planner_tasks, select_today_tasks,
+    compute_task_stats, create_task_draft, filter_tasks, format_local_day, group_tasks_by_plan_day,
+    is_today_member, now_ms, parse_quick_capture, select_planner_tasks, select_today_tasks,
+    settle_timer_segment,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,6 +24,7 @@ pub struct TasksPane {
     state: AppState,
     capture: Entity<InputState>,
     notes: Entity<InputState>,
+    tag_input: Entity<InputState>,
     project_title: Entity<InputState>,
     project_title_id: Option<String>,
     notes_task_id: Option<String>,
@@ -36,12 +38,14 @@ impl TasksPane {
             InputState::new(window, cx).placeholder("快速捕获：今天 写报告 #项目 提前10分钟")
         });
         let notes = cx.new(|cx| InputState::new(window, cx).placeholder("选中任务后编辑备注…"));
+        let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("标签名，回车添加"));
         let project_title =
             cx.new(|cx| InputState::new(window, cx).placeholder("项目名称，回车保存"));
         let mut this = Self {
             state,
             capture: capture.clone(),
             notes: notes.clone(),
+            tag_input: tag_input.clone(),
             project_title: project_title.clone(),
             project_title_id: None,
             notes_task_id: None,
@@ -79,6 +83,19 @@ impl TasksPane {
                 }
             },
         ));
+        this._subs.push(
+            cx.subscribe_in(&tag_input, window, |this, input, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let text = input.read(cx).value().to_string();
+                    if !text.trim().is_empty() {
+                        this.add_tag_to_selected(text.trim(), cx);
+                        input.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                        });
+                    }
+                }
+            }),
+        );
         this
     }
 
@@ -239,6 +256,64 @@ impl TasksPane {
         cx.notify();
     }
 
+    fn toggle_timer(&mut self, id: &str, cx: &mut Context<Self>) {
+        let today = self.state.today();
+        let now = now_ms();
+        self.state.with_mut(|s| {
+            if let Some((tid, started)) = s.active_timer.take() {
+                if let Some(mut task) = s.repo.get_task(&tid).cloned() {
+                    settle_timer_segment(&mut task, &today, now - started, now);
+                    s.repo.upsert_task(task);
+                }
+                if tid == id {
+                    return;
+                }
+            }
+            s.active_timer = Some((id.to_string(), now));
+            s.selected_task_id = Some(id.to_string());
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn add_subtask(&mut self, parent_id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            let parent = s.repo.get_task(parent_id).cloned();
+            let Some(parent) = parent else {
+                return;
+            };
+            let child =
+                create_task_draft("子任务", Some(&parent.project_id), Some(parent_id), None);
+            let id = child.id.clone();
+            s.repo.upsert_task(child);
+            s.selected_task_id = Some(id);
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn add_tag_to_selected(&mut self, title: &str, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.selected_task_id.clone()) else {
+            return;
+        };
+        self.state.with_mut(|s| {
+            let tag = s.repo.create_tag(title);
+            s.repo.add_tag_to_task(&tid, &tag.id);
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn remove_tag_from_selected(&mut self, tag_id: &str, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.selected_task_id.clone()) else {
+            return;
+        };
+        self.state
+            .with_mut(|s| s.repo.remove_tag_from_task(&tid, tag_id));
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn select_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.state
             .with_mut(|s| s.selected_task_id = Some(id.to_string()));
@@ -272,25 +347,31 @@ impl TasksPane {
         self.state.persist_if_dirty();
     }
 
-    fn filtered_tasks(&self) -> (String, Vec<Task>) {
+    fn filtered_tasks(&self) -> (String, Vec<(Task, usize)>) {
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
         self.state.with(|s| {
             let all = s.repo.list_tasks();
-            let list: Vec<_> = match nav {
+            let roots: Vec<Task> = match nav {
                 AppNav::Today => select_today_tasks(&all, &today, s.repo.today_order())
                     .into_iter()
                     .cloned()
                     .collect(),
                 AppNav::Inbox => filter_tasks(&all, Some(INBOX_PROJECT_ID), Some(false), None)
                     .into_iter()
+                    .filter(|t| t.parent_id.is_none())
                     .cloned()
                     .collect(),
                 AppNav::Done => filter_tasks(&all, None, Some(true), None)
                     .into_iter()
+                    .filter(|t| t.parent_id.is_none())
                     .cloned()
                     .collect(),
-                AppNav::Planner => select_planner_tasks(&all).into_iter().cloned().collect(),
+                AppNav::Planner => select_planner_tasks(&all)
+                    .into_iter()
+                    .filter(|t| t.parent_id.is_none())
+                    .cloned()
+                    .collect(),
                 AppNav::Projects => {
                     let pid = s
                         .active_project_id
@@ -298,14 +379,32 @@ impl TasksPane {
                         .unwrap_or_else(|| INBOX_PROJECT_ID.to_string());
                     filter_tasks(&all, Some(&pid), Some(false), None)
                         .into_iter()
+                        .filter(|t| t.parent_id.is_none())
                         .cloned()
                         .collect()
                 }
                 _ => all
-                    .into_iter()
-                    .filter(|t| !t.is_done && is_today_member(t, &today))
+                    .iter()
+                    .filter(|t| t.parent_id.is_none() && !t.is_done && is_today_member(t, &today))
+                    .cloned()
                     .collect(),
             };
+            let include_done_kids = nav == AppNav::Done;
+            let mut list = Vec::new();
+            for root in roots {
+                let rid = root.id.clone();
+                list.push((root, 0usize));
+                let mut kids: Vec<_> = all
+                    .iter()
+                    .filter(|t| t.parent_id.as_deref() == Some(rid.as_str()))
+                    .filter(|t| include_done_kids || !t.is_done)
+                    .cloned()
+                    .collect();
+                kids.sort_by_key(|t| t.created_at);
+                for k in kids {
+                    list.push((k, 1));
+                }
+            }
             let title = if nav == AppNav::Projects {
                 s.active_project_id
                     .as_ref()
@@ -319,6 +418,7 @@ impl TasksPane {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_task_row(
         task: Task,
         entity: WeakEntity<Self>,
@@ -327,16 +427,21 @@ impl TasksPane {
         accent: Hsla,
         today: &str,
         selected: bool,
+        indent: usize,
+        timing: bool,
+        tag_label: String,
     ) -> impl IntoElement {
         let id = task.id.clone();
         let done = task.is_done;
         let title = task.title.clone();
+        let spent = task.time_spent;
         let plan = task
             .due_day
             .clone()
             .or_else(|| task.due_with_time.map(format_local_day))
             .unwrap_or_default();
         let has_notes = !task.notes.trim().is_empty();
+        let is_root = task.parent_id.is_none();
         let tomorrow = add_local_days(today, 1).unwrap_or_else(|| today.to_string());
         let today_day = today.to_string();
         h_flex()
@@ -345,6 +450,7 @@ impl TasksPane {
             .items_center()
             .gap_2()
             .p_2()
+            .pl(px(8. + indent as f32 * 16.))
             .rounded(radius)
             .when(selected, |row| row.bg(accent.opacity(0.55)))
             .hover(move |s| s.bg(accent.opacity(0.4)))
@@ -372,15 +478,15 @@ impl TasksPane {
                     .cursor_pointer()
                     .when(done, |d| d.text_color(muted))
                     .child(title)
-                    .when(has_notes, |col| {
-                        col.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .overflow_hidden()
-                                .child("有备注"),
-                        )
-                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(muted)
+                            .when(has_notes, |row| row.child("有备注"))
+                            .when(!tag_label.is_empty(), |row| row.child(tag_label))
+                            .when(spent > 0, |row| row.child(format!("{}m", spent / 60_000))),
+                    )
                     .on_click({
                         let id = id.clone();
                         let entity = entity.clone();
@@ -396,6 +502,38 @@ impl TasksPane {
             })
             .when(!done, |row| {
                 row.child(
+                    Button::new(SharedString::from(format!("timer-{id}")))
+                        .xsmall()
+                        .ghost()
+                        .label(if timing { "⏹" } else { "▶" })
+                        .on_click({
+                            let id = id.clone();
+                            let entity = entity.clone();
+                            move |_, _, app| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(app, |this, cx| this.toggle_timer(&id, cx));
+                                }
+                            }
+                        }),
+                )
+                .when(is_root, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("sub-{id}")))
+                            .xsmall()
+                            .ghost()
+                            .label("+子")
+                            .on_click({
+                                let id = id.clone();
+                                let entity = entity.clone();
+                                move |_, _, app| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(app, |this, cx| this.add_subtask(&id, cx));
+                                    }
+                                }
+                            }),
+                    )
+                })
+                .child(
                     Button::new(SharedString::from(format!("today-{id}")))
                         .xsmall()
                         .ghost()
@@ -501,6 +639,13 @@ impl Render for TasksPane {
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
         let selected_id = self.state.with(|s| s.selected_task_id.clone());
+        let active_timer_id = self
+            .state
+            .with(|s| s.active_timer.as_ref().map(|(id, _)| id.clone()));
+        let selected_tags = selected_id
+            .as_ref()
+            .map(|id| self.state.with(|s| s.repo.tags_for_task(id)))
+            .unwrap_or_default();
         if selected_id != self.notes_task_id {
             match &selected_id {
                 Some(id) => self.load_notes_for(id, window, cx),
@@ -535,7 +680,12 @@ impl Render for TasksPane {
                             .child("计划为空。用快速捕获写「今天 …」或「明天 …」来排期。")
                             .into_any_element()
                     } else {
-                        let groups = group_tasks_by_plan_day(&tasks);
+                        let roots: Vec<Task> = tasks
+                            .iter()
+                            .filter(|(_, d)| *d == 0)
+                            .map(|(t, _)| t.clone())
+                            .collect();
+                        let groups = group_tasks_by_plan_day(&roots);
                         let sections: Vec<_> = groups
                             .into_iter()
                             .map(|(day, day_tasks)| {
@@ -551,6 +701,16 @@ impl Render for TasksPane {
                                     .map(|task| {
                                         let selected =
                                             selected_id.as_deref() == Some(task.id.as_str());
+                                        let timing =
+                                            active_timer_id.as_deref() == Some(task.id.as_str());
+                                        let tag_label = self.state.with(|s| {
+                                            s.repo
+                                                .tags_for_task(&task.id)
+                                                .into_iter()
+                                                .map(|t| format!("#{}", t.title))
+                                                .collect::<Vec<_>>()
+                                                .join(" ")
+                                        });
                                         Self::render_task_row(
                                             task,
                                             entity.clone(),
@@ -559,6 +719,9 @@ impl Render for TasksPane {
                                             accent,
                                             &today,
                                             selected,
+                                            0,
+                                            timing,
+                                            tag_label,
                                         )
                                         .into_any_element()
                                     })
@@ -594,8 +757,17 @@ impl Render for TasksPane {
                 } else {
                     let rows: Vec<_> = tasks
                         .into_iter()
-                        .map(|task| {
+                        .map(|(task, indent)| {
                             let selected = selected_id.as_deref() == Some(task.id.as_str());
+                            let timing = active_timer_id.as_deref() == Some(task.id.as_str());
+                            let tag_label = self.state.with(|s| {
+                                s.repo
+                                    .tags_for_task(&task.id)
+                                    .into_iter()
+                                    .map(|t| format!("#{}", t.title))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            });
                             Self::render_task_row(
                                 task,
                                 entity.clone(),
@@ -604,6 +776,9 @@ impl Render for TasksPane {
                                 accent,
                                 &today,
                                 selected,
+                                indent,
+                                timing,
+                                tag_label,
                             )
                             .into_any_element()
                         })
@@ -617,8 +792,13 @@ impl Render for TasksPane {
                 }
             }
             TasksMode::Board => {
-                let todo: Vec<_> = tasks.iter().filter(|t| !t.is_done).cloned().collect();
-                let done: Vec<_> = tasks.iter().filter(|t| t.is_done).cloned().collect();
+                let roots: Vec<Task> = tasks
+                    .iter()
+                    .filter(|(_, d)| *d == 0)
+                    .map(|(t, _)| t.clone())
+                    .collect();
+                let todo: Vec<_> = roots.iter().filter(|t| !t.is_done).cloned().collect();
+                let done: Vec<_> = roots.iter().filter(|t| t.is_done).cloned().collect();
                 let active: Vec<_> = todo
                     .iter()
                     .filter(|t| t.due_day.is_some() || t.due_with_time.is_some())
@@ -636,6 +816,15 @@ impl Render for TasksPane {
                             .into_iter()
                             .map(|task| {
                                 let selected = selected_id.as_deref() == Some(task.id.as_str());
+                                let timing = active_timer_id.as_deref() == Some(task.id.as_str());
+                                let tag_label = self.state.with(|s| {
+                                    s.repo
+                                        .tags_for_task(&task.id)
+                                        .into_iter()
+                                        .map(|t| format!("#{}", t.title))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                });
                                 Self::render_task_row(
                                     task,
                                     entity.clone(),
@@ -644,6 +833,9 @@ impl Render for TasksPane {
                                     accent,
                                     &today,
                                     selected,
+                                    0,
+                                    timing,
+                                    tag_label,
                                 )
                                 .into_any_element()
                             })
@@ -819,7 +1011,28 @@ impl Render for TasksPane {
                                     )
                                 }),
                         )
-                        .child(Input::new(&self.notes)),
+                        .child(Input::new(&self.notes))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_xs().text_color(muted).child("标签"))
+                                .child(Input::new(&self.tag_input).cleanable(true)),
+                        )
+                        .when(!selected_tags.is_empty(), |col| {
+                            col.child(h_flex().gap_1().flex_wrap().children(
+                                selected_tags.into_iter().map(|tag| {
+                                    let tid = tag.id.clone();
+                                    Button::new(SharedString::from(format!("rm-tag-{tid}")))
+                                        .xsmall()
+                                        .ghost()
+                                        .label(format!("#{} ×", tag.title))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_tag_from_selected(&tid, cx);
+                                        }))
+                                }),
+                            ))
+                        }),
                 )
             })
     }
