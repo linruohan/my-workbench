@@ -17,13 +17,22 @@ pub struct ShellResult {
 }
 
 pub fn run_shell(command: &str, cwd: Option<&str>, timeout_secs: u64) -> Result<ShellResult> {
+    run_shell_in(command, cwd, cwd, timeout_secs)
+}
+
+pub fn run_shell_in(
+    command: &str,
+    cwd: Option<&str>,
+    workspace_root: Option<&str>,
+    timeout_secs: u64,
+) -> Result<ShellResult> {
     #[cfg(windows)]
     {
-        run_shell_kind("cmd", command, cwd, timeout_secs)
+        run_shell_kind("cmd", command, cwd, workspace_root, timeout_secs)
     }
     #[cfg(not(windows))]
     {
-        run_shell_kind("bash", command, cwd, timeout_secs)
+        run_shell_kind("bash", command, cwd, workspace_root, timeout_secs)
     }
 }
 
@@ -32,6 +41,7 @@ pub fn run_shell_kind(
     kind: &str,
     command: &str,
     cwd: Option<&str>,
+    workspace_root: Option<&str>,
     timeout_secs: u64,
 ) -> Result<ShellResult> {
     let mut cmd = match kind.to_lowercase().as_str() {
@@ -63,7 +73,7 @@ pub fn run_shell_kind(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    apply_agent_shell_env(&mut cmd, cwd, cwd);
+    apply_agent_shell_env(&mut cmd, workspace_root.or(cwd), cwd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("启动 shell 失败")?;
     let stdout = child.stdout.take();
@@ -268,7 +278,12 @@ impl JobRegistry {
         Self::default()
     }
 
-    pub fn start(&self, command: &str, cwd: Option<&str>) -> Result<String> {
+    pub fn start(
+        &self,
+        command: &str,
+        cwd: Option<&str>,
+        workspace_root: Option<&str>,
+    ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let output = Arc::new(Mutex::new(String::new()));
         let done = Arc::new(Mutex::new(None));
@@ -287,6 +302,7 @@ impl JobRegistry {
         }
         let command = command.to_string();
         let cwd = cwd.map(|s| s.to_string());
+        let workspace_root = workspace_root.map(|s| s.to_string());
         thread::spawn(move || {
             #[cfg(windows)]
             let mut cmd = {
@@ -303,7 +319,11 @@ impl JobRegistry {
             if let Some(ref cwd) = cwd {
                 cmd.current_dir(cwd);
             }
-            apply_agent_shell_env(&mut cmd, cwd.as_deref(), cwd.as_deref());
+            apply_agent_shell_env(
+                &mut cmd,
+                workspace_root.as_deref().or(cwd.as_deref()),
+                cwd.as_deref(),
+            );
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             match cmd.spawn() {
                 Ok(mut child) => {

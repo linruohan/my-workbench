@@ -13,7 +13,7 @@ use wb_domain::{
 use wb_host::{
     global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
     present_path, probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd,
-    run_shell, run_shell_kind, set_agent_cwd, web_fetch, web_search, write_text,
+    run_shell_in, run_shell_kind, set_agent_cwd, web_fetch, web_search, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
 
@@ -1353,7 +1353,7 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
             let root = effective_root(workspace_root).ok();
-            let result = run_shell(command, root.as_deref(), 120)?;
+            let result = run_shell_in(command, root.as_deref(), workspace_root, 120)?;
             Ok(ToolResult {
                 ok: result.code == 0,
                 content: format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr),
@@ -1367,7 +1367,7 @@ pub fn execute_tool(
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
             let root = effective_root(workspace_root).ok();
             let kind = if name == "bash" { "bash" } else { "pwsh" };
-            let result = match run_shell_kind(kind, command, root.as_deref(), 120) {
+            let result = match run_shell_kind(kind, command, root.as_deref(), workspace_root, 120) {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ToolResult::err_text(format!(
@@ -1416,7 +1416,7 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
             let root = effective_root(workspace_root).ok();
-            let id = global_jobs().start(command, root.as_deref())?;
+            let id = global_jobs().start(command, root.as_deref(), workspace_root)?;
             Ok(ToolResult::ok_text(format!("已启动后台任务 {id}")))
         }
         "job_output" => {
@@ -1589,9 +1589,11 @@ pub fn execute_tool(
             } else {
                 safe_join(&root, sub)?
             };
-            let entries = list_files_recursive(&base, 200)?;
+            const INLINE_LIMIT: usize = 250;
+            const CAPTURE_LIMIT: usize = 2000;
+            let entries = list_files_recursive(&base, 500)?;
             let mut hits = Vec::new();
-            for e in entries {
+            'outer: for e in entries {
                 if e.is_dir {
                     continue;
                 }
@@ -1601,20 +1603,29 @@ pub fn execute_tool(
                 for (i, line) in text.lines().enumerate() {
                     if line.contains(pattern) {
                         hits.push(format!("{}:{}:{}", e.relative, i + 1, line.trim()));
-                        if hits.len() >= 50 {
-                            break;
+                        if hits.len() >= CAPTURE_LIMIT {
+                            break 'outer;
                         }
                     }
                 }
-                if hits.len() >= 50 {
-                    break;
-                }
             }
-            Ok(ToolResult::ok_text(if hits.is_empty() {
-                "（无匹配）".into()
-            } else {
-                hits.join("\n")
-            }))
+            if hits.is_empty() {
+                return Ok(ToolResult::ok_text("（无匹配）"));
+            }
+            if hits.len() <= INLINE_LIMIT {
+                return Ok(ToolResult::ok_text(hits.join("\n")));
+            }
+            let spill_dir = Path::new(&root).join(".wb").join("spill");
+            std::fs::create_dir_all(&spill_dir)?;
+            let spill_name = format!("grep-{}.txt", uuid::Uuid::new_v4());
+            let spill_path = spill_dir.join(&spill_name);
+            write_text(&spill_path, &hits.join("\n"))?;
+            let inline = hits[..INLINE_LIMIT].join("\n");
+            Ok(ToolResult::ok_text(format!(
+                "{inline}\n… 另有 {} 条已写入 {}",
+                hits.len() - INLINE_LIMIT,
+                spill_path.display()
+            )))
         }
         "skill_list" => {
             let prefs = load_prefs().unwrap_or_default();

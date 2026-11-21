@@ -369,7 +369,7 @@ DSH：统一协作式取消 + 超时错误映射。
 | `read_image` | ✅ 元数据；超 4MiB/长边 2048 给 `<image_offload>` 提示 |
 | `job_start` / `job_output` / `job_list` / `job_kill` | ✅ 后台 shell（非 PTY） |
 | `web_fetch` | ✅ HTTP GET + 体积截断 |
-| `glob` / `grep` | ✅（自实现扫描 + 结果上限；非 ripgrep） |
+| `glob` / `grep` | ✅（自实现；grep 内联 250，超额 spill 至 `.wb/spill`） |
 | `ui_open` | ✅ 切换侧栏视图；斜杠 `/ui_open today` |
 | 写工具审批卡（Confirm 模式 Ask） | ✅ |
 | 会话权限切换（确认 / 会话自动 / 只读） | ✅ |
