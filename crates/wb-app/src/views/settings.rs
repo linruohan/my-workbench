@@ -231,6 +231,18 @@ impl SettingsPane {
         cx.notify();
     }
 
+    fn toggle_tray(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| s.prefs.tray_enabled = enabled);
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
+    fn toggle_close_to_tray(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| s.prefs.close_to_tray = enabled);
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
     fn set_default_model(&mut self, model_ref: &str, cx: &mut Context<Self>) {
         self.state.with_mut(|s| {
             s.prefs.agent.default_model_ref = Some(model_ref.to_string());
@@ -686,10 +698,13 @@ impl SettingsPane {
 }
 
 impl Render for SettingsPane {
+    #[allow(clippy::large_unopt_stack_frames)]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_mode = self.state.theme_mode();
         let voice = self.state.with(|s| s.prefs.voice.enabled);
         let sys_notify = self.state.with(|s| s.prefs.system_notifications);
+        let tray_on = self.state.with(|s| s.prefs.tray_enabled);
+        let close_to_tray = self.state.with(|s| s.prefs.close_to_tray);
 
         v_flex()
             .size_full()
@@ -759,6 +774,41 @@ impl Render for SettingsPane {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("开启后，任务提醒与定时投递会尝试弹出系统 Toast"),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(div().font_bold().child("系统托盘"))
+                    .child(
+                        h_flex().items_center().gap_3().child("启用托盘图标").child(
+                            Switch::new("tray-enabled")
+                                .checked(tray_on)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.toggle_tray(*checked, cx);
+                                })),
+                        ),
+                    )
+                    .child(
+                        h_flex().items_center().gap_3().child("关闭时最小化到托盘").child(
+                            Switch::new("close-to-tray")
+                                .checked(close_to_tray)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.toggle_close_to_tray(*checked, cx);
+                                })),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "托盘开关需重启后生效；关闭窗口会最小化，托盘「退出」才结束进程",
+                            ),
                     ),
             )
             .child(

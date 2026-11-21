@@ -1,6 +1,7 @@
 use crate::appearance::{apply_theme_pref, apply_ui_font};
 use crate::command_palette::CommandPalette;
 use crate::state::{AppNav, AppState};
+use crate::tray::{self, TrayAction};
 use crate::views::{AgentPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
@@ -30,6 +31,8 @@ pub struct WorkbenchApp {
     agent: Entity<AgentPane>,
     settings: Entity<SettingsPane>,
     palette: Entity<CommandPalette>,
+    /// Kept alive so the OS tray icon is not dropped.
+    _tray: Option<tray_icon::TrayIcon>,
 }
 
 impl WorkbenchApp {
@@ -93,6 +96,36 @@ impl WorkbenchApp {
         })
         .detach();
 
+        let tray_on = state.with(|s| s.prefs.tray_enabled);
+        let close_to_tray = state.with(|s| s.prefs.close_to_tray);
+        let tray_icon = if tray_on { tray::create_tray() } else { None };
+        if tray_on && close_to_tray {
+            // Keep the process (and reminder ticks) alive: close → minimize; tray「退出」才真正退出。
+            window.on_window_should_close(cx, |window, _cx| {
+                if tray::is_force_quit() {
+                    return true;
+                }
+                window.minimize_window();
+                false
+            });
+        }
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let Some(action) = tray::poll_action() else {
+                    continue;
+                };
+                this.update(cx, |this, cx| {
+                    this.handle_tray_action(action, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+
         Self {
             state,
             collapsed,
@@ -104,6 +137,24 @@ impl WorkbenchApp {
             agent,
             settings,
             palette,
+            _tray: tray_icon,
+        }
+    }
+
+    fn handle_tray_action(&mut self, action: TrayAction, cx: &mut Context<Self>) {
+        match action {
+            TrayAction::Show => {
+                cx.activate(true);
+                if let Some(handle) = cx.active_window() {
+                    let _ = handle.update(cx, |_, window, _| {
+                        window.activate_window();
+                    });
+                }
+            }
+            TrayAction::Quit => {
+                tray::request_force_quit();
+                cx.quit();
+            }
         }
     }
 

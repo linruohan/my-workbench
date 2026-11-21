@@ -38,6 +38,16 @@ pub struct AppPrefs {
     /// Planner calendar: omit Sat/Sun when building day columns.
     #[serde(default)]
     pub planner_skip_weekends: bool,
+    /// Show a system tray icon while the app runs.
+    #[serde(default = "default_true")]
+    pub tray_enabled: bool,
+    /// Close button minimizes instead of quitting (tray Quit exits).
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_sidebar_width() -> f32 {
@@ -60,6 +70,8 @@ impl Default for AppPrefs {
             knowledge_current: None,
             knowledge_recent: Vec::new(),
             planner_skip_weekends: false,
+            tray_enabled: true,
+            close_to_tray: true,
         }
     }
 }

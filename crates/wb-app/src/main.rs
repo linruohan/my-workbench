@@ -3,6 +3,7 @@ mod appearance;
 mod command_palette;
 mod state;
 mod timed_deliver;
+mod tray;
 mod views;
 
 use gpui_kit::assets::Assets;
