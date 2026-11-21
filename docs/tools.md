@@ -361,7 +361,8 @@ DSH：统一协作式取消 + 超时错误映射。
 | `note_list` / `note_create` | ✅ |
 | `notification_list` / `schedule_list` / `schedule_create` / `schedule_enable` / `schedule_delete` | ✅ |
 | `timer_status` / `timer_add` | ✅（记入当日用时；非 UI 实时跑表） |
-| `read` / `write` / `str_replace` / `shell` | ✅（拒绝 `..` 越界；尚无 spill） |
+| `read` / `write` / `str_replace` / `shell` / `bash` / `pwsh` | ✅（拒绝 `..` 越界；尚无 spill） |
+| `load_workspace_dependencies` | ✅ PATH 探测 |
 | `read_image` | ✅ 元数据（格式/尺寸）；尚无 vision 挂载 / OCR |
 | `job_start` / `job_output` / `job_list` / `job_kill` | ✅ 后台 shell（非 PTY） |
 | `web_fetch` | ✅ HTTP GET + 体积截断 |

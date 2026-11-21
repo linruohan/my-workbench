@@ -11,8 +11,8 @@ use wb_domain::{
 };
 use wb_host::{
     global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
-    present_path, read_image_info, read_text, resolve_agent_cwd, run_shell, set_agent_cwd,
-    web_fetch, web_search, write_text,
+    present_path, probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd,
+    run_shell, run_shell_kind, set_agent_cwd, web_fetch, web_search, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
 
@@ -1076,6 +1076,37 @@ pub fn execute_tool(
                 open_view: None,
             })
         }
+        "bash" | "pwsh" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            let root = effective_root(workspace_root).ok();
+            let kind = if name == "bash" { "bash" } else { "pwsh" };
+            let result = match run_shell_kind(kind, command, root.as_deref(), 120) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(ToolResult::err_text(format!(
+                        "{kind} 不可用或执行失败：{e}"
+                    )));
+                }
+            };
+            Ok(ToolResult {
+                ok: result.code == 0,
+                content: format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr),
+                open_view: None,
+            })
+        }
+        "load_workspace_dependencies" => {
+            let lines: Vec<_> = probe_workspace_dependencies()
+                .into_iter()
+                .map(|(name, path)| match path {
+                    Some(p) => format!("- {name}: {p}"),
+                    None => format!("- {name}: （未找到）"),
+                })
+                .collect();
+            Ok(ToolResult::ok_text(lines.join("\n")))
+        }
         "read_image" => {
             let rel = args
                 .get("path")
@@ -1789,6 +1820,14 @@ mod tests {
             &json!({ "action": "clear" }),
             None,
         );
+    }
+
+    #[test]
+    fn load_workspace_dependencies_lists_tools() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let r = execute_tool(&mut repo, "load_workspace_dependencies", &json!({}), None).unwrap();
+        assert!(r.ok);
+        assert!(r.content.contains("git:") || r.content.contains("cargo:"));
     }
 
     #[test]

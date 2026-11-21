@@ -18,16 +18,47 @@ pub struct ShellResult {
 
 pub fn run_shell(command: &str, cwd: Option<&str>, timeout_secs: u64) -> Result<ShellResult> {
     #[cfg(windows)]
-    let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    };
+    {
+        run_shell_kind("cmd", command, cwd, timeout_secs)
+    }
     #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = Command::new("sh");
-        c.args(["-lc", command]);
-        c
+    {
+        run_shell_kind("bash", command, cwd, timeout_secs)
+    }
+}
+
+/// Run with an explicit shell kind: `bash` / `pwsh` / `cmd`.
+pub fn run_shell_kind(
+    kind: &str,
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: u64,
+) -> Result<ShellResult> {
+    let mut cmd = match kind.to_lowercase().as_str() {
+        "bash" | "sh" => {
+            let mut c = Command::new("bash");
+            c.args(["-lc", command]);
+            c
+        }
+        "pwsh" | "powershell" => {
+            let mut c = Command::new("pwsh");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+            c
+        }
+        _ => {
+            #[cfg(windows)]
+            {
+                let mut c = Command::new("cmd");
+                c.args(["/C", command]);
+                c
+            }
+            #[cfg(not(windows))]
+            {
+                let mut c = Command::new("sh");
+                c.args(["-lc", command]);
+                c
+            }
+        }
     };
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
@@ -73,6 +104,54 @@ pub fn run_shell(command: &str, cwd: Option<&str>, timeout_secs: u64) -> Result<
             }
             None => thread::sleep(Duration::from_millis(50)),
         }
+    }
+}
+
+/// Probe common workspace toolchain binaries on PATH.
+pub fn probe_workspace_dependencies() -> Vec<(String, Option<String>)> {
+    const NAMES: &[&str] = &[
+        "node", "npm", "pnpm", "yarn", "python", "python3", "pip", "cargo", "rustc", "git", "rg",
+    ];
+    NAMES
+        .iter()
+        .map(|name| ((*name).to_string(), which_bin(name)))
+        .collect()
+}
+
+fn which_bin(name: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let out = Command::new("where")
+            .arg(name)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("which")
+            .arg(name)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 }
 

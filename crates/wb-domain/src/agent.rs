@@ -589,10 +589,32 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         tool(
             "shell",
             ToolEffect::Write,
-            "在工作区执行 shell",
+            "在工作区执行 shell（平台默认：Windows=cmd，其它=bash）",
             serde_json::json!({
                 "command": { "type": "string" }
             }),
+        ),
+        tool(
+            "bash",
+            ToolEffect::Write,
+            "强制用 bash -lc 执行命令",
+            serde_json::json!({
+                "command": { "type": "string" }
+            }),
+        ),
+        tool(
+            "pwsh",
+            ToolEffect::Write,
+            "强制用 pwsh -Command 执行命令",
+            serde_json::json!({
+                "command": { "type": "string" }
+            }),
+        ),
+        tool(
+            "load_workspace_dependencies",
+            ToolEffect::Read,
+            "探测 PATH 上的 node/python/pnpm/cargo/git 等工具路径",
+            serde_json::json!({}),
         ),
         tool(
             "read_image",
