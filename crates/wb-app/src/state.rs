@@ -136,4 +136,23 @@ impl AppState {
     pub fn theme_is_dark(&self) -> bool {
         self.with(|s| matches!(s.prefs.theme_mode, ThemeModePref::Dark))
     }
+
+    /// Push an in-app notification and optionally a desktop toast.
+    pub fn push_notification(
+        &self,
+        kind: wb_domain::NotificationKind,
+        title: &str,
+        body: &str,
+        related_id: Option<&str>,
+    ) {
+        let want_toast = self.with_mut(|s| {
+            s.repo.push_notification(kind, title, body, related_id);
+            s.prefs.system_notifications
+        });
+        if want_toast {
+            if let Err(e) = wb_host::show_system_notification(title, body) {
+                log::debug!("系统通知失败: {e}");
+            }
+        }
+    }
 }

@@ -90,6 +90,24 @@ impl SettingsPane {
         cx.notify();
     }
 
+    fn toggle_system_notifications(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.state
+            .with_mut(|s| s.prefs.system_notifications = enabled);
+        self.state.persist_prefs();
+        if enabled {
+            let _ = wb_host::show_system_notification("my-workbench", "系统通知已开启");
+        }
+        cx.notify();
+    }
+
+    fn set_default_model(&mut self, model_ref: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.prefs.agent.default_model_ref = Some(model_ref.to_string());
+        });
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
     fn prepare_speech(&mut self, cx: &mut Context<Self>) {
         match speech_ensure_models("sensevoice") {
             Ok(st) => {
@@ -110,6 +128,11 @@ impl Render for SettingsPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dark = self.state.theme_is_dark();
         let voice = self.state.with(|s| s.prefs.voice.enabled);
+        let sys_notify = self.state.with(|s| s.prefs.system_notifications);
+        let default_model = self
+            .state
+            .with(|s| s.prefs.agent.default_model_ref.clone())
+            .unwrap_or_else(|| wb_domain::BUILTIN_MODEL_REF.to_string());
         let providers = load_providers();
         let data_dir = wb_store::resolve_data_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -141,6 +164,30 @@ impl Render for SettingsPane {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("已扫描系统字体 {} 个", self.font_count)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(div().font_bold().child("通知"))
+                    .child(
+                        h_flex().items_center().gap_3().child("系统桌面通知").child(
+                            Switch::new("sys-notify")
+                                .checked(sys_notify)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.toggle_system_notifications(*checked, cx);
+                                })),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("开启后，任务提醒与定时投递会尝试弹出系统 Toast"),
                     ),
             )
             .child(
@@ -202,6 +249,37 @@ impl Render for SettingsPane {
                     .border_1()
                     .border_color(cx.theme().border)
                     .child(div().font_bold().child("Agent 模型"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("新会话默认模型：{default_model}")),
+                    )
+                    .child(
+                        h_flex().gap_2().flex_wrap().children(
+                            std::iter::once((
+                                wb_domain::BUILTIN_MODEL_REF.to_string(),
+                                "内置".to_string(),
+                            ))
+                            .chain(providers.providers.iter().flat_map(|p| {
+                                p.models.keys().map(|mid| {
+                                    (format!("{}/{}", p.id, mid), format!("{} / {mid}", p.name))
+                                })
+                            }))
+                            .map(|(model_ref, label)| {
+                                let selected = model_ref == default_model;
+                                let mr = model_ref.clone();
+                                Button::new(SharedString::from(format!("model-{model_ref}")))
+                                    .xsmall()
+                                    .when(selected, |b| b.primary())
+                                    .when(!selected, |b| b.ghost())
+                                    .label(label)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_default_model(&mr, cx);
+                                    }))
+                            }),
+                        ),
+                    )
                     .children(providers.providers.into_iter().map(|p| {
                         div().text_sm().child(format!(
                             "{} · {} {}",

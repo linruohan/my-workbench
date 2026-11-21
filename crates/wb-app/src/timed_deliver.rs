@@ -24,13 +24,13 @@ pub fn fire_timed_task<T: 'static>(
     let updated = mark_timed_task_ran(task, now_ms());
     state.with_mut(|s| {
         s.repo.upsert_timed_task(updated);
-        s.repo.push_notification(
-            NotificationKind::System,
-            &format!("定时任务：{}", task.title),
-            &command_preview,
-            Some(&task.id),
-        );
     });
+    state.push_notification(
+        NotificationKind::System,
+        &format!("定时任务：{}", task.title),
+        &command_preview,
+        Some(&task.id),
+    );
     state.persist_if_dirty();
 
     if task.command.trim().is_empty() {
@@ -99,12 +99,12 @@ pub fn skip_timed_task(state: &AppState, task: &TimedTask) {
     let updated = mark_timed_task_ran(task, now_ms());
     state.with_mut(|s| {
         s.repo.upsert_timed_task(updated);
-        s.repo.push_notification(
-            NotificationKind::System,
-            &format!("已跳过：{}", task.title),
-            "定时任务已跳过本次",
-            Some(&task.id),
-        );
     });
+    state.push_notification(
+        NotificationKind::System,
+        &format!("已跳过：{}", task.title),
+        "定时任务已跳过本次",
+        Some(&task.id),
+    );
     state.persist_if_dirty();
 }

@@ -5,16 +5,21 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    TimedSchedulePreset, create_timed_task_draft, is_timed_task_auto_due, make_preset_schedule,
-    now_ms, timed_preset_label, timed_schedule_label,
+    TimedIntervalUnit, TimedSchedulePreset, create_timed_task_draft, is_timed_task_auto_due,
+    make_custom_schedule, make_preset_schedule, now_ms, timed_interval_unit_label,
+    timed_preset_label, timed_schedule_label,
 };
 
 pub struct TimedPane {
     state: AppState,
     title: Entity<InputState>,
     command: Entity<InputState>,
+    custom_every: Entity<InputState>,
+    custom_at: Entity<InputState>,
+    custom_unit: TimedIntervalUnit,
     agent: Option<Entity<AgentPane>>,
 }
 
@@ -25,6 +30,17 @@ impl TimedPane {
             title: cx.new(|cx| InputState::new(window, cx).placeholder("标题")),
             command: cx
                 .new(|cx| InputState::new(window, cx).placeholder("投递给 Agent 的指令或技能")),
+            custom_every: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("间隔，如 2")
+                    .default_value("2")
+            }),
+            custom_at: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("时刻 HH:MM")
+                    .default_value("09:00")
+            }),
+            custom_unit: TimedIntervalUnit::Day,
             agent: None,
         }
     }
@@ -33,10 +49,9 @@ impl TimedPane {
         self.agent = Some(agent);
     }
 
-    fn add_preset(&mut self, preset: TimedSchedulePreset, at_time: &str, cx: &mut Context<Self>) {
+    fn add_with_schedule(&mut self, schedule: wb_domain::TimedSchedule, cx: &mut Context<Self>) {
         let title = self.title.read(cx).value().to_string();
         let command = self.command.read(cx).value().to_string();
-        let schedule = make_preset_schedule(preset, at_time);
         let task = create_timed_task_draft(
             Some(if title.trim().is_empty() {
                 "未命名定时任务"
@@ -50,6 +65,29 @@ impl TimedPane {
         self.state.with_mut(|s| s.repo.upsert_timed_task(task));
         self.state.persist_if_dirty();
         cx.notify();
+    }
+
+    fn add_preset(&mut self, preset: TimedSchedulePreset, at_time: &str, cx: &mut Context<Self>) {
+        self.add_with_schedule(make_preset_schedule(preset, at_time), cx);
+    }
+
+    fn add_custom(&mut self, cx: &mut Context<Self>) {
+        let every = self
+            .custom_every
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(1)
+            .max(1);
+        let at = self.custom_at.read(cx).value().to_string();
+        let at = if at.trim().is_empty() {
+            "09:00"
+        } else {
+            at.trim()
+        };
+        let schedule = make_custom_schedule(every, self.custom_unit, at);
+        self.add_with_schedule(schedule, cx);
     }
 
     fn after_deliver(&mut self, cx: &mut Context<Self>) {
@@ -181,6 +219,49 @@ impl Render for TimedPane {
                                 "09:00",
                                 cx,
                             )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("自定义"),
+                            )
+                            .child(Input::new(&self.custom_every))
+                            .children(
+                                [
+                                    TimedIntervalUnit::Hour,
+                                    TimedIntervalUnit::Day,
+                                    TimedIntervalUnit::Week,
+                                    TimedIntervalUnit::Month,
+                                ]
+                                .into_iter()
+                                .map(|unit| {
+                                    let selected = self.custom_unit == unit;
+                                    let label = timed_interval_unit_label(unit);
+                                    Button::new(SharedString::from(format!("unit-{label}")))
+                                        .xsmall()
+                                        .when(selected, |b| b.primary())
+                                        .when(!selected, |b| b.ghost())
+                                        .label(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.custom_unit = unit;
+                                            cx.notify();
+                                        }))
+                                }),
+                            )
+                            .child(Input::new(&self.custom_at))
+                            .child(
+                                Button::new("add-custom")
+                                    .small()
+                                    .primary()
+                                    .label("添加自定义")
+                                    .on_click(cx.listener(|this, _, _, cx| this.add_custom(cx))),
+                            ),
                     ),
             )
             .child(if tasks.is_empty() {

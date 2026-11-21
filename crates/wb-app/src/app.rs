@@ -83,17 +83,13 @@ impl WorkbenchApp {
         if timing {
             self.tasks.update(cx, |_, cx| cx.notify());
         }
-        self.state.with_mut(|s| {
+        let due_reminds: Vec<(String, String, bool)> = self.state.with_mut(|s| {
             s.repo.wake_snoozed_notifications(now);
+            let mut due = Vec::new();
             for task in s.repo.list_tasks() {
                 if let Some(at) = task.remind_at {
                     if at <= now && !task.is_done {
-                        s.repo.push_notification(
-                            wb_domain::NotificationKind::TaskRemind,
-                            &task.title,
-                            "计划提醒",
-                            Some(&task.id),
-                        );
+                        due.push((task.id.clone(), task.title.clone(), false));
                         let mut t = task.clone();
                         t.remind_at = None;
                         s.repo.upsert_task(t);
@@ -101,12 +97,7 @@ impl WorkbenchApp {
                 }
                 if let Some(at) = task.deadline_remind_at {
                     if at <= now && !task.is_done {
-                        s.repo.push_notification(
-                            wb_domain::NotificationKind::DeadlineRemind,
-                            &task.title,
-                            "截止提醒",
-                            Some(&task.id),
-                        );
+                        due.push((task.id.clone(), task.title.clone(), true));
                         let mut t = task.clone();
                         t.deadline_remind_at = None;
                         s.repo.upsert_task(t);
@@ -114,7 +105,25 @@ impl WorkbenchApp {
                 }
             }
             s.last_tick = now;
+            due
         });
+        for (id, title, is_deadline) in due_reminds {
+            if is_deadline {
+                self.state.push_notification(
+                    wb_domain::NotificationKind::DeadlineRemind,
+                    &title,
+                    "截止提醒",
+                    Some(&id),
+                );
+            } else {
+                self.state.push_notification(
+                    wb_domain::NotificationKind::TaskRemind,
+                    &title,
+                    "计划提醒",
+                    Some(&id),
+                );
+            }
+        }
         self.state.persist_if_dirty();
         cx.notify();
     }

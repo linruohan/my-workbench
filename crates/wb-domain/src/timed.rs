@@ -371,6 +371,16 @@ pub fn make_preset_schedule(preset: TimedSchedulePreset, at_time: &str) -> Timed
     }
 }
 
+pub fn make_custom_schedule(every: i64, unit: TimedIntervalUnit, at_time: &str) -> TimedSchedule {
+    TimedSchedule::Custom {
+        every: every.max(1),
+        unit,
+        at_time: normalize_at_time(Some(at_time)),
+        end_mode: EndMode::Never,
+        end_date: None,
+    }
+}
+
 pub fn build_timed_task_prompt(task: &TimedTask) -> String {
     let sched = timed_schedule_label(task.schedule.as_ref());
     format!(
@@ -392,5 +402,13 @@ mod tests {
     #[test]
     fn label_none() {
         assert_eq!(timed_schedule_label(None), "未设置计划");
+    }
+
+    #[test]
+    fn custom_schedule_next_run() {
+        let s = make_custom_schedule(2, TimedIntervalUnit::Day, "09:00");
+        let next = compute_next_run_at(&s, 1_700_000_000_000);
+        assert!(next.is_some());
+        assert!(next.unwrap() > 1_700_000_000_000);
     }
 }
