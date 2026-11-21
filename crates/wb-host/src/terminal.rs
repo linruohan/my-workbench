@@ -1,14 +1,18 @@
-//! Lightweight terminal sessions (command log + cwd). Not a real PTY/ConPTY.
+//! Interactive terminal sessions backed by portable-pty (Windows ConPTY / Unix PTY).
 
-use crate::shell::run_shell;
+use crate::shell::{scrubbed_agent_env, which_bin};
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const OUTPUT_LIMIT: usize = 400_000;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalInfo {
     pub id: String,
@@ -20,13 +24,16 @@ pub struct TerminalInfo {
 struct TerminalSession {
     shell: String,
     cwd: PathBuf,
-    buffer: String,
+    buffer: Arc<Mutex<String>>,
+    writer: Option<Box<dyn Write + Send>>,
+    child: Option<Box<dyn Child + Send>>,
+    master: Option<Box<dyn MasterPty + Send>>,
     closed: bool,
 }
 
 #[derive(Default)]
 pub struct TerminalRegistry {
-    inner: Mutex<HashMap<String, TerminalSession>>,
+    inner: Mutex<std::collections::HashMap<String, TerminalSession>>,
 }
 
 impl TerminalRegistry {
@@ -34,19 +41,56 @@ impl TerminalRegistry {
         let cwd = cwd
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let id = Uuid::new_v4().to_string();
-        let shell = if shell.trim().is_empty() {
+        let shell_label = if shell.trim().is_empty() {
             default_shell().to_string()
         } else {
             shell.trim().to_string()
         };
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 32,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| anyhow::anyhow!("无法创建 PTY：{e}"))?;
+        let mut cmd = interactive_shell(&shell_label);
+        cmd.cwd(cwd.as_os_str());
+        cmd.env_clear();
+        let cwd_s = cwd.display().to_string();
+        for (k, v) in scrubbed_agent_env(Some(&cwd_s), Some(&cwd_s)) {
+            cmd.env(k, v);
+        }
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| anyhow::anyhow!("无法在 PTY 中启动 shell：{e}"))?;
+        drop(pair.slave);
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| anyhow::anyhow!("无法读取 PTY：{e}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| anyhow::anyhow!("无法写入 PTY：{e}"))?;
+        let id = Uuid::new_v4().to_string();
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let pump_buf = buffer.clone();
+        let pump_id = id.clone();
+        thread::spawn(move || pump_term(pump_id, &mut reader, pump_buf));
+        thread::sleep(Duration::from_millis(120));
         let mut map = self.inner.lock().unwrap();
         map.insert(
             id.clone(),
             TerminalSession {
-                shell,
+                shell: shell_label,
                 cwd,
-                buffer: String::new(),
+                buffer,
+                writer: Some(writer),
+                child: Some(child),
+                master: Some(pair.master),
                 closed: false,
             },
         );
@@ -54,48 +98,67 @@ impl TerminalRegistry {
     }
 
     pub fn send(&self, id: &str, command: &str) -> Result<String> {
-        let mut map = self.inner.lock().unwrap();
-        let Some(session) = map.get_mut(id) else {
-            bail!("终端不存在");
-        };
-        if session.closed {
-            bail!("终端已关闭");
+        if command.len() > 32_000 || command.contains('\0') {
+            bail!("输入无效");
         }
-        let cwd = session.cwd.to_string_lossy().to_string();
-        let line = format!("$ {command}\n");
-        session.buffer.push_str(&line);
-        // Drop lock while running shell.
-        let shell = session.shell.clone();
-        drop(map);
+        let mut writer = {
+            let mut map = self.inner.lock().unwrap();
+            let Some(session) = map.get_mut(id) else {
+                bail!("终端不存在");
+            };
+            if session.closed || session.child.is_none() {
+                bail!("终端已关闭");
+            }
+            session
+                .writer
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("终端已关闭"))?
+        };
+        let write_result = (|| -> Result<()> {
+            writer.write_all(command.as_bytes())?;
+            writer.write_all(b"\r")?;
+            writer.flush()?;
+            Ok(())
+        })();
+        {
+            let mut map = self.inner.lock().unwrap();
+            if let Some(session) = map.get_mut(id) {
+                if write_result.is_ok() {
+                    session.writer = Some(writer);
+                }
+            }
+        }
+        write_result?;
 
-        let wrapped = wrap_command(&shell, command);
-        let result = run_shell(&wrapped, Some(&cwd), 120);
-        let mut map = self.inner.lock().unwrap();
-        let Some(session) = map.get_mut(id) else {
-            bail!("终端不存在");
-        };
-        match result {
-            Ok(r) => {
-                if !r.stdout.is_empty() {
-                    session.buffer.push_str(&r.stdout);
-                    if !r.stdout.ends_with('\n') {
-                        session.buffer.push('\n');
-                    }
+        let started = Instant::now();
+        let timeout = Duration::from_secs(8);
+        let quiet = Duration::from_millis(400);
+        let baseline = self.buffer_len(id);
+        let mut last_len = baseline;
+        let mut last_change = Instant::now();
+        loop {
+            thread::sleep(Duration::from_millis(60));
+            let (len, alive) = {
+                let map = self.inner.lock().unwrap();
+                match map.get(id) {
+                    Some(session) => (
+                        session.buffer.lock().unwrap().len(),
+                        session.child.is_some() && !session.closed,
+                    ),
+                    None => bail!("终端不存在"),
                 }
-                if !r.stderr.is_empty() {
-                    session.buffer.push_str(&r.stderr);
-                    if !r.stderr.ends_with('\n') {
-                        session.buffer.push('\n');
-                    }
-                }
-                session.buffer.push_str(&format!("[exit {}]\n", r.code));
-                Ok(session.buffer.clone())
+            };
+            if len != last_len {
+                last_len = len;
+                last_change = Instant::now();
             }
-            Err(e) => {
-                session.buffer.push_str(&format!("[error] {e}\n"));
-                Err(e)
+            let grew = len > baseline;
+            let quiet_enough = grew && last_change.elapsed() >= quiet;
+            if started.elapsed() >= timeout || quiet_enough || !alive {
+                break;
             }
         }
+        self.read(id)
     }
 
     pub fn read(&self, id: &str) -> Result<String> {
@@ -103,7 +166,8 @@ impl TerminalRegistry {
         let Some(session) = map.get(id) else {
             bail!("终端不存在");
         };
-        Ok(session.buffer.clone())
+        let raw = session.buffer.lock().unwrap().clone();
+        Ok(strip_ansi(&raw))
     }
 
     pub fn list(&self) -> Vec<TerminalInfo> {
@@ -114,7 +178,7 @@ impl TerminalRegistry {
                 id: id.clone(),
                 shell: s.shell.clone(),
                 cwd: s.cwd.display().to_string(),
-                closed: s.closed,
+                closed: s.closed || s.child.is_none(),
             })
             .collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
@@ -122,32 +186,73 @@ impl TerminalRegistry {
     }
 
     pub fn close(&self, id: &str) -> bool {
-        let mut map = self.inner.lock().unwrap();
-        if let Some(session) = map.get_mut(id) {
+        let taken = {
+            let mut map = self.inner.lock().unwrap();
+            let Some(session) = map.get_mut(id) else {
+                return false;
+            };
             session.closed = true;
-            true
-        } else {
-            false
+            session.writer.take();
+            session.master.take();
+            session.child.take()
+        };
+        if let Some(mut child) = taken {
+            let _ = child.kill();
+            let _ = child.wait();
         }
+        true
     }
 
     pub fn signal(&self, id: &str, signal: &str) -> Result<String> {
-        let map = self.inner.lock().unwrap();
-        let Some(session) = map.get(id) else {
-            bail!("终端不存在");
-        };
-        if session.closed {
-            bail!("终端已关闭");
+        let kind = signal.trim().to_ascii_uppercase();
+        if matches!(kind.as_str(), "SIGKILL" | "KILL" | "SIGTERM" | "TERM") {
+            let child = {
+                let mut map = self.inner.lock().unwrap();
+                let Some(session) = map.get_mut(id) else {
+                    bail!("终端不存在");
+                };
+                if session.closed {
+                    bail!("终端已关闭");
+                }
+                session.closed = true;
+                session.writer.take();
+                session.master.take();
+                session.child.take()
+            };
+            if let Some(mut child) = child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Ok(format!("已结束终端进程 signal={kind}"));
         }
-        // Non-PTY: record a signal marker; next command is independent.
-        drop(map);
-        let mut map = self.inner.lock().unwrap();
-        if let Some(session) = map.get_mut(id) {
+        let mut writer = {
+            let mut map = self.inner.lock().unwrap();
+            let Some(session) = map.get_mut(id) else {
+                bail!("终端不存在");
+            };
+            if session.closed {
+                bail!("终端已关闭");
+            }
             session
-                .buffer
-                .push_str(&format!("[signal {signal} — 轻量终端无进程组，仅记录]\n"));
+                .writer
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("终端已关闭"))?
+        };
+        let result = (|| -> Result<()> {
+            writer.write_all(&[0x03])?;
+            writer.flush()?;
+            Ok(())
+        })();
+        {
+            let mut map = self.inner.lock().unwrap();
+            if let Some(session) = map.get_mut(id) {
+                if result.is_ok() {
+                    session.writer = Some(writer);
+                }
+            }
         }
-        Ok(format!("已记录 signal={signal}"))
+        result?;
+        Ok(format!("已发送 Ctrl+C（{kind}）"))
     }
 
     pub fn set_cwd(&self, id: &str, cwd: &Path) -> Result<()> {
@@ -156,17 +261,137 @@ impl TerminalRegistry {
             bail!("终端不存在");
         };
         session.cwd = cwd.to_path_buf();
-        session
-            .buffer
-            .push_str(&format!("[cwd {}]\n", cwd.display()));
+        let mut buf = session.buffer.lock().unwrap();
+        buf.push_str(&format!("[cwd {}]\n", cwd.display()));
         Ok(())
     }
+
+    fn buffer_len(&self, id: &str) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|s| s.buffer.lock().unwrap().len())
+            .unwrap_or(0)
+    }
+}
+
+fn pump_term(id: String, reader: &mut dyn Read, buffer: Arc<Mutex<String>>) {
+    let _ = id;
+    let mut buf = [0u8; 8 * 1024];
+    let mut pending = Vec::new();
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                let tail = take_text(&mut pending, true);
+                if !tail.is_empty() {
+                    append_limited(&buffer, &tail);
+                }
+                break;
+            }
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                let chunk = take_text(&mut pending, false);
+                if !chunk.is_empty() && !append_limited(&buffer, &chunk) {
+                    break;
+                }
+            }
+            Err(_) => {
+                let tail = take_text(&mut pending, true);
+                if !tail.is_empty() {
+                    append_limited(&buffer, &tail);
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn append_limited(buffer: &Mutex<String>, chunk: &str) -> bool {
+    let mut guard = buffer.lock().unwrap();
+    if guard.len() >= OUTPUT_LIMIT {
+        return false;
+    }
+    let room = OUTPUT_LIMIT - guard.len();
+    let take = room.min(chunk.len());
+    guard.push_str(&chunk[..take]);
+    true
+}
+
+fn take_text(pending: &mut Vec<u8>, finish: bool) -> String {
+    if pending.is_empty() {
+        return String::new();
+    }
+    match std::str::from_utf8(pending) {
+        Ok(s) => {
+            let out = s.to_string();
+            pending.clear();
+            out
+        }
+        Err(err) => {
+            let valid = err.valid_up_to();
+            let out = String::from_utf8_lossy(&pending[..valid]).into_owned();
+            if err.error_len().is_none() && !finish {
+                pending.drain(..valid);
+                out
+            } else {
+                let skip = valid + err.error_len().unwrap_or(1);
+                let skip = skip.min(pending.len());
+                pending.drain(..skip);
+                out
+            }
+        }
+    }
+}
+
+fn strip_ansi(input: &str) -> String {
+    let b = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == 0x1b {
+            i += 1;
+            if i < b.len() && b[i] == b'[' {
+                i += 1;
+                while i < b.len() && !b[i].is_ascii_alphabetic() && b[i] != b'@' && b[i] != b'~' {
+                    i += 1;
+                }
+                if i < b.len() {
+                    i += 1;
+                }
+                continue;
+            }
+            if i < b.len() && b[i] == b']' {
+                i += 1;
+                while i < b.len() && b[i] != 0x07 && b[i] != b'\\' {
+                    i += 1;
+                }
+                if i < b.len() {
+                    i += 1;
+                }
+                continue;
+            }
+            continue;
+        }
+        if b[i] < 0x20 && b[i] != b'\n' && b[i] != b'\r' && b[i] != b'\t' {
+            i += 1;
+            continue;
+        }
+        let ch = input[i..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 fn default_shell() -> &'static str {
     #[cfg(windows)]
     {
-        "pwsh"
+        if which_bin("pwsh").is_some() {
+            "pwsh"
+        } else {
+            "powershell"
+        }
     }
     #[cfg(not(windows))]
     {
@@ -174,11 +399,35 @@ fn default_shell() -> &'static str {
     }
 }
 
-fn wrap_command(shell: &str, command: &str) -> String {
-    match shell.to_lowercase().as_str() {
-        "bash" | "sh" => command.to_string(),
-        "cmd" => command.to_string(),
-        _ => command.to_string(), // pwsh / powershell: still via cmd /C or sh -lc wrapper in run_shell
+fn interactive_shell(shell: &str) -> CommandBuilder {
+    let s = shell.to_ascii_lowercase();
+    if s.contains("bash") || s == "sh" {
+        let mut cmd = CommandBuilder::new("bash");
+        cmd.arg("-i");
+        cmd
+    } else if s == "cmd" || s == "cmd.exe" {
+        CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "sh" })
+    } else if s.contains("powershell") && !s.contains("pwsh") {
+        let mut cmd = CommandBuilder::new("powershell");
+        cmd.arg("-NoLogo");
+        cmd.arg("-NoProfile");
+        cmd
+    } else {
+        let bin = if which_bin("pwsh").is_some() {
+            "pwsh"
+        } else if cfg!(windows) {
+            "powershell"
+        } else {
+            "bash"
+        };
+        let mut cmd = CommandBuilder::new(bin);
+        if bin != "bash" {
+            cmd.arg("-NoLogo");
+            cmd.arg("-NoProfile");
+        } else {
+            cmd.arg("-i");
+        }
+        cmd
     }
 }
 
@@ -225,4 +474,26 @@ pub fn resolve_agent_cwd(workspace_root: Option<&str>) -> Option<PathBuf> {
         }
     }
     workspace_root.map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_keeps_text() {
+        assert_eq!(strip_ansi("a\u{1b}[31mred\u{1b}[0m"), "ared");
+    }
+
+    #[test]
+    fn pty_echo_roundtrip() {
+        let reg = TerminalRegistry::default();
+        let id = reg.open("cmd", None).expect("open pty");
+        let out = reg.send(&id, "echo wb-pty-ok").expect("send");
+        assert!(
+            out.contains("wb-pty-ok"),
+            "pty output missing marker: {out}"
+        );
+        assert!(reg.close(&id));
+    }
 }

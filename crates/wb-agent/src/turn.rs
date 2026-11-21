@@ -331,11 +331,14 @@ fn dispatch_tool_calls(
                 ));
             }
             ToolGate::Run => {
-                let result = execute_tool(repo, &call.name, &call.args, workspace_root)
-                    .unwrap_or_else(|e| ToolResult {
-                        ok: false,
-                        content: e.to_string(),
-                        open_view: None,
+                let args = with_thread_id(&call.args, &thread.id);
+                let result =
+                    execute_tool(repo, &call.name, &args, workspace_root).unwrap_or_else(|e| {
+                        ToolResult {
+                            ok: false,
+                            content: e.to_string(),
+                            open_view: None,
+                        }
                     });
                 if result.open_view.is_some() {
                     open_view = result.open_view.clone();
@@ -379,21 +382,22 @@ pub fn resolve_approval(
     repo.upsert_agent_approval(approval.clone());
 
     let mut open_view = None;
-    let content = if approved {
-        let args: Value = serde_json::from_str(&approval.args_json).unwrap_or_else(|_| json!({}));
-        let result =
-            execute_tool(repo, &approval.tool_name, &args, workspace_root).unwrap_or_else(|e| {
-                ToolResult {
+    let content =
+        if approved {
+            let mut args: Value =
+                serde_json::from_str(&approval.args_json).unwrap_or_else(|_| json!({}));
+            args = with_thread_id(&args, &approval.thread_id);
+            let result = execute_tool(repo, &approval.tool_name, &args, workspace_root)
+                .unwrap_or_else(|e| ToolResult {
                     ok: false,
                     content: e.to_string(),
                     open_view: None,
-                }
-            });
-        open_view = result.open_view.clone();
-        format!("已批准并执行 {}：{}", approval.tool_name, result.content)
-    } else {
-        format!("已拒绝 {}", approval.tool_name)
-    };
+                });
+            open_view = result.open_view.clone();
+            format!("已批准并执行 {}：{}", approval.tool_name, result.content)
+        } else {
+            format!("已拒绝 {}", approval.tool_name)
+        };
 
     let msg = tool_msg(&approval.thread_id, &approval.tool_name, None, &content);
     repo.upsert_agent_message(msg.clone());
@@ -438,6 +442,48 @@ pub async fn run_user_turn(
     proxy: Option<&str>,
 ) -> Result<TurnOutcome> {
     let pending = begin_user_turn(repo, thread, user_text);
+    drive_pending_turn(repo, pending, proxy).await
+}
+
+/// Drive a turn when the latest user message is already on the thread (no duplicate insert).
+pub async fn resume_thread_turn(
+    repo: &mut MemoryWorkbenchRepository,
+    thread: &AgentThread,
+    proxy: Option<&str>,
+) -> Result<TurnOutcome> {
+    let history = repo.messages_for_thread(&thread.id);
+    let user_text = history
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, AgentRole::User))
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let builtin_reply =
+        if thread.model_ref == BUILTIN_MODEL_REF || thread.model_ref.starts_with("builtin:") {
+            Some(builtin_reply(&user_text, repo))
+        } else {
+            None
+        };
+    let workspace_root = repo
+        .list_agent_workspaces()
+        .into_iter()
+        .find(|w| w.id == thread.workspace_id)
+        .and_then(|w| w.root_path);
+    let pending = PendingTurn {
+        thread: thread.clone(),
+        user_text,
+        history,
+        builtin_reply,
+        workspace_root,
+    };
+    drive_pending_turn(repo, pending, proxy).await
+}
+
+async fn drive_pending_turn(
+    repo: &mut MemoryWorkbenchRepository,
+    pending: PendingTurn,
+    proxy: Option<&str>,
+) -> Result<TurnOutcome> {
     let reply = resolve_turn_reply(&pending, proxy).await;
     let mut phase = finish_user_turn(repo, &pending, reply);
     loop {
@@ -449,6 +495,30 @@ pub async fn run_user_turn(
             }
         }
     }
+}
+
+/// Sync wrapper for nested subagent / background workers.
+pub fn run_user_turn_blocking(
+    repo: &mut MemoryWorkbenchRepository,
+    thread: &AgentThread,
+    user_text: &str,
+    proxy: Option<&str>,
+) -> Result<TurnOutcome> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(run_user_turn(repo, thread, user_text, proxy))
+}
+
+pub fn resume_thread_turn_blocking(
+    repo: &mut MemoryWorkbenchRepository,
+    thread: &AgentThread,
+    proxy: Option<&str>,
+) -> Result<TurnOutcome> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(resume_thread_turn(repo, thread, proxy))
 }
 
 fn create_approval(thread_id: &str, tool_name: &str, args: &Value, summary: &str) -> AgentApproval {
@@ -485,6 +555,25 @@ fn tool_names(calls: &[PlannedCall]) -> String {
         .map(|c| c.name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn with_thread_id(args: &Value, thread_id: &str) -> Value {
+    let mut out = args.clone();
+    if let Some(obj) = out.as_object_mut() {
+        if !obj.contains_key("threadId") {
+            obj.insert("threadId".into(), Value::String(thread_id.into()));
+        }
+    } else {
+        out = json!({ "threadId": thread_id });
+        if let Some(obj) = args.as_object() {
+            if let Some(merged) = out.as_object_mut() {
+                for (k, v) in obj {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {

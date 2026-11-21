@@ -1,8 +1,22 @@
+//! Local speech model catalog + status. Transcription uses an external CLI when available.
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use wb_store::ensure_data_dir;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechFileSpec {
+    pub name: String,
+    pub rel_path: String,
+    pub url: String,
+    pub mirror_url: String,
+    pub min_bytes: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,46 +24,202 @@ pub struct SpeechStatus {
     pub engine: String,
     pub ready: bool,
     pub model_dir: String,
+    pub missing: Vec<String>,
     pub message: Option<String>,
+}
+
+pub fn sensevoice_files() -> Vec<SpeechFileSpec> {
+    vec![
+        SpeechFileSpec {
+            name: "model.int8.onnx".into(),
+            rel_path: "sensevoice-onnx/model.int8.onnx".into(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx".into(),
+            mirror_url: "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx".into(),
+            min_bytes: 200_000_000,
+        },
+        SpeechFileSpec {
+            name: "tokens.txt".into(),
+            rel_path: "sensevoice-onnx/tokens.txt".into(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/tokens.txt".into(),
+            mirror_url: "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/tokens.txt".into(),
+            min_bytes: 100_000,
+        },
+        SpeechFileSpec {
+            name: "silero_vad.onnx".into(),
+            rel_path: "silero/silero_vad.onnx".into(),
+            url: "https://huggingface.co/csukuangfj/vad/resolve/fba88cd2e921609e7675c3aaf51e0b9b295da4bc/silero_vad.onnx".into(),
+            mirror_url: "https://hf-mirror.com/csukuangfj/vad/resolve/fba88cd2e921609e7675c3aaf51e0b9b295da4bc/silero_vad.onnx".into(),
+            min_bytes: 1_000_000,
+        },
+    ]
 }
 
 pub fn speech_model_dir(engine: &str) -> Result<PathBuf> {
     Ok(ensure_data_dir()?.join("models").join(engine))
 }
 
+fn file_ready(path: &Path, min_bytes: u64) -> bool {
+    fs::metadata(path)
+        .map(|m| m.len() >= min_bytes)
+        .unwrap_or(false)
+}
+
 pub fn speech_status(engine: &str) -> Result<SpeechStatus> {
     let dir = speech_model_dir(engine)?;
-    let ready = dir.exists()
-        && fs::read_dir(&dir)
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false);
+    let files = if engine.eq_ignore_ascii_case("sensevoice") {
+        sensevoice_files()
+    } else {
+        Vec::new()
+    };
+    let missing: Vec<_> = if files.is_empty() {
+        if dir.exists()
+            && fs::read_dir(&dir)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
+        {
+            Vec::new()
+        } else {
+            vec!["（未配置该引擎文件清单）".into()]
+        }
+    } else {
+        files
+            .into_iter()
+            .filter(|f| !file_ready(&dir.join(&f.rel_path), f.min_bytes))
+            .map(|f| f.name)
+            .collect()
+    };
+    let ready = missing.is_empty();
     Ok(SpeechStatus {
         engine: engine.into(),
         ready,
         model_dir: dir.to_string_lossy().to_string(),
+        missing: missing.clone(),
         message: if ready {
             None
         } else {
-            Some("模型尚未下载，请在设置中准备语音引擎".into())
+            Some(format!(
+                "模型尚未就绪，缺少 {} 个文件。可在设置中准备/下载。",
+                missing.len()
+            ))
         },
     })
 }
 
-/// Placeholder: full ASR wiring lands with bundled worker scripts.
-pub fn speech_transcribe(
-    _engine: &str,
-    _wav_path: &str,
-    _language: Option<&str>,
-) -> Result<String> {
-    bail!("语音转写需先下载本地模型；当前为 Rust 宿主占位实现")
+/// Create dirs and optionally download SenseVoice files (tokens/vad first; large onnx last).
+pub fn speech_ensure_models(engine: &str) -> Result<SpeechStatus> {
+    speech_ensure_models_ex(engine, false)
 }
 
-pub fn speech_ensure_models(engine: &str) -> Result<SpeechStatus> {
+pub fn speech_ensure_models_ex(engine: &str, download: bool) -> Result<SpeechStatus> {
     let dir = speech_model_dir(engine)?;
     fs::create_dir_all(&dir).context("创建模型目录失败")?;
+    if download && engine.eq_ignore_ascii_case("sensevoice") {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?;
+        // Download smaller files first so status improves quickly.
+        let mut files = sensevoice_files();
+        files.sort_by_key(|f| f.min_bytes);
+        for file in files {
+            let path = dir.join(&file.rel_path);
+            if file_ready(&path, file.min_bytes) {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Err(e) = download_file(&client, &file.mirror_url, &path, file.min_bytes) {
+                log::warn!("mirror download failed for {}: {e}", file.name);
+                download_file(&client, &file.url, &path, file.min_bytes)?;
+            }
+        }
+    }
     speech_status(engine)
+}
+
+fn download_file(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    path: &Path,
+    min_bytes: u64,
+) -> Result<()> {
+    let resp = client.get(url).send().context("下载语音模型失败")?;
+    if !resp.status().is_success() {
+        bail!("下载失败 HTTP {}", resp.status());
+    }
+    let bytes = resp.bytes().context("读取下载内容失败")?;
+    if (bytes.len() as u64) < min_bytes {
+        bail!(
+            "下载文件过小：{} < {}（可能是错误页）",
+            bytes.len(),
+            min_bytes
+        );
+    }
+    let tmp = path.with_extension("part");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 pub fn speech_warm(engine: &str) -> Result<SpeechStatus> {
     speech_status(engine)
+}
+
+/// Transcribe a WAV file. Tries `sherpa-onnx-offline` / `sensevoice` CLI when present.
+pub fn speech_transcribe(engine: &str, wav_path: &str, language: Option<&str>) -> Result<String> {
+    let wav = Path::new(wav_path);
+    if !wav.is_file() {
+        bail!("录音文件不存在：{wav_path}");
+    }
+    let status = speech_status(engine)?;
+    let lang = language.unwrap_or("auto");
+
+    if let Some(bin) = crate::shell::which_bin("sherpa-onnx-offline")
+        .or_else(|| crate::shell::which_bin("sensevoice"))
+    {
+        let tokens = Path::new(&status.model_dir).join("sensevoice-onnx/tokens.txt");
+        let model = Path::new(&status.model_dir).join("sensevoice-onnx/model.int8.onnx");
+        let mut cmd = Command::new(&bin);
+        cmd.arg("--tokens")
+            .arg(&tokens)
+            .arg("--sense-voice-model")
+            .arg(&model)
+            .arg("--language")
+            .arg(lang)
+            .arg(wav_path);
+        let out = cmd.output().context("启动语音 CLI 失败")?;
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !text.is_empty() {
+                return Ok(text);
+            }
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("语音 CLI 失败：{err}");
+    }
+
+    if !status.ready {
+        bail!(
+            "语音模型未就绪（{}）。请在设置中下载 SenseVoice，或安装 sherpa-onnx-offline。",
+            status.message.unwrap_or_else(|| status.model_dir.clone())
+        );
+    }
+    bail!(
+        "SenseVoice 模型已在 {}，但未找到 sherpa-onnx-offline / sensevoice CLI，也尚未接入内置 worker。",
+        status.model_dir
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensevoice_catalog() {
+        assert_eq!(sensevoice_files().len(), 3);
+    }
 }

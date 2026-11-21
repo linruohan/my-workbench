@@ -121,24 +121,36 @@ pub fn run_shell_kind(
 /// Scrub inherited secrets / host `WB_*`, then inject managed agent facts.
 pub fn apply_agent_shell_env(cmd: &mut Command, workspace_root: Option<&str>, cwd: Option<&str>) {
     cmd.env_clear();
-    for (key, value) in std::env::vars() {
-        if !is_allowed_env_key(&key) {
-            continue;
-        }
-        cmd.env(&key, value);
+    for (key, value) in scrubbed_agent_env(workspace_root, cwd) {
+        cmd.env(key, value);
     }
-    cmd.env("WB_AGENT_SHELL", "1");
+}
+
+/// Allowlisted environment for agent shells and PTY sessions.
+pub fn scrubbed_agent_env(
+    workspace_root: Option<&str>,
+    cwd: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (key, value) in std::env::vars() {
+        if is_allowed_env_key(&key) {
+            out.push((key, value));
+        }
+    }
+    out.push(("WB_AGENT_SHELL".into(), "1".into()));
     if let Some(home) = dirs::home_dir() {
-        cmd.env("WB_HOME", home);
+        out.push(("WB_HOME".into(), home.display().to_string()));
     }
     if let Some(root) = workspace_root.filter(|s| !s.is_empty()) {
-        cmd.env("WB_WORKSPACE_ROOT", root);
+        out.push(("WB_WORKSPACE_ROOT".into(), root.to_string()));
     }
     if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
-        cmd.env("WB_CWD", cwd);
+        out.push(("WB_CWD".into(), cwd.to_string()));
     } else if let Some(root) = workspace_root.filter(|s| !s.is_empty()) {
-        cmd.env("WB_CWD", root);
+        out.push(("WB_CWD".into(), root.to_string()));
     }
+    out.push(("TERM".into(), "xterm-256color".into()));
+    out
 }
 
 fn is_allowed_env_key(key: &str) -> bool {
@@ -190,20 +202,6 @@ fn is_allowed_env_key(key: &str) -> bool {
     ALLOW.iter().any(|k| k.eq_ignore_ascii_case(key))
 }
 
-#[cfg(test)]
-mod env_tests {
-    use super::*;
-
-    #[test]
-    fn allowlist_keeps_path_drops_secrets_and_wb() {
-        assert!(is_allowed_env_key("PATH"));
-        assert!(is_allowed_env_key("Path"));
-        assert!(!is_allowed_env_key("WB_HOME"));
-        assert!(!is_allowed_env_key("OPENAI_API_KEY"));
-        assert!(!is_allowed_env_key("MY_SECRET"));
-    }
-}
-
 /// Probe common workspace toolchain binaries on PATH.
 pub fn probe_workspace_dependencies() -> Vec<(String, Option<String>)> {
     const NAMES: &[&str] = &[
@@ -215,7 +213,7 @@ pub fn probe_workspace_dependencies() -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-fn which_bin(name: &str) -> Option<String> {
+pub fn which_bin(name: &str) -> Option<String> {
     #[cfg(windows)]
     {
         let out = Command::new("where")
@@ -430,4 +428,18 @@ pub fn global_jobs() -> &'static JobRegistry {
 pub fn write_stdin_line(child_stdin: &mut impl Write, line: &str) -> Result<()> {
     writeln!(child_stdin, "{line}")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_keeps_path_drops_secrets_and_wb() {
+        assert!(is_allowed_env_key("PATH"));
+        assert!(is_allowed_env_key("Path"));
+        assert!(!is_allowed_env_key("WB_HOME"));
+        assert!(!is_allowed_env_key("OPENAI_API_KEY"));
+        assert!(!is_allowed_env_key("MY_SECRET"));
+    }
 }

@@ -96,4 +96,8 @@ pub struct AgentPrefs {
     pub plugins_dirs: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub subagents: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub hooks: Vec<serde_json::Value>,
 }

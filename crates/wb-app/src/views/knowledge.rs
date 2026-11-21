@@ -8,7 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
 use wb_host::{
-    create_markdown, list_files_recursive, open_path, pick_directory, read_text, write_text,
+    create_markdown, git_branch, list_files_recursive, open_path, pick_directory, read_text,
+    write_text,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -206,7 +207,13 @@ impl KnowledgePane {
 }
 
 impl Render for KnowledgePane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pending = self.state.with(|s| s.kb_current_file.clone());
+        if let Some(path) = pending {
+            if self.current.as_deref() != Some(path.as_str()) {
+                self.open_file(&path, window, cx);
+            }
+        }
         let filter = self.filter.read(cx).value().to_lowercase();
         let files: Vec<_> = self
             .files
@@ -216,7 +223,13 @@ impl Render for KnowledgePane {
             .collect();
         let root_label = self
             .root()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| {
+                let path = p.to_string_lossy().to_string();
+                match git_branch(&p) {
+                    Some(branch) => format!("{path}  ·  {branch}"),
+                    None => path,
+                }
+            })
             .unwrap_or_else(|| "未选择知识库".into());
         let entity = cx.weak_entity();
         let current = self.current.clone();

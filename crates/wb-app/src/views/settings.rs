@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_domain::ThemeModePref;
 use wb_host::{
-    list_system_fonts, open_path, speech_ensure_models, speech_status, voice_ptt_set_enabled,
+    list_system_fonts, ocr_ensure_models, ocr_status, open_path, speech_ensure_models,
+    speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
 };
 
 pub struct SettingsPane {
@@ -20,10 +21,15 @@ pub struct SettingsPane {
     memory_input: Entity<InputState>,
     skills_dirs: Entity<InputState>,
     plugins_dirs: Entity<InputState>,
+    mcp_json: Entity<InputState>,
+    subagents_json: Entity<InputState>,
+    hooks_json: Entity<InputState>,
     key_inputs: HashMap<String, Entity<InputState>>,
     font_count: usize,
     speech_msg: String,
+    ocr_msg: String,
     cred_msg: String,
+    agent_json_msg: String,
 }
 
 impl SettingsPane {
@@ -56,6 +62,30 @@ impl SettingsPane {
                 .placeholder("插件目录，多个用 ; 分隔")
                 .default_value(plugins_val)
         });
+        let (mcp_val, sub_val, hooks_val) = state.with(|s| {
+            (
+                serde_json::to_string_pretty(&s.prefs.agent.mcp_servers)
+                    .unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string_pretty(&s.prefs.agent.subagents)
+                    .unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string_pretty(&s.prefs.agent.hooks).unwrap_or_else(|_| "[]".into()),
+            )
+        });
+        let mcp_json = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("MCP 服务器 JSON 数组")
+                .default_value(mcp_val)
+        });
+        let subagents_json = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("子智能体 JSON 数组")
+                .default_value(sub_val)
+        });
+        let hooks_json = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Hooks JSON 数组")
+                .default_value(hooks_val)
+        });
         let creds = load_credentials();
         let providers = load_providers();
         let mut key_inputs = HashMap::new();
@@ -80,6 +110,16 @@ impl SettingsPane {
                 }
             })
             .unwrap_or_else(|e| e.to_string());
+        let ocr_msg = ocr_status()
+            .map(|st| {
+                if st.ready {
+                    format!("OCR 就绪：{}", st.model_dir)
+                } else {
+                    st.message
+                        .unwrap_or_else(|| format!("OCR 未就绪：{}", st.model_dir))
+                }
+            })
+            .unwrap_or_else(|e| e.to_string());
         Self {
             state,
             proxy,
@@ -87,11 +127,40 @@ impl SettingsPane {
             memory_input,
             skills_dirs,
             plugins_dirs,
+            mcp_json,
+            subagents_json,
+            hooks_json,
             key_inputs,
             font_count,
             speech_msg,
+            ocr_msg,
             cred_msg: String::new(),
+            agent_json_msg: String::new(),
         }
+    }
+
+    fn save_agent_json(&mut self, cx: &mut Context<Self>) {
+        let mcp_raw = self.mcp_json.read(cx).value().to_string();
+        let sub_raw = self.subagents_json.read(cx).value().to_string();
+        let hooks_raw = self.hooks_json.read(cx).value().to_string();
+        let mcp: Result<Vec<serde_json::Value>, _> = serde_json::from_str(mcp_raw.trim());
+        let subs: Result<Vec<serde_json::Value>, _> = serde_json::from_str(sub_raw.trim());
+        let hooks: Result<Vec<serde_json::Value>, _> = serde_json::from_str(hooks_raw.trim());
+        match (mcp, subs, hooks) {
+            (Ok(mcp), Ok(subs), Ok(hooks)) => {
+                self.state.with_mut(|s| {
+                    s.prefs.agent.mcp_servers = mcp;
+                    s.prefs.agent.subagents = subs;
+                    s.prefs.agent.hooks = hooks;
+                });
+                self.state.persist_prefs();
+                self.agent_json_msg = "已保存 MCP / 子智能体 / Hooks".into();
+            }
+            (Err(e), _, _) => self.agent_json_msg = format!("MCP JSON 无效：{e}"),
+            (_, Err(e), _) => self.agent_json_msg = format!("子智能体 JSON 无效：{e}"),
+            (_, _, Err(e)) => self.agent_json_msg = format!("Hooks JSON 无效：{e}"),
+        }
+        cx.notify();
     }
 
     fn save_proxy(&mut self, cx: &mut Context<Self>) {
@@ -257,7 +326,60 @@ impl SettingsPane {
             }
             Err(e) => self.speech_msg = e.to_string(),
         }
-        let _ = speech_status("sensevoice");
+        cx.notify();
+    }
+
+    fn download_speech(&mut self, cx: &mut Context<Self>) {
+        self.speech_msg = "正在下载 SenseVoice 模型…".into();
+        cx.notify();
+        match speech_ensure_models_ex("sensevoice", true) {
+            Ok(st) => {
+                self.speech_msg = if st.ready {
+                    format!("下载完成：{}", st.model_dir)
+                } else {
+                    format!(
+                        "部分完成，仍缺 {:?}：{}",
+                        st.missing,
+                        st.message.unwrap_or_default()
+                    )
+                };
+            }
+            Err(e) => self.speech_msg = format!("下载失败：{e}"),
+        }
+        cx.notify();
+    }
+
+    fn prepare_ocr(&mut self, cx: &mut Context<Self>) {
+        match ocr_ensure_models(false) {
+            Ok(st) => {
+                self.ocr_msg = if st.ready {
+                    format!("模型就绪：{}", st.model_dir)
+                } else {
+                    st.message.unwrap_or_else(|| "待下载".into())
+                };
+            }
+            Err(e) => self.ocr_msg = e.to_string(),
+        }
+        cx.notify();
+    }
+
+    fn download_ocr(&mut self, cx: &mut Context<Self>) {
+        self.ocr_msg = "正在下载 PaddleOCR 模型…".into();
+        cx.notify();
+        match ocr_ensure_models(true) {
+            Ok(st) => {
+                self.ocr_msg = if st.ready {
+                    format!("下载完成：{}", st.model_dir)
+                } else {
+                    format!(
+                        "部分完成，仍缺 {:?}：{}",
+                        st.missing,
+                        st.message.unwrap_or_default()
+                    )
+                };
+            }
+            Err(e) => self.ocr_msg = format!("下载失败：{e}"),
+        }
         cx.notify();
     }
 
@@ -325,6 +447,45 @@ impl SettingsPane {
                     .label("保存技能/插件目录")
                     .on_click(cx.listener(|this, _, _, cx| this.save_dirs(cx))),
             )
+            .child(div().font_bold().child("MCP / 子智能体 / Hooks"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("粘贴 JSON 数组；MCP 项含 name+command 或 name+url；子智能体含 name/description/prompt"),
+            )
+            .child(Input::new(&self.mcp_json))
+            .child(Input::new(&self.subagents_json))
+            .child(Input::new(&self.hooks_json))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("save-agent-json")
+                            .small()
+                            .primary()
+                            .label("保存 JSON 配置")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_agent_json(cx))),
+                    )
+                    .child(
+                        Button::new("open-prefs")
+                            .small()
+                            .label("打开 prefs.json")
+                            .on_click(|_, _, _| {
+                                if let Ok(p) = wb_store::prefs_path() {
+                                    let _ = open_path(&p);
+                                }
+                            }),
+                    ),
+            )
+            .when(!self.agent_json_msg.is_empty(), |col| {
+                col.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.agent_json_msg.clone()),
+                )
+            })
             .child(
                 div()
                     .text_sm()
@@ -536,6 +697,14 @@ impl Render for SettingsPane {
                     .border_color(cx.theme().border)
                     .child(div().font_bold().child("语音输入"))
                     .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "按住 CapsLock 录音，松手后转写并粘贴（需麦克风权限 + SenseVoice/CLI）",
+                            ),
+                    )
+                    .child(
                         h_flex()
                             .items_center()
                             .gap_3()
@@ -547,10 +716,25 @@ impl Render for SettingsPane {
                             ))),
                     )
                     .child(
-                        Button::new("speech-prep")
-                            .small()
-                            .label("准备 SenseVoice 模型目录")
-                            .on_click(cx.listener(|this, _, _, cx| this.prepare_speech(cx))),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("speech-prep")
+                                    .small()
+                                    .label("准备目录")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.prepare_speech(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("speech-dl")
+                                    .small()
+                                    .primary()
+                                    .label("下载 SenseVoice")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.download_speech(cx)),
+                                    ),
+                            ),
                     )
                     .when(!self.speech_msg.is_empty(), |col| {
                         col.child(
@@ -558,6 +742,40 @@ impl Render for SettingsPane {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(self.speech_msg.clone()),
+                        )
+                    }),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(div().font_bold().child("OCR 识图"))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("ocr-prep")
+                                    .small()
+                                    .label("准备目录")
+                                    .on_click(cx.listener(|this, _, _, cx| this.prepare_ocr(cx))),
+                            )
+                            .child(
+                                Button::new("ocr-dl")
+                                    .small()
+                                    .primary()
+                                    .label("下载 PaddleOCR")
+                                    .on_click(cx.listener(|this, _, _, cx| this.download_ocr(cx))),
+                            ),
+                    )
+                    .when(!self.ocr_msg.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(self.ocr_msg.clone()),
                         )
                     }),
             )

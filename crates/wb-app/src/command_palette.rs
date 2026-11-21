@@ -12,6 +12,8 @@ struct PaletteItem {
     nav: Option<AppNav>,
     task_id: Option<String>,
     thread_id: Option<String>,
+    note_id: Option<String>,
+    kb_path: Option<String>,
 }
 
 pub struct CommandPalette {
@@ -53,6 +55,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Today),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
             PaletteItem {
                 id: "nav-inbox".into(),
@@ -61,6 +65,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Inbox),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
             PaletteItem {
                 id: "nav-planner".into(),
@@ -69,6 +75,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Planner),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
             PaletteItem {
                 id: "nav-timed".into(),
@@ -77,6 +85,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Timed),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
             PaletteItem {
                 id: "nav-kb".into(),
@@ -85,6 +95,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Knowledge),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
             PaletteItem {
                 id: "nav-agent".into(),
@@ -93,6 +105,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Agent),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
             PaletteItem {
                 id: "nav-settings".into(),
@@ -101,6 +115,8 @@ impl CommandPalette {
                 nav: Some(AppNav::Settings),
                 task_id: None,
                 thread_id: None,
+                note_id: None,
+                kb_path: None,
             },
         ];
         self.state.with(|s| {
@@ -117,6 +133,8 @@ impl CommandPalette {
                     nav: Some(nav),
                     task_id: Some(t.id),
                     thread_id: None,
+                    note_id: None,
+                    kb_path: None,
                 });
             }
             for p in s
@@ -132,6 +150,8 @@ impl CommandPalette {
                     nav: Some(AppNav::Projects),
                     task_id: None,
                     thread_id: None,
+                    note_id: None,
+                    kb_path: None,
                 });
             }
             for t in s.repo.list_agent_threads() {
@@ -142,6 +162,8 @@ impl CommandPalette {
                     nav: Some(AppNav::Agent),
                     task_id: None,
                     thread_id: Some(t.id),
+                    note_id: None,
+                    kb_path: None,
                 });
             }
             for n in s.repo.list_notes() {
@@ -152,7 +174,30 @@ impl CommandPalette {
                     nav: Some(AppNav::Knowledge),
                     task_id: None,
                     thread_id: None,
+                    note_id: Some(n.id),
+                    kb_path: None,
                 });
+            }
+            if let Some(root) = s
+                .prefs
+                .knowledge_current
+                .clone()
+                .or_else(|| s.prefs.knowledge_roots.first().cloned())
+            {
+                if let Ok(files) = wb_host::list_files_recursive(std::path::Path::new(&root), 400) {
+                    for f in files.into_iter().filter(|e| !e.is_dir) {
+                        items.push(PaletteItem {
+                            id: format!("kb-{}", f.path),
+                            label: f.relative.clone(),
+                            kind: "知识库",
+                            nav: Some(AppNav::Knowledge),
+                            task_id: None,
+                            thread_id: None,
+                            note_id: None,
+                            kb_path: Some(f.path),
+                        });
+                    }
+                }
             }
         });
         items
@@ -187,6 +232,14 @@ impl CommandPalette {
             }
             if let Some(id) = item.thread_id {
                 s.active_thread_id = Some(id);
+            }
+            if let Some(path) = item.kb_path {
+                s.kb_current_file = Some(path);
+                s.nav = AppNav::Knowledge;
+            }
+            if item.note_id.is_some() {
+                // Workbench notes live under Knowledge; open the pane.
+                s.nav = AppNav::Knowledge;
             }
             s.palette_open = false;
         });

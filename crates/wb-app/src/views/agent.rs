@@ -6,6 +6,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Disableable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use gpui_webview::WebView;
 use wb_agent::{
     TurnPhase, begin_user_turn, clear_goal_round_flag, continue_turn_reply, create_thread,
     cycle_permission_mode, finish_continue_turn, finish_user_turn, load_providers,
@@ -13,12 +14,18 @@ use wb_agent::{
     resolve_turn_reply,
 };
 use wb_domain::BUILTIN_MODEL_REF;
-use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
-use wb_host::pick_directory;
+use wb_domain::{
+    AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE, agent_workspace_title_from_path, create_id,
+    normalize_agent_web_url, now_ms,
+};
+use wb_host::{cleanup_tool_spill, pick_directory};
 
 pub struct AgentPane {
     state: AppState,
     input: Entity<InputState>,
+    web_url_input: Entity<InputState>,
+    webview: Option<Entity<WebView>>,
+    loaded_web_url: Option<String>,
     busy: bool,
     status: String,
     _subs: Vec<Subscription>,
@@ -30,9 +37,14 @@ impl AgentPane {
             InputState::new(window, cx)
                 .placeholder("给 Agent 发消息，或 /task_list /project_list …")
         });
+        let web_url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://… 新建网页会话"));
         let mut this = Self {
             state,
             input: input.clone(),
+            web_url_input: web_url_input.clone(),
+            webview: None,
+            loaded_web_url: None,
             busy: false,
             status: String::new(),
             _subs: Vec::new(),
@@ -54,7 +66,132 @@ impl AgentPane {
                 }
             }),
         );
+        this._subs.push(cx.subscribe_in(
+            &web_url_input,
+            window,
+            |this, input, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let url = input.read(cx).value().to_string();
+                    this.create_web_thread(&url, window, cx);
+                }
+            },
+        ));
         this
+    }
+
+    pub fn hide_webview(&mut self, cx: &mut Context<Self>) {
+        if let Some(wv) = &self.webview {
+            wv.update(cx, |v, _| v.hide());
+        }
+        self.loaded_web_url = None;
+    }
+
+    fn ensure_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.webview.is_some() {
+            return true;
+        }
+        match WebView::build(wry::WebViewBuilder::new(), window, cx) {
+            Ok(view) => {
+                let entity = cx.new(|_cx| view);
+                entity.update(cx, |v, _| v.hide());
+                self.webview = Some(entity);
+                true
+            }
+            Err(e) => {
+                self.status = format!("无法创建网页视图：{e}");
+                false
+            }
+        }
+    }
+
+    fn sync_webview(&mut self, url: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(url) = url.filter(|u| !u.is_empty()) else {
+            self.hide_webview(cx);
+            return;
+        };
+        if !self.ensure_webview(window, cx) {
+            return;
+        }
+        let Some(wv) = self.webview.clone() else {
+            return;
+        };
+        if self.loaded_web_url.as_deref() != Some(url) {
+            wv.update(cx, |v, _| {
+                v.load_url(url);
+                v.show();
+            });
+            self.loaded_web_url = Some(url.to_string());
+        } else {
+            wv.update(cx, |v, _| v.show());
+        }
+    }
+
+    fn create_web_thread(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(url) = normalize_agent_web_url(raw) else {
+            self.status = "请输入有效网址（例如 https://example.com）".into();
+            cx.notify();
+            return;
+        };
+        if !self.ensure_webview(window, cx) {
+            cx.notify();
+            return;
+        }
+        let thread_id = self.state.with_mut(|s| {
+            let ws = s
+                .repo
+                .list_agent_workspaces()
+                .into_iter()
+                .next()
+                .expect("default workspace");
+            let mut thread = create_thread(
+                &ws.id,
+                WEB_AGENT_THREAD_TITLE,
+                s.prefs.agent.default_model_ref.as_deref(),
+            );
+            thread.web_url = Some(url.clone());
+            let id = thread.id.clone();
+            s.repo.upsert_agent_thread(thread);
+            s.active_thread_id = Some(id.clone());
+            id
+        });
+        let _ = thread_id;
+        self.web_url_input.update(cx, |i, cx| {
+            i.set_value(&url, window, cx);
+        });
+        self.sync_webview(Some(&url), window, cx);
+        self.status.clear();
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn apply_web_url_to_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.web_url_input.read(cx).value().to_string();
+        let Some(url) = normalize_agent_web_url(&raw) else {
+            self.status = "网址无效".into();
+            cx.notify();
+            return;
+        };
+        let updated = self.state.with_mut(|s| {
+            let Some(id) = s.active_thread_id.clone() else {
+                return false;
+            };
+            let Some(mut t) = s.repo.list_agent_threads().into_iter().find(|t| t.id == id) else {
+                return false;
+            };
+            t.web_url = Some(url.clone());
+            if t.title == "新会话" || t.title.is_empty() {
+                t.title = WEB_AGENT_THREAD_TITLE.into();
+            }
+            t.updated_at = now_ms();
+            s.repo.upsert_agent_thread(t);
+            true
+        });
+        if updated {
+            self.sync_webview(Some(&url), window, cx);
+            self.status.clear();
+            self.state.persist_if_dirty();
+        }
+        cx.notify();
     }
 
     fn ensure_thread(&mut self) -> String {
@@ -320,10 +457,15 @@ impl AgentPane {
             let ws = AgentWorkspace {
                 id: create_id(now),
                 title,
-                root_path: Some(path),
+                root_path: Some(path.clone()),
                 created_at: now,
                 updated_at: now,
             };
+            if let Ok(n) = cleanup_tool_spill(std::path::Path::new(&path)) {
+                if n > 0 {
+                    log::info!("cleaned {n} old spill files in {path}");
+                }
+            }
             self.state.with_mut(|s| s.repo.upsert_agent_workspace(ws));
             self.state.persist_if_dirty();
             cx.notify();
@@ -352,11 +494,43 @@ impl AgentPane {
         self.state.with_mut(|s| s.active_thread_id = Some(id));
         cx.notify();
     }
+
+    fn toggle_pin_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s.repo.list_agent_threads().into_iter().find(|t| t.id == id) {
+                t.pinned_at = if t.pinned_at.is_some() {
+                    None
+                } else {
+                    Some(now_ms())
+                };
+                t.updated_at = now_ms();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn toggle_archive_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s.repo.list_agent_threads().into_iter().find(|t| t.id == id) {
+                t.archived_at = if t.archived_at.is_some() {
+                    None
+                } else {
+                    Some(now_ms())
+                };
+                t.updated_at = now_ms();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
 }
 
 impl Render for AgentPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (threads, messages, workspaces, approvals, perm_label, model_label) =
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (threads, messages, workspaces, approvals, perm_label, model_label, active_web_url) =
             self.state.with(|s| {
                 let tid = s.active_thread_id.clone();
                 let messages = tid
@@ -370,6 +544,7 @@ impl Render for AgentPane {
                 let thread = tid
                     .as_deref()
                     .and_then(|id| s.repo.list_agent_threads().into_iter().find(|t| t.id == id));
+                let web_url = thread.as_ref().and_then(|t| t.web_url.clone());
                 let perm = thread
                     .as_ref()
                     .map(|t| permission_mode_label(t.permission_mode))
@@ -391,8 +566,12 @@ impl Render for AgentPane {
                     approvals,
                     perm,
                     model,
+                    web_url,
                 )
             });
+        self.sync_webview(active_web_url.as_deref(), window, cx);
+        let webview_el = self.webview.clone();
+        let has_web = active_web_url.is_some() && webview_el.is_some();
         let entity = cx.weak_entity();
         let active = self.state.with(|s| s.active_thread_id.clone());
         let status = self.status.clone();
@@ -446,11 +625,25 @@ impl Render for AgentPane {
             })
             .collect();
 
+        let mut threads = threads;
+        threads.sort_by(|a, b| match (a.pinned_at, b.pinned_at) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.updated_at.cmp(&a.updated_at),
+        });
         let thread_rows: Vec<_> = threads
             .into_iter()
+            .filter(|t| t.archived_at.is_none())
             .map(|t| {
                 let id = t.id.clone();
                 let selected = active.as_deref() == Some(id.as_str());
+                let pinned = t.pinned_at.is_some();
+                let title = if pinned {
+                    format!("[置顶] {}", t.title)
+                } else {
+                    t.title.clone()
+                };
                 let entity = entity.clone();
                 h_flex()
                     .w_full()
@@ -466,7 +659,7 @@ impl Render for AgentPane {
                             .flex_1()
                             .overflow_hidden()
                             .cursor_pointer()
-                            .child(t.title)
+                            .child(title)
                             .on_click({
                                 let id = id.clone();
                                 let entity = entity.clone();
@@ -480,12 +673,45 @@ impl Render for AgentPane {
                             }),
                     )
                     .child(
+                        Button::new(SharedString::from(format!("pin-thread-{id}")))
+                            .xsmall()
+                            .ghost()
+                            .label(if pinned { "取消置顶" } else { "置顶" })
+                            .on_click({
+                                let id = id.clone();
+                                let entity = entity.clone();
+                                move |_, _, app| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(app, |this, cx| this.toggle_pin_thread(&id, cx));
+                                    }
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("arch-thread-{id}")))
+                            .xsmall()
+                            .ghost()
+                            .label("归档")
+                            .on_click({
+                                let id = id.clone();
+                                let entity = entity.clone();
+                                move |_, _, app| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(app, |this, cx| {
+                                            this.toggle_archive_thread(&id, cx)
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .child(
                         Button::new(SharedString::from(format!("del-thread-{id}")))
                             .xsmall()
                             .ghost()
                             .label("×")
                             .on_click({
                                 let id = id.clone();
+                                let entity = entity.clone();
                                 move |_, _, app| {
                                     if let Some(e) = entity.upgrade() {
                                         e.update(app, |this, cx| this.delete_thread(&id, cx));
@@ -575,6 +801,15 @@ impl Render for AgentPane {
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.cycle_thread_model(cx)),
                                     ),
+                            )
+                            .child(
+                                Button::new("agent-web-new")
+                                    .small()
+                                    .label("网页会话")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let url = this.web_url_input.read(cx).value().to_string();
+                                        this.create_web_thread(&url, window, cx);
+                                    })),
                             ),
                     )
                     .child(
@@ -597,6 +832,55 @@ impl Render for AgentPane {
                     .h_full()
                     .p_3()
                     .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Input::new(&self.web_url_input))
+                            .child(
+                                Button::new("agent-web-go")
+                                    .small()
+                                    .primary()
+                                    .label(if has_web {
+                                        "打开/刷新"
+                                    } else {
+                                        "打开网页"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let has = this.state.with(|s| {
+                                            s.active_thread_id
+                                                .as_ref()
+                                                .and_then(|id| {
+                                                    s.repo
+                                                        .list_agent_threads()
+                                                        .into_iter()
+                                                        .find(|t| &t.id == id)
+                                                })
+                                                .and_then(|t| t.web_url)
+                                                .is_some()
+                                        });
+                                        if has {
+                                            this.apply_web_url_to_active(window, cx);
+                                        } else {
+                                            let url =
+                                                this.web_url_input.read(cx).value().to_string();
+                                            this.create_web_thread(&url, window, cx);
+                                        }
+                                    })),
+                            ),
+                    )
+                    .when(has_web, |col| {
+                        col.child(
+                            div()
+                                .h(px(280.))
+                                .w_full()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(border)
+                                .overflow_hidden()
+                                .child(webview_el.expect("webview when has_web")),
+                        )
+                    })
                     .when(!approval_rows.is_empty(), |col| {
                         col.child(v_flex().gap_2().children(approval_rows))
                     })

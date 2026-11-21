@@ -246,6 +246,98 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "task_reopen",
+            ToolEffect::Write,
+            "重新打开任务（同 task_incomplete）",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_get",
+            ToolEffect::Read,
+            "查看单个任务（含子任务）",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_list_today",
+            ToolEffect::Read,
+            "列出今日任务",
+            serde_json::json!({}),
+        ),
+        tool(
+            "task_update",
+            ToolEffect::Write,
+            "修改任务标题、备注、项目或预估",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "title": { "type": "string" },
+                "notes": { "type": "string" },
+                "projectId": { "type": "string" },
+                "timeEstimateMinutes": { "type": "number" }
+            }),
+        ),
+        tool(
+            "task_schedule",
+            ToolEffect::Write,
+            "设置计划日或计划时刻",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "dueDay": { "type": "string" },
+                "dueWithTime": { "type": "integer" },
+                "remindOption": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_set_deadline",
+            ToolEffect::Write,
+            "设置截止日期或时刻",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "deadlineDay": { "type": "string" },
+                "deadlineWithTime": { "type": "integer" }
+            }),
+        ),
+        tool(
+            "task_set_reminder",
+            ToolEffect::Write,
+            "设置提醒：remindAt 或 remindOption",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "remindOption": { "type": "string" },
+                "remindAt": { "type": "integer" }
+            }),
+        ),
+        tool(
+            "task_move_backlog",
+            ToolEffect::Write,
+            "清除计划，移入待办",
+            serde_json::json!({
+                "taskId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_add_subtask",
+            ToolEffect::Write,
+            "为任务添加子任务",
+            serde_json::json!({
+                "parentId": { "type": "string" },
+                "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "task_delete",
+            ToolEffect::Write,
+            "删除任务及其子任务",
+            serde_json::json!({
+                "taskId": { "type": "string" }
+            }),
+        ),
+        tool(
             "project_list",
             ToolEffect::Read,
             "列出项目",
@@ -257,6 +349,16 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             "创建项目",
             serde_json::json!({
                 "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "project_archive",
+            ToolEffect::Write,
+            "归档或取消归档项目",
+            serde_json::json!({
+                "projectId": { "type": "string" },
+                "title": { "type": "string" },
+                "archived": { "type": "boolean" }
             }),
         ),
         tool(
@@ -283,6 +385,16 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "tag_assign",
+            ToolEffect::Write,
+            "按标签名或 id 给任务打标，不存在则创建",
+            serde_json::json!({
+                "taskId": { "type": "string" },
+                "tagId": { "type": "string" },
+                "tagTitle": { "type": "string" }
+            }),
+        ),
+        tool(
             "note_list",
             ToolEffect::Read,
             "列出应用内笔记",
@@ -298,10 +410,62 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "note_get",
+            ToolEffect::Read,
+            "读取一条应用内笔记",
+            serde_json::json!({
+                "noteId": { "type": "string" },
+                "title": { "type": "string" }
+            }),
+        ),
+        tool(
+            "note_search",
+            ToolEffect::Read,
+            "按标题或正文搜索笔记",
+            serde_json::json!({
+                "query": { "type": "string" }
+            }),
+        ),
+        tool(
+            "note_update",
+            ToolEffect::Write,
+            "更新笔记标题或正文",
+            serde_json::json!({
+                "noteId": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            }),
+        ),
+        tool(
+            "note_delete",
+            ToolEffect::Write,
+            "删除应用内笔记",
+            serde_json::json!({
+                "noteId": { "type": "string" }
+            }),
+        ),
+        tool(
             "notification_list",
             ToolEffect::Read,
             "列出通知",
             serde_json::json!({}),
+        ),
+        tool(
+            "notification_dismiss",
+            ToolEffect::Write,
+            "关闭一条通知",
+            serde_json::json!({
+                "notificationId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "notification_snooze",
+            ToolEffect::Write,
+            "稍后提醒一条通知",
+            serde_json::json!({
+                "notificationId": { "type": "string" },
+                "minutes": { "type": "integer" }
+            }),
         ),
         tool(
             "notification_create",
@@ -368,6 +532,20 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             serde_json::json!({
                 "scheduleId": { "type": "string" }
             }),
+        ),
+        tool(
+            "timer_start",
+            ToolEffect::Write,
+            "开始为任务计时（有子任务的父任务不可计时）",
+            serde_json::json!({
+                "taskId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "timer_stop",
+            ToolEffect::Write,
+            "停止当前计时并记入当日用时",
+            serde_json::json!({}),
         ),
         tool(
             "timer_status",
@@ -513,12 +691,99 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "memory_save",
+            ToolEffect::Write,
+            "同 memory_add",
+            serde_json::json!({
+                "text": { "type": "string" }
+            }),
+        ),
+        tool(
             "memory_remove",
             ToolEffect::Write,
             "按序号或全文删除一条记忆（index 从 1 起）",
             serde_json::json!({
                 "index": { "type": "integer" },
                 "text": { "type": "string" }
+            }),
+        ),
+        tool(
+            "memory_forget",
+            ToolEffect::Write,
+            "同 memory_remove",
+            serde_json::json!({
+                "index": { "type": "integer" },
+                "text": { "type": "string" }
+            }),
+        ),
+        tool(
+            "hook_list",
+            ToolEffect::Read,
+            "列出已启用的钩子",
+            serde_json::json!({}),
+        ),
+        tool(
+            "session_set_model",
+            ToolEffect::Write,
+            "切换当前会话模型（providerId/modelId）",
+            serde_json::json!({
+                "modelRef": { "type": "string" },
+                "threadId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "subagent_list",
+            ToolEffect::Read,
+            "列出 prefs 中登记的子智能体定义",
+            serde_json::json!({}),
+        ),
+        tool(
+            "subagent",
+            ToolEffect::Write,
+            "托管启动子智能体；wait=true 同步完成，否则立即返回 agentId",
+            serde_json::json!({
+                "name": { "type": "string" },
+                "task": { "type": "string" },
+                "wait": { "type": "boolean" },
+                "threadId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "list_agents",
+            ToolEffect::Read,
+            "列出本会话托管的子智能体",
+            serde_json::json!({
+                "scope": { "type": "string" },
+                "threadId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "send_message",
+            ToolEffect::Write,
+            "向托管子智能体发送消息",
+            serde_json::json!({
+                "agent_id": { "type": "string" },
+                "message": { "type": "string" },
+                "threadId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "interrupt_agent",
+            ToolEffect::Write,
+            "中断托管子智能体",
+            serde_json::json!({
+                "agent_id": { "type": "string" },
+                "threadId": { "type": "string" }
+            }),
+        ),
+        tool(
+            "host_tool_run",
+            ToolEffect::Write,
+            "运行本机白名单工具（如 git/node/python）",
+            serde_json::json!({
+                "toolId": { "type": "string" },
+                "args": { "type": "string" },
+                "cwd": { "type": "string" }
             }),
         ),
         tool(
@@ -588,6 +853,16 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             serde_json::json!({
                 "index": { "type": "integer" },
                 "name": { "type": "string" }
+            }),
+        ),
+        tool(
+            "mcp_call",
+            ToolEffect::Write,
+            "连接已配置的 stdio MCP：不传 tool 时列出工具，否则调用",
+            serde_json::json!({
+                "name": { "type": "string" },
+                "tool": { "type": "string" },
+                "arguments": { "type": "object" }
             }),
         ),
     ]
@@ -707,6 +982,12 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             serde_json::json!({ "path": { "type": "string" } }),
         ),
         tool(
+            "ocr",
+            ToolEffect::Read,
+            "对工作区图片做 OCR 文字识别（tesseract 或已下载的 PaddleOCR 模型）",
+            serde_json::json!({ "path": { "type": "string" } }),
+        ),
+        tool(
             "job_start",
             ToolEffect::Write,
             "后台启动 shell 任务",
@@ -757,6 +1038,15 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "office_to_pdf",
+            ToolEffect::Write,
+            "用本机 LibreOffice/soffice 把文档转为 PDF",
+            serde_json::json!({
+                "path": { "type": "string" },
+                "output": { "type": "string" }
+            }),
+        ),
+        tool(
             "working_directory",
             ToolEffect::None,
             "设置或查看会话工作目录（相对工作区）",
@@ -767,7 +1057,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         tool(
             "terminal_open",
             ToolEffect::Write,
-            "打开轻量终端会话（非 PTY）",
+            "打开交互终端会话（portable-pty / ConPTY）",
             serde_json::json!({
                 "shell": { "type": "string" }
             }),

@@ -31,7 +31,7 @@ pub fn require_observed_for_existing(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "FS_NOT_OBSERVED：请先 read / read_image / view 后再修改已存在文件：{}",
+        "FS_NOT_OBSERVED：请先 read / read_image / ocr / view 后再修改已存在文件：{}",
         path.display()
     ))
 }

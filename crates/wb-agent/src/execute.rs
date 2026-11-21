@@ -1,21 +1,31 @@
 use crate::fs_observe::{observe_path, require_observed_for_existing};
+use crate::managed_agents::{
+    finish_managed_agent, get_managed_agent, interrupt_managed_agent, list_managed_agents,
+    register_managed_agent, send_managed_agent_message, take_managed_agent_inbox,
+};
 use crate::session_goal::{create_goal, get_goal, update_goal};
 use crate::session_todo::{SessionTodo, list_todos, write_todos};
+use crate::turn::{resume_thread_turn_blocking, run_user_turn_blocking};
 use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use wb_domain::{
-    AgentMessage, AgentPermissionMode, NotificationKind, PatchAction, TimedIntervalUnit,
-    TimedSchedulePreset, ToolEffect, ToolGate, ToolSpec, apply_hunks, builtin_host_tools,
-    create_timed_task_draft, format_local_day, gate_tool, make_custom_schedule,
-    make_preset_schedule, now_ms, parse_apply_patch, settle_timer_segment, workspace_tools,
+    AgentMessage, AgentPermissionMode, AgentRole, AgentThread, BUILTIN_MODEL_REF, NotificationKind,
+    PatchAction, ReminderOptionId, SchedulePatch, Task, TimedIntervalUnit, TimedSchedulePreset,
+    ToolEffect, ToolGate, ToolSpec, apply_hunks, apply_schedule_patch, at_local_time,
+    builtin_host_tools, clear_plan_fields, create_id, create_task_draft, create_timed_task_draft,
+    format_local_day, gate_tool, is_today_member, make_custom_schedule, make_preset_schedule,
+    now_ms, parse_apply_patch, settle_timer_segment, shift_remind_at, workspace_tools,
 };
 use wb_host::{
-    global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
-    present_path, probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd,
-    run_shell_in, run_shell_kind, set_agent_cwd, web_fetch, web_search, write_text,
+    cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive, list_plugins,
+    list_skills, load_skill, maybe_spill, mcp_http_call, mcp_stdio_call, present_path,
+    probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd, run_shell_in,
+    run_shell_kind, set_agent_cwd, web_fetch, web_search, which_bin, write_text,
 };
-use wb_store::{MemoryWorkbenchRepository, load_prefs, save_prefs};
+use wb_store::{MemoryWorkbenchRepository, load_prefs, update_prefs};
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolResult {
@@ -202,15 +212,136 @@ pub fn execute_tool(
                 None => Ok(ToolResult::err_text("任务不存在")),
             }
         }
-        "task_incomplete" => {
-            let id = args
-                .get("taskId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 taskId"))?;
-            match repo.incomplete_task(id) {
+        "task_incomplete" | "task_reopen" => {
+            let task = match resolve_task(repo, args) {
+                Ok(t) => t,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            match repo.incomplete_task(&task.id) {
                 Some(t) => Ok(ToolResult::ok_text(format!("已重开：{}", t.title))),
                 None => Ok(ToolResult::err_text("任务不存在")),
             }
+        }
+        "task_get" => {
+            let task = match resolve_task(repo, args) {
+                Ok(t) => t,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let subs: Vec<_> = repo
+                .list_tasks()
+                .into_iter()
+                .filter(|t| t.parent_id.as_deref() == Some(task.id.as_str()))
+                .map(|t| {
+                    format!(
+                        "  - [{}] {} ({})",
+                        if t.is_done { "x" } else { " " },
+                        t.title,
+                        t.id
+                    )
+                })
+                .collect();
+            let mut text = format_task_detail(&task);
+            if !subs.is_empty() {
+                text.push_str("\n子任务:\n");
+                text.push_str(&subs.join("\n"));
+            }
+            Ok(ToolResult::ok_text(text))
+        }
+        "task_list_today" => {
+            let today = format_local_day(now_ms());
+            let lines: Vec<_> = repo
+                .list_tasks()
+                .into_iter()
+                .filter(|t| !t.is_done && t.parent_id.is_none() && is_today_member(t, &today))
+                .map(|t| format!("- {} ({})", t.title, t.id))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "今日没有任务".into()
+            } else {
+                format!("今日 {} 项\n{}", lines.len(), lines.join("\n"))
+            }))
+        }
+        "task_update" => {
+            let task = match resolve_task(repo, args) {
+                Ok(t) => t,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let Some(mut next) = repo.get_task(&task.id).cloned() else {
+                return Ok(ToolResult::err_text("任务不存在"));
+            };
+            if let Some(title) = arg_str(args, &["title"]) {
+                if args.get("taskId").is_some() || args.get("id").is_some() {
+                    next.title = title.to_string();
+                }
+            }
+            if let Some(notes) = args.get("notes").and_then(|v| v.as_str()) {
+                next.notes = notes.to_string();
+            }
+            if let Some(pid) = arg_str(args, &["projectId"]) {
+                next.project_id = pid.to_string();
+            }
+            if let Some(mins) = args.get("timeEstimateMinutes").and_then(|v| v.as_i64()) {
+                next.time_estimate = mins * 60_000;
+            }
+            next.updated_at = now_ms();
+            let title = next.title.clone();
+            repo.upsert_task(next);
+            Ok(ToolResult::ok_text(format!("已修改任务「{title}」")))
+        }
+        "task_schedule" | "task_set_deadline" => match apply_task_when(repo, args) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
+        "task_set_reminder" => match apply_task_reminder(repo, args) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
+        "task_move_backlog" => {
+            let task = match resolve_task(repo, args) {
+                Ok(t) => t,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let Some(mut next) = repo.get_task(&task.id).cloned() else {
+                return Ok(ToolResult::err_text("任务不存在"));
+            };
+            clear_plan_fields(&mut next);
+            next.updated_at = now_ms();
+            let title = next.title.clone();
+            repo.upsert_task(next);
+            Ok(ToolResult::ok_text(format!("已把「{title}」移入待办")))
+        }
+        "task_add_subtask" => {
+            let title = arg_str(args, &["title", "subtaskTitle"]).unwrap_or("");
+            if title.is_empty() {
+                return Ok(ToolResult::err_text("子任务标题不能为空"));
+            }
+            let parent = match resolve_task(
+                repo,
+                &serde_json::json!({
+                    "taskId": args.get("parentId").cloned().unwrap_or(Value::Null),
+                    "title": args.get("parentTitle").cloned().unwrap_or(Value::Null),
+                }),
+            ) {
+                Ok(t) => t,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let child = create_task_draft(title, Some(&parent.project_id), Some(&parent.id), None);
+            let id = child.id.clone();
+            let label = child.title.clone();
+            repo.upsert_task(child);
+            Ok(ToolResult::ok_text(format!(
+                "已添加子任务「{label}」({id})"
+            )))
+        }
+        "task_delete" => {
+            let task = match resolve_task(repo, args) {
+                Ok(t) => t,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let title = task.title.clone();
+            let id = task.id.clone();
+            repo.delete_task(&id);
+            Ok(ToolResult::ok_text(format!("已删除任务「{title}」")))
         }
         "project_list" => {
             let lines: Vec<_> = repo
@@ -235,6 +366,30 @@ pub fn execute_tool(
                 "已创建项目 {} · {}",
                 p.id, p.title
             )))
+        }
+        "project_archive" => {
+            let archived = args
+                .get("archived")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let project = if let Some(id) = arg_str(args, &["projectId", "id"]) {
+                repo.list_projects().into_iter().find(|p| p.id == id)
+            } else if let Some(title) = arg_str(args, &["title"]) {
+                repo.list_projects().into_iter().find(|p| p.title == title)
+            } else {
+                None
+            };
+            let Some(project) = project else {
+                return Ok(ToolResult::err_text("项目不存在"));
+            };
+            match repo.set_project_archived(&project.id, archived) {
+                Some(p) => Ok(ToolResult::ok_text(format!(
+                    "已{}项目「{}」",
+                    if archived { "归档" } else { "恢复" },
+                    p.title
+                ))),
+                None => Ok(ToolResult::err_text("收件箱不能归档")),
+            }
         }
         "tag_list" => {
             let lines: Vec<_> = repo
@@ -279,6 +434,10 @@ pub fn execute_tool(
                 "已将标签 {tag_id} 加到任务 {task_id}"
             )))
         }
+        "tag_assign" => match assign_tag(repo, args) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
         "note_list" => {
             let notes = repo.list_notes();
             let lines: Vec<_> = notes
@@ -302,6 +461,69 @@ pub fn execute_tool(
                 "已创建笔记 {} · {}",
                 n.id, n.title
             )))
+        }
+        "note_get" => {
+            let note = match resolve_note(repo, args) {
+                Ok(n) => n,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            Ok(ToolResult::ok_text(format!(
+                "{} ({})\n{}",
+                note.title, note.id, note.body_md
+            )))
+        }
+        "note_search" => {
+            let q = arg_str(args, &["query"]).unwrap_or("").to_lowercase();
+            if q.is_empty() {
+                return Ok(ToolResult::err_text("请提供搜索词"));
+            }
+            let lines: Vec<_> = repo
+                .list_notes()
+                .into_iter()
+                .filter(|n| {
+                    n.title.to_lowercase().contains(&q) || n.body_md.to_lowercase().contains(&q)
+                })
+                .map(|n| format!("- {} ({})", n.title, n.id))
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无匹配笔记）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "note_update" => {
+            let note = match resolve_note(repo, args) {
+                Ok(n) => n,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let Some(mut next) = repo.get_note(&note.id).cloned() else {
+                return Ok(ToolResult::err_text("笔记不存在"));
+            };
+            if let Some(title) = arg_str(args, &["title"]) {
+                if args.get("noteId").is_some() || args.get("id").is_some() {
+                    next.title = title.to_string();
+                }
+            }
+            if let Some(body) = args
+                .get("body")
+                .or_else(|| args.get("bodyMd"))
+                .and_then(|v| v.as_str())
+            {
+                next.body_md = body.to_string();
+            }
+            next.updated_at = now_ms();
+            let title = next.title.clone();
+            repo.upsert_note(next);
+            Ok(ToolResult::ok_text(format!("已更新笔记「{title}」")))
+        }
+        "note_delete" => {
+            let note = match resolve_note(repo, args) {
+                Ok(n) => n,
+                Err(msg) => return Ok(ToolResult::err_text(msg)),
+            };
+            let title = note.title.clone();
+            repo.delete_note(&note.id);
+            Ok(ToolResult::ok_text(format!("已删除笔记「{title}」")))
         }
         "notification_list" => {
             let notes = repo.list_notifications();
@@ -342,6 +564,23 @@ pub fn execute_tool(
                 "已创建通知 {} · {}",
                 n.id, n.title
             )))
+        }
+        "notification_dismiss" => {
+            let id = arg_str(args, &["notificationId", "id"]).unwrap_or("");
+            if id.is_empty() {
+                return Ok(ToolResult::err_text("需要 notificationId"));
+            }
+            repo.dismiss_notification(id);
+            Ok(ToolResult::ok_text("已关闭通知"))
+        }
+        "notification_snooze" => {
+            let id = arg_str(args, &["notificationId", "id"]).unwrap_or("");
+            if id.is_empty() {
+                return Ok(ToolResult::err_text("需要 notificationId"));
+            }
+            let minutes = args.get("minutes").and_then(|v| v.as_i64()).unwrap_or(10);
+            repo.snooze_notification(id, now_ms() + minutes * 60_000);
+            Ok(ToolResult::ok_text(format!("已推迟通知 {minutes} 分钟")))
         }
         "schedule_list" => {
             let tasks = repo.list_timed_tasks();
@@ -507,6 +746,14 @@ pub fn execute_tool(
             repo.delete_timed_task(id);
             Ok(ToolResult::ok_text(format!("已删除定时任务 {id}")))
         }
+        "timer_start" => match start_tool_timer(repo, args) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
+        "timer_stop" => match stop_tool_timer(repo) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
         "timer_status" => {
             let id = args
                 .get("taskId")
@@ -660,7 +907,7 @@ pub fn execute_tool(
                 None => Ok(ToolResult::err_text("缺少 key")),
             }
         }
-        "settings_set" => {
+        "settings_set" | "settings_patch" => {
             let key = args
                 .get("key")
                 .and_then(|v| v.as_str())
@@ -686,62 +933,65 @@ pub fn execute_tool(
                     .map(|x| x.to_string())
                     .collect()
             };
-            let mut prefs = load_prefs().unwrap_or_default();
-            match key {
-                "themeMode" => {
-                    let v = as_str().to_lowercase();
-                    prefs.theme_mode = match v.as_str() {
-                        "dark" => wb_domain::ThemeModePref::Dark,
-                        "light" => wb_domain::ThemeModePref::Light,
-                        _ => {
-                            return Ok(ToolResult::err_text("themeMode 仅支持 light/dark"));
-                        }
-                    };
-                }
-                "systemNotifications" => {
-                    let on = raw.as_bool().unwrap_or_else(|| {
-                        matches!(
-                            as_str().to_lowercase().as_str(),
-                            "1" | "true" | "yes" | "on"
-                        )
-                    });
-                    prefs.system_notifications = on;
-                }
-                "httpProxy" => {
-                    let v = as_str();
-                    prefs.http_proxy = if v.trim().is_empty() {
-                        None
-                    } else {
-                        Some(v.trim().to_string())
-                    };
-                }
-                "defaultModelRef" => {
-                    let v = as_str();
-                    prefs.agent.default_model_ref = if v.trim().is_empty() {
-                        None
-                    } else {
-                        Some(v.trim().to_string())
-                    };
-                }
-                "personality" => {
-                    let v = as_str();
-                    prefs.agent.personality = if v.trim().is_empty() {
-                        None
-                    } else {
-                        Some(v.trim().to_string())
-                    };
-                }
-                "skillsDirs" => prefs.agent.skills_dirs = split_dirs(&as_str()),
-                "pluginsDirs" => prefs.agent.plugins_dirs = split_dirs(&as_str()),
-                "" => return Ok(ToolResult::err_text("缺少 key")),
-                other => {
-                    return Ok(ToolResult::err_text(format!(
-                        "不支持写入：{other}（白名单同上）"
-                    )));
-                }
+            if key.is_empty() {
+                return Ok(ToolResult::err_text("缺少 key"));
             }
-            save_prefs(&prefs)?;
-            Ok(ToolResult::ok_text(format!("已更新 {key}")))
+            let result = update_prefs(|prefs| {
+                match key {
+                    "themeMode" => {
+                        let v = as_str().to_lowercase();
+                        prefs.theme_mode = match v.as_str() {
+                            "dark" => wb_domain::ThemeModePref::Dark,
+                            "light" => wb_domain::ThemeModePref::Light,
+                            _ => {
+                                return Ok(ToolResult::err_text("themeMode 仅支持 light/dark"));
+                            }
+                        };
+                    }
+                    "systemNotifications" => {
+                        let on = raw.as_bool().unwrap_or_else(|| {
+                            matches!(
+                                as_str().to_lowercase().as_str(),
+                                "1" | "true" | "yes" | "on"
+                            )
+                        });
+                        prefs.system_notifications = on;
+                    }
+                    "httpProxy" => {
+                        let v = as_str();
+                        prefs.http_proxy = if v.trim().is_empty() {
+                            None
+                        } else {
+                            Some(v.trim().to_string())
+                        };
+                    }
+                    "defaultModelRef" => {
+                        let v = as_str();
+                        prefs.agent.default_model_ref = if v.trim().is_empty() {
+                            None
+                        } else {
+                            Some(v.trim().to_string())
+                        };
+                    }
+                    "personality" => {
+                        let v = as_str();
+                        prefs.agent.personality = if v.trim().is_empty() {
+                            None
+                        } else {
+                            Some(v.trim().to_string())
+                        };
+                    }
+                    "skillsDirs" => prefs.agent.skills_dirs = split_dirs(&as_str()),
+                    "pluginsDirs" => prefs.agent.plugins_dirs = split_dirs(&as_str()),
+                    other => {
+                        return Ok(ToolResult::err_text(format!(
+                            "不支持写入：{other}（白名单同上）"
+                        )));
+                    }
+                }
+                Ok(ToolResult::ok_text(format!("已更新 {key}")))
+            })?;
+            Ok(result)
         }
         "host_tool_list" => {
             let lines: Vec<_> = all_tools()
@@ -755,6 +1005,176 @@ pub fn execute_tool(
                 })
                 .collect();
             Ok(ToolResult::ok_text(lines.join("\n")))
+        }
+        "host_tool_run" => match run_host_tool(args, workspace_root) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
+        "hook_list" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let lines: Vec<_> = prefs
+                .agent
+                .hooks
+                .iter()
+                .filter(|h| h.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))
+                .map(|h| {
+                    let event = h.get("event").and_then(|v| v.as_str()).unwrap_or("event");
+                    let title = h.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("- {event} · {title}")
+                })
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "还没有钩子".into()
+            } else {
+                format!("有 {} 个钩子\n{}", lines.len(), lines.join("\n"))
+            }))
+        }
+        "session_set_model" => {
+            let model_ref = arg_str(args, &["modelRef", "model"]).unwrap_or("");
+            if model_ref.is_empty()
+                || (!model_ref.contains('/') && !model_ref.starts_with("builtin:"))
+            {
+                return Ok(ToolResult::err_text(
+                    "模型引用无效（形如 providerId/modelId 或 builtin:…）",
+                ));
+            }
+            let thread_id = arg_str(args, &["threadId", "id"]).unwrap_or("");
+            if thread_id.is_empty() {
+                return Ok(ToolResult::err_text("缺少 threadId"));
+            }
+            let Some(mut thread) = repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == thread_id)
+            else {
+                return Ok(ToolResult::err_text("会话不存在"));
+            };
+            thread.model_ref = model_ref.to_string();
+            thread.updated_at = now_ms();
+            repo.upsert_agent_thread(thread);
+            Ok(ToolResult::ok_text(format!("已切换模型 {model_ref}")))
+        }
+        "subagent_list" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let lines: Vec<_> = prefs
+                .agent
+                .subagents
+                .iter()
+                .map(|s| {
+                    let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("- `{name}` {desc}")
+                })
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "还没有子智能体。可在 prefs.agent.subagents 添加，或由插件注册。".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "subagent" => match spawn_subagent(repo, args) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
+        "list_agents" => {
+            let thread_id = arg_str(args, &["threadId"]).unwrap_or("");
+            if thread_id.is_empty() {
+                return Ok(ToolResult::err_text("缺少 threadId"));
+            }
+            let descendants = arg_str(args, &["scope"]).is_some_and(|s| s == "descendants");
+            let agents = list_managed_agents(thread_id, descendants);
+            if agents.is_empty() {
+                return Ok(ToolResult::ok_text("没有托管子智能体"));
+            }
+            let lines: Vec<_> = agents
+                .into_iter()
+                .map(|a| {
+                    format!(
+                        "- {} [{}] {} depth={} inbox={}",
+                        a.id,
+                        a.name,
+                        a.status.as_str(),
+                        a.depth,
+                        a.inbox
+                    )
+                })
+                .collect();
+            Ok(ToolResult::ok_text(format!(
+                "有 {} 个托管子智能体\n{}",
+                lines.len(),
+                lines.join("\n")
+            )))
+        }
+        "send_message" => {
+            let parent = arg_str(args, &["threadId"]).unwrap_or("");
+            let agent_id = arg_str(args, &["agent_id", "agentId", "id"]).unwrap_or("");
+            let message = arg_str(args, &["message", "text"]).unwrap_or("");
+            match send_managed_agent_message(agent_id, parent, message) {
+                Ok(view) => {
+                    let drained = take_managed_agent_inbox(agent_id);
+                    if let Some(thread) = repo
+                        .list_agent_threads()
+                        .into_iter()
+                        .find(|t| t.id == agent_id)
+                    {
+                        let proxy = load_prefs()
+                            .ok()
+                            .and_then(|p| p.http_proxy)
+                            .filter(|s| !s.trim().is_empty());
+                        for text in &drained {
+                            let now = now_ms();
+                            repo.upsert_agent_message(AgentMessage {
+                                id: create_id(now),
+                                thread_id: thread.id.clone(),
+                                role: AgentRole::User,
+                                content: text.clone(),
+                                tool_name: None,
+                                tool_call_id: None,
+                                tool_calls_json: None,
+                                created_at: now,
+                            });
+                            match resume_thread_turn_blocking(repo, &thread, proxy.as_deref()) {
+                                Ok(out) => {
+                                    let _ = finish_managed_agent(agent_id, &out.assistant.content);
+                                }
+                                Err(e) => {
+                                    let reply = format!("子智能体续写失败：{e}");
+                                    let now = now_ms();
+                                    repo.upsert_agent_message(AgentMessage {
+                                        id: create_id(now),
+                                        thread_id: thread.id.clone(),
+                                        role: AgentRole::Assistant,
+                                        content: reply.clone(),
+                                        tool_name: None,
+                                        tool_call_id: None,
+                                        tool_calls_json: None,
+                                        created_at: now,
+                                    });
+                                    let _ = finish_managed_agent(agent_id, &reply);
+                                }
+                            }
+                        }
+                    }
+                    Ok(ToolResult::ok_text(format!(
+                        "已向 {} 投递消息（status={}）",
+                        view.id,
+                        view.status.as_str()
+                    )))
+                }
+                Err(e) => Ok(ToolResult::err_text(e)),
+            }
+        }
+        "interrupt_agent" => {
+            let parent = arg_str(args, &["threadId"]).unwrap_or("");
+            let agent_id = arg_str(args, &["agent_id", "agentId", "id"]).unwrap_or("");
+            match interrupt_managed_agent(agent_id, parent) {
+                Ok(view) => Ok(ToolResult::ok_text(format!(
+                    "已请求中断 {}（{}）",
+                    view.id,
+                    view.status.as_str()
+                ))),
+                Err(e) => Ok(ToolResult::err_text(e)),
+            }
         }
         "session_search" => {
             let q = args
@@ -1025,7 +1445,7 @@ pub fn execute_tool(
                 lines.join("\n")
             }))
         }
-        "memory_add" => {
+        "memory_add" | "memory_save" => {
             let text = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -1034,31 +1454,33 @@ pub fn execute_tool(
             if text.is_empty() {
                 return Ok(ToolResult::err_text("记忆内容不能为空"));
             }
-            let mut prefs = load_prefs().unwrap_or_default();
-            if !prefs.agent.memories.iter().any(|m| m == text) {
-                prefs.agent.memories.push(text.to_string());
-                save_prefs(&prefs)?;
-            }
+            update_prefs(|prefs| {
+                if !prefs.agent.memories.iter().any(|m| m == text) {
+                    prefs.agent.memories.push(text.to_string());
+                }
+                Ok(())
+            })?;
             Ok(ToolResult::ok_text(format!("已记住：{text}")))
         }
-        "memory_remove" => {
-            let mut prefs = load_prefs().unwrap_or_default();
-            let before = prefs.agent.memories.len();
-            if let Some(idx) = args.get("index").and_then(|v| v.as_u64()) {
-                let i = idx.saturating_sub(1) as usize;
-                if i < prefs.agent.memories.len() {
-                    prefs.agent.memories.remove(i);
+        "memory_remove" | "memory_forget" => {
+            let result = update_prefs(|prefs| {
+                let before = prefs.agent.memories.len();
+                if let Some(idx) = args.get("index").and_then(|v| v.as_u64()) {
+                    let i = idx.saturating_sub(1) as usize;
+                    if i < prefs.agent.memories.len() {
+                        prefs.agent.memories.remove(i);
+                    }
+                } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+                    prefs.agent.memories.retain(|m| m != text);
+                } else {
+                    return Ok(ToolResult::err_text("需要 index 或 text"));
                 }
-            } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
-                prefs.agent.memories.retain(|m| m != text);
-            } else {
-                return Ok(ToolResult::err_text("需要 index 或 text"));
-            }
-            save_prefs(&prefs)?;
-            Ok(ToolResult::ok_text(format!(
-                "已删除 {} 条记忆",
-                before.saturating_sub(prefs.agent.memories.len())
-            )))
+                Ok(ToolResult::ok_text(format!(
+                    "已删除 {} 条记忆",
+                    before.saturating_sub(prefs.agent.memories.len())
+                )))
+            })?;
+            Ok(result)
         }
         "todo_list" => {
             let lines: Vec<_> = list_todos()
@@ -1354,9 +1776,11 @@ pub fn execute_tool(
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
             let root = effective_root(workspace_root).ok();
             let result = run_shell_in(command, root.as_deref(), workspace_root, 120)?;
+            let raw = format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr);
+            let content = maybe_spill(root.as_deref().map(Path::new), "shell", raw);
             Ok(ToolResult {
                 ok: result.code == 0,
-                content: format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr),
+                content,
                 open_view: None,
             })
         }
@@ -1375,9 +1799,11 @@ pub fn execute_tool(
                     )));
                 }
             };
+            let raw = format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr);
+            let content = maybe_spill(root.as_deref().map(Path::new), kind, raw);
             Ok(ToolResult {
                 ok: result.code == 0,
-                content: format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr),
+                content,
                 open_view: None,
             })
         }
@@ -1410,6 +1836,17 @@ pub fn execute_tool(
                 info.note
             )))
         }
+        "ocr" => {
+            let rel = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
+            observe_path(&path);
+            let text = wb_host::ocr_image(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(ToolResult::ok_text(text))
+        }
         "job_start" => {
             let command = args
                 .get("command")
@@ -1426,15 +1863,11 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 jobId"))?;
             match global_jobs().output(id) {
-                Some((out, code)) => Ok(ToolResult::ok_text(format!(
-                    "code={:?}\n{}",
-                    code,
-                    if out.len() > 20_000 {
-                        format!("{}…\n[truncated {} bytes]", &out[..20_000], out.len())
-                    } else {
-                        out
-                    }
-                ))),
+                Some((out, code)) => {
+                    let root = effective_root(workspace_root).ok();
+                    let body = maybe_spill(root.as_deref().map(Path::new), "job", out);
+                    Ok(ToolResult::ok_text(format!("code={code:?}\n{body}")))
+                }
                 None => Ok(ToolResult::err_text("任务不存在")),
             }
         }
@@ -1486,14 +1919,17 @@ pub fn execute_tool(
             if result.truncated {
                 body.push_str("\n…[truncated]");
             }
+            let root = effective_root(workspace_root).ok();
+            let raw = format!(
+                "HTTP {} · {}\n{}",
+                result.status,
+                result.content_type.unwrap_or_else(|| "unknown".into()),
+                body
+            );
+            let content = maybe_spill(root.as_deref().map(Path::new), "web_fetch", raw);
             Ok(ToolResult {
                 ok: result.status < 400,
-                content: format!(
-                    "HTTP {} · {}\n{}",
-                    result.status,
-                    result.content_type.unwrap_or_else(|| "unknown".into()),
-                    body
-                ),
+                content,
                 open_view: None,
             })
         }
@@ -1548,6 +1984,10 @@ pub fn execute_tool(
                 path.display()
             )))
         }
+        "office_to_pdf" => match office_to_pdf(args, workspace_root) {
+            Ok(text) => Ok(ToolResult::ok_text(text)),
+            Err(msg) => Ok(ToolResult::err_text(msg)),
+        },
         "glob" => {
             let pattern = args
                 .get("pattern")
@@ -1615,17 +2055,9 @@ pub fn execute_tool(
             if hits.len() <= INLINE_LIMIT {
                 return Ok(ToolResult::ok_text(hits.join("\n")));
             }
-            let spill_dir = Path::new(&root).join(".wb").join("spill");
-            std::fs::create_dir_all(&spill_dir)?;
-            let spill_name = format!("grep-{}.txt", uuid::Uuid::new_v4());
-            let spill_path = spill_dir.join(&spill_name);
-            write_text(&spill_path, &hits.join("\n"))?;
-            let inline = hits[..INLINE_LIMIT].join("\n");
-            Ok(ToolResult::ok_text(format!(
-                "{inline}\n… 另有 {} 条已写入 {}",
-                hits.len() - INLINE_LIMIT,
-                spill_path.display()
-            )))
+            let _ = cleanup_tool_spill(Path::new(&root));
+            let msg = maybe_spill(Some(Path::new(&root)), "grep", hits.join("\n"));
+            Ok(ToolResult::ok_text(msg))
         }
         "skill_list" => {
             let prefs = load_prefs().unwrap_or_default();
@@ -1704,46 +2136,98 @@ pub fn execute_tool(
             if let Some(a) = args.get("args") {
                 entry.insert("args".into(), a.clone());
             }
-            let mut prefs = load_prefs().unwrap_or_default();
-            if prefs.agent.mcp_servers.iter().any(|v| {
-                v.get("name")
-                    .or_else(|| v.get("id"))
-                    .and_then(|x| x.as_str())
-                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
-            }) {
-                return Ok(ToolResult::err_text(format!("已存在 MCP：{name}")));
-            }
-            prefs.agent.mcp_servers.push(Value::Object(entry));
-            save_prefs(&prefs)?;
-            Ok(ToolResult::ok_text(format!(
-                "已添加 MCP 配置 {name}（尚无协议运行时）"
-            )))
-        }
-        "mcp_remove" => {
-            let mut prefs = load_prefs().unwrap_or_default();
-            let before = prefs.agent.mcp_servers.len();
-            if let Some(idx) = args.get("index").and_then(|v| v.as_u64()) {
-                let i = idx as usize;
-                if i == 0 || i > prefs.agent.mcp_servers.len() {
-                    return Ok(ToolResult::err_text("index 无效（从 1 起）"));
-                }
-                prefs.agent.mcp_servers.remove(i - 1);
-            } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-                prefs.agent.mcp_servers.retain(|v| {
+            let result = update_prefs(|prefs| {
+                if prefs.agent.mcp_servers.iter().any(|v| {
                     v.get("name")
                         .or_else(|| v.get("id"))
                         .and_then(|x| x.as_str())
-                        .map(|n| !n.eq_ignore_ascii_case(name))
-                        .unwrap_or(true)
-                });
-            } else {
-                return Ok(ToolResult::err_text("需要 index 或 name"));
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                }) {
+                    return Ok(ToolResult::err_text(format!("已存在 MCP：{name}")));
+                }
+                prefs.agent.mcp_servers.push(Value::Object(entry));
+                Ok(ToolResult::ok_text(format!(
+                    "已添加 MCP 配置 {name}。可用 mcp_call（stdio command 或 HTTP url）"
+                )))
+            })?;
+            Ok(result)
+        }
+        "mcp_call" => {
+            let prefs = load_prefs().unwrap_or_default();
+            let wanted = arg_str(args, &["name", "server"]).unwrap_or("");
+            let server = prefs.agent.mcp_servers.iter().find(|v| {
+                v.get("name")
+                    .or_else(|| v.get("id"))
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|n| wanted.is_empty() || n.eq_ignore_ascii_case(wanted))
+            });
+            let Some(server) = server else {
+                return Ok(ToolResult::err_text("未找到 MCP 配置"));
+            };
+            let tool = arg_str(args, &["tool", "toolName"]);
+            let arguments = args
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let url = server.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let command = server.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if !url.is_empty() && command.is_empty() {
+                return match mcp_http_call(url, tool, &arguments, Duration::from_secs(20)) {
+                    Ok(text) => Ok(ToolResult::ok_text(text)),
+                    Err(e) => Ok(ToolResult::err_text(e.to_string())),
+                };
             }
-            if prefs.agent.mcp_servers.len() == before {
-                return Ok(ToolResult::err_text("未找到要删除的 MCP"));
+            if command.is_empty() {
+                return Ok(ToolResult::err_text(
+                    "MCP 配置缺少 command（stdio）或 url（HTTP）",
+                ));
             }
-            save_prefs(&prefs)?;
-            Ok(ToolResult::ok_text("已删除 MCP 配置"))
+            let cmd_args: Vec<String> = server
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match mcp_stdio_call(
+                command,
+                &cmd_args,
+                tool,
+                &arguments,
+                Duration::from_secs(20),
+            ) {
+                Ok(text) => Ok(ToolResult::ok_text(text)),
+                Err(e) => Ok(ToolResult::err_text(e.to_string())),
+            }
+        }
+        "mcp_remove" => {
+            let result = update_prefs(|prefs| {
+                let before = prefs.agent.mcp_servers.len();
+                if let Some(idx) = args.get("index").and_then(|v| v.as_u64()) {
+                    let i = idx as usize;
+                    if i == 0 || i > prefs.agent.mcp_servers.len() {
+                        return Ok(ToolResult::err_text("index 无效（从 1 起）"));
+                    }
+                    prefs.agent.mcp_servers.remove(i - 1);
+                } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                    prefs.agent.mcp_servers.retain(|v| {
+                        v.get("name")
+                            .or_else(|| v.get("id"))
+                            .and_then(|x| x.as_str())
+                            .map(|n| !n.eq_ignore_ascii_case(name))
+                            .unwrap_or(true)
+                    });
+                } else {
+                    return Ok(ToolResult::err_text("需要 index 或 name"));
+                }
+                if prefs.agent.mcp_servers.len() == before {
+                    return Ok(ToolResult::err_text("未找到要删除的 MCP"));
+                }
+                Ok(ToolResult::ok_text("已删除 MCP 配置"))
+            })?;
+            Ok(result)
         }
         "working_directory" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -1847,6 +2331,500 @@ pub fn execute_tool(
             Ok(ToolResult::ok_text(msg))
         }
         other => Ok(ToolResult::err_text(format!("未知工具: {other}"))),
+    }
+}
+
+fn arg_str<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| {
+        args.get(*k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+fn resolve_task(repo: &MemoryWorkbenchRepository, args: &Value) -> Result<Task, String> {
+    if let Some(id) = arg_str(args, &["taskId", "id"]) {
+        return repo
+            .get_task(id)
+            .cloned()
+            .ok_or_else(|| format!("找不到任务 {id}"));
+    }
+    let title = arg_str(args, &["title"]).ok_or("需要 taskId 或 title")?;
+    repo.list_tasks()
+        .into_iter()
+        .find(|t| t.title == title)
+        .ok_or_else(|| format!("找不到任务「{title}」"))
+}
+
+fn resolve_note(repo: &MemoryWorkbenchRepository, args: &Value) -> Result<wb_domain::Note, String> {
+    if let Some(id) = arg_str(args, &["noteId", "id"]) {
+        return repo
+            .get_note(id)
+            .cloned()
+            .ok_or_else(|| format!("找不到笔记 {id}"));
+    }
+    let title = arg_str(args, &["title"]).ok_or("需要 noteId 或 title")?;
+    repo.list_notes()
+        .into_iter()
+        .find(|n| n.title == title)
+        .ok_or_else(|| format!("找不到笔记「{title}」"))
+}
+
+fn format_task_detail(task: &Task) -> String {
+    format!(
+        "id: {}\ntitle: {}\nproject: {}\ndone: {}\ndueDay: {:?}\ndueWithTime: {:?}\ndeadlineDay: {:?}\nremindAt: {:?}\nnotes: {}",
+        task.id,
+        task.title,
+        task.project_id,
+        task.is_done,
+        task.due_day,
+        task.due_with_time,
+        task.deadline_day,
+        task.remind_at,
+        task.notes
+    )
+}
+
+fn parse_remind(raw: &str) -> Option<ReminderOptionId> {
+    match raw.to_ascii_lowercase().as_str() {
+        "none" | "off" | "不提醒" => Some(ReminderOptionId::None),
+        "at_start" | "atstart" | "到点" | "到点提醒" => Some(ReminderOptionId::AtStart),
+        "m5" | "5" | "5m" | "提前5分钟" | "提前 5 分钟" => Some(ReminderOptionId::M5),
+        "m10" | "10" | "10m" | "提前10分钟" | "提前 10 分钟" => Some(ReminderOptionId::M10),
+        "m15" | "15" | "15m" | "提前15分钟" | "提前 15 分钟" => Some(ReminderOptionId::M15),
+        "m30" | "30" | "30m" => Some(ReminderOptionId::M30),
+        "h1" | "60" | "1h" | "提前1小时" | "提前 1 小时" => Some(ReminderOptionId::H1),
+        _ => None,
+    }
+}
+
+fn apply_task_when(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<String, String> {
+    let task = resolve_task(repo, args)?;
+    let due_ms = args.get("dueWithTime").and_then(|v| v.as_i64());
+    let due_day = arg_str(args, &["dueDay"]);
+    let deadline_ms = args.get("deadlineWithTime").and_then(|v| v.as_i64());
+    let deadline_day = arg_str(args, &["deadlineDay"]);
+    let remind = arg_str(args, &["remindOption"]).and_then(parse_remind);
+    let mut timed = due_ms;
+    if timed.is_none() {
+        if let (Some(day), Some(opt)) = (due_day, remind) {
+            if opt != ReminderOptionId::None {
+                timed = at_local_time(day, 9, 0);
+            }
+        }
+    }
+    let mut patch = SchedulePatch::default();
+    if let Some(ms) = timed {
+        patch.due_with_time = Some(Some(ms));
+    } else if let Some(day) = due_day {
+        patch.due_day = Some(Some(day.to_string()));
+    }
+    if let Some(ms) = deadline_ms {
+        patch.deadline_with_time = Some(Some(ms));
+    } else if let Some(day) = deadline_day {
+        patch.deadline_day = Some(Some(day.to_string()));
+    }
+    if let Some(opt) = remind {
+        if opt == ReminderOptionId::None {
+            patch.remind_at = Some(None);
+        } else if let Some(ms) = timed {
+            patch.remind_at = Some(shift_remind_at(ms, opt));
+        } else if let Some(ms) = deadline_ms {
+            patch.deadline_remind_at = Some(shift_remind_at(ms, opt));
+        }
+    }
+    let Some(mut next) = repo.get_task(&task.id).cloned() else {
+        return Err("任务不存在".into());
+    };
+    apply_schedule_patch(&mut next, &patch);
+    next.updated_at = now_ms();
+    let title = next.title.clone();
+    repo.upsert_task(next);
+    Ok(format!("已更新「{title}」的时间"))
+}
+
+fn apply_task_reminder(
+    repo: &mut MemoryWorkbenchRepository,
+    args: &Value,
+) -> Result<String, String> {
+    let task = resolve_task(repo, args)?;
+    let Some(mut next) = repo.get_task(&task.id).cloned() else {
+        return Err("任务不存在".into());
+    };
+    let mut patch = SchedulePatch::default();
+    if let Some(explicit) = args.get("remindAt").and_then(|v| v.as_i64()) {
+        patch.remind_at = Some(Some(explicit));
+    } else if let Some(opt) = arg_str(args, &["remindOption"]).and_then(parse_remind) {
+        if opt == ReminderOptionId::None {
+            patch.remind_at = Some(None);
+        } else if let Some(due) = next.due_with_time.or(next.deadline_with_time) {
+            let at = shift_remind_at(due, opt);
+            if next.due_with_time.is_some() {
+                patch.remind_at = Some(at);
+            } else {
+                patch.deadline_remind_at = Some(at);
+            }
+        } else {
+            return Err("任务没有计划时刻，无法按提前量设置提醒".into());
+        }
+    } else {
+        return Err("需要 remindAt 或 remindOption".into());
+    }
+    apply_schedule_patch(&mut next, &patch);
+    next.updated_at = now_ms();
+    let title = next.title.clone();
+    repo.upsert_task(next);
+    Ok(format!("已更新「{title}」的提醒"))
+}
+
+fn assign_tag(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<String, String> {
+    let task = resolve_task(repo, args)?;
+    let tag = if let Some(id) = arg_str(args, &["tagId"]) {
+        repo.list_tags()
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| "标签不存在".to_string())?
+    } else if let Some(title) = arg_str(args, &["tagTitle", "title"]) {
+        if let Some(existing) = repo.list_tags().into_iter().find(|t| t.title == title) {
+            existing
+        } else {
+            repo.create_tag(title)
+        }
+    } else {
+        return Err("请提供标签".into());
+    };
+    repo.add_tag_to_task(&task.id, &tag.id);
+    Ok(format!("已为「{}」加上标签「{}」", task.title, tag.title))
+}
+
+struct RunningTimer {
+    task_id: String,
+    started: i64,
+}
+
+fn tool_timer() -> &'static Mutex<Option<RunningTimer>> {
+    static TIMER: OnceLock<Mutex<Option<RunningTimer>>> = OnceLock::new();
+    TIMER.get_or_init(|| Mutex::new(None))
+}
+
+fn settle_running(repo: &mut MemoryWorkbenchRepository, running: RunningTimer) -> String {
+    let now = now_ms();
+    let elapsed = (now - running.started).max(0);
+    if let Some(mut task) = repo.get_task(&running.task_id).cloned() {
+        let day = format_local_day(now);
+        settle_timer_segment(&mut task, &day, elapsed, now);
+        let title = task.title.clone();
+        repo.upsert_task(task);
+        format!("已停止「{title}」计时，记入 {elapsed}ms")
+    } else {
+        "计时任务已不存在，已停止".into()
+    }
+}
+
+fn start_tool_timer(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<String, String> {
+    let task = resolve_task(repo, args)?;
+    if task.parent_id.is_none()
+        && repo
+            .list_tasks()
+            .iter()
+            .any(|t| t.parent_id.as_deref() == Some(task.id.as_str()))
+    {
+        return Err("有子任务的父任务不能直接计时".into());
+    }
+    let previous = tool_timer().lock().unwrap().take();
+    let settled = if let Some(prev) = previous {
+        settle_running(repo, prev)
+    } else {
+        String::new()
+    };
+    *tool_timer().lock().unwrap() = Some(RunningTimer {
+        task_id: task.id.clone(),
+        started: now_ms(),
+    });
+    let msg = format!("开始为「{}」计时", task.title);
+    if settled.is_empty() {
+        Ok(msg)
+    } else {
+        Ok(format!("{settled}\n{msg}"))
+    }
+}
+
+fn stop_tool_timer(repo: &mut MemoryWorkbenchRepository) -> Result<String, String> {
+    let previous = tool_timer().lock().unwrap().take();
+    match previous {
+        Some(running) => Ok(settle_running(repo, running)),
+        None => Err("没有正在进行的计时".into()),
+    }
+}
+
+fn run_host_tool(args: &Value, workspace_root: Option<&str>) -> Result<String, String> {
+    let tool_id = arg_str(args, &["toolId", "id", "name"]).unwrap_or("");
+    if tool_id.is_empty() {
+        return Err("缺少 toolId".into());
+    }
+    let tool_key = tool_id.to_ascii_lowercase();
+    let bin = match tool_key.as_str() {
+        "git" => "git",
+        "node" | "nodejs" => "node",
+        "npm" => "npm",
+        "pnpm" => "pnpm",
+        "yarn" => "yarn",
+        "python" | "python3" => {
+            if which_bin("python").is_some() {
+                "python"
+            } else {
+                "python3"
+            }
+        }
+        "pip" => "pip",
+        "cargo" => "cargo",
+        "rustc" => "rustc",
+        "rg" | "ripgrep" => "rg",
+        other => other,
+    };
+    if which_bin(bin).is_none() {
+        return Err(format!("本机未找到工具：{tool_id}（{bin}）"));
+    }
+    let extra = arg_str(args, &["args", "command"]).unwrap_or("");
+    let command = if extra.is_empty() {
+        format!("{bin} --version")
+    } else {
+        format!("{bin} {extra}")
+    };
+    let cwd = arg_str(args, &["cwd"]).or(workspace_root);
+    match run_shell_in(&command, cwd, workspace_root, 60) {
+        Ok(r) => {
+            let mut out = String::new();
+            if !r.stdout.trim().is_empty() {
+                out.push_str(r.stdout.trim());
+            }
+            if !r.stderr.trim().is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("[stderr]\n");
+                out.push_str(r.stderr.trim());
+            }
+            if out.is_empty() {
+                out = "(no output)".into();
+            }
+            out.push_str(&format!("\n[exit code: {}]", r.code));
+            Ok(out)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn office_to_pdf(args: &Value, workspace_root: Option<&str>) -> Result<String, String> {
+    let rel = arg_str(args, &["path", "input"]).ok_or("缺少 path")?;
+    let root = workspace_root.ok_or("未绑定工作区")?;
+    let input = if Path::new(rel).is_absolute() {
+        if !rel.starts_with(root) {
+            return Err("路径必须在工作区内".into());
+        }
+        Path::new(rel).to_path_buf()
+    } else {
+        Path::new(root).join(rel)
+    };
+    if !input.is_file() {
+        return Err(format!("文件不存在：{}", input.display()));
+    }
+    let soffice = which_bin("soffice")
+        .or_else(|| which_bin("libreoffice"))
+        .ok_or("未找到 LibreOffice/soffice")?;
+    let out_dir = if let Some(output) = arg_str(args, &["output", "outdir"]) {
+        let p = if Path::new(output).is_absolute() {
+            Path::new(output).to_path_buf()
+        } else {
+            Path::new(root).join(output)
+        };
+        if p.is_dir() || output.ends_with('/') || output.ends_with('\\') {
+            p
+        } else {
+            p.parent().unwrap_or(Path::new(root)).to_path_buf()
+        }
+    } else {
+        input
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| Path::new(root).to_path_buf())
+    };
+    let _ = std::fs::create_dir_all(&out_dir);
+    let cmd = format!(
+        "\"{}\" --headless --convert-to pdf --outdir \"{}\" \"{}\"",
+        soffice,
+        out_dir.display(),
+        input.display()
+    );
+    let result = run_shell_in(&cmd, Some(root), Some(root), 120).map_err(|e| e.to_string())?;
+    if result.code != 0 {
+        return Err(format!(
+            "转换失败 [exit {}]\n{}{}",
+            result.code, result.stdout, result.stderr
+        ));
+    }
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let pdf = out_dir.join(format!("{stem}.pdf"));
+    Ok(format!("已转换：{}", pdf.display()))
+}
+
+fn spawn_subagent(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<String, String> {
+    let parent_id = arg_str(args, &["threadId"]).ok_or("缺少 threadId")?;
+    let name = arg_str(args, &["name"]).ok_or("请提供 name")?;
+    let task = arg_str(args, &["task", "prompt"]).ok_or("请提供 task")?;
+    let wait = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
+    let parent = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == parent_id)
+        .ok_or("父会话不存在")?;
+    let depth = list_managed_agents(parent_id, true)
+        .into_iter()
+        .filter(|a| a.id == parent_id)
+        .map(|a| a.depth)
+        .next()
+        .or_else(|| get_managed_agent(parent_id).map(|a| a.depth))
+        .unwrap_or(0);
+    if depth >= 2 {
+        return Err("子智能体嵌套过深".into());
+    }
+    let prefs = load_prefs().unwrap_or_default();
+    let def = prefs.agent.subagents.iter().find(|s| {
+        s.get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    });
+    let prompt = def
+        .and_then(|s| s.get("prompt").and_then(|v| v.as_str()))
+        .unwrap_or("你是一个专注的子智能体，请完成交给你的任务。");
+    let description = def
+        .and_then(|s| s.get("description").and_then(|v| v.as_str()))
+        .unwrap_or(name);
+    let now = now_ms();
+    let child = AgentThread {
+        id: create_id(now),
+        workspace_id: parent.workspace_id.clone(),
+        project_id: None,
+        title: format!("subagent:{name}"),
+        model_ref: if parent.model_ref.is_empty() {
+            BUILTIN_MODEL_REF.into()
+        } else {
+            parent.model_ref.clone()
+        },
+        permission_mode: if parent.permission_mode == AgentPermissionMode::Readonly {
+            AgentPermissionMode::Readonly
+        } else {
+            AgentPermissionMode::SessionAuto
+        },
+        queue_json: None,
+        web_url: None,
+        archived_at: None,
+        pinned_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let child_id = child.id.clone();
+    let child_for_run = child.clone();
+    repo.upsert_agent_thread(child);
+    register_managed_agent(&child_id, parent_id, name, depth + 1);
+
+    let user_text = format!("【子智能体 {name} · {description}】\n{prompt}\n\n任务：{task}");
+    let proxy = load_prefs()
+        .ok()
+        .and_then(|p| p.http_proxy)
+        .filter(|s| !s.trim().is_empty());
+
+    if wait {
+        match run_user_turn_blocking(repo, &child_for_run, &user_text, proxy.as_deref()) {
+            Ok(out) => {
+                let reply = out.assistant.content.clone();
+                let _ = finish_managed_agent(&child_id, &reply);
+                repo.push_notification(
+                    NotificationKind::Agent,
+                    &format!("子智能体 {name} 完成"),
+                    &reply.chars().take(200).collect::<String>(),
+                    Some(parent_id),
+                );
+                Ok(format!("子智能体 {name} 已同步完成\n{reply}"))
+            }
+            Err(e) => {
+                let _ = finish_managed_agent(&child_id, &format!("失败：{e}"));
+                Err(format!("子智能体 {name} 失败：{e}"))
+            }
+        }
+    } else {
+        let now = now_ms();
+        repo.upsert_agent_message(AgentMessage {
+            id: create_id(now),
+            thread_id: child_id.clone(),
+            role: AgentRole::User,
+            content: user_text,
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now,
+        });
+        let child_id_bg = child_id.clone();
+        let parent_bg = parent_id.to_string();
+        let name_bg = name.to_string();
+        let proxy_bg = proxy.clone();
+        let _ = std::thread::Builder::new()
+            .name("wb-subagent".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(400));
+                let Ok(mut repo) = wb_store::load_store() else {
+                    return;
+                };
+                let Some(thread) = repo
+                    .list_agent_threads()
+                    .into_iter()
+                    .find(|t| t.id == child_id_bg)
+                else {
+                    return;
+                };
+                if get_managed_agent(&child_id_bg)
+                    .is_some_and(|a| a.status != crate::managed_agents::ManagedAgentStatus::Running)
+                {
+                    return;
+                }
+                let has_asst = repo
+                    .messages_for_thread(&child_id_bg)
+                    .iter()
+                    .any(|m| matches!(m.role, AgentRole::Assistant));
+                if has_asst {
+                    return;
+                }
+                match resume_thread_turn_blocking(&mut repo, &thread, proxy_bg.as_deref()) {
+                    Ok(out) => {
+                        let reply = out.assistant.content.clone();
+                        let _ = finish_managed_agent(&child_id_bg, &reply);
+                        repo.push_notification(
+                            NotificationKind::Agent,
+                            &format!("子智能体 {name_bg} 完成"),
+                            &reply.chars().take(200).collect::<String>(),
+                            Some(&parent_bg),
+                        );
+                        let _ = wb_store::save_store(&mut repo);
+                    }
+                    Err(e) => {
+                        let _ = finish_managed_agent(&child_id_bg, &format!("失败：{e}"));
+                        repo.push_notification(
+                            NotificationKind::Agent,
+                            &format!("子智能体 {name_bg} 失败"),
+                            &e.to_string(),
+                            Some(&parent_bg),
+                        );
+                        let _ = wb_store::save_store(&mut repo);
+                    }
+                }
+            });
+        Ok(format!(
+            "已托管启动子智能体 {name}，agentId={child_id}（后台跑完整回合；可用 list_agents / send_message / interrupt_agent）"
+        ))
     }
 }
 
@@ -2168,6 +3146,7 @@ mod tests {
             tool_calls_json: None,
             created_at: now + 2,
         });
+        crate::session_goal::clear_goal();
         let created = execute_tool(
             &mut repo,
             "create_goal",
@@ -2216,8 +3195,17 @@ mod tests {
         .unwrap();
         assert!(et.ok);
 
+        // Re-assert active goal in case a parallel test cleared the process-global store.
+        if crate::get_goal().is_none() {
+            let _ = execute_tool(
+                &mut repo,
+                "create_goal",
+                &json!({ "objective": "完成迁移", "maxRounds": 3 }),
+                None,
+            );
+        }
         let idle = crate::prepare_goal_idle_round();
-        assert!(idle.is_some());
+        assert!(idle.is_some(), "goal={:?}", crate::get_goal());
 
         let _ = execute_tool(
             &mut repo,
@@ -2229,9 +3217,6 @@ mod tests {
 
     #[test]
     fn mcp_add_list_remove() {
-        use std::sync::{Mutex, OnceLock};
-        static PREFS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = PREFS_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let mut repo = MemoryWorkbenchRepository::default();
         let name = format!("demo-mcp-{}", uuid::Uuid::new_v4());
         let add = execute_tool(
@@ -2377,5 +3362,154 @@ mod tests {
         .unwrap();
         assert!(del.ok);
         assert!(repo.list_timed_tasks().is_empty());
+    }
+
+    #[test]
+    fn task_note_schedule_and_timer_tools() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        execute_tool(
+            &mut repo,
+            "task_create",
+            &json!({ "title": "写文档" }),
+            None,
+        )
+        .unwrap();
+        let id = repo.list_tasks()[0].id.clone();
+        let updated = execute_tool(
+            &mut repo,
+            "task_update",
+            &json!({ "taskId": id, "notes": "先写大纲", "timeEstimateMinutes": 25 }),
+            None,
+        )
+        .unwrap();
+        assert!(updated.ok);
+        let scheduled = execute_tool(
+            &mut repo,
+            "task_schedule",
+            &json!({ "taskId": id, "dueDay": "2026-11-21" }),
+            None,
+        )
+        .unwrap();
+        assert!(scheduled.ok);
+        assert_eq!(
+            repo.get_task(&id).unwrap().due_day.as_deref(),
+            Some("2026-11-21")
+        );
+        let child = execute_tool(
+            &mut repo,
+            "task_add_subtask",
+            &json!({ "parentId": id, "title": "小节" }),
+            None,
+        )
+        .unwrap();
+        assert!(child.ok);
+        let blocked =
+            execute_tool(&mut repo, "timer_start", &json!({ "taskId": id }), None).unwrap();
+        assert!(!blocked.ok);
+        let note = execute_tool(
+            &mut repo,
+            "note_create",
+            &json!({ "title": "备忘", "body": "关键词甲" }),
+            None,
+        )
+        .unwrap();
+        assert!(note.ok);
+        let found = execute_tool(
+            &mut repo,
+            "note_search",
+            &json!({ "query": "关键词甲" }),
+            None,
+        )
+        .unwrap();
+        assert!(found.content.contains("备忘"));
+        let got = execute_tool(&mut repo, "task_get", &json!({ "taskId": id }), None).unwrap();
+        assert!(got.content.contains("小节"));
+    }
+
+    #[test]
+    fn subagent_and_aliases() {
+        update_prefs(|prefs| {
+            prefs.agent.subagents = vec![json!({
+                "name": "researcher",
+                "description": "调研助手",
+                "prompt": "简洁回答"
+            })];
+            prefs.agent.hooks = vec![json!({
+                "event": "task_complete",
+                "title": "完成提示",
+                "enabled": true
+            })];
+            Ok(())
+        })
+        .unwrap();
+
+        let mut repo = MemoryWorkbenchRepository::default();
+        let parent = crate::turn::create_thread("ws", "主会话", None);
+        let parent_id = parent.id.clone();
+        repo.upsert_agent_thread(parent);
+
+        let listed = execute_tool(&mut repo, "subagent_list", &json!({}), None).unwrap();
+        assert!(listed.content.contains("researcher"));
+        let hooks = execute_tool(&mut repo, "hook_list", &json!({}), None).unwrap();
+        assert!(hooks.content.contains("完成提示"));
+
+        let spawned = execute_tool(
+            &mut repo,
+            "subagent",
+            &json!({
+                "threadId": parent_id,
+                "name": "researcher",
+                "task": "查一下缺口",
+                "wait": true
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(spawned.ok);
+        assert!(spawned.content.contains("已同步完成"));
+
+        let agents = execute_tool(
+            &mut repo,
+            "list_agents",
+            &json!({ "threadId": parent_id }),
+            None,
+        )
+        .unwrap();
+        assert!(agents.content.contains("researcher") || agents.content.contains("托管"));
+
+        let model = execute_tool(
+            &mut repo,
+            "session_set_model",
+            &json!({ "threadId": parent_id, "modelRef": "openai/gpt-4o-mini" }),
+            None,
+        )
+        .unwrap();
+        assert!(model.ok);
+        assert_eq!(
+            repo.list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == parent_id)
+                .unwrap()
+                .model_ref,
+            "openai/gpt-4o-mini"
+        );
+
+        let host = execute_tool(
+            &mut repo,
+            "host_tool_run",
+            &json!({ "toolId": "git", "args": "--version" }),
+            None,
+        )
+        .unwrap();
+        assert!(host.ok, "{}", host.content);
+
+        let save = execute_tool(
+            &mut repo,
+            "memory_save",
+            &json!({ "text": "别名记忆" }),
+            None,
+        )
+        .unwrap();
+        assert!(save.ok);
     }
 }

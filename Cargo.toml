@@ -22,13 +22,15 @@ wb-host = { path = "crates/wb-host" }
 wb-agent = { path = "crates/wb-agent" }
 
 gpui-kit = { path = "../gpui-kit/crates/kit" }
+gpui-webview = { path = "../gpui-kit/crates/webview" }
+wry = { version = "0.53.3", package = "lb-wry" }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 dirs = "6"
 log = "0.4"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "charset", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "charset", "stream", "json", "blocking"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,6 +42,9 @@ font-kit = "0.14"
 url = "2"
 walkdir = "2"
 env_logger = "0.11"
+portable-pty = "0.8"
+cpal = "0.15"
+hound = "3.5"
 
 [profile.dev]
 debug = "limited"

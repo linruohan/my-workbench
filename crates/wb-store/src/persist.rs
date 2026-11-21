@@ -4,7 +4,13 @@ use crate::snapshot::WorkbenchSnapshot;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use wb_domain::AppPrefs;
+
+fn prefs_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 pub const SAVE_DEBOUNCE_MS: u64 = 400;
 pub const MAX_ROLLING_BACKUPS: usize = 7;
@@ -68,6 +74,28 @@ pub fn save_store(repo: &mut MemoryWorkbenchRepository) -> Result<SaveStatus> {
 }
 
 pub fn load_prefs() -> Result<AppPrefs> {
+    let _guard = prefs_lock().lock().unwrap_or_else(|e| e.into_inner());
+    load_prefs_unlocked()
+}
+
+pub fn save_prefs(prefs: &AppPrefs) -> Result<()> {
+    let _guard = prefs_lock().lock().unwrap_or_else(|e| e.into_inner());
+    save_prefs_unlocked(prefs)
+}
+
+/// Read-modify-write under the prefs lock so concurrent tools/tests don't clobber each other.
+pub fn update_prefs<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce(&mut AppPrefs) -> Result<T>,
+{
+    let _guard = prefs_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut prefs = load_prefs_unlocked()?;
+    let out = f(&mut prefs)?;
+    save_prefs_unlocked(&prefs)?;
+    Ok(out)
+}
+
+fn load_prefs_unlocked() -> Result<AppPrefs> {
     let path = prefs_path()?;
     if !path.exists() {
         return Ok(AppPrefs::default());
@@ -79,7 +107,7 @@ pub fn load_prefs() -> Result<AppPrefs> {
     Ok(serde_json::from_str(&text).unwrap_or_default())
 }
 
-pub fn save_prefs(prefs: &AppPrefs) -> Result<()> {
+fn save_prefs_unlocked(prefs: &AppPrefs) -> Result<()> {
     let path = prefs_path()?;
     let json = serde_json::to_string_pretty(prefs)?;
     write_text_atomic(&path, &json)

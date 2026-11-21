@@ -133,7 +133,7 @@ DSH 用按所有者隔离的持久 bash（跨调用保留 cwd/变量）。
 
 环境：同 shell，PTY 启动时 allowlist scrub。  
 
-未对齐：完整 xterm.js 渲染、OSC 颜色恢复、Tab 补全菜单、Host 重启后进程恢复、DSH 侧栏配额语义。本仓库有轻量终端面板（文本预览 + 输入）。
+未对齐：完整 xterm.js 渲染、OSC 颜色恢复、Tab 补全菜单、Host 重启后进程恢复、DSH 侧栏配额语义。本仓库终端是 ConPTY 会话，模型通过 `terminal_read` 看文本。
 
 ### `dsh-tool-jobs` — ✅ 已接入
 
@@ -355,18 +355,19 @@ DSH：统一协作式取消 + 超时错误映射。
 
 | 工具 | 状态 |
 | --- | --- |
-| `task_list` / `task_create` / `task_complete` / `task_incomplete` | ✅ |
-| `project_list` / `project_create` | ✅ |
-| `tag_list` / `tag_create` / `tag_add` | ✅ |
-| `note_list` / `note_create` | ✅ |
-| `notification_list` / `notification_create` | ✅ |
+| `task_list` / `task_list_today` / `task_get` / `task_create` / `task_update` / `task_complete` / `task_incomplete` / `task_reopen` / `task_schedule` / `task_set_deadline` / `task_set_reminder` / `task_move_backlog` / `task_add_subtask` / `task_delete` | ✅ |
+| `project_list` / `project_create` / `project_archive` | ✅ |
+| `tag_list` / `tag_create` / `tag_add` / `tag_assign` | ✅ |
+| `note_list` / `note_get` / `note_search` / `note_create` / `note_update` / `note_delete` | ✅ |
+| `notification_list` / `notification_create` / `notification_dismiss` / `notification_snooze` | ✅ |
 | `schedule_list` / `schedule_view` / `schedule_create` / `schedule_edit` / `schedule_enable` / `schedule_delete` | ✅ |
-| `timer_status` / `timer_add` | ✅（记入当日用时；非 UI 实时跑表） |
+| `timer_status` / `timer_add` / `timer_start` / `timer_stop` | ✅（工具计时记入当日用时；界面跑表仍独立） |
 | `read` / `write` / `str_replace` / `edit` / `shell` / `bash` / `pwsh` | ✅（越界拒绝；shell 环境 scrub + `WB_*` 注入） |
 | `apply_patch` | ✅ Codex Add/Update/Delete |
 | `str_replace_editor` | ✅ view/create/str_replace/insert |
 | `load_workspace_dependencies` | ✅ PATH 探测 |
 | `read_image` | ✅ 元数据；超 4MiB/长边 2048 给 `<image_offload>` 提示 |
+| `ocr` | 🟡 tesseract CLI 优先；可下载 PaddleOCR 模型目录（ONNX 运行时待接） |
 | `job_start` / `job_output` / `job_list` / `job_kill` | ✅ 后台 shell（非 PTY） |
 | `web_fetch` | ✅ HTTP GET + 体积截断 |
 | `glob` / `grep` | ✅（自实现；grep 内联 250，超额 spill 至 `.wb/spill`） |
@@ -374,14 +375,19 @@ DSH：统一协作式取消 + 超时错误映射。
 | 写工具审批卡（Confirm 模式 Ask） | ✅ |
 | 会话权限切换（确认 / 会话自动 / 只读） | ✅ |
 | 远程模型 tool-call 循环（最多 4 轮） | ✅ |
-| `memory_list` / `memory_add` / `memory_remove` | ✅（prefs.json） |
+| `memory_list` / `memory_add` / `memory_save` / `memory_remove` / `memory_forget` | ✅（prefs.json；save/forget 为别名） |
+| `hook_list` | ✅ prefs.agent.hooks |
+| `session_set_model` | ✅ |
+| `subagent_list` / `subagent` / `list_agents` / `send_message` / `interrupt_agent` | 🟡 `wait=true` 完整工具环；`wait=false` 后台 `resume_thread_turn` + 通知唤醒父会话 |
+| `host_tool_run` | 🟡 PATH 白名单二进制（git/node/python…），非完整安装/探测面 |
+| `office_to_pdf` | 🟡 调用本机 soffice/libreoffice |
 | `todo_write` / `todo_list` | ✅（进程内会话待办） |
 | `ask_user_question` | ✅（写入通知中心） |
-| `skill_list` / `skill_load` / `plugin_list` / `mcp_list` / `mcp_add` / `mcp_remove` | ✅（目录扫描 / prefs；无 MCP 协议运行时） |
+| `skill_list` / `skill_load` / `plugin_list` / `mcp_list` / `mcp_add` / `mcp_remove` / `mcp_call` | ✅（stdio + HTTP JSON-RPC/SSE：initialize + tools/list 或 tools/call） |
 | `working_directory` | ✅ 会话 cwd |
-| `terminal_open/send/read/list/close/signal` | 🟡 轻量命令日志会话（非 ConPTY） |
+| `terminal_open/send/read/list/close/signal` | ✅ portable-pty / ConPTY；SIGINT 写 Ctrl+C，SIGTERM/KILL 结束进程 |
 | `search` | ✅ 任务/笔记/项目/标签 |
-| `settings_get` / `settings_set` | ✅ 白名单安全项 |
+| `settings_get` / `settings_set` / `settings_patch` | ✅ 白名单安全项（patch 为别名） |
 | `host_tool_list` | ✅ |
 | `session_search` | ✅ 消息全文 |
 | `present` | ✅ 系统打开 + 可选资源管理器选中 |
@@ -390,7 +396,7 @@ DSH：统一协作式取消 + 超时错误映射。
 | `session_event_search` / `session_event_read` / `session_event_trace` | ✅ 消息即事件（1-based seq） |
 | `get_goal` / `create_goal` / `update_goal` | 🟡 进程内 goal；空闲续行最多 2 次；自主 blocked 默认满 3 轮 |
 | FS 观察策略 | ✅ 写/删已存在文件前须 `read`/`read_image`/`view`（`FS_NOT_OBSERVED`） |
-| 真 PTY / MCP 协议运行时 | ❌ 未迁 |
+| 真 PTY / MCP stdio / 子智能体控制 | ✅ `terminal_*` ConPTY；`mcp_call` stdio；`subagent*` 进程内托管 |
 
 斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list` `/goal …`。
 

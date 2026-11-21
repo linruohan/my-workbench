@@ -367,6 +367,18 @@ impl MemoryWorkbenchRepository {
         self.dirty = true;
     }
 
+    pub fn get_note(&self, id: &str) -> Option<&Note> {
+        self.notes.get(id)
+    }
+
+    pub fn delete_note(&mut self, id: &str) -> bool {
+        let removed = self.notes.remove(id).is_some();
+        if removed {
+            self.dirty = true;
+        }
+        removed
+    }
+
     pub fn create_note(&mut self, title: &str, body_md: &str) -> Note {
         let now = now_ms();
         let note = Note {

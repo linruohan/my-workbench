@@ -142,18 +142,19 @@ cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --wor
 - Provider、密钥、`model_http`、回合与工具门禁（confirm / session_auto / readonly）。
 - 工作台工具 + 工作区工具；PTY/job/shell 从现 `agent_workspace.rs` 接入。
 - 技能/插件/MCP/钩子/子智能体设置页。
-- 网页会话：`gpui-webview` 替代 Tauri `web_session`。
+- 网页会话：`gpui-webview` 替代 Tauri `web_session`（Agent 页 URL 栏 + 嵌入 WebView；离页隐藏）。
 
 ### 阶段 6 — 语音 / OCR / 其它原生
 
-- speech 模型下载与转写、CapsLock PTT（现 `voice_ptt.rs` / speech 模块）；可参考 gpui-kit `examples/speech`。
-- PaddleOCR 识图回退。
-- 系统字体扫描、HTTP 代理、spill 清理。
+- speech 模型目录/下载与 CLI 转写；CapsLock LL hook + cpal 录音写 `ptt-last.wav` 再转写粘贴（ONNX worker 待接）。
+- PaddleOCR 模型下载 + `ocr` 工具（tesseract 回退；ONNX 运行时待接）。
+- 系统字体扫描、HTTP 代理、`.wb/spill` 落盘与 30 天 GC；MCP HTTP JSON-RPC/SSE。
+- 子智能体：`wait=true`/`send_message` 走完整 `run_user_turn` 工具环；异步托管后台 resume。
 
 ### 阶段 7 — 收尾
 
-- 命令面板 `Ctrl+P`/`Ctrl+K` 全库检索。
-- 深浅色主题（`Theme::change`）、侧栏宽度持久化。
+- 命令面板 `Ctrl+P`/`Ctrl+K`：页面/任务/项目/会话/笔记 + 知识库文件。
+- 深浅色主题（`Theme::change`）、侧栏折叠 + 拖拽改宽持久化；设置页可编辑 MCP/子智能体/Hooks JSON。
 - 更新 README / design / packaging / 提交门禁；移除全部 JS 依赖与 Tauri 配置。
 
 ## 关键复用策略
