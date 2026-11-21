@@ -121,47 +121,107 @@ fn download_file(
     Ok(())
 }
 
-/// Prefer tesseract CLI if present; otherwise report PaddleOCR model readiness.
+/// Prefer tesseract / RapidOCR Python / paddleocr CLI; otherwise report model readiness.
 pub fn ocr_image(path: &Path) -> Result<String> {
     if !path.is_file() {
         bail!("图片不存在：{}", path.display());
     }
-    if which_tesseract().is_some() {
-        let out = Command::new("tesseract")
-            .args([
-                path.to_string_lossy().as_ref(),
-                "stdout",
-                "-l",
-                "chi_sim+eng",
-            ])
-            .output()
-            .context("启动 tesseract 失败")?;
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return Ok(if text.is_empty() {
-                "没有识别到文字。".into()
-            } else {
-                text
-            });
-        }
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("tesseract 失败：{err}");
+    if let Some(text) = try_tesseract(path) {
+        return Ok(text);
+    }
+    if let Some(text) = try_python_rapidocr(path) {
+        return Ok(text);
+    }
+    if let Some(text) = try_paddleocr_cli(path) {
+        return Ok(text);
     }
     let status = ocr_status()?;
     if status.ready {
         bail!(
-            "PaddleOCR 模型已在 {}，但本机未安装 tesseract，且尚未接入 ONNX 运行时。可安装 tesseract 作为临时回退。",
+            "PaddleOCR 模型已在 {}，但未找到 tesseract / rapidocr_onnxruntime / paddleocr CLI，且尚未接入内置 ONNX 运行时。",
             status.model_dir
         );
     }
     bail!(
-        "OCR 未就绪：缺少 {:?}。可在设置中下载 PaddleOCR 模型，或安装 tesseract。",
+        "OCR 未就绪：缺少 {:?}。可在设置中下载 PaddleOCR 模型，或安装 tesseract / pip install rapidocr-onnxruntime。",
         status.missing
     )
 }
 
-fn which_tesseract() -> Option<String> {
-    crate::shell::which_bin("tesseract")
+fn try_tesseract(path: &Path) -> Option<String> {
+    crate::shell::which_bin("tesseract")?;
+    let out = Command::new("tesseract")
+        .args([
+            path.to_string_lossy().as_ref(),
+            "stdout",
+            "-l",
+            "chi_sim+eng",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Some(if text.is_empty() {
+        "没有识别到文字。".into()
+    } else {
+        text
+    })
+}
+
+fn try_python_rapidocr(path: &Path) -> Option<String> {
+    let py = crate::shell::which_bin("python").or_else(|| crate::shell::which_bin("python3"))?;
+    let script = r#"
+import sys
+path = sys.argv[1]
+try:
+    from rapidocr_onnxruntime import RapidOCR
+except Exception:
+    try:
+        from rapidocr_onnxruntime.main import RapidOCR
+    except Exception as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
+ocr = RapidOCR()
+result, _ = ocr(path)
+if not result:
+    print("")
+else:
+    print("\n".join(str(item[1]) for item in result))
+"#;
+    let out = Command::new(&py)
+        .args(["-c", script, path.to_string_lossy().as_ref()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Some(if text.is_empty() {
+        "没有识别到文字。".into()
+    } else {
+        text
+    })
+}
+
+fn try_paddleocr_cli(path: &Path) -> Option<String> {
+    let bin = crate::shell::which_bin("paddleocr")?;
+    let out = Command::new(&bin)
+        .args([
+            "ocr",
+            "-i",
+            path.to_string_lossy().as_ref(),
+            "--use_angle_cls",
+            "true",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 #[cfg(test)]

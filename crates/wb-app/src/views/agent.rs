@@ -27,6 +27,8 @@ pub struct AgentPane {
     webview: Option<Entity<WebView>>,
     loaded_web_url: Option<String>,
     busy: bool,
+    /// Bumped to cancel the in-flight turn spawn.
+    turn_gen: u64,
     status: String,
     _subs: Vec<Subscription>,
 }
@@ -46,6 +48,7 @@ impl AgentPane {
             webview: None,
             loaded_web_url: None,
             busy: false,
+            turn_gen: 0,
             status: String::new(),
             _subs: Vec::new(),
         };
@@ -238,11 +241,18 @@ impl AgentPane {
             .with_mut(|s| begin_user_turn(&mut s.repo, &thread, &text));
         self.state.persist_if_dirty();
 
+        self.turn_gen = self.turn_gen.wrapping_add(1);
+        let expected = self.turn_gen;
         self.busy = true;
         self.status.clear();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
+            let still_active = |this: &WeakEntity<AgentPane>, cx: &mut AsyncApp| -> bool {
+                this.update(cx, |pane, _| pane.turn_gen == expected && pane.busy)
+                    .unwrap_or(false)
+            };
+
             let pending2 = pending.clone();
             let proxy2 = proxy.clone();
             let reply = cx
@@ -255,6 +265,10 @@ impl AgentPane {
                     rt.block_on(resolve_turn_reply(&pending2, proxy2.as_deref()))
                 })
                 .await;
+
+            if !still_active(&this, cx) {
+                return;
+            }
 
             let mut phase = this
                 .update(cx, |this, cx| {
@@ -270,7 +284,13 @@ impl AgentPane {
 
             let mut goal_followups = 0u32;
             loop {
+                if !still_active(&this, cx) {
+                    return;
+                }
                 while let Some(TurnPhase::Continue(cont, _)) = phase {
+                    if !still_active(&this, cx) {
+                        return;
+                    }
                     let proxy3 = proxy.clone();
                     let cont2 = (*cont).clone();
                     let reply = cx
@@ -283,6 +303,9 @@ impl AgentPane {
                             rt.block_on(continue_turn_reply(&cont2, proxy3.as_deref()))
                         })
                         .await;
+                    if !still_active(&this, cx) {
+                        return;
+                    }
                     phase = this
                         .update(cx, |this, cx| {
                             let next = this
@@ -334,6 +357,9 @@ impl AgentPane {
                         rt.block_on(resolve_turn_reply(&pending2, proxy2.as_deref()))
                     })
                     .await;
+                if !still_active(&this, cx) {
+                    return;
+                }
                 phase = this
                     .update(cx, |this, cx| {
                         let next = this
@@ -348,13 +374,25 @@ impl AgentPane {
             }
 
             this.update(cx, |this, cx| {
-                this.status.clear();
-                this.busy = false;
-                cx.notify();
+                if this.turn_gen == expected {
+                    this.status.clear();
+                    this.busy = false;
+                    cx.notify();
+                }
             })
             .ok();
         })
         .detach();
+    }
+
+    fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        if !self.busy {
+            return;
+        }
+        self.turn_gen = self.turn_gen.wrapping_add(1);
+        self.busy = false;
+        self.status = "已中止当前回合（进行中的模型请求可能仍会完成，但结果会被丢弃）".into();
+        cx.notify();
     }
 
     fn cycle_thread_permission(&mut self, cx: &mut Context<Self>) {
@@ -925,21 +963,33 @@ impl Render for AgentPane {
                         ),
                     )
                     .child(
-                        h_flex().gap_2().child(Input::new(&self.input)).child(
-                            Button::new("send")
-                                .primary()
-                                .label(if self.busy { "…" } else { "发送" })
-                                .disabled(self.busy)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let text = this.input.read(cx).value().to_string();
-                                    if !text.trim().is_empty() {
-                                        this.input.update(cx, |i, cx| {
-                                            i.set_value("", window, cx);
-                                        });
-                                        this.send(text, cx);
-                                    }
-                                })),
-                        ),
+                        h_flex()
+                            .gap_2()
+                            .child(Input::new(&self.input))
+                            .child(
+                                Button::new("send")
+                                    .primary()
+                                    .label(if self.busy { "…" } else { "发送" })
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let text = this.input.read(cx).value().to_string();
+                                        if !text.trim().is_empty() {
+                                            this.input.update(cx, |i, cx| {
+                                                i.set_value("", window, cx);
+                                            });
+                                            this.send(text, cx);
+                                        }
+                                    })),
+                            )
+                            .when(self.busy, |row| {
+                                row.child(
+                                    Button::new("agent-stop").danger().label("中止").on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.stop_turn(cx);
+                                        }),
+                                    ),
+                                )
+                            }),
                     ),
             )
     }

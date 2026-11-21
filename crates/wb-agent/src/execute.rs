@@ -1537,10 +1537,31 @@ pub fn execute_tool(
             if question.is_empty() {
                 return Ok(ToolResult::err_text("问题不能为空"));
             }
-            repo.push_notification(NotificationKind::System, "Agent 提问", question, None);
-            Ok(ToolResult::ok_text(format!(
-                "已向用户提问（见通知中心）：{question}"
-            )))
+            let timed = args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case("timed"));
+            let secs = args
+                .get("timeout")
+                .or_else(|| args.get("seconds"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60)
+                .clamp(5, 600);
+            let body = if timed {
+                format!("（{secs}s 超时后请自行继续）{question}")
+            } else {
+                question.to_string()
+            };
+            repo.push_notification(NotificationKind::System, "Agent 提问", &body, None);
+            if timed {
+                Ok(ToolResult::ok_text(format!(
+                    "已向用户提问（通知中心，约 {secs}s 超时）：{question}\n若用户未及时回复，请按合理默认继续。"
+                )))
+            } else {
+                Ok(ToolResult::ok_text(format!(
+                    "已向用户提问（见通知中心）：{question}"
+                )))
+            }
         }
         "read" => {
             let rel = args
@@ -1845,6 +1866,23 @@ pub fn execute_tool(
             let path = safe_join(&root, rel)?;
             observe_path(&path);
             let text = wb_host::ocr_image(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(ToolResult::ok_text(text))
+        }
+        "speech_transcribe" => {
+            let rel = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+            let lang = args.get("language").and_then(|v| v.as_str());
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
+            observe_path(&path);
+            let engine = load_prefs()
+                .ok()
+                .and_then(|p| p.voice.engine)
+                .unwrap_or_else(|| "sensevoice".into());
+            let text = wb_host::speech_transcribe(&engine, &path.to_string_lossy(), lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(ToolResult::ok_text(text))
         }
         "job_start" => {

@@ -984,8 +984,17 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         tool(
             "ocr",
             ToolEffect::Read,
-            "对工作区图片做 OCR 文字识别（tesseract 或已下载的 PaddleOCR 模型）",
+            "对工作区图片做 OCR 文字识别（tesseract / rapidocr / paddleocr CLI）",
             serde_json::json!({ "path": { "type": "string" } }),
+        ),
+        tool(
+            "speech_transcribe",
+            ToolEffect::Read,
+            "转写本机 WAV 录音（SenseVoice / sherpa-onnx-offline CLI）",
+            serde_json::json!({
+                "path": { "type": "string" },
+                "language": { "type": "string" }
+            }),
         ),
         tool(
             "job_start",
