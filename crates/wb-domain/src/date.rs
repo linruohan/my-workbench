@@ -55,6 +55,46 @@ pub fn weekday_of_day(day: &str) -> Option<Weekday> {
     parse_local_day(day).map(|d| d.weekday())
 }
 
+pub fn is_weekend(day: &str) -> bool {
+    matches!(weekday_of_day(day), Some(Weekday::Sat) | Some(Weekday::Sun))
+}
+
+/// Chinese weekday short label: 一…日.
+pub fn weekday_cn_short(day: &str) -> &'static str {
+    match weekday_of_day(day) {
+        Some(Weekday::Mon) => "一",
+        Some(Weekday::Tue) => "二",
+        Some(Weekday::Wed) => "三",
+        Some(Weekday::Thu) => "四",
+        Some(Weekday::Fri) => "五",
+        Some(Weekday::Sat) => "六",
+        Some(Weekday::Sun) => "日",
+        None => "?",
+    }
+}
+
+/// Build `count` planner day columns starting at `start` (inclusive).
+/// When `skip_weekends` is true, Saturday/Sunday are omitted until enough weekdays are collected.
+pub fn planner_day_columns(start: &str, count: usize, skip_weekends: bool) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(count);
+    let mut cursor = start.to_string();
+    let mut guard = 0usize;
+    while out.len() < count && guard < count.saturating_mul(4).saturating_add(14) {
+        guard += 1;
+        if !(skip_weekends && is_weekend(&cursor)) {
+            out.push(cursor.clone());
+        }
+        match add_local_days(&cursor, 1) {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+    out
+}
+
 pub fn local_hour_minute(ms: i64) -> (u32, u32) {
     let dt = Local
         .timestamp_millis_opt(ms)
@@ -72,5 +112,22 @@ mod tests {
         let day = format_local_day(1_700_000_000_000);
         assert_eq!(day.len(), 10);
         assert!(parse_local_day(&day).is_some());
+    }
+
+    #[test]
+    fn planner_columns_include_weekends_by_default() {
+        // 2026-11-20 is Friday → 3 days: Fri Sat Sun
+        let cols = planner_day_columns("2026-11-20", 3, false);
+        assert_eq!(cols, vec!["2026-11-20", "2026-11-21", "2026-11-22"]);
+        assert!(is_weekend("2026-11-21"));
+        assert_eq!(weekday_cn_short("2026-11-20"), "五");
+    }
+
+    #[test]
+    fn planner_columns_skip_weekends() {
+        // Fri → next weekdays Mon Tue (skip Sat/Sun)
+        let cols = planner_day_columns("2026-11-20", 3, true);
+        assert_eq!(cols, vec!["2026-11-20", "2026-11-23", "2026-11-24"]);
+        assert!(!cols.iter().any(|d| is_weekend(d)));
     }
 }

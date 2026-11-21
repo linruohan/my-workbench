@@ -35,6 +35,9 @@ pub struct AppPrefs {
     pub knowledge_current: Option<String>,
     #[serde(default)]
     pub knowledge_recent: Vec<String>,
+    /// Planner calendar: omit Sat/Sun when building day columns.
+    #[serde(default)]
+    pub planner_skip_weekends: bool,
 }
 
 fn default_sidebar_width() -> f32 {
@@ -56,6 +59,7 @@ impl Default for AppPrefs {
             knowledge_roots: Vec::new(),
             knowledge_current: None,
             knowledge_recent: Vec::new(),
+            planner_skip_weekends: false,
         }
     }
 }

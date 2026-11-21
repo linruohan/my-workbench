@@ -254,6 +254,45 @@ pub fn group_tasks_by_plan_day(tasks: &[Task]) -> Vec<(String, Vec<Task>)> {
     groups
 }
 
+/// Number of day columns in the planner calendar view.
+pub const PLANNER_CALENDAR_COLUMNS: usize = 15;
+
+/// Bucket root tasks into planner calendar columns.
+/// Returns `(overdue, columns)` where `columns` aligns 1:1 with `day_columns`.
+/// Tasks with plan day before the first column go into `overdue`;
+/// tasks after the last column or without a plan day are omitted.
+pub fn bucket_tasks_for_calendar(
+    tasks: &[Task],
+    day_columns: &[String],
+) -> (Vec<Task>, Vec<Vec<Task>>) {
+    let mut overdue = Vec::new();
+    let mut columns: Vec<Vec<Task>> = day_columns.iter().map(|_| Vec::new()).collect();
+    if day_columns.is_empty() {
+        return (overdue, columns);
+    }
+    let first = day_columns.first().map(String::as_str).unwrap_or("");
+    let last = day_columns.last().map(String::as_str).unwrap_or("");
+    for task in tasks {
+        if task.parent_id.is_some() || task.is_done {
+            continue;
+        }
+        let Some(day) = task_plan_day(task) else {
+            continue;
+        };
+        if day.as_str() < first {
+            overdue.push(task.clone());
+            continue;
+        }
+        if day.as_str() > last {
+            continue;
+        }
+        if let Some(idx) = day_columns.iter().position(|d| d == &day) {
+            columns[idx].push(task.clone());
+        }
+    }
+    (overdue, columns)
+}
+
 pub fn filter_tasks<'a>(
     tasks: &'a [Task],
     project_id: Option<&str>,
@@ -352,5 +391,30 @@ mod tests {
         assert!(!t.is_done);
         assert!(t.due_with_time.is_some());
         assert!(t.due_with_time.unwrap() > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn calendar_buckets_overdue_and_columns() {
+        let cols = vec![
+            "2026-11-21".into(),
+            "2026-11-22".into(),
+            "2026-11-23".into(),
+        ];
+        let mut overdue = create_task_draft("旧", None, None, Some(1));
+        overdue.due_day = Some("2026-11-20".into());
+        let mut today = create_task_draft("今", None, None, Some(2));
+        today.due_day = Some("2026-11-21".into());
+        let mut later = create_task_draft("后", None, None, Some(3));
+        later.due_day = Some("2026-11-23".into());
+        let mut far = create_task_draft("远", None, None, Some(4));
+        far.due_day = Some("2026-12-01".into());
+        let (ov, buckets) = bucket_tasks_for_calendar(&[overdue, today, later, far], &cols);
+        assert_eq!(ov.len(), 1);
+        assert_eq!(ov[0].title, "旧");
+        assert_eq!(buckets[0].len(), 1);
+        assert_eq!(buckets[0][0].title, "今");
+        assert!(buckets[1].is_empty());
+        assert_eq!(buckets[2].len(), 1);
+        assert_eq!(buckets[2][0].title, "后");
     }
 }

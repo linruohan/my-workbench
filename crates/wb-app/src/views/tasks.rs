@@ -6,11 +6,12 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    INBOX_PROJECT_ID, SchedulePatch, Task, TimedSchedulePreset, add_local_days,
-    apply_schedule_patch, clear_plan_fields, compute_task_stats, create_task_draft, filter_tasks,
-    format_local_day, group_tasks_by_plan_day, is_today_member, now_ms, parse_quick_capture,
-    select_planner_tasks, select_today_tasks, set_task_repeat_preset, settle_timer_segment,
-    task_repeat_label,
+    INBOX_PROJECT_ID, PLANNER_CALENDAR_COLUMNS, SchedulePatch, Task, TimedSchedulePreset,
+    add_local_days, apply_schedule_patch, bucket_tasks_for_calendar, clear_plan_fields,
+    compute_task_stats, create_task_draft, filter_tasks, format_local_day, group_tasks_by_plan_day,
+    is_today_member, now_ms, parse_quick_capture, planner_day_columns, select_planner_tasks,
+    select_today_tasks, set_task_repeat_preset, settle_timer_segment, task_repeat_label,
+    weekday_cn_short,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,6 +19,7 @@ enum TasksMode {
     #[default]
     List,
     Board,
+    Calendar,
     Stats,
 }
 
@@ -668,6 +670,58 @@ impl TasksPane {
                 cx.notify();
             }))
     }
+
+    fn toggle_skip_weekends(&mut self, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.prefs.planner_skip_weekends = !s.prefs.planner_skip_weekends;
+        });
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
+    fn render_calendar_chip(
+        task: Task,
+        entity: WeakEntity<Self>,
+        radius: Pixels,
+        muted: Hsla,
+        accent: Hsla,
+        border: Hsla,
+        selected: bool,
+    ) -> impl IntoElement {
+        let id = task.id.clone();
+        let title = task.title.clone();
+        let time_label = task
+            .due_with_time
+            .map(|ms| {
+                let (h, m) = wb_domain::local_hour_minute(ms);
+                format!("{h:02}:{m:02}")
+            })
+            .unwrap_or_default();
+        v_flex()
+            .id(SharedString::from(format!("cal-chip-{id}")))
+            .w_full()
+            .gap_0p5()
+            .p_1p5()
+            .rounded(radius)
+            .border_1()
+            .border_color(if selected { accent } else { border })
+            .when(selected, |el| el.bg(accent.opacity(0.55)))
+            .hover(move |s| s.bg(accent.opacity(0.4)))
+            .cursor_pointer()
+            .on_click({
+                let entity = entity.clone();
+                let id = id.clone();
+                move |_, window, app| {
+                    if let Some(e) = entity.upgrade() {
+                        e.update(app, |this, cx| this.select_task(&id, window, cx));
+                    }
+                }
+            })
+            .child(div().text_xs().font_bold().child(title))
+            .when(!time_label.is_empty(), |col| {
+                col.child(div().text_xs().text_color(muted).child(time_label))
+            })
+    }
 }
 
 impl Render for TasksPane {
@@ -903,6 +957,132 @@ impl Render for TasksPane {
                     .children(columns)
                     .into_any_element()
             }
+            TasksMode::Calendar => {
+                let skip = self.state.with(|s| s.prefs.planner_skip_weekends);
+                let day_cols = planner_day_columns(&today, PLANNER_CALENDAR_COLUMNS, skip);
+                let roots: Vec<Task> = tasks
+                    .iter()
+                    .filter(|(_, d)| *d == 0)
+                    .map(|(t, _)| t.clone())
+                    .collect();
+                let (overdue, buckets) = bucket_tasks_for_calendar(&roots, &day_cols);
+                let mut col_els: Vec<AnyElement> = Vec::new();
+                if !overdue.is_empty() {
+                    let chips: Vec<_> = overdue
+                        .into_iter()
+                        .map(|task| {
+                            let selected = selected_id.as_deref() == Some(task.id.as_str());
+                            Self::render_calendar_chip(
+                                task,
+                                entity.clone(),
+                                radius,
+                                muted,
+                                accent,
+                                border,
+                                selected,
+                            )
+                            .into_any_element()
+                        })
+                        .collect();
+                    col_els.push(
+                        v_flex()
+                            .w(px(132.))
+                            .gap_1()
+                            .p_2()
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(border)
+                            .overflow_y_scrollbar()
+                            .child(
+                                div()
+                                    .font_bold()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("逾期 · {}", chips.len())),
+                            )
+                            .children(chips)
+                            .into_any_element(),
+                    );
+                }
+                for (day, day_tasks) in day_cols.iter().zip(buckets) {
+                    let is_today = day == &today;
+                    let weekday = weekday_cn_short(day);
+                    let md = day.get(5..).unwrap_or(day.as_str()).to_string();
+                    let header = if is_today {
+                        format!("今天 · 周{weekday} · {md}")
+                    } else {
+                        format!("周{weekday} · {md}")
+                    };
+                    let chips: Vec<_> = day_tasks
+                        .into_iter()
+                        .map(|task| {
+                            let selected = selected_id.as_deref() == Some(task.id.as_str());
+                            Self::render_calendar_chip(
+                                task,
+                                entity.clone(),
+                                radius,
+                                muted,
+                                accent,
+                                border,
+                                selected,
+                            )
+                            .into_any_element()
+                        })
+                        .collect();
+                    let count = chips.len();
+                    col_els.push(
+                        v_flex()
+                            .w(px(132.))
+                            .gap_1()
+                            .p_2()
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(if is_today { accent } else { border })
+                            .when(is_today, |col| col.bg(accent.opacity(0.12)))
+                            .overflow_y_scrollbar()
+                            .child(
+                                div()
+                                    .font_bold()
+                                    .text_xs()
+                                    .text_color(if is_today { accent } else { muted })
+                                    .child(format!("{header} · {count}")),
+                            )
+                            .children(chips)
+                            .into_any_element(),
+                    );
+                }
+                v_flex()
+                    .gap_2()
+                    .flex_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_xs().text_color(muted).child(format!(
+                                "{} 列 · 自 {today}{}",
+                                PLANNER_CALENDAR_COLUMNS,
+                                if skip { " · 已跳过周末" } else { "" }
+                            )))
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("cal-skip-weekends")
+                                    .xsmall()
+                                    .label(if skip { "显示周末" } else { "跳过周末" })
+                                    .selected(skip)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_skip_weekends(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_1()
+                            .overflow_x_scrollbar()
+                            .children(col_els),
+                    )
+                    .into_any_element()
+            }
             TasksMode::Stats => {
                 let cards: Vec<_> = [
                     ("未完成", stats.open.to_string()),
@@ -964,6 +1144,7 @@ impl Render for TasksPane {
                     .child(div().flex_1())
                     .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
                     .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
+                    .child(self.mode_button("mode-calendar", "日历", TasksMode::Calendar, cx))
                     .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx))
                     .child(
                         Button::new("new-project")
