@@ -2220,10 +2220,7 @@ mod tests {
     fn mcp_add_list_remove() {
         use std::sync::{Mutex, OnceLock};
         static PREFS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = PREFS_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap();
+        let _guard = PREFS_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let mut repo = MemoryWorkbenchRepository::default();
         let name = format!("demo-mcp-{}", uuid::Uuid::new_v4());
         let add = execute_tool(
@@ -2236,13 +2233,7 @@ mod tests {
         assert!(add.ok, "{}", add.content);
         let list = execute_tool(&mut repo, "mcp_list", &json!({}), None).unwrap();
         assert!(list.content.contains(&name), "{}", list.content);
-        let rm = execute_tool(
-            &mut repo,
-            "mcp_remove",
-            &json!({ "name": name }),
-            None,
-        )
-        .unwrap();
+        let rm = execute_tool(&mut repo, "mcp_remove", &json!({ "name": name }), None).unwrap();
         assert!(rm.ok, "{}", rm.content);
     }
 

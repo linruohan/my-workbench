@@ -63,6 +63,7 @@ pub fn run_shell_kind(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
+    apply_agent_shell_env(&mut cmd, cwd, cwd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("启动 shell 失败")?;
     let stdout = child.stdout.take();
@@ -104,6 +105,92 @@ pub fn run_shell_kind(
             }
             None => thread::sleep(Duration::from_millis(50)),
         }
+    }
+}
+
+/// Scrub inherited secrets / host `WB_*`, then inject managed agent facts.
+pub fn apply_agent_shell_env(cmd: &mut Command, workspace_root: Option<&str>, cwd: Option<&str>) {
+    cmd.env_clear();
+    for (key, value) in std::env::vars() {
+        if !is_allowed_env_key(&key) {
+            continue;
+        }
+        cmd.env(&key, value);
+    }
+    cmd.env("WB_AGENT_SHELL", "1");
+    if let Some(home) = dirs::home_dir() {
+        cmd.env("WB_HOME", home);
+    }
+    if let Some(root) = workspace_root.filter(|s| !s.is_empty()) {
+        cmd.env("WB_WORKSPACE_ROOT", root);
+    }
+    if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
+        cmd.env("WB_CWD", cwd);
+    } else if let Some(root) = workspace_root.filter(|s| !s.is_empty()) {
+        cmd.env("WB_CWD", root);
+    }
+}
+
+fn is_allowed_env_key(key: &str) -> bool {
+    if key.starts_with("WB_") {
+        return false;
+    }
+    let upper = key.to_ascii_uppercase();
+    if upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("TOKEN")
+        || upper.contains("API_KEY")
+        || upper.contains("ACCESS_KEY")
+    {
+        return false;
+    }
+    const ALLOW: &[&str] = &[
+        "PATH",
+        "PATHEXT",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "HOME",
+        "USERPROFILE",
+        "USERNAME",
+        "USER",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "COLORTERM",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "OS",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "PSModulePath",
+        "PROMPT",
+        "SHELL",
+        "SHLVL",
+    ];
+    ALLOW.iter().any(|k| k.eq_ignore_ascii_case(key))
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_keeps_path_drops_secrets_and_wb() {
+        assert!(is_allowed_env_key("PATH"));
+        assert!(is_allowed_env_key("Path"));
+        assert!(!is_allowed_env_key("WB_HOME"));
+        assert!(!is_allowed_env_key("OPENAI_API_KEY"));
+        assert!(!is_allowed_env_key("MY_SECRET"));
     }
 }
 
@@ -216,6 +303,7 @@ impl JobRegistry {
             if let Some(ref cwd) = cwd {
                 cmd.current_dir(cwd);
             }
+            apply_agent_shell_env(&mut cmd, cwd.as_deref(), cwd.as_deref());
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             match cmd.spawn() {
                 Ok(mut child) => {

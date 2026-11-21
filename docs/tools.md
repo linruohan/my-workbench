@@ -362,11 +362,11 @@ DSH：统一协作式取消 + 超时错误映射。
 | `notification_list` / `notification_create` | ✅ |
 | `schedule_list` / `schedule_view` / `schedule_create` / `schedule_edit` / `schedule_enable` / `schedule_delete` | ✅ |
 | `timer_status` / `timer_add` | ✅（记入当日用时；非 UI 实时跑表） |
-| `read` / `write` / `str_replace` / `edit` / `shell` / `bash` / `pwsh` | ✅（拒绝 `..` 越界；尚无 spill） |
+| `read` / `write` / `str_replace` / `edit` / `shell` / `bash` / `pwsh` | ✅（越界拒绝；shell 环境 scrub + `WB_*` 注入） |
 | `apply_patch` | ✅ Codex Add/Update/Delete |
 | `str_replace_editor` | ✅ view/create/str_replace/insert |
 | `load_workspace_dependencies` | ✅ PATH 探测 |
-| `read_image` | ✅ 元数据（格式/尺寸）；尚无 vision 挂载 / OCR |
+| `read_image` | ✅ 元数据；超 4MiB/长边 2048 给 `<image_offload>` 提示 |
 | `job_start` / `job_output` / `job_list` / `job_kill` | ✅ 后台 shell（非 PTY） |
 | `web_fetch` | ✅ HTTP GET + 体积截断 |
 | `glob` / `grep` | ✅（自实现扫描 + 结果上限；非 ripgrep） |

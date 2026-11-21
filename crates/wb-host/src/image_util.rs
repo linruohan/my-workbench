@@ -70,6 +70,9 @@ fn gif_size(data: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+const VISION_MAX_BYTES: usize = 4 * 1024 * 1024;
+const VISION_MAX_EDGE: u32 = 2048;
+
 /// Inspect an image file (magic + size). No full vision / OCR pipeline yet.
 pub fn read_image_info(path: &Path) -> Result<ImageInfo> {
     if !path.exists() {
@@ -86,12 +89,44 @@ pub fn read_image_info(path: &Path) -> Result<ImageInfo> {
         "gif" => gif_size(&data),
         _ => None,
     };
+    let (width, height) = (dims.map(|(w, _)| w), dims.map(|(_, h)| h));
+    let long_edge = width.zip(height).map(|(w, h)| w.max(h)).unwrap_or(0);
+    let mut note = String::from("已读取图片元数据；完整多模态挂载 / OCR 将在后续迭代增强");
+    if data.len() > VISION_MAX_BYTES || long_edge > VISION_MAX_EDGE {
+        note.push_str(&format!(
+            "\n<image_offload path=\"{}\" bytes={} edge={} limitBytes={} limitEdge={}/> — 体积或边长超 vision 预算，请按需再次 read_image",
+            path.display(),
+            data.len(),
+            long_edge,
+            VISION_MAX_BYTES,
+            VISION_MAX_EDGE
+        ));
+    }
     Ok(ImageInfo {
         path: path.display().to_string(),
         format,
         bytes: data.len(),
-        width: dims.map(|(w, _)| w),
-        height: dims.map(|(_, h)| h),
-        note: "已读取图片元数据；完整多模态挂载 / OCR 将在后续迭代增强".into(),
+        width,
+        height,
+        note,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_image_gets_offload_hint() {
+        let dir = std::env::temp_dir().join(format!("wb-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.bin");
+        // Fake oversized JPEG header + padding
+        let mut data = vec![0xff, 0xd8, 0xff, 0xe0];
+        data.resize(VISION_MAX_BYTES + 10, 0);
+        std::fs::write(&path, &data).unwrap();
+        let info = read_image_info(&path).unwrap();
+        assert!(info.note.contains("image_offload"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
