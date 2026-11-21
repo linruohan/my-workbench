@@ -17,9 +17,10 @@
 ```
 crates/wb-app      GPUI 窗口与界面（入口二进制 my-workbench）
 crates/wb-domain   无 IO 的领域规则
-crates/wb-store    内存仓储 + workbench.json / prefs.json 持久化
-crates/wb-host     原生能力（kb 文件、shell、HTTP、语音 PTT、字体）
+crates/wb-store    内存仓储 + workbench.json / prefs.json / theme.json 持久化
+crates/wb-host     原生能力（kb、shell、HTTP、PTT、OCR ONNX、字体）
 crates/wb-agent    Agent 回合、工具分派、Provider
+crates/wb-asr      SenseVoice 独立助手进程（避开与 OCR 的 CRT 冲突）
 ```
 
 UI 依赖本地 [`../gpui-kit`](../gpui-kit)（path：`../gpui-kit/crates/kit`）。
@@ -40,6 +41,7 @@ UI 依赖本地 [`../gpui-kit`](../gpui-kit)（path：`../gpui-kit/crates/kit`�
 环境要求：Rust stable、Visual Studio Build Tools（C++ 桌面开发）、本地检出 [`gpui-kit`](../gpui-kit) 于 `D:\codehub\gpui-kit`（或相对本仓库 `../gpui-kit`）。
 
 ```bash
+cargo build -p wb-asr        # 语音转写助手（与 wb-app 同目录即可被发现）
 cargo run -p wb-app          # 启动桌面应用
 cargo test --workspace       # 单元测试
 cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace

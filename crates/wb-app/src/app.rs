@@ -21,6 +21,7 @@ actions!(workbench, [OpenPalette, FocusCapture, Escape]);
 pub struct WorkbenchApp {
     state: AppState,
     collapsed: bool,
+    ptt_held: bool,
     sidebar_panels: Entity<ResizableState>,
     tasks: Entity<TasksPane>,
     timed: Entity<TimedPane>,
@@ -70,9 +71,24 @@ impl WorkbenchApp {
         })
         .detach();
 
+        // PTT 录音态与转写结果需要更密的轮询
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.on_ptt_poll(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+
         Self {
             state,
             collapsed,
+            ptt_held: false,
             sidebar_panels,
             tasks,
             timed,
@@ -148,6 +164,17 @@ impl WorkbenchApp {
                 );
             }
         }
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn on_ptt_poll(&mut self, cx: &mut Context<Self>) {
+        let held = wb_host::voice_ptt_is_held();
+        let mut dirty = false;
+        if self.ptt_held != held {
+            self.ptt_held = held;
+            dirty = true;
+        }
         if let Some(text) = wb_host::voice_ptt_take_pending() {
             if wb_host::voice_ptt_paste(&text).is_err() {
                 self.state.push_notification(
@@ -157,9 +184,11 @@ impl WorkbenchApp {
                     None,
                 );
             }
+            dirty = true;
         }
-        self.state.persist_if_dirty();
-        cx.notify();
+        if dirty {
+            cx.notify();
+        }
     }
 
     fn set_nav(&mut self, nav: AppNav, cx: &mut Context<Self>) {
@@ -271,6 +300,7 @@ impl Render for WorkbenchApp {
         let save_ok = self.state.with(|s| s.save_status.ok);
         let entity = cx.weak_entity();
         let collapsed = self.collapsed;
+        let ptt_held = self.ptt_held;
 
         let today_label = if today_count > 0 {
             format!("今日 ({today_count})")
@@ -463,6 +493,18 @@ impl Render for WorkbenchApp {
                             ))
                             .child(div().font_bold().child(nav.label()))
                             .child(div().flex_1())
+                            .when(ptt_held, |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(cx.theme().danger)
+                                        .text_color(cx.theme().danger_foreground)
+                                        .child("正在录音… 松开 CapsLock 结束"),
+                                )
+                            })
                             .child(
                                 Button::new("bell")
                                     .ghost()

@@ -92,7 +92,7 @@ Agent 输入框内以 `/` 开头触发斜杠命令；CapsLock 按住说话由语
 - 宿主每 15 秒扫描到期提醒与定时任务；到期后写通知、弹出提醒卡并打开通知中心。
 - 同一次提醒被忽略后进入约 5 分钟冷却，不反复抢焦点。
 - 通知来源包括任务提醒、截止提醒、定时任务与 Agent 系统消息。
-- `systemNotifications` 偏好已存在，但尚未调用系统通知 API（未落地）。
+- `systemNotifications` 开启时，应用内通知会同步弹出系统 Toast（Windows WinRT）。
 
 ## 5. 数据模型与持久化
 
@@ -254,7 +254,7 @@ wb-domain
 
 ## 10. 外观与性能
 
-- 主题仅浅色 / 深色；`theme.json` 持久化；CSS 变量 `--wb-*` 统一令牌。
+- 主题仅浅色 / 深色；`prefs.json` 的 `themeMode` 为主，保存时同步写 `theme.json`（兼容旧数据）。
 - 系统字体经 Rust `font-kit` 扫描，应用于界面字体与内嵌网页默认字体；搜索支持中文名与文件名别名。
 - Agent 消息与 Markdown 实时预览使用窗口化渲染；长列表按需渲染。
 - 动画短、可关；`prefers-reduced-motion` 归零。

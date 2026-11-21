@@ -1,11 +1,12 @@
-use crate::paths::{prefs_path, store_path};
+use crate::paths::{prefs_path, store_path, theme_path};
 use crate::repository::MemoryWorkbenchRepository;
 use crate::snapshot::WorkbenchSnapshot;
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use wb_domain::AppPrefs;
+use wb_domain::{AppPrefs, ThemeModePref};
 
 fn prefs_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -95,22 +96,75 @@ where
     Ok(out)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ThemeFile {
+    /// `"light"` | `"dark"` — 与旧 Tauri `theme.json` 对齐
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    theme: Option<String>,
+}
+
+fn parse_theme_mode(raw: &str) -> Option<ThemeModePref> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dark" => Some(ThemeModePref::Dark),
+        "light" => Some(ThemeModePref::Light),
+        _ => None,
+    }
+}
+
+fn load_theme_file_mode() -> Option<ThemeModePref> {
+    let path = theme_path().ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(&path).ok()?;
+    let file: ThemeFile = serde_json::from_str(&text).ok()?;
+    file.mode
+        .as_deref()
+        .or(file.theme.as_deref())
+        .and_then(parse_theme_mode)
+}
+
+fn save_theme_file(mode: ThemeModePref) -> Result<()> {
+    let path = theme_path()?;
+    let mode = match mode {
+        ThemeModePref::Dark => "dark",
+        ThemeModePref::Light => "light",
+    };
+    let json = serde_json::to_string_pretty(&ThemeFile {
+        mode: Some(mode.into()),
+        theme: None,
+    })?;
+    write_text_atomic(&path, &json)
+}
+
 fn load_prefs_unlocked() -> Result<AppPrefs> {
     let path = prefs_path()?;
-    if !path.exists() {
-        return Ok(AppPrefs::default());
+    let prefs_existed = path.is_file();
+    let mut prefs = if !prefs_existed {
+        AppPrefs::default()
+    } else {
+        let text = fs::read_to_string(&path)?;
+        if text.trim().is_empty() {
+            AppPrefs::default()
+        } else {
+            serde_json::from_str(&text).unwrap_or_default()
+        }
+    };
+    // 仅在尚无 prefs.json 时用 theme.json 补齐（兼容旧 Tauri 数据）
+    if !prefs_existed && let Some(mode) = load_theme_file_mode() {
+        prefs.theme_mode = mode;
     }
-    let text = fs::read_to_string(&path)?;
-    if text.trim().is_empty() {
-        return Ok(AppPrefs::default());
-    }
-    Ok(serde_json::from_str(&text).unwrap_or_default())
+    Ok(prefs)
 }
 
 fn save_prefs_unlocked(prefs: &AppPrefs) -> Result<()> {
     let path = prefs_path()?;
     let json = serde_json::to_string_pretty(prefs)?;
-    write_text_atomic(&path, &json)
+    write_text_atomic(&path, &json)?;
+    let _ = save_theme_file(prefs.theme_mode);
+    Ok(())
 }
 
 fn write_text_atomic(path: &Path, contents: &str) -> Result<()> {
@@ -175,6 +229,20 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let q: AppPrefs = serde_json::from_str(&json).unwrap();
         assert_eq!(p.sidebar_width, q.sidebar_width);
+    }
+
+    #[test]
+    fn theme_file_parses_mode_and_theme_alias() {
+        let a: ThemeFile = serde_json::from_str(r#"{"mode":"dark"}"#).unwrap();
+        assert_eq!(
+            parse_theme_mode(a.mode.as_deref().unwrap()),
+            Some(ThemeModePref::Dark)
+        );
+        let b: ThemeFile = serde_json::from_str(r#"{"theme":"Light"}"#).unwrap();
+        assert_eq!(
+            parse_theme_mode(b.theme.as_deref().unwrap()),
+            Some(ThemeModePref::Light)
+        );
     }
 
     #[test]

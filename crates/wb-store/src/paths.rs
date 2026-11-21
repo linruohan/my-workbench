@@ -30,3 +30,7 @@ pub fn store_path() -> Result<PathBuf> {
 pub fn prefs_path() -> Result<PathBuf> {
     data_file_path(PREFS_FILE)
 }
+
+pub fn theme_path() -> Result<PathBuf> {
+    data_file_path(THEME_FILE)
+}
