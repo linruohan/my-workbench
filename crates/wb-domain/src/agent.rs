@@ -570,6 +570,26 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             "列出已配置的 MCP 服务器",
             serde_json::json!({}),
         ),
+        tool(
+            "mcp_add",
+            ToolEffect::Write,
+            "添加 MCP 服务器配置（仅 prefs，无协议运行时）",
+            serde_json::json!({
+                "name": { "type": "string" },
+                "command": { "type": "string" },
+                "args": { "type": "array" },
+                "url": { "type": "string" }
+            }),
+        ),
+        tool(
+            "mcp_remove",
+            ToolEffect::Write,
+            "按序号或名称删除 MCP 配置",
+            serde_json::json!({
+                "index": { "type": "integer" },
+                "name": { "type": "string" }
+            }),
+        ),
     ]
 }
 

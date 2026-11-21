@@ -1673,6 +1673,67 @@ pub fn execute_tool(
                 lines.join("\n")
             }))
         }
+        "mcp_add" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                return Ok(ToolResult::err_text("缺少 name"));
+            }
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".into(), Value::String(name.to_string()));
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                entry.insert("command".into(), Value::String(cmd.to_string()));
+            }
+            if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+                entry.insert("url".into(), Value::String(url.to_string()));
+            }
+            if let Some(a) = args.get("args") {
+                entry.insert("args".into(), a.clone());
+            }
+            let mut prefs = load_prefs().unwrap_or_default();
+            if prefs.agent.mcp_servers.iter().any(|v| {
+                v.get("name")
+                    .or_else(|| v.get("id"))
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            }) {
+                return Ok(ToolResult::err_text(format!("已存在 MCP：{name}")));
+            }
+            prefs.agent.mcp_servers.push(Value::Object(entry));
+            save_prefs(&prefs)?;
+            Ok(ToolResult::ok_text(format!(
+                "已添加 MCP 配置 {name}（尚无协议运行时）"
+            )))
+        }
+        "mcp_remove" => {
+            let mut prefs = load_prefs().unwrap_or_default();
+            let before = prefs.agent.mcp_servers.len();
+            if let Some(idx) = args.get("index").and_then(|v| v.as_u64()) {
+                let i = idx as usize;
+                if i == 0 || i > prefs.agent.mcp_servers.len() {
+                    return Ok(ToolResult::err_text("index 无效（从 1 起）"));
+                }
+                prefs.agent.mcp_servers.remove(i - 1);
+            } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                prefs.agent.mcp_servers.retain(|v| {
+                    v.get("name")
+                        .or_else(|| v.get("id"))
+                        .and_then(|x| x.as_str())
+                        .map(|n| !n.eq_ignore_ascii_case(name))
+                        .unwrap_or(true)
+                });
+            } else {
+                return Ok(ToolResult::err_text("需要 index 或 name"));
+            }
+            if prefs.agent.mcp_servers.len() == before {
+                return Ok(ToolResult::err_text("未找到要删除的 MCP"));
+            }
+            save_prefs(&prefs)?;
+            Ok(ToolResult::ok_text("已删除 MCP 配置"))
+        }
         "working_directory" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path.trim().is_empty() {
@@ -2153,6 +2214,36 @@ mod tests {
             &json!({ "action": "clear" }),
             None,
         );
+    }
+
+    #[test]
+    fn mcp_add_list_remove() {
+        use std::sync::{Mutex, OnceLock};
+        static PREFS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = PREFS_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let mut repo = MemoryWorkbenchRepository::default();
+        let name = format!("demo-mcp-{}", uuid::Uuid::new_v4());
+        let add = execute_tool(
+            &mut repo,
+            "mcp_add",
+            &json!({ "name": name, "command": "npx", "args": ["-y", "demo"] }),
+            None,
+        )
+        .unwrap();
+        assert!(add.ok, "{}", add.content);
+        let list = execute_tool(&mut repo, "mcp_list", &json!({}), None).unwrap();
+        assert!(list.content.contains(&name), "{}", list.content);
+        let rm = execute_tool(
+            &mut repo,
+            "mcp_remove",
+            &json!({ "name": name }),
+            None,
+        )
+        .unwrap();
+        assert!(rm.ok, "{}", rm.content);
     }
 
     #[test]

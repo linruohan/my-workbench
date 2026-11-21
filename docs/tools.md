@@ -377,7 +377,7 @@ DSH：统一协作式取消 + 超时错误映射。
 | `memory_list` / `memory_add` / `memory_remove` | ✅（prefs.json） |
 | `todo_write` / `todo_list` | ✅（进程内会话待办） |
 | `ask_user_question` | ✅（写入通知中心） |
-| `skill_list` / `skill_load` / `plugin_list` / `mcp_list` | ✅（目录扫描 / prefs） |
+| `skill_list` / `skill_load` / `plugin_list` / `mcp_list` / `mcp_add` / `mcp_remove` | ✅（目录扫描 / prefs；无 MCP 协议运行时） |
 | `working_directory` | ✅ 会话 cwd |
 | `terminal_open/send/read/list/close/signal` | 🟡 轻量命令日志会话（非 ConPTY） |
 | `search` | ✅ 任务/笔记/项目/标签 |
@@ -390,7 +390,7 @@ DSH：统一协作式取消 + 超时错误映射。
 | `session_event_search` / `session_event_read` / `session_event_trace` | ✅ 消息即事件（1-based seq） |
 | `get_goal` / `create_goal` / `update_goal` | 🟡 进程内 goal；空闲续行最多 2 次；自主 blocked 默认满 3 轮 |
 | FS 观察策略 | ✅ 写/删已存在文件前须 `read`/`read_image`/`view`（`FS_NOT_OBSERVED`） |
-| 真 PTY / MCP 协议 | ❌ 未迁 |
+| 真 PTY / MCP 协议运行时 | ❌ 未迁 |
 
 斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list` `/goal …`。
 
