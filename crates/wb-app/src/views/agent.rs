@@ -8,9 +8,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_agent::{
     TurnPhase, begin_user_turn, continue_turn_reply, create_thread, cycle_permission_mode,
-    finish_continue_turn, finish_user_turn, pending_approvals_for_thread, permission_mode_label,
-    resolve_approval, resolve_turn_reply,
+    finish_continue_turn, finish_user_turn, load_providers, pending_approvals_for_thread,
+    permission_mode_label, resolve_approval, resolve_turn_reply,
 };
+use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{AgentRole, AgentWorkspace, agent_workspace_title_from_path, create_id, now_ms};
 use wb_host::pick_directory;
 
@@ -181,6 +182,45 @@ impl AgentPane {
         cx.notify();
     }
 
+    fn available_model_refs() -> Vec<String> {
+        let mut refs = vec![BUILTIN_MODEL_REF.to_string()];
+        for p in load_providers().providers {
+            if p.id.starts_with("builtin") {
+                continue;
+            }
+            if p.models.is_empty() {
+                refs.push(format!("{}/default", p.id));
+            } else {
+                for mid in p.models.keys() {
+                    refs.push(format!("{}/{}", p.id, mid));
+                }
+            }
+        }
+        refs
+    }
+
+    fn cycle_thread_model(&mut self, cx: &mut Context<Self>) {
+        let tid = self.ensure_thread();
+        let refs = Self::available_model_refs();
+        if refs.is_empty() {
+            return;
+        }
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+            {
+                let idx = refs.iter().position(|r| r == &t.model_ref).unwrap_or(0);
+                t.model_ref = refs[(idx + 1) % refs.len()].clone();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn apply_open_view(&mut self, view: Option<&str>) {
         let Some(view) = view else {
             return;
@@ -261,34 +301,43 @@ impl AgentPane {
 
 impl Render for AgentPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (threads, messages, workspaces, approvals, perm_label) = self.state.with(|s| {
-            let tid = s.active_thread_id.clone();
-            let messages = tid
-                .as_deref()
-                .map(|id| s.repo.messages_for_thread(id))
-                .unwrap_or_default();
-            let approvals = tid
-                .as_deref()
-                .map(|id| pending_approvals_for_thread(&s.repo, id))
-                .unwrap_or_default();
-            let perm = tid
-                .as_deref()
-                .and_then(|id| {
-                    s.repo
-                        .list_agent_threads()
-                        .into_iter()
-                        .find(|t| t.id == id)
-                        .map(|t| permission_mode_label(t.permission_mode))
-                })
-                .unwrap_or("确认");
-            (
-                s.repo.list_agent_threads(),
-                messages,
-                s.repo.list_agent_workspaces(),
-                approvals,
-                perm,
-            )
-        });
+        let (threads, messages, workspaces, approvals, perm_label, model_label) =
+            self.state.with(|s| {
+                let tid = s.active_thread_id.clone();
+                let messages = tid
+                    .as_deref()
+                    .map(|id| s.repo.messages_for_thread(id))
+                    .unwrap_or_default();
+                let approvals = tid
+                    .as_deref()
+                    .map(|id| pending_approvals_for_thread(&s.repo, id))
+                    .unwrap_or_default();
+                let thread = tid
+                    .as_deref()
+                    .and_then(|id| s.repo.list_agent_threads().into_iter().find(|t| t.id == id));
+                let perm = thread
+                    .as_ref()
+                    .map(|t| permission_mode_label(t.permission_mode))
+                    .unwrap_or("确认");
+                let model = thread
+                    .as_ref()
+                    .map(|t| {
+                        t.model_ref
+                            .split('/')
+                            .next_back()
+                            .unwrap_or(t.model_ref.as_str())
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "local".into());
+                (
+                    s.repo.list_agent_threads(),
+                    messages,
+                    s.repo.list_agent_workspaces(),
+                    approvals,
+                    perm,
+                    model,
+                )
+            });
         let entity = cx.weak_entity();
         let active = self.state.with(|s| s.active_thread_id.clone());
         let status = self.status.clone();
@@ -462,6 +511,15 @@ impl Render for AgentPane {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cycle_thread_permission(cx)
                                     })),
+                            )
+                            .child(
+                                Button::new("agent-model")
+                                    .small()
+                                    .ghost()
+                                    .label(format!("模型:{model_label}"))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.cycle_thread_model(cx)),
+                                    ),
                             ),
                     )
                     .child(
