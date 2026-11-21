@@ -572,6 +572,40 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "edit",
+            ToolEffect::Write,
+            "同 str_replace（字面量替换）",
+            serde_json::json!({
+                "path": { "type": "string" },
+                "oldString": { "type": "string" },
+                "newString": { "type": "string" },
+                "replaceAll": { "type": "boolean" }
+            }),
+        ),
+        tool(
+            "apply_patch",
+            ToolEffect::Write,
+            "应用 Codex 风格补丁（Add/Update/Delete File）",
+            serde_json::json!({
+                "patch": { "type": "string" },
+                "input": { "type": "string" }
+            }),
+        ),
+        tool(
+            "str_replace_editor",
+            ToolEffect::Write,
+            "Claude Code 风格编辑器：view/create/str_replace/insert",
+            serde_json::json!({
+                "command": { "type": "string" },
+                "path": { "type": "string" },
+                "file_text": { "type": "string" },
+                "old_str": { "type": "string" },
+                "new_str": { "type": "string" },
+                "insert_line": { "type": "integer" },
+                "view_range": { "type": "array" }
+            }),
+        ),
+        tool(
             "glob",
             ToolEffect::Read,
             "按 glob 查找文件",

@@ -4,10 +4,10 @@ use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
 use wb_domain::{
-    AgentMessage, AgentPermissionMode, NotificationKind, TimedIntervalUnit, TimedSchedulePreset,
-    ToolEffect, ToolGate, ToolSpec, builtin_host_tools, create_timed_task_draft, format_local_day,
-    gate_tool, make_custom_schedule, make_preset_schedule, now_ms, settle_timer_segment,
-    workspace_tools,
+    AgentMessage, AgentPermissionMode, NotificationKind, PatchAction, TimedIntervalUnit,
+    TimedSchedulePreset, ToolEffect, ToolGate, ToolSpec, apply_hunks, builtin_host_tools,
+    create_timed_task_draft, format_local_day, gate_tool, make_custom_schedule,
+    make_preset_schedule, now_ms, parse_apply_patch, settle_timer_segment, workspace_tools,
 };
 use wb_host::{
     global_jobs, global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
@@ -99,6 +99,34 @@ fn format_event(seq: usize, m: &AgentMessage) -> String {
         .map(|id| format!(" call={id}"))
         .unwrap_or_default();
     format!("#{seq} [{role}]{tool}{call}\n{}", m.content)
+}
+
+fn number_lines(text: &str, view_range: Option<&Value>) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let (start, end) = match view_range {
+        Some(Value::Array(arr)) if arr.len() >= 2 => {
+            let a = arr[0].as_u64().unwrap_or(1).max(1) as usize;
+            let b = arr[1].as_i64().unwrap_or(lines.len() as i64);
+            let end = if b < 0 {
+                lines.len()
+            } else {
+                (b as usize).min(lines.len())
+            };
+            (a.min(lines.len().saturating_add(1)), end)
+        }
+        _ => (1, lines.len()),
+    };
+    if lines.is_empty() {
+        return "（空文件）".into();
+    }
+    let start = start.max(1);
+    let end = end.max(start.saturating_sub(1)).min(lines.len());
+    lines[start.saturating_sub(1)..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>6}|{}", start + i, line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn all_tools() -> Vec<ToolSpec> {
@@ -1063,6 +1091,135 @@ pub fn execute_tool(
                 if replace_all { count } else { 1 }
             )))
         }
+        "apply_patch" => {
+            let patch = args
+                .get("patch")
+                .or_else(|| args.get("input"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 patch"))?;
+            let root = effective_root(workspace_root)?;
+            let actions = parse_apply_patch(patch).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut summary = Vec::new();
+            for action in actions {
+                match action {
+                    PatchAction::Add { path: rel, content } => {
+                        let path = safe_join(&root, &rel)?;
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        write_text(&path, &content)?;
+                        summary.push(format!("+ {rel}"));
+                    }
+                    PatchAction::Delete { path: rel } => {
+                        let path = safe_join(&root, &rel)?;
+                        if path.exists() {
+                            std::fs::remove_file(&path)?;
+                            summary.push(format!("- {rel}"));
+                        } else {
+                            summary.push(format!("- {rel}（不存在，跳过）"));
+                        }
+                    }
+                    PatchAction::Update { path: rel, hunks } => {
+                        let path = safe_join(&root, &rel)?;
+                        let text = read_text(&path)?;
+                        let next =
+                            apply_hunks(&text, &hunks).map_err(|e| anyhow::anyhow!("{e}"))?;
+                        write_text(&path, &next)?;
+                        summary.push(format!("~ {rel}（{} hunk）", hunks.len()));
+                    }
+                }
+            }
+            Ok(ToolResult::ok_text(format!(
+                "已应用补丁：\n{}",
+                summary.join("\n")
+            )))
+        }
+        "str_replace_editor" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let rel = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+            let root = effective_root(workspace_root)?;
+            let path = safe_join(&root, rel)?;
+            match command.as_str() {
+                "view" => {
+                    let text = read_text(&path)?;
+                    let numbered = number_lines(&text, args.get("view_range"));
+                    Ok(ToolResult::ok_text(numbered))
+                }
+                "create" => {
+                    let content = args
+                        .get("file_text")
+                        .or_else(|| args.get("fileText"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    write_text(&path, content)?;
+                    Ok(ToolResult::ok_text(format!("已创建 {rel}")))
+                }
+                "str_replace" => {
+                    let old = args
+                        .get("old_str")
+                        .or_else(|| args.get("oldStr"))
+                        .or_else(|| args.get("oldString"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("缺少 old_str"))?;
+                    let new = args
+                        .get("new_str")
+                        .or_else(|| args.get("newStr"))
+                        .or_else(|| args.get("newString"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let text = read_text(&path)?;
+                    let count = text.matches(old).count();
+                    if count == 0 {
+                        return Ok(ToolResult::err_text("未找到 old_str"));
+                    }
+                    if count > 1 {
+                        return Ok(ToolResult::err_text(format!(
+                            "old_str 出现 {count} 次，请收窄"
+                        )));
+                    }
+                    write_text(&path, &text.replacen(old, new, 1))?;
+                    Ok(ToolResult::ok_text(format!("已替换 {rel}")))
+                }
+                "insert" => {
+                    let insert_line = args
+                        .get("insert_line")
+                        .or_else(|| args.get("insertLine"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let new = args
+                        .get("new_str")
+                        .or_else(|| args.get("newStr"))
+                        .or_else(|| args.get("file_text"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let text = read_text(&path)?;
+                    let mut lines: Vec<&str> = text.lines().collect();
+                    let at = insert_line.min(lines.len());
+                    // insert_line is 0-based "after this line" in Claude Code; treat as index.
+                    lines.insert(at, new);
+                    let mut out = lines.join("\n");
+                    if text.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    write_text(&path, &out)?;
+                    Ok(ToolResult::ok_text(format!("已在 {rel} 第 {at} 行后插入")))
+                }
+                other => Ok(ToolResult::err_text(format!(
+                    "未知 command：{other}（view/create/str_replace/insert）"
+                ))),
+            }
+        }
         "shell" => {
             let command = args
                 .get("command")
@@ -1605,6 +1762,32 @@ mod tests {
         let nav = execute_tool(&mut repo, "ui_open", &json!({ "view": "今日" }), None).unwrap();
         assert!(nav.ok);
         assert_eq!(nav.open_view.as_deref(), Some("today"));
+
+        let patch = execute_tool(
+            &mut repo,
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Add File: new.txt\n+alpha\n*** Update File: hello.rs\n@@\n-fn main() { println!(\"done\"); }\n+fn main() { println!(\"patched\"); }\n*** End Patch\n"
+            }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(patch.ok);
+        assert!(
+            std::fs::read_to_string(dir.join("new.txt"))
+                .unwrap()
+                .contains("alpha")
+        );
+        assert!(std::fs::read_to_string(&file).unwrap().contains("patched"));
+
+        let viewed = execute_tool(
+            &mut repo,
+            "str_replace_editor",
+            &json!({ "command": "view", "path": "new.txt" }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(viewed.content.contains("alpha"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

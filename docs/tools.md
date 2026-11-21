@@ -361,7 +361,9 @@ DSH：统一协作式取消 + 超时错误映射。
 | `note_list` / `note_create` | ✅ |
 | `notification_list` / `schedule_list` / `schedule_create` / `schedule_enable` / `schedule_delete` | ✅ |
 | `timer_status` / `timer_add` | ✅（记入当日用时；非 UI 实时跑表） |
-| `read` / `write` / `str_replace` / `shell` / `bash` / `pwsh` | ✅（拒绝 `..` 越界；尚无 spill） |
+| `read` / `write` / `str_replace` / `edit` / `shell` / `bash` / `pwsh` | ✅（拒绝 `..` 越界；尚无 spill） |
+| `apply_patch` | ✅ Codex Add/Update/Delete |
+| `str_replace_editor` | ✅ view/create/str_replace/insert |
 | `load_workspace_dependencies` | ✅ PATH 探测 |
 | `read_image` | ✅ 元数据（格式/尺寸）；尚无 vision 挂载 / OCR |
 | `job_start` / `job_output` / `job_list` / `job_kill` | ✅ 后台 shell（非 PTY） |
@@ -386,7 +388,7 @@ DSH：统一协作式取消 + 超时错误映射。
 | `session_trace` | ✅ 近期消息摘要 |
 | `session_event_search` / `session_event_read` / `session_event_trace` | ✅ 消息即事件（1-based seq） |
 | `get_goal` / `create_goal` / `update_goal` | 🟡 进程内 goal；回合结束后最多 2 次空闲续行 |
-| 真 PTY / MCP 协议 / 完整 goal 策略与 blocked 阈值 | ❌ 未迁 |
+| 真 PTY / MCP 协议 / 完整 goal 策略与 blocked 阈值 / FS 观察策略 | ❌ 未迁 |
 
 斜杠快捷：`/task_list` `/project_list` `/tag_list` `/note_list` `/schedule_list` `/notification_list` `/ui_open <view>` `/search <q>` `/host_tool_list` `/goal …`。
 
