@@ -419,6 +419,44 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
                 "command": { "type": "string" }
             }),
         ),
+        tool(
+            "read_image",
+            ToolEffect::Read,
+            "读取工作区图片元数据（格式/尺寸）",
+            serde_json::json!({ "path": { "type": "string" } }),
+        ),
+        tool(
+            "job_start",
+            ToolEffect::Write,
+            "后台启动 shell 任务",
+            serde_json::json!({ "command": { "type": "string" } }),
+        ),
+        tool(
+            "job_output",
+            ToolEffect::Read,
+            "读取后台任务输出",
+            serde_json::json!({ "jobId": { "type": "string" } }),
+        ),
+        tool(
+            "job_list",
+            ToolEffect::Read,
+            "列出后台任务",
+            serde_json::json!({}),
+        ),
+        tool(
+            "job_kill",
+            ToolEffect::Destructive,
+            "终止后台任务",
+            serde_json::json!({ "jobId": { "type": "string" } }),
+        ),
+        tool(
+            "web_fetch",
+            ToolEffect::Read,
+            "抓取网页/HTTP 文本（有体积上限）",
+            serde_json::json!({
+                "url": { "type": "string" }
+            }),
+        ),
     ]
 }
 

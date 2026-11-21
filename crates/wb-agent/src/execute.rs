@@ -6,7 +6,9 @@ use wb_domain::{
     builtin_host_tools, create_timed_task_draft, format_local_day, gate_tool, make_custom_schedule,
     make_preset_schedule, now_ms, settle_timer_segment, workspace_tools,
 };
-use wb_host::{list_files_recursive, read_text, run_shell, write_text};
+use wb_host::{
+    global_jobs, list_files_recursive, read_image_info, read_text, run_shell, web_fetch, write_text,
+};
 use wb_store::MemoryWorkbenchRepository;
 
 #[derive(Debug, Clone, Default)]
@@ -480,6 +482,110 @@ pub fn execute_tool(
                 open_view: None,
             })
         }
+        "read_image" => {
+            let rel = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 path"))?;
+            let root = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
+            let path = safe_join(root, rel)?;
+            let info = read_image_info(&path)?;
+            Ok(ToolResult::ok_text(format!(
+                "{} · {} · {} bytes · {}x{} · {}",
+                info.path,
+                info.format,
+                info.bytes,
+                info.width.unwrap_or(0),
+                info.height.unwrap_or(0),
+                info.note
+            )))
+        }
+        "job_start" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            let id = global_jobs().start(command, workspace_root)?;
+            Ok(ToolResult::ok_text(format!("已启动后台任务 {id}")))
+        }
+        "job_output" => {
+            let id = args
+                .get("jobId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 jobId"))?;
+            match global_jobs().output(id) {
+                Some((out, code)) => Ok(ToolResult::ok_text(format!(
+                    "code={:?}\n{}",
+                    code,
+                    if out.len() > 20_000 {
+                        format!("{}…\n[truncated {} bytes]", &out[..20_000], out.len())
+                    } else {
+                        out
+                    }
+                ))),
+                None => Ok(ToolResult::err_text("任务不存在")),
+            }
+        }
+        "job_list" => {
+            let lines: Vec<_> = global_jobs()
+                .list()
+                .into_iter()
+                .map(|j| {
+                    format!(
+                        "- {} [{}] code={:?} · {}",
+                        j.id,
+                        if j.done { "done" } else { "run" },
+                        j.code,
+                        j.command
+                    )
+                })
+                .collect();
+            Ok(ToolResult::ok_text(if lines.is_empty() {
+                "（无后台任务）".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        "job_kill" => {
+            let id = args
+                .get("jobId")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 jobId"))?;
+            if global_jobs().kill(id) {
+                Ok(ToolResult::ok_text(format!("已终止 {id}")))
+            } else {
+                Ok(ToolResult::err_text("任务不存在"))
+            }
+        }
+        "web_fetch" => {
+            let url = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 url"))?;
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Ok(ToolResult::err_text("仅支持 http/https"));
+            }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let result = rt.block_on(web_fetch(url, None))?;
+            let mut body = result.body;
+            if result.truncated {
+                body.push_str("\n…[truncated]");
+            }
+            Ok(ToolResult {
+                ok: result.status < 400,
+                content: format!(
+                    "HTTP {} · {}\n{}",
+                    result.status,
+                    result.content_type.unwrap_or_else(|| "unknown".into()),
+                    body
+                ),
+                open_view: None,
+            })
+        }
         "glob" => {
             let pattern = args
                 .get("pattern")
@@ -682,6 +788,51 @@ mod tests {
         .unwrap();
         assert!(r.ok);
         assert_eq!(repo.get_task(&id).unwrap().time_spent, 120_000);
+    }
+
+    #[test]
+    fn read_image_and_job_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("wb-agent-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1x1 PNG
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xfe,
+            0xd4, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(dir.join("dot.png"), png).unwrap();
+        let mut repo = MemoryWorkbenchRepository::default();
+        let root = dir.to_string_lossy().to_string();
+        let img = execute_tool(
+            &mut repo,
+            "read_image",
+            &json!({ "path": "dot.png" }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(img.ok);
+        assert!(img.content.contains("png"));
+
+        let job = execute_tool(
+            &mut repo,
+            "job_start",
+            &json!({ "command": "echo hello-job" }),
+            Some(&root),
+        )
+        .unwrap();
+        assert!(job.ok);
+        let id = job.content.split_whitespace().last().unwrap().to_string();
+        for _ in 0..50 {
+            if let Some((_, Some(_))) = global_jobs().output(&id) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let out = execute_tool(&mut repo, "job_output", &json!({ "jobId": id }), None).unwrap();
+        assert!(out.ok);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

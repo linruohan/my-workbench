@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,13 +76,23 @@ pub fn run_shell(command: &str, cwd: Option<&str>, timeout_secs: u64) -> Result<
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobInfo {
+    pub id: String,
+    pub command: String,
+    pub done: bool,
+    pub code: Option<i32>,
+}
+
 #[derive(Default)]
 pub struct JobRegistry {
     inner: Mutex<HashMap<String, JobState>>,
 }
 
 struct JobState {
-    kill: Arc<Mutex<Option<u32>>>,
+    command: String,
+    pid: Arc<Mutex<Option<u32>>>,
     output: Arc<Mutex<String>>,
     done: Arc<Mutex<Option<i32>>>,
 }
@@ -91,16 +102,18 @@ impl JobRegistry {
         Self::default()
     }
 
-    pub fn start(&self, id: &str, command: &str, cwd: Option<&str>) -> Result<()> {
+    pub fn start(&self, command: &str, cwd: Option<&str>) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
         let output = Arc::new(Mutex::new(String::new()));
         let done = Arc::new(Mutex::new(None));
-        let kill = Arc::new(Mutex::new(None));
+        let pid = Arc::new(Mutex::new(None));
         {
             let mut map = self.inner.lock().unwrap();
             map.insert(
-                id.to_string(),
+                id.clone(),
                 JobState {
-                    kill: kill.clone(),
+                    command: command.to_string(),
+                    pid: pid.clone(),
                     output: output.clone(),
                     done: done.clone(),
                 },
@@ -109,11 +122,43 @@ impl JobRegistry {
         let command = command.to_string();
         let cwd = cwd.map(|s| s.to_string());
         thread::spawn(move || {
-            let result = run_shell(&command, cwd.as_deref(), 600);
-            match result {
-                Ok(r) => {
-                    *output.lock().unwrap() = format!("{}{}", r.stdout, r.stderr);
-                    *done.lock().unwrap() = Some(r.code);
+            #[cfg(windows)]
+            let mut cmd = {
+                let mut c = Command::new("cmd");
+                c.args(["/C", &command]);
+                c
+            };
+            #[cfg(not(windows))]
+            let mut cmd = {
+                let mut c = Command::new("sh");
+                c.args(["-lc", &command]);
+                c
+            };
+            if let Some(ref cwd) = cwd {
+                cmd.current_dir(cwd);
+            }
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    *pid.lock().unwrap() = Some(child.id());
+                    let mut out = String::new();
+                    if let Some(mut s) = child.stdout.take() {
+                        let mut buf = Vec::new();
+                        let _ = s.read_to_end(&mut buf);
+                        out.push_str(&String::from_utf8_lossy(&buf));
+                    }
+                    if let Some(mut s) = child.stderr.take() {
+                        let mut buf = Vec::new();
+                        let _ = s.read_to_end(&mut buf);
+                        if !out.is_empty() && !buf.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&String::from_utf8_lossy(&buf));
+                    }
+                    let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                    *output.lock().unwrap() = out;
+                    *done.lock().unwrap() = Some(code);
+                    *pid.lock().unwrap() = None;
                 }
                 Err(e) => {
                     *output.lock().unwrap() = e.to_string();
@@ -121,7 +166,7 @@ impl JobRegistry {
                 }
             }
         });
-        Ok(())
+        Ok(id)
     }
 
     pub fn output(&self, id: &str) -> Option<(String, Option<i32>)> {
@@ -133,17 +178,66 @@ impl JobRegistry {
         ))
     }
 
+    pub fn list(&self) -> Vec<JobInfo> {
+        let map = self.inner.lock().unwrap();
+        let mut v: Vec<_> = map
+            .iter()
+            .map(|(id, j)| {
+                let code = *j.done.lock().unwrap();
+                JobInfo {
+                    id: id.clone(),
+                    command: j.command.clone(),
+                    done: code.is_some(),
+                    code,
+                }
+            })
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
+    }
+
     pub fn kill(&self, id: &str) -> bool {
         let map = self.inner.lock().unwrap();
-        if let Some(job) = map.get(id) {
-            if let Some(pid) = *job.kill.lock().unwrap() {
-                let _ = pid;
-            }
-            *job.done.lock().unwrap() = Some(-9);
-            return true;
+        let Some(job) = map.get(id) else {
+            return false;
+        };
+        if let Some(pid) = *job.pid.lock().unwrap() {
+            kill_pid(pid);
         }
-        false
+        if job.done.lock().unwrap().is_none() {
+            *job.done.lock().unwrap() = Some(-9);
+            let mut out = job.output.lock().unwrap();
+            if out.is_empty() {
+                *out = "[killed]".into();
+            } else {
+                out.push_str("\n[killed]");
+            }
+        }
+        true
     }
+}
+
+fn kill_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+static GLOBAL_JOBS: OnceLock<JobRegistry> = OnceLock::new();
+
+pub fn global_jobs() -> &'static JobRegistry {
+    GLOBAL_JOBS.get_or_init(JobRegistry::new)
 }
 
 pub fn write_stdin_line(child_stdin: &mut impl Write, line: &str) -> Result<()> {
