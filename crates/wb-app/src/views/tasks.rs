@@ -714,6 +714,7 @@ impl TasksPane {
         timing: bool,
         tag_label: String,
         pending_delete: bool,
+        focus_mode: bool,
     ) -> impl IntoElement {
         let id = task.id.clone();
         let done = task.is_done;
@@ -762,15 +763,17 @@ impl TasksPane {
                     .cursor_pointer()
                     .when(done, |d| d.text_color(muted))
                     .child(title)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(muted)
-                            .when(has_notes, |row| row.child("有备注"))
-                            .when(!tag_label.is_empty(), |row| row.child(tag_label))
-                            .when(spent > 0, |row| row.child(format!("{}m", spent / 60_000))),
-                    )
+                    .when(focus_mode, |col| {
+                        col.child(
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(muted)
+                                .when(has_notes, |row| row.child("有备注"))
+                                .when(!tag_label.is_empty(), |row| row.child(tag_label))
+                                .when(spent > 0, |row| row.child(format!("{}m", spent / 60_000))),
+                        )
+                    })
                     .on_click({
                         let id = id.clone();
                         let entity = entity.clone();
@@ -781,7 +784,7 @@ impl TasksPane {
                         }
                     }),
             )
-            .when(!plan.is_empty(), |row| {
+            .when(focus_mode && !plan.is_empty(), |row| {
                 row.child(div().text_xs().text_color(muted).child(plan))
             })
             .when(!done, |row| {
@@ -800,7 +803,7 @@ impl TasksPane {
                             }
                         }),
                 )
-                .when(is_root, |row| {
+                .when(focus_mode && is_root, |row| {
                     row.child(
                         Button::new(SharedString::from(format!("sub-{id}")))
                             .xsmall()
@@ -974,6 +977,29 @@ impl Render for TasksPane {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
+        let (focus_mode, proactive, nav) = self.state.with(|s| {
+            (
+                s.prefs.general.interface_mode == "focus",
+                s.prefs.general.proactive_suggestions && s.prefs.general.interface_mode != "focus",
+                s.nav,
+            )
+        });
+        let suggestions: Vec<Task> = if proactive && nav == AppNav::Today {
+            all_for_stats
+                .iter()
+                .filter(|t| {
+                    t.parent_id.is_none()
+                        && !t.is_done
+                        && t.due_day.is_none()
+                        && t.due_with_time.is_none()
+                        && !tasks.iter().any(|(shown, _)| shown.id == t.id)
+                })
+                .take(5)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let selected_id = self.state.with(|s| s.selected_task_id.clone());
         let active_timer_id = self
             .state
@@ -1061,6 +1087,7 @@ impl Render for TasksPane {
                                             timing,
                                             tag_label,
                                             pending_delete,
+                                            focus_mode,
                                         )
                                         .into_any_element()
                                     })
@@ -1126,6 +1153,7 @@ impl Render for TasksPane {
                                 timing,
                                 tag_label,
                                 pending_delete,
+                                focus_mode,
                             )
                             .into_any_element()
                         })
@@ -1186,6 +1214,7 @@ impl Render for TasksPane {
                                     timing,
                                     tag_label,
                                     pending_delete,
+                                    focus_mode,
                                 )
                                 .into_any_element()
                             })
@@ -1435,6 +1464,48 @@ impl Render for TasksPane {
                     }),
             )
             .child(Input::new(&self.capture).cleanable(true))
+            .when(!suggestions.is_empty(), |col| {
+                let entity = entity.clone();
+                col.child(
+                    v_flex()
+                        .gap_2()
+                        .p_3()
+                        .rounded(radius)
+                        .border_1()
+                        .border_color(border)
+                        .bg(accent.opacity(0.12))
+                        .child(div().text_sm().font_bold().child("主动任务推荐"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("未排期任务，可加入今日"),
+                        )
+                        .children(suggestions.into_iter().map(|task| {
+                            let id = task.id.clone();
+                            let title = task.title.clone();
+                            let entity = entity.clone();
+                            let day = today.clone();
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().text_sm().child(title))
+                                .child(
+                                    Button::new(SharedString::from(format!("suggest-{id}")))
+                                        .xsmall()
+                                        .primary()
+                                        .label("加入今日")
+                                        .on_click(move |_, _, app| {
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| {
+                                                    this.schedule_day(&id, Some(day.clone()), cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                        })),
+                )
+            })
             .when(show_archive, |col| {
                 col.child(
                     h_flex()

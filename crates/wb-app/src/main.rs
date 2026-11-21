@@ -20,8 +20,18 @@ fn main() {
         gpui_kit::init(cx);
         themes::init(cx);
 
+        let restore = wb_store::load_prefs()
+            .ok()
+            .map(|prefs| prefs.general.window_restore)
+            .unwrap_or_else(|| "default".into());
+        let default_size = size(px(1280.), px(800.));
+        let window_bounds = if restore == "maximized" {
+            WindowBounds::Maximized(Bounds::centered(None, default_size, cx))
+        } else {
+            WindowBounds::centered(default_size, cx)
+        };
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
+            window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(960.), px(640.))),
             #[cfg(target_os = "linux")]
             window_background: WindowBackgroundAppearance::Opaque,

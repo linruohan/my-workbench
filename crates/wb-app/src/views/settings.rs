@@ -679,7 +679,7 @@ fn general_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPag
                             },
                         ),
                     )
-                    .description("下次启动时的窗口状态（宿主接线后生效）"),
+                    .description("下次启动时的窗口状态；「记住上次」暂与默认相同"),
                 )
                 .item(SettingItem::new(
                     "显示操作提示",
