@@ -1,6 +1,6 @@
 use crate::paths::{
     CREDENTIALS_FILE, EXPORTS_DIR, PREFS_FILE, PROVIDERS_FILE, STORE_FILE, THEME_FILE,
-    ensure_data_dir, prefs_path, store_path, theme_path,
+    ensure_data_dir, prefs_path, resolve_data_dir, store_path, theme_path,
 };
 use crate::repository::MemoryWorkbenchRepository;
 use crate::snapshot::WorkbenchSnapshot;
@@ -236,6 +236,78 @@ pub fn backup_core_data_to(dest_parent: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
+#[derive(Debug, Clone)]
+pub struct MigrateDataReport {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub copied_files: usize,
+    pub redirect_written: bool,
+}
+
+/// Copy core JSON + rolling `workbench.bak.*` into `dest`, then point the default
+/// location at `dest` via `data-redirect.txt` (unless `dest` is the default dir).
+/// Does not move/delete the source; does not copy `models/`.
+pub fn migrate_data_dir_to(dest: &Path) -> Result<MigrateDataReport> {
+    use crate::paths::{
+        assert_safe_migrate_dest, clear_data_redirect, default_data_dir, paths_equal,
+        write_data_redirect,
+    };
+
+    let src = resolve_data_dir()?;
+    let default = default_data_dir()?;
+    assert_safe_migrate_dest(&src, dest)?;
+    fs::create_dir_all(dest).with_context(|| format!("创建目标目录失败: {}", dest.display()))?;
+
+    let mut copied = 0usize;
+    for name in backup_core_file_names() {
+        let from = src.join(name);
+        if from.is_file() {
+            fs::copy(&from, dest.join(name))
+                .with_context(|| format!("迁移失败: {}", from.display()))?;
+            copied += 1;
+        }
+    }
+    // Rolling snapshot backups
+    if let Ok(entries) = fs::read_dir(&src) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with("workbench.bak.") && name.ends_with(".json") && path.is_file() {
+                fs::copy(&path, dest.join(name))
+                    .with_context(|| format!("迁移备份失败: {}", path.display()))?;
+                copied += 1;
+            }
+        }
+    }
+    if copied == 0 {
+        anyhow::bail!("当前数据目录没有可迁移的核心文件");
+    }
+
+    let redirect_written = if paths_equal(dest, &default) {
+        clear_data_redirect()?;
+        false
+    } else {
+        write_data_redirect(dest)?;
+        true
+    };
+
+    Ok(MigrateDataReport {
+        source: src,
+        destination: dest.to_path_buf(),
+        copied_files: copied,
+        redirect_written,
+    })
+}
+
+/// Copy data back into the default directory and remove the redirect pointer.
+pub fn migrate_data_dir_to_default() -> Result<MigrateDataReport> {
+    use crate::paths::default_data_dir;
+    let dest = default_data_dir()?;
+    migrate_data_dir_to(&dest)
+}
+
 fn maybe_rolling_backup(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -305,6 +377,40 @@ mod tests {
     #[test]
     fn data_dir_resolves() {
         let _ = ensure_data_dir();
+    }
+
+    #[test]
+    fn migrate_rejects_same_directory() {
+        use crate::paths::assert_safe_migrate_dest;
+        let dir = std::env::temp_dir().join(format!("wb-mig-same-{}", wb_domain::now_ms()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(assert_safe_migrate_dest(&dir, &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_copies_core_files_into_dest() {
+        let stamp = wb_domain::now_ms();
+        let src = std::env::temp_dir().join(format!("wb-mig-src-{stamp}"));
+        let dest = std::env::temp_dir().join(format!("wb-mig-dest-{stamp}"));
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dest);
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join(STORE_FILE), r#"{"tasks":[]}"#).unwrap();
+        fs::write(src.join(PREFS_FILE), "{}").unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let mut copied = 0usize;
+        for name in backup_core_file_names() {
+            let from = src.join(name);
+            if from.is_file() {
+                fs::copy(&from, dest.join(name)).unwrap();
+                copied += 1;
+            }
+        }
+        assert_eq!(copied, 2);
+        assert!(dest.join(STORE_FILE).is_file());
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dest);
     }
 
     #[test]

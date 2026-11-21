@@ -630,10 +630,62 @@ impl SettingsPane {
         cx.notify();
     }
 
+    fn migrate_data_pick(&mut self, cx: &mut Context<Self>) {
+        self.data_msg = match wb_host::pick_directory() {
+            Some(dest) => match wb_store::migrate_data_dir_to(&dest) {
+                Ok(report) => {
+                    let _ = open_path(&report.destination);
+                    format!(
+                        "已迁移 {} 个文件到 {}{}",
+                        report.copied_files,
+                        report.destination.display(),
+                        if report.redirect_written {
+                            "；下次启动将使用新目录（原目录未删除）"
+                        } else {
+                            "；已恢复为默认目录"
+                        }
+                    )
+                }
+                Err(e) => format!("迁移失败：{e}"),
+            },
+            None => "已取消选择迁移目标".into(),
+        };
+        cx.notify();
+    }
+
+    fn migrate_data_default(&mut self, cx: &mut Context<Self>) {
+        self.data_msg = match wb_store::migrate_data_dir_to_default() {
+            Ok(report) => format!(
+                "已迁回默认目录（{} 个文件）：{}",
+                report.copied_files,
+                report.destination.display()
+            ),
+            Err(e) => format!("迁回默认失败：{e}"),
+        };
+        cx.notify();
+    }
+
     fn render_data_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let data_dir = wb_store::resolve_data_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "%APPDATA%\\my-workbench".into());
+        let status = wb_store::data_dir_status().ok();
+        let data_dir = status
+            .as_ref()
+            .map(|s| s.current.to_string_lossy().to_string())
+            .unwrap_or_else(|| "%APPDATA%\\my-workbench".into());
+        let loc_hint: String = status
+            .as_ref()
+            .map(|s| {
+                if s.via_env {
+                    "（环境变量 WB_DATA_DIR）".into()
+                } else if s.via_redirect {
+                    "（已迁移）".into()
+                } else {
+                    "（系统默认）".into()
+                }
+            })
+            .unwrap_or_default();
+        let can_restore = status
+            .as_ref()
+            .is_some_and(|s| s.via_redirect && !s.via_env);
         v_flex()
             .gap_2()
             .p_3()
@@ -645,11 +697,12 @@ impl SettingsPane {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("数据目录：{data_dir}")),
+                    .child(format!("数据目录：{data_dir}{loc_hint}")),
             )
             .child(
                 h_flex()
                     .gap_2()
+                    .flex_wrap()
                     .child(
                         Button::new("open-data-dir")
                             .small()
@@ -672,14 +725,31 @@ impl SettingsPane {
                             .small()
                             .label("备份到…")
                             .on_click(cx.listener(|this, _, _, cx| this.backup_data_pick(cx))),
-                    ),
+                    )
+                    .child(
+                        Button::new("migrate-data")
+                            .small()
+                            .label("迁移数据目录…")
+                            .on_click(cx.listener(|this, _, _, cx| this.migrate_data_pick(cx))),
+                    )
+                    .when(can_restore, |row| {
+                        row.child(
+                            Button::new("migrate-default")
+                                .small()
+                                .ghost()
+                                .label("迁回默认目录")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.migrate_data_default(cx);
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(
-                        "备份含 workbench/prefs/theme/credentials/providers（不含语音 OCR 模型）",
+                        "备份/迁移含 workbench/prefs/theme/credentials/providers 与滚动备份；不含语音 OCR 模型。迁移会写重定向，原目录保留。",
                     ),
             )
             .when(!self.data_msg.is_empty(), |col| {
