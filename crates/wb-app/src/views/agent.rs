@@ -18,7 +18,7 @@ use wb_domain::{
     AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE, agent_workspace_title_from_path, create_id,
     normalize_agent_web_url, now_ms,
 };
-use wb_host::{cleanup_tool_spill, pick_directory};
+use wb_host::cleanup_tool_spill;
 
 pub struct AgentPane {
     state: AppState,
@@ -488,7 +488,10 @@ impl AgentPane {
     }
 
     fn add_workspace(&mut self, cx: &mut Context<Self>) {
-        if let Some(dir) = pick_directory() {
+        super::prompt_directory(cx, |this, dir, cx| {
+            let Some(dir) = dir else {
+                return;
+            };
             let path = dir.to_string_lossy().to_string();
             let title = agent_workspace_title_from_path(&path);
             let now = now_ms();
@@ -504,10 +507,10 @@ impl AgentPane {
                     log::info!("cleaned {n} old spill files in {path}");
                 }
             }
-            self.state.with_mut(|s| s.repo.upsert_agent_workspace(ws));
-            self.state.persist_if_dirty();
+            this.state.with_mut(|s| s.repo.upsert_agent_workspace(ws));
+            this.state.persist_if_dirty();
             cx.notify();
-        }
+        });
     }
 
     fn new_thread(&mut self, cx: &mut Context<Self>) {

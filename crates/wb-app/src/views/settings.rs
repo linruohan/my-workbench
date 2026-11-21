@@ -10,7 +10,7 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_host::{
-    list_system_fonts, ocr_ensure_models, ocr_status, open_path, speech_ensure_models,
+    list_system_fonts, ocr_ensure_models, ocr_status, speech_ensure_models,
     speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
 };
 
@@ -497,9 +497,9 @@ impl SettingsPane {
                         Button::new("open-prefs")
                             .small()
                             .label("打开 prefs.json")
-                            .on_click(|_, _, _| {
+                            .on_click(|_, _, cx| {
                                 if let Ok(p) = wb_store::prefs_path() {
-                                    let _ = open_path(&p);
+                                    cx.open_with_system(&p);
                                 }
                             }),
                     ),
@@ -608,7 +608,7 @@ impl SettingsPane {
     fn backup_data_here(&mut self, cx: &mut Context<Self>) {
         self.data_msg = match wb_store::backup_core_data() {
             Ok(dest) => {
-                let _ = open_path(&dest);
+                cx.open_with_system(&dest);
                 format!("已备份到 {}", dest.display())
             }
             Err(e) => format!("备份失败：{e}"),
@@ -617,40 +617,44 @@ impl SettingsPane {
     }
 
     fn backup_data_pick(&mut self, cx: &mut Context<Self>) {
-        self.data_msg = match wb_host::pick_directory() {
-            Some(parent) => match wb_store::backup_core_data_to(&parent) {
-                Ok(dest) => {
-                    let _ = open_path(&dest);
-                    format!("已备份到 {}", dest.display())
-                }
-                Err(e) => format!("备份失败：{e}"),
-            },
-            None => "已取消选择备份目录".into(),
-        };
-        cx.notify();
+        super::prompt_directory(cx, |this, parent, cx| {
+            this.data_msg = match parent {
+                Some(parent) => match wb_store::backup_core_data_to(&parent) {
+                    Ok(dest) => {
+                        cx.open_with_system(&dest);
+                        format!("已备份到 {}", dest.display())
+                    }
+                    Err(e) => format!("备份失败：{e}"),
+                },
+                None => "已取消选择备份目录".into(),
+            };
+            cx.notify();
+        });
     }
 
     fn migrate_data_pick(&mut self, cx: &mut Context<Self>) {
-        self.data_msg = match wb_host::pick_directory() {
-            Some(dest) => match wb_store::migrate_data_dir_to(&dest) {
-                Ok(report) => {
-                    let _ = open_path(&report.destination);
-                    format!(
-                        "已迁移 {} 个文件到 {}{}",
-                        report.copied_files,
-                        report.destination.display(),
-                        if report.redirect_written {
-                            "；下次启动将使用新目录（原目录未删除）"
-                        } else {
-                            "；已恢复为默认目录"
-                        }
-                    )
-                }
-                Err(e) => format!("迁移失败：{e}"),
-            },
-            None => "已取消选择迁移目标".into(),
-        };
-        cx.notify();
+        super::prompt_directory(cx, |this, dest, cx| {
+            this.data_msg = match dest {
+                Some(dest) => match wb_store::migrate_data_dir_to(&dest) {
+                    Ok(report) => {
+                        cx.open_with_system(&report.destination);
+                        format!(
+                            "已迁移 {} 个文件到 {}{}",
+                            report.copied_files,
+                            report.destination.display(),
+                            if report.redirect_written {
+                                "；下次启动将使用新目录（原目录未删除）"
+                            } else {
+                                "；已恢复为默认目录"
+                            }
+                        )
+                    }
+                    Err(e) => format!("迁移失败：{e}"),
+                },
+                None => "已取消选择迁移目标".into(),
+            };
+            cx.notify();
+        });
     }
 
     fn migrate_data_default(&mut self, cx: &mut Context<Self>) {
@@ -707,9 +711,9 @@ impl SettingsPane {
                         Button::new("open-data-dir")
                             .small()
                             .label("打开数据目录")
-                            .on_click(|_, _, _| {
+                            .on_click(|_, _, cx| {
                                 if let Ok(dir) = wb_store::resolve_data_dir() {
-                                    let _ = open_path(&dir);
+                                    cx.open_with_system(&dir);
                                 }
                             }),
                     )

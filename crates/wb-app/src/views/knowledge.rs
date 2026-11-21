@@ -9,8 +9,7 @@ use gpui_kit::*;
 use std::path::{Path, PathBuf};
 use wb_domain::{body_links_to, extract_wikilinks, resolve_wikilink};
 use wb_host::{
-    create_markdown, git_branch, list_files_recursive, open_path, pick_directory, read_text,
-    write_text,
+    create_markdown, git_branch, list_files_recursive, read_text, search_kb_content, write_text,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,7 +37,7 @@ pub struct KnowledgePane {
 impl KnowledgePane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| InputState::new(window, cx).placeholder("选择文件开始编辑…"));
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("筛选文件名"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("筛选文件名或正文"));
         let find = cx.new(|cx| InputState::new(window, cx).placeholder("查找"));
         let replace = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
         let mut this = Self {
@@ -85,9 +84,12 @@ impl KnowledgePane {
     }
 
     fn add_root(&mut self, cx: &mut Context<Self>) {
-        if let Some(dir) = pick_directory() {
+        super::prompt_directory(cx, |this, dir, cx| {
+            let Some(dir) = dir else {
+                return;
+            };
             let path = dir.to_string_lossy().to_string();
-            self.state.with_mut(|s| {
+            this.state.with_mut(|s| {
                 if !s.prefs.knowledge_roots.contains(&path) {
                     s.prefs.knowledge_roots.push(path.clone());
                 }
@@ -96,10 +98,10 @@ impl KnowledgePane {
                 s.prefs.knowledge_recent.insert(0, path);
                 s.prefs.knowledge_recent.truncate(10);
             });
-            self.state.persist_prefs();
-            self.reload_files();
+            this.state.persist_prefs();
+            this.reload_files();
             cx.notify();
-        }
+        });
     }
 
     fn open_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -258,13 +260,45 @@ impl Render for KnowledgePane {
                 self.open_file(&path, window, cx);
             }
         }
-        let filter = self.filter.read(cx).value().to_lowercase();
-        let files: Vec<_> = self
-            .files
-            .iter()
-            .filter(|(_, rel)| filter.is_empty() || rel.to_lowercase().contains(&filter))
-            .cloned()
-            .collect();
+        let filter_raw = self.filter.read(cx).value().to_string();
+        let filter = filter_raw.trim().to_lowercase();
+        // (path, relative, optional body snippet)
+        let files: Vec<(String, String, Option<String>)> = if filter.is_empty() {
+            self.files
+                .iter()
+                .map(|(p, r)| (p.clone(), r.clone(), None))
+                .collect()
+        } else if filter.chars().count() >= 2 {
+            if let Some(root) = self.root() {
+                match search_kb_content(&root, &filter_raw, 800, 80) {
+                    Ok(hits) if !hits.is_empty() => hits
+                        .into_iter()
+                        .map(|h| {
+                            let snip = if h.line > 0 {
+                                Some(format!("L{} · {}", h.line, h.snippet))
+                            } else {
+                                None
+                            };
+                            (h.path, h.relative, snip)
+                        })
+                        .collect(),
+                    _ => self
+                        .files
+                        .iter()
+                        .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
+                        .map(|(p, r)| (p.clone(), r.clone(), None))
+                        .collect(),
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.files
+                .iter()
+                .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
+                .map(|(p, r)| (p.clone(), r.clone(), None))
+                .collect()
+        };
         let root_label = self
             .root()
             .map(|p| {
@@ -316,17 +350,21 @@ impl Render for KnowledgePane {
                     .child(div().text_xs().text_color(muted).child(root_label))
                     .child(Input::new(&self.filter).cleanable(true))
                     .child(v_flex().gap_1().flex_1().overflow_y_scrollbar().children(
-                        files.into_iter().map(|(path, rel)| {
+                        files.into_iter().map(|(path, rel, snip)| {
                             let active = current.as_deref() == Some(path.as_str());
                             let entity = entity.clone();
-                            div()
+                            v_flex()
                                 .id(SharedString::from(path.clone()))
+                                .gap_0p5()
                                 .p_2()
                                 .rounded(radius)
                                 .when(active, |d| d.bg(cx.theme().accent))
                                 .hover(|d| d.bg(cx.theme().accent))
                                 .cursor_pointer()
-                                .child(rel)
+                                .child(div().child(rel))
+                                .when_some(snip, |col, s| {
+                                    col.child(div().text_xs().text_color(muted).child(s))
+                                })
                                 .on_click(move |_, window, app| {
                                     if let Some(e) = entity.upgrade() {
                                         e.update(app, |this, cx| {
@@ -385,10 +423,8 @@ impl Render for KnowledgePane {
                                         .small()
                                         .ghost()
                                         .label("打开位置")
-                                        .on_click(move |_, _, _| {
-                                            let p = std::path::Path::new(&path);
-                                            let target = p.parent().unwrap_or(p);
-                                            let _ = open_path(target);
+                                        .on_click(move |_, _, cx| {
+                                            cx.reveal_path(std::path::Path::new(&path));
                                         }),
                                 )
                             }),

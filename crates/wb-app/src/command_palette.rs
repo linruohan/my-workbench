@@ -1,4 +1,4 @@
-﻿use crate::state::{AppNav, AppState};
+use crate::state::{AppNav, AppState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -226,12 +226,56 @@ impl CommandPalette {
     }
 
     fn filtered(&self, cx: &App) -> Vec<PaletteItem> {
-        let q = self.query.read(cx).value().to_lowercase();
-        self.all_items()
+        let raw = self.query.read(cx).value().to_string();
+        let q = raw.trim().to_lowercase();
+        let mut items: Vec<PaletteItem> = self
+            .all_items()
             .into_iter()
             .filter(|i| q.is_empty() || i.label.to_lowercase().contains(&q) || i.kind.contains(&q))
-            .take(30)
-            .collect()
+            .take(24)
+            .collect();
+        // Lightweight vault body search (no FTS index) when query is meaningful.
+        if q.chars().count() >= 2 {
+            let root = self.state.with(|s| {
+                s.prefs
+                    .knowledge_current
+                    .clone()
+                    .or_else(|| s.prefs.knowledge_roots.first().cloned())
+            });
+            if let Some(root) = root {
+                if let Ok(hits) =
+                    wb_host::search_kb_content(std::path::Path::new(&root), &raw, 400, 12)
+                {
+                    let existing: std::collections::HashSet<String> =
+                        items.iter().filter_map(|i| i.kb_path.clone()).collect();
+                    for h in hits {
+                        if existing.contains(&h.path) {
+                            continue;
+                        }
+                        let label = if h.line > 0 {
+                            format!("{} · L{} · {}", h.relative, h.line, h.snippet)
+                        } else {
+                            h.relative.clone()
+                        };
+                        items.push(PaletteItem {
+                            id: format!("kb-body-{}", h.path),
+                            label,
+                            kind: "正文",
+                            nav: Some(AppNav::Knowledge),
+                            task_id: None,
+                            thread_id: None,
+                            note_id: None,
+                            kb_path: Some(h.path),
+                        });
+                        if items.len() >= 30 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        items.truncate(30);
+        items
     }
 
     fn activate(&mut self, item: PaletteItem, cx: &mut Context<Self>) {

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
-use wb_domain::is_kb_extension;
+use wb_domain::{is_kb_extension, is_text_extension};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +14,16 @@ pub struct KbEntry {
     pub name: String,
     pub is_dir: bool,
     pub relative: String,
+}
+
+/// One content / path hit from a lightweight vault scan (no SQLite FTS).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KbSearchHit {
+    pub path: String,
+    pub relative: String,
+    pub line: usize,
+    pub snippet: String,
 }
 
 pub fn pick_directory() -> Option<PathBuf> {
@@ -98,23 +108,10 @@ pub fn rename_path(from: &Path, to: &Path) -> Result<()> {
 }
 
 pub fn reveal_in_explorer(path: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        Command::new("explorer")
-            .arg(if path.is_dir() {
-                path.as_os_str().to_owned()
-            } else {
-                // /select,path
-                let arg = format!("/select,{}", path.display());
-                std::ffi::OsString::from(arg)
-            })
-            .spawn()?;
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        bail!("当前平台未实现 reveal_in_explorer");
+    if path.is_dir() {
+        crate::open_ext::open_path(path)
+    } else {
+        crate::open_ext::reveal_in_file_manager(path)
     }
 }
 
@@ -178,4 +175,85 @@ pub fn create_markdown(dir: &Path, name: &str) -> Result<PathBuf> {
     }
     write_text(&file, "# \n")?;
     Ok(file)
+}
+
+fn trim_snippet(line: &str, max: usize) -> String {
+    let t = line.trim();
+    if t.chars().count() <= max {
+        t.to_string()
+    } else {
+        format!("{}…", t.chars().take(max).collect::<String>())
+    }
+}
+
+/// Scan text files under `root` for `query` (case-insensitive).
+/// Returns at most one hit per file, capped by `max_hits`. Skips binaries/images.
+pub fn search_kb_content(
+    root: &Path,
+    query: &str,
+    max_files: usize,
+    max_hits: usize,
+) -> Result<Vec<KbSearchHit>> {
+    let q = query.trim();
+    if q.is_empty() || max_hits == 0 {
+        return Ok(Vec::new());
+    }
+    let q_lower = q.to_lowercase();
+    let entries = list_files_recursive(root, max_files)?;
+    let mut hits = Vec::with_capacity(max_hits.min(32));
+    for entry in entries {
+        if hits.len() >= max_hits {
+            break;
+        }
+        let path = Path::new(&entry.path);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !is_text_extension(ext) {
+            continue;
+        }
+        let rel_l = entry.relative.to_lowercase();
+        if rel_l.contains(&q_lower) {
+            hits.push(KbSearchHit {
+                path: entry.path.clone(),
+                relative: entry.relative.clone(),
+                line: 0,
+                snippet: entry.relative.clone(),
+            });
+            continue;
+        }
+        let Ok(text) = read_text(path) else {
+            continue;
+        };
+        for (idx, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&q_lower) {
+                hits.push(KbSearchHit {
+                    path: entry.path.clone(),
+                    relative: entry.relative.clone(),
+                    line: idx + 1,
+                    snippet: trim_snippet(line, 80),
+                });
+                break;
+            }
+        }
+    }
+    Ok(hits)
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn finds_body_and_skips_when_empty_query() {
+        let dir = std::env::temp_dir().join(format!("wb-kb-search-{}", wb_domain::now_ms()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.md"), "# Hello\nfindme unique-token\n").unwrap();
+        fs::write(dir.join("b.md"), "nothing here\n").unwrap();
+        assert!(search_kb_content(&dir, "  ", 50, 10).unwrap().is_empty());
+        let hits = search_kb_content(&dir, "unique-token", 50, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].relative, "a.md");
+        assert_eq!(hits[0].line, 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
