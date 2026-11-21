@@ -6,10 +6,11 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    INBOX_PROJECT_ID, SchedulePatch, Task, add_local_days, apply_schedule_patch, clear_plan_fields,
-    compute_task_stats, create_task_draft, filter_tasks, format_local_day, group_tasks_by_plan_day,
-    is_today_member, now_ms, parse_quick_capture, select_planner_tasks, select_today_tasks,
-    settle_timer_segment,
+    INBOX_PROJECT_ID, SchedulePatch, Task, TimedSchedulePreset, add_local_days,
+    apply_schedule_patch, clear_plan_fields, compute_task_stats, create_task_draft, filter_tasks,
+    format_local_day, group_tasks_by_plan_day, is_today_member, now_ms, parse_quick_capture,
+    select_planner_tasks, select_today_tasks, set_task_repeat_preset, settle_timer_segment,
+    task_repeat_label,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -310,6 +311,21 @@ impl TasksPane {
         };
         self.state
             .with_mut(|s| s.repo.remove_tag_from_task(&tid, tag_id));
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn set_selected_repeat(&mut self, preset: Option<TimedSchedulePreset>, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.selected_task_id.clone()) else {
+            return;
+        };
+        self.state.with_mut(|s| {
+            if let Some(mut task) = s.repo.get_task(&tid).cloned() {
+                if set_task_repeat_preset(&mut task, preset).is_ok() {
+                    s.repo.upsert_task(task);
+                }
+            }
+        });
         self.state.persist_if_dirty();
         cx.notify();
     }
@@ -1032,7 +1048,38 @@ impl Render for TasksPane {
                                         }))
                                 }),
                             ))
-                        }),
+                        })
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .flex_wrap()
+                                .items_center()
+                                .child(div().text_xs().text_color(muted).child(format!(
+                                            "重复 · {}",
+                                            selected_task
+                                                .map(task_repeat_label)
+                                                .unwrap_or_else(|| "不重复".into())
+                                        )))
+                                .children(
+                                    [
+                                        (None, "无"),
+                                        (Some(TimedSchedulePreset::Daily), "每天"),
+                                        (Some(TimedSchedulePreset::Weekdays), "工作日"),
+                                        (Some(TimedSchedulePreset::Weekly), "每周"),
+                                        (Some(TimedSchedulePreset::Monthly), "每月"),
+                                    ]
+                                    .into_iter()
+                                    .map(|(preset, label)| {
+                                        Button::new(SharedString::from(format!("repeat-{label}")))
+                                            .xsmall()
+                                            .ghost()
+                                            .label(label)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.set_selected_repeat(preset, cx);
+                                            }))
+                                    }),
+                                ),
+                        ),
                 )
             })
     }

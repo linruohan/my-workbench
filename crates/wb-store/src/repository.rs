@@ -4,7 +4,7 @@ use wb_domain::{
     AgentApproval, AgentMessage, AgentThread, AgentWorkspace, AppNotification,
     DEFAULT_AGENT_WORKSPACE_TITLE, INBOX_PROJECT_ID, Note, NotificationKind, NotificationStatus,
     Project, ProjectBucket, Tag, Task, TimedTask, create_id, create_inbox_project,
-    create_task_draft, mark_task_complete, mark_task_incomplete, now_ms,
+    create_task_draft, mark_task_complete, mark_task_incomplete, now_ms, try_advance_repeat,
 };
 
 #[derive(Debug, Clone)]
@@ -191,6 +191,11 @@ impl MemoryWorkbenchRepository {
     pub fn complete_task(&mut self, id: &str) -> Option<Task> {
         let now = now_ms();
         let task = self.tasks.get_mut(id)?;
+        if try_advance_repeat(task, now) {
+            let out = task.clone();
+            self.dirty = true;
+            return Some(out);
+        }
         mark_task_complete(task, now);
         let out = task.clone();
         self.dirty = true;

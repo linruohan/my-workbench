@@ -1,7 +1,11 @@
 use crate::DomainError;
-use crate::date::{format_local_day, now_ms};
+use crate::date::{format_local_day, local_hour_minute, now_ms};
 use crate::id::create_id;
-use crate::types::{INBOX_PROJECT_ID, Project, ProjectBucket, SchedulePatch, Task};
+use crate::timed::{compute_next_run_at, make_preset_schedule, timed_schedule_label};
+use crate::types::{
+    INBOX_PROJECT_ID, Project, ProjectBucket, SchedulePatch, Task, TimedSchedule,
+    TimedSchedulePreset,
+};
 use std::collections::HashMap;
 
 pub fn create_inbox_project(now: i64) -> Project {
@@ -104,6 +108,81 @@ pub fn assert_no_repeat_on_subtask(task: &Task) -> Result<(), DomainError> {
         return Err(DomainError::new("子任务不能设置重复"));
     }
     Ok(())
+}
+
+pub fn parse_repeat_schedule(raw: &str) -> Option<TimedSchedule> {
+    serde_json::from_str(raw).ok()
+}
+
+pub fn encode_repeat_schedule(schedule: &TimedSchedule) -> String {
+    serde_json::to_string(schedule).unwrap_or_default()
+}
+
+pub fn set_task_repeat_preset(
+    task: &mut Task,
+    preset: Option<TimedSchedulePreset>,
+) -> Result<(), DomainError> {
+    if preset.is_some() && task.parent_id.is_some() {
+        return Err(DomainError::new("子任务不能设置重复"));
+    }
+    task.repeat_cfg_id = preset.map(|p| encode_repeat_schedule(&make_preset_schedule(p, "09:00")));
+    task.updated_at = now_ms();
+    Ok(())
+}
+
+pub fn task_repeat_label(task: &Task) -> String {
+    task.repeat_cfg_id
+        .as_deref()
+        .and_then(parse_repeat_schedule)
+        .map(|s| timed_schedule_label(Some(&s)))
+        .unwrap_or_else(|| "不重复".into())
+}
+
+/// Completing a repeating task advances its plan instead of staying done.
+/// Returns `true` when the task was reopened with the next occurrence.
+pub fn try_advance_repeat(task: &mut Task, now: i64) -> bool {
+    if task.parent_id.is_some() {
+        return false;
+    }
+    let Some(raw) = task.repeat_cfg_id.as_deref() else {
+        return false;
+    };
+    let Some(schedule) = parse_repeat_schedule(raw) else {
+        return false;
+    };
+    if matches!(schedule, TimedSchedule::Once { .. }) {
+        return false;
+    }
+
+    let from = task
+        .due_with_time
+        .or_else(|| {
+            task.due_day
+                .as_ref()
+                .and_then(|d| crate::date::at_local_time(d, 9, 0))
+        })
+        .unwrap_or(now);
+
+    let next = compute_next_run_at(&schedule, from)
+        .filter(|n| *n > from)
+        .or_else(|| compute_next_run_at(&schedule, now))
+        .filter(|n| *n > now);
+    let Some(next) = next else {
+        return false;
+    };
+
+    mark_task_incomplete(task, now);
+    let (h, m) = local_hour_minute(next);
+    if h == 0 && m == 0 {
+        task.due_day = Some(format_local_day(next));
+        task.due_with_time = None;
+    } else {
+        task.due_with_time = Some(next);
+        task.due_day = None;
+    }
+    task.remind_at = None;
+    task.updated_at = now;
+    true
 }
 
 /// Effective plan day for a task: due_with_time wins over due_day.
@@ -262,5 +341,16 @@ mod tests {
         assert!(is_today_member(&t, "2026-01-01"));
         t.is_done = true;
         assert!(!is_today_member(&t, "2026-01-01"));
+    }
+
+    #[test]
+    fn advance_daily_repeat_reopens() {
+        let mut t = create_task_draft("日报", None, None, Some(1_700_000_000_000));
+        set_task_repeat_preset(&mut t, Some(TimedSchedulePreset::Daily)).unwrap();
+        t.due_with_time = Some(1_700_000_000_000);
+        assert!(try_advance_repeat(&mut t, 1_700_000_000_000));
+        assert!(!t.is_done);
+        assert!(t.due_with_time.is_some());
+        assert!(t.due_with_time.unwrap() > 1_700_000_000_000);
     }
 }

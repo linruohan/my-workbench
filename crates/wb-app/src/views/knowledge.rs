@@ -22,9 +22,12 @@ pub struct KnowledgePane {
     state: AppState,
     files: Vec<(String, String)>,
     editor: Entity<InputState>,
+    find: Entity<InputState>,
+    replace: Entity<InputState>,
     current: Option<String>,
     filter: Entity<InputState>,
     mode: KbMode,
+    replace_status: String,
     _subs: Vec<Subscription>,
 }
 
@@ -32,13 +35,18 @@ impl KnowledgePane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| InputState::new(window, cx).placeholder("选择文件开始编辑…"));
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("筛选文件名"));
+        let find = cx.new(|cx| InputState::new(window, cx).placeholder("查找"));
+        let replace = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
         let mut this = Self {
             state,
             files: Vec::new(),
             editor: editor.clone(),
+            find,
+            replace,
             current: None,
             filter,
             mode: KbMode::Edit,
+            replace_status: String::new(),
             _subs: Vec::new(),
         };
         this.reload_files();
@@ -99,6 +107,7 @@ impl KnowledgePane {
                 self.editor.update(cx, |input, cx| {
                     input.set_value(text, window, cx);
                 });
+                self.replace_status.clear();
                 cx.notify();
             }
             Err(e) => log::warn!("打开文件失败: {e}"),
@@ -126,6 +135,72 @@ impl KnowledgePane {
             Err(e) => log::warn!("{e}"),
         }
     }
+
+    fn find_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let needle = self.find.read(cx).value().to_string();
+        if needle.is_empty() {
+            self.replace_status = "请输入查找内容".into();
+            cx.notify();
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        let count = text.matches(&needle).count();
+        self.replace_status = if count == 0 {
+            "未找到".into()
+        } else {
+            format!("共 {count} 处")
+        };
+        // Focus editor so user can continue editing near the match.
+        let _ = window;
+        cx.notify();
+    }
+
+    fn replace_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let needle = self.find.read(cx).value().to_string();
+        let replacement = self.replace.read(cx).value().to_string();
+        if needle.is_empty() {
+            self.replace_status = "请输入查找内容".into();
+            cx.notify();
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        if !text.contains(&needle) {
+            self.replace_status = "未找到".into();
+            cx.notify();
+            return;
+        }
+        let next = text.replacen(&needle, &replacement, 1);
+        self.editor.update(cx, |input, cx| {
+            input.set_value(&next, window, cx);
+        });
+        self.save_current(&next);
+        self.replace_status = "已替换 1 处".into();
+        cx.notify();
+    }
+
+    fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let needle = self.find.read(cx).value().to_string();
+        let replacement = self.replace.read(cx).value().to_string();
+        if needle.is_empty() {
+            self.replace_status = "请输入查找内容".into();
+            cx.notify();
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        let count = text.matches(&needle).count();
+        if count == 0 {
+            self.replace_status = "未找到".into();
+            cx.notify();
+            return;
+        }
+        let next = text.replace(&needle, &replacement);
+        self.editor.update(cx, |input, cx| {
+            input.set_value(&next, window, cx);
+        });
+        self.save_current(&next);
+        self.replace_status = format!("已全部替换 {count} 处");
+        cx.notify();
+    }
 }
 
 impl Render for KnowledgePane {
@@ -145,6 +220,10 @@ impl Render for KnowledgePane {
         let current = self.current.clone();
         let preview_text = self.editor.read(cx).value().to_string();
         let mode = self.mode;
+        let replace_status = self.replace_status.clone();
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let radius = cx.theme().radius;
 
         h_flex()
             .size_full()
@@ -153,7 +232,7 @@ impl Render for KnowledgePane {
                     .w(px(280.))
                     .h_full()
                     .border_r_1()
-                    .border_color(cx.theme().border)
+                    .border_color(border)
                     .p_3()
                     .gap_2()
                     .child(
@@ -175,12 +254,7 @@ impl Render for KnowledgePane {
                                     ),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(root_label),
-                    )
+                    .child(div().text_xs().text_color(muted).child(root_label))
                     .child(Input::new(&self.filter).cleanable(true))
                     .child(v_flex().gap_1().flex_1().overflow_y_scrollbar().children(
                         files.into_iter().map(|(path, rel)| {
@@ -189,7 +263,7 @@ impl Render for KnowledgePane {
                             div()
                                 .id(SharedString::from(path.clone()))
                                 .p_2()
-                                .rounded(cx.theme().radius)
+                                .rounded(radius)
                                 .when(active, |d| d.bg(cx.theme().accent))
                                 .hover(|d| d.bg(cx.theme().accent))
                                 .cursor_pointer()
@@ -250,6 +324,43 @@ impl Render for KnowledgePane {
                                 )
                             }),
                     )
+                    .when(mode == KbMode::Edit && current.is_some(), |col| {
+                        col.child(
+                            h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .items_center()
+                                .child(Input::new(&self.find).cleanable(true))
+                                .child(Input::new(&self.replace).cleanable(true))
+                                .child(Button::new("kb-find").xsmall().label("查找").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.find_next(window, cx);
+                                    }),
+                                ))
+                                .child(Button::new("kb-repl").xsmall().label("替换").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.replace_once(window, cx);
+                                    }),
+                                ))
+                                .child(
+                                    Button::new("kb-repl-all")
+                                        .xsmall()
+                                        .primary()
+                                        .label("全部替换")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.replace_all(window, cx);
+                                        })),
+                                )
+                                .when(!replace_status.is_empty(), |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(replace_status.clone()),
+                                    )
+                                }),
+                        )
+                    })
                     .child(match mode {
                         KbMode::Edit => Input::new(&self.editor).into_any_element(),
                         KbMode::Preview => div()
