@@ -1450,15 +1450,16 @@ impl AgentPane {
 
     /// Insert a quoted snippet (e.g. a tool result) at the caret.
     fn quote_into_composer(&mut self, body: &str, cx: &mut Context<Self>) {
+        let total_chars = body.chars().count();
         let clipped: String = body.chars().take(1_500).collect();
-        let suffix = if body.chars().count() > 1_500 {
-            "…"
-        } else {
-            ""
-        };
+        let suffix = if total_chars > 1_500 { "…" } else { "" };
         let quote = format!("\n> {}{suffix}\n", clipped.replace('\n', "\n> "));
         self.pending_insert = Some(quote);
-        self.status = "已把内容引用到输入框".into();
+        self.status = if total_chars > 1_500 {
+            format!("已引用前 1500 / {total_chars} 字，完整输出可在工具消息里展开查看")
+        } else {
+            "已把内容引用到输入框".into()
+        };
         cx.notify();
     }
 
