@@ -16,20 +16,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wb_agent::{
-    ContinueTurn, SlashCommand, StreamEvent, TurnPhase, apply_slash_completion, begin_user_turn,
-    clear_goal_round_flag, continue_turn_reply_streaming, create_thread, cycle_permission_mode,
-    dequeue_user_text, enqueue_user_text, finish_continue_turn_with_stage,
-    finish_user_turn_with_stage, load_providers, model_context_window,
-    pending_approvals_for_thread, permission_mode_label, prepare_goal_idle_round,
-    prompt_char_count, queued_user_texts, resolve_approval, resolve_turn_reply_streaming,
-    slash_suggestions,
+    ContinueTurn, SlashCommand, StreamEvent, TurnPhase, answer_user_question,
+    apply_slash_completion, begin_user_turn, clear_goal_round_flag, continue_turn_reply_streaming,
+    create_thread, cycle_permission_mode, dequeue_user_text, enqueue_user_text,
+    finish_continue_turn_with_stage, finish_user_turn_with_stage, load_providers,
+    model_context_window, pending_approvals_for_thread, permission_mode_label,
+    prepare_goal_idle_round, prompt_char_count, queued_user_texts, resolve_approval,
+    resolve_turn_reply_streaming, slash_suggestions,
 };
-use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{
     AgentMessage, AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE,
     agent_workspace_title_from_path, create_id, format_chat_day_label, format_local_clock,
     format_local_day, normalize_agent_web_url, now_ms,
 };
+use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID};
 use wb_host::{cleanup_tool_spill, global_terminals};
 
 fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {
@@ -59,6 +59,7 @@ pub struct AgentPane {
     state: AppState,
     input: Entity<TextareaState>,
     web_url_input: Entity<InputState>,
+    ask_input: Entity<InputState>,
     find: Entity<InputState>,
     webview: Option<Entity<WebView>>,
     loaded_web_url: Option<String>,
@@ -73,6 +74,8 @@ pub struct AgentPane {
     cancel_flag: Arc<AtomicBool>,
     /// Message text to load into the composer on next render.
     pending_edit: Option<String>,
+    /// Ask approvals that already have an auto-answer timer running.
+    ask_timers: HashSet<String>,
     status: String,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
@@ -100,10 +103,12 @@ impl AgentPane {
         let web_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://… 新建网页会话"));
         let find = cx.new(|cx| InputState::new(window, cx).placeholder("筛选消息…"));
+        let ask_input = cx.new(|cx| InputState::new(window, cx).placeholder("回答 Agent 的问题…"));
         let mut this = Self {
             state,
             input: input.clone(),
             web_url_input: web_url_input.clone(),
+            ask_input: ask_input.clone(),
             find: find.clone(),
             webview: None,
             loaded_web_url: None,
@@ -113,6 +118,7 @@ impl AgentPane {
             stream_status: Arc::new(Mutex::new(String::new())),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pending_edit: None,
+            ask_timers: HashSet::new(),
             status: String::new(),
             prompt_history: Vec::new(),
             history_index: None,
@@ -173,6 +179,23 @@ impl AgentPane {
                 }
             },
         ));
+        this._subs.push(
+            cx.subscribe_in(&ask_input, window, |this, input, event, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = event {
+                    if *shift {
+                        return;
+                    }
+                    let answer = input.read(cx).value().to_string();
+                    if answer.trim().is_empty() {
+                        return;
+                    }
+                    input.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                    });
+                    this.submit_ask_answer(answer, cx);
+                }
+            }),
+        );
         this
     }
 
@@ -812,6 +835,98 @@ impl AgentPane {
         .detach();
     }
 
+    /// Auto-answer `ask_user_question` approvals that carry `mode: timed`.
+    fn spawn_ask_timers(&mut self, approvals: &[wb_domain::AgentApproval], cx: &mut Context<Self>) {
+        for a in approvals {
+            if a.tool_name != "ask_user_question" || self.ask_timers.contains(&a.id) {
+                continue;
+            }
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(&a.args_json) else {
+                continue;
+            };
+            let timed = args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case("timed"));
+            if !timed {
+                continue;
+            }
+            let secs = args
+                .get("timeout")
+                .or_else(|| args.get("seconds"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60)
+                .clamp(5, 600);
+            let id = a.id.clone();
+            self.ask_timers.insert(id.clone());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(secs))
+                    .await;
+                this.update(cx, |pane, cx| pane.auto_answer_ask(&id, cx))
+                    .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn auto_answer_ask(&mut self, approval_id: &str, cx: &mut Context<Self>) {
+        self.ask_timers.remove(approval_id);
+        let still_pending = self.state.with(|s| {
+            pending_approvals_for_thread(&s.repo, s.active_thread_id.as_deref().unwrap_or_default())
+                .iter()
+                .any(|a| a.id == approval_id)
+        });
+        if !still_pending {
+            return;
+        }
+        self.submit_ask_answer("（超时未回复，请按合理默认继续）".into(), cx);
+    }
+
+    fn submit_ask_answer(&mut self, answer: String, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            return;
+        };
+        let ask = self.state.with(|s| {
+            pending_approvals_for_thread(&s.repo, &tid)
+                .into_iter()
+                .find(|a| a.tool_name == "ask_user_question")
+        });
+        let Some(ask) = ask else {
+            self.status = "没有待回答的提问".into();
+            cx.notify();
+            return;
+        };
+        let root = self.state.with(|s| {
+            let thread = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)?;
+            s.repo
+                .list_agent_workspaces()
+                .into_iter()
+                .find(|w| w.id == thread.workspace_id)
+                .and_then(|w| w.root_path)
+        });
+        let phase = self
+            .state
+            .with_mut(|s| answer_user_question(&mut s.repo, &ask.id, &answer, root.as_deref()));
+        match phase {
+            Ok(p) => {
+                self.state.persist_if_dirty();
+                if let TurnPhase::Continue(cont, _) = p {
+                    self.start_continue_turn(*cont, cx);
+                }
+                cx.notify();
+            }
+            Err(e) => {
+                self.status = format!("提交回答失败：{e}");
+                cx.notify();
+            }
+        }
+    }
+
     fn resend_message(&mut self, msg_id: &str, cx: &mut Context<Self>) {
         let Some(msg) = self.state.with(|s| {
             s.repo
@@ -856,18 +971,28 @@ impl AgentPane {
     }
 
     fn available_model_refs() -> Vec<String> {
-        let mut refs = vec![BUILTIN_MODEL_REF.to_string()];
-        for p in load_providers().providers {
-            if p.id.starts_with("builtin") {
+        let store = load_providers();
+        let mut refs = Vec::new();
+        let builtin_on = store
+            .providers
+            .iter()
+            .find(|provider| provider.id == BUILTIN_PROVIDER_ID)
+            .is_none_or(|provider| provider.enabled);
+        if builtin_on {
+            refs.push(BUILTIN_MODEL_REF.to_string());
+        }
+        for provider in &store.providers {
+            if !provider.enabled || provider.id.starts_with("builtin") {
                 continue;
             }
-            if p.models.is_empty() {
-                refs.push(format!("{}/default", p.id));
-            } else {
-                for mid in p.models.keys() {
-                    refs.push(format!("{}/{}", p.id, mid));
-                }
+            let mut ids: Vec<_> = provider.models.keys().cloned().collect();
+            ids.sort();
+            for model_id in ids {
+                refs.push(format!("{}/{}", provider.id, model_id));
             }
+        }
+        if refs.is_empty() {
+            refs.push(BUILTIN_MODEL_REF.to_string());
         }
         refs
     }
@@ -1317,6 +1442,7 @@ impl AgentPane {
             )
         });
         self.sync_webview(active_web_url.as_deref(), window, cx);
+        self.spawn_ask_timers(&approvals, cx);
         let webview_el = self.webview.clone();
         let has_web = active_web_url.is_some() && webview_el.is_some();
         let entity = cx.weak_entity();
@@ -1329,8 +1455,79 @@ impl AgentPane {
         let border = cx.theme().border;
         let danger = cx.theme().danger;
 
+        let ask_card: Option<AnyElement> = approvals
+            .iter()
+            .find(|a| a.tool_name == "ask_user_question")
+            .map(|a| {
+                let question = a
+                    .args_json
+                    .get(0..)
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|v| {
+                        v.get("question")
+                            .and_then(|q| q.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| a.summary.clone());
+                let id = a.id.clone();
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(accent.opacity(0.5))
+                    .bg(secondary)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_bold()
+                                    .text_color(accent)
+                                    .child("Agent 提问"),
+                            )
+                            .child(div().text_xs().text_color(muted).child("回答后继续")),
+                    )
+                    .child(div().text_sm().child(question))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().child(Input::new(&self.ask_input)))
+                            .child(
+                                Button::new("agent-ask-submit")
+                                    .small()
+                                    .primary()
+                                    .label("回答")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let text = this.ask_input.read(cx).value().to_string();
+                                        if text.trim().is_empty() {
+                                            return;
+                                        }
+                                        this.ask_input.update(cx, |i, cx| {
+                                            i.set_value("", window, cx);
+                                        });
+                                        this.submit_ask_answer(text, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("ask-skip-{id}")))
+                                    .small()
+                                    .ghost()
+                                    .label("跳过")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.decide_approval(id.clone(), false, cx);
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            });
+
         let approval_rows: Vec<_> = approvals
             .into_iter()
+            .filter(|a| a.tool_name != "ask_user_question")
             .map(|a| {
                 let id_ok = a.id.clone();
                 let id_no = a.id.clone();
@@ -1846,6 +2043,7 @@ impl AgentPane {
                                 ),
                         )
                     })
+                    .when_some(ask_card, |col, card| col.child(card))
                     .when(!approval_rows.is_empty(), |col| {
                         col.child(v_flex().gap_2().children(approval_rows))
                     })

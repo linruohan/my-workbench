@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod inspector;
 pub mod knowledge;
+mod model_settings;
 pub mod settings;
 pub mod tasks;
 pub mod timed;

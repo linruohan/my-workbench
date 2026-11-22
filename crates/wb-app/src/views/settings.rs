@@ -1,3 +1,4 @@
+use super::model_settings::{ModelEditor, model_page};
 use crate::appearance::apply_ui_font;
 use crate::state::{AppNav, AppState};
 use crate::themes;
@@ -12,8 +13,6 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
-use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_domain::ThemeModePref;
 use wb_host::{
     list_skills, list_system_fonts, ocr_ensure_models, ocr_status, path_is_within, paths_equal,
@@ -28,11 +27,11 @@ pub struct SettingsPane {
     mcp_json: Entity<InputState>,
     subagents_json: Entity<InputState>,
     hooks_json: Entity<InputState>,
-    key_inputs: HashMap<String, Entity<InputState>>,
+    pub(crate) model_editor: ModelEditor,
+    _model_subs: Vec<Subscription>,
     font_count: usize,
     speech_msg: String,
     ocr_msg: String,
-    cred_msg: String,
     agent_json_msg: String,
     data_msg: String,
     skills_msg: String,
@@ -80,19 +79,7 @@ impl SettingsPane {
                 .placeholder("Hooks JSON 数组")
                 .default_value(hooks_val)
         });
-        let creds = load_credentials();
-        let providers = load_providers();
-        let mut key_inputs = HashMap::new();
-        for p in providers.providers.iter().filter(|p| p.api_key_required) {
-            let has = creds.keys.contains_key(&p.id);
-            let placeholder = if has {
-                format!("{} API Key（已保存，输入 - 可清除）", p.name)
-            } else {
-                format!("{} API Key", p.name)
-            };
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-            key_inputs.insert(p.id.clone(), input);
-        }
+        let (model_editor, model_subs) = ModelEditor::new(state.clone(), window, cx);
         let font_count = list_system_fonts().map(|f| f.len()).unwrap_or(0);
         let speech_msg = speech_status("sensevoice")
             .map(|st| {
@@ -122,11 +109,11 @@ impl SettingsPane {
             mcp_json,
             subagents_json,
             hooks_json,
-            key_inputs,
+            model_editor,
+            _model_subs: model_subs,
             font_count,
             speech_msg,
             ocr_msg,
-            cred_msg: String::new(),
             agent_json_msg: String::new(),
             data_msg: String::new(),
             skills_msg: String::new(),
@@ -157,14 +144,6 @@ impl SettingsPane {
         cx.notify();
     }
 
-    fn set_default_model(&mut self, model_ref: &str, cx: &mut Context<Self>) {
-        self.state.with_mut(|s| {
-            s.prefs.agent.default_model_ref = Some(model_ref.to_string());
-        });
-        self.state.persist_prefs();
-        cx.notify();
-    }
-
     fn save_personality(&mut self, cx: &mut Context<Self>) {
         let text = self.personality.read(cx).value().to_string();
         self.state.with_mut(|s| {
@@ -175,7 +154,6 @@ impl SettingsPane {
             };
         });
         self.state.persist_prefs();
-        self.cred_msg = "个性化已保存".into();
         cx.notify();
     }
 
@@ -217,7 +195,6 @@ impl SettingsPane {
             s.prefs.agent.plugins_dirs = split(&plugins);
         });
         self.state.persist_prefs();
-        self.cred_msg = "插件目录已保存".into();
         cx.notify();
     }
 
@@ -307,38 +284,6 @@ impl SettingsPane {
             }
         });
         self.state.persist_prefs();
-        cx.notify();
-    }
-
-    fn save_api_keys(&mut self, cx: &mut Context<Self>) {
-        let mut creds = load_credentials();
-        for (pid, input) in &self.key_inputs {
-            let value = input.read(cx).value().to_string();
-            if value.trim().is_empty() {
-                // Only clear when user typed something then cleared? Keep existing if empty
-                // and field was never touched — but we can't know. Empty means "no change"
-                // unless prefixed with "-". Simpler: empty = no change; single "-" = clear.
-                continue;
-            }
-            if value.trim() == "-" {
-                creds.keys.remove(pid);
-            } else {
-                creds.keys.insert(pid.clone(), value.trim().to_string());
-            }
-        }
-        match save_credentials(&creds) {
-            Ok(()) => {
-                self.cred_msg = "API Key 已保存到本地 credentials".into();
-                // Clear inputs after save so keys aren't left visible.
-                for input in self.key_inputs.values() {
-                    input.update(cx, |i, cx| {
-                        // InputState set_value needs window — skip clear if awkward
-                        let _ = (i, cx);
-                    });
-                }
-            }
-            Err(e) => self.cred_msg = format!("保存失败：{e}"),
-        }
         cx.notify();
     }
 
@@ -489,12 +434,6 @@ impl SettingsPane {
             mcp_json: self.mcp_json.clone(),
             subagents_json: self.subagents_json.clone(),
             hooks_json: self.hooks_json.clone(),
-            key_inputs: self
-                .key_inputs
-                .iter()
-                .map(|(id, input)| (id.clone(), input.clone()))
-                .collect(),
-            cred_msg: self.cred_msg.clone(),
             agent_json_msg: self.agent_json_msg.clone(),
             skills_msg: self.skills_msg.clone(),
         };
@@ -521,8 +460,6 @@ struct AgentForm {
     mcp_json: Entity<InputState>,
     subagents_json: Entity<InputState>,
     hooks_json: Entity<InputState>,
-    key_inputs: Vec<(String, Entity<InputState>)>,
-    cred_msg: String,
     agent_json_msg: String,
     skills_msg: String,
 }
@@ -1180,19 +1117,15 @@ fn agent_pages(
         mcp_json,
         subagents_json,
         hooks_json,
-        key_inputs,
-        cred_msg,
         agent_json_msg,
         skills_msg,
     } = form;
-    let model_state = state.clone();
     let model_entity = entity.clone();
     let persona_entity = entity.clone();
     let memory_entity = entity.clone();
     let memory_state = state.clone();
     let dirs_entity = entity.clone();
     let json_entity = entity.clone();
-    let keys_entity = entity.clone();
     let proxy_read = state.clone();
     let proxy_write = state.clone();
     let proxy_entity = entity.clone();
@@ -1201,138 +1134,34 @@ fn agent_pages(
     let _ = state;
     vec![
         agent_nav(
-            SettingPage::new("模型")
-                .icon(Icon::new(IconName::Cpu))
-                .group(
-                    SettingGroup::new().title("默认模型").in_nav(false).item(
-                        SettingItem::render(move |_, _, cx| {
-                            let default_model = model_state
-                                .with(|s| s.prefs.agent.default_model_ref.clone())
-                                .unwrap_or_else(|| wb_domain::BUILTIN_MODEL_REF.to_string());
-                            let providers = load_providers();
-                            let creds = load_credentials();
-                            let muted = cx.theme().muted_foreground;
-                            let model_entity = model_entity.clone();
-                            v_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(format!("新会话默认模型：{default_model}")),
-                                )
-                                .child(
-                                    h_flex().gap_2().flex_wrap().children(
-                                        std::iter::once((
-                                            wb_domain::BUILTIN_MODEL_REF.to_string(),
-                                            "内置".to_string(),
-                                        ))
-                                        .chain(providers.providers.iter().flat_map(|provider| {
-                                            if provider.id.starts_with("builtin") {
-                                                return Vec::new().into_iter();
-                                            }
-                                            let items: Vec<(String, String)> = if provider
-                                                .models
-                                                .is_empty()
-                                            {
-                                                vec![(
-                                                    format!("{}/default", provider.id),
-                                                    provider.name.clone(),
-                                                )]
-                                            } else {
-                                                provider
-                                                    .models
-                                                    .keys()
-                                                    .map(|mid| {
-                                                        (
-                                                            format!("{}/{}", provider.id, mid),
-                                                            format!("{} / {mid}", provider.name),
-                                                        )
-                                                    })
-                                                    .collect()
-                                            };
-                                            items.into_iter()
-                                        }))
-                                        .map(
-                                            |(model_ref, label)| {
-                                                let selected = model_ref == default_model;
-                                                let model_ref_click = model_ref.clone();
-                                                let model_entity = model_entity.clone();
-                                                Button::new(SharedString::from(format!(
-                                                    "set-model-{model_ref}"
-                                                )))
-                                                .xsmall()
-                                                .when(selected, |button| button.primary())
-                                                .when(!selected, |button| button.ghost())
-                                                .label(label)
-                                                .on_click(move |_, _, cx| {
-                                                    let model_ref_click = model_ref_click.clone();
-                                                    model_entity
-                                                        .update(cx, |this, cx| {
-                                                            this.set_default_model(
-                                                                &model_ref_click,
-                                                                cx,
-                                                            );
-                                                        })
-                                                        .ok();
-                                                })
-                                            },
-                                        ),
-                                    ),
-                                )
-                                .children(providers.providers.iter().map(|provider| {
-                                    let has_key = creds.keys.contains_key(&provider.id);
-                                    div().text_sm().child(format!(
-                                        "{} · {} {}{}",
-                                        provider.name,
-                                        provider.base_url,
-                                        if provider.enabled { "" } else { "(停用) " },
-                                        if provider.api_key_required {
-                                            if has_key { "· Key✓" } else { "· 缺 Key" }
-                                        } else {
-                                            ""
-                                        }
-                                    ))
-                                }))
-                        })
-                        .keywords(["模型", "provider", "默认"]),
-                    ),
-                )
-                .group(
-                    SettingGroup::new().title("代理").in_nav(false).item(
-                        SettingItem::new(
-                            "HTTP 代理",
-                            SettingField::input(
-                                move |_| {
-                                    proxy_read
-                                        .with(|inner| {
-                                            inner.prefs.http_proxy.clone().unwrap_or_default()
-                                        })
-                                        .into()
-                                },
-                                move |value: SharedString, cx: &mut App| {
-                                    proxy_write.with_mut(|inner| {
-                                        inner.prefs.http_proxy = if value.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(value.trim().to_string())
-                                        };
-                                    });
-                                    proxy_write.persist_prefs();
-                                    poke(&proxy_entity, cx);
-                                },
-                            ),
-                        )
-                        .description(
-                            "只影响模型请求。例如 http://127.0.0.1:7890，留空则不走代理。",
+            model_page(model_entity).group(
+                SettingGroup::new().title("代理").in_nav(false).item(
+                    SettingItem::new(
+                        "HTTP 代理",
+                        SettingField::input(
+                            move |_| {
+                                proxy_read
+                                    .with(|inner| {
+                                        inner.prefs.http_proxy.clone().unwrap_or_default()
+                                    })
+                                    .into()
+                            },
+                            move |value: SharedString, cx: &mut App| {
+                                proxy_write.with_mut(|inner| {
+                                    inner.prefs.http_proxy = if value.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(value.trim().to_string())
+                                    };
+                                });
+                                proxy_write.persist_prefs();
+                                poke(&proxy_entity, cx);
+                            },
                         ),
-                    ),
-                )
-                .group(keys_group(
-                    key_inputs.clone(),
-                    keys_entity.clone(),
-                    cred_msg.clone(),
-                )),
+                    )
+                    .description("只影响模型请求。例如 http://127.0.0.1:7890，留空则不走代理。"),
+                ),
+            ),
         ),
         agent_nav(
             SettingPage::new("个性化")
@@ -1440,62 +1269,6 @@ fn agent_pages(
         agent_nav(commands_page()),
         agent_nav(hooks_page(hooks_json.clone(), json_entity, agent_json_msg)),
     ]
-}
-
-fn keys_group(
-    key_inputs: Vec<(String, Entity<InputState>)>,
-    keys_entity: WeakEntity<SettingsPane>,
-    cred_msg: String,
-) -> SettingGroup {
-    SettingGroup::new().title("密钥").in_nav(false).item(
-        SettingItem::render(move |_, _, cx| {
-            let muted = cx.theme().muted_foreground;
-            let key_inputs = key_inputs.clone();
-            let keys_entity = keys_entity.clone();
-            let cred_msg = cred_msg.clone();
-            v_flex()
-                .gap_2()
-                .children(
-                    key_inputs
-                        .iter()
-                        .map(|(_, input)| Input::new(input).into_any_element()),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("save-keys")
-                                .small()
-                                .primary()
-                                .label("保存 API Key")
-                                .on_click(move |_, _, cx| {
-                                    keys_entity
-                                        .update(cx, |this, cx| this.save_api_keys(cx))
-                                        .ok();
-                                }),
-                        )
-                        .child(
-                            Button::new("save-providers")
-                                .small()
-                                .outline()
-                                .label("写入默认 Provider 配置")
-                                .on_click(|_, _, _| {
-                                    let _ = save_providers(&load_providers());
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("输入 Key 后点保存。只输入一个 - 会清除该 Provider 的 Key。"),
-                )
-                .when(!cred_msg.is_empty(), |col| {
-                    col.child(div().text_sm().text_color(muted).child(cred_msg))
-                })
-        })
-        .keywords(["API", "Key", "密钥"]),
-    )
 }
 
 fn dir_page(

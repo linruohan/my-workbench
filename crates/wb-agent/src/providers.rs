@@ -40,12 +40,12 @@ pub fn default_providers() -> ProviderStore {
         providers: vec![
             ProviderConfig {
                 id: BUILTIN_PROVIDER_ID.into(),
-                name: "内置".into(),
+                name: "本机工作台".into(),
                 kind: ProviderKind::Builtin,
                 base_url: String::new(),
                 api_key_required: false,
                 enabled: true,
-                models: models(&[("local", "本地内置")]),
+                models: models(&[("local", "本机工作台")]),
             },
             ProviderConfig {
                 id: "ollama".into(),

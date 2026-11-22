@@ -48,6 +48,104 @@ pub async fn model_http(req: ModelHttpRequest) -> Result<ModelHttpResponse> {
     Ok(ModelHttpResponse { status, body })
 }
 
+/// `GET {baseURL}/models`，兼容 OpenAI `data[].id` 与 Ollama `models[].name`。
+pub async fn list_provider_models(
+    base_url: &str,
+    api_key: Option<&str>,
+    proxy: Option<&str>,
+    anthropic: bool,
+) -> Result<Vec<String>> {
+    let root = base_url.trim().trim_end_matches('/');
+    if root.is_empty() {
+        anyhow::bail!("Base URL 为空");
+    }
+    let mut headers = vec![("Accept".into(), "application/json".into())];
+    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+        if anthropic {
+            headers.push(("x-api-key".into(), key.to_string()));
+            headers.push(("anthropic-version".into(), "2023-06-01".into()));
+        } else {
+            headers.push(("Authorization".into(), format!("Bearer {key}")));
+        }
+    }
+    let resp = model_http(ModelHttpRequest {
+        url: format!("{root}/models"),
+        method: "GET".into(),
+        headers,
+        body: None,
+        proxy: proxy.map(str::to_string),
+    })
+    .await?;
+    if resp.status >= 400 {
+        anyhow::bail!("HTTP {}: {}", resp.status, trim_error(&resp.body));
+    }
+    parse_model_ids(&resp.body)
+}
+
+fn trim_error(body: &str) -> String {
+    let text = body.trim();
+    let count = text.chars().count();
+    if count <= 180 {
+        return text.to_string();
+    }
+    let mut short = text.chars().take(180).collect::<String>();
+    short.push('…');
+    short
+}
+
+pub(crate) fn parse_model_ids(body: &str) -> Result<Vec<String>> {
+    let value: Value = serde_json::from_str(body).context("模型列表不是 JSON")?;
+    let mut ids = Vec::new();
+    collect_model_ids(&value, &mut ids);
+    if ids.is_empty() {
+        anyhow::bail!("响应里没有模型 id");
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(id) => push_id(id, out),
+        Value::Array(items) => {
+            for item in items {
+                push_model_item(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for key in ["data", "models", "model"] {
+                if let Some(child) = map.get(key) {
+                    collect_model_ids(child, out);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn push_model_item(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(id) => push_id(id, out),
+        Value::Object(map) => {
+            for key in ["id", "name", "model"] {
+                if let Some(id) = map.get(key).and_then(Value::as_str) {
+                    push_id(id, out);
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_id(id: &str, out: &mut Vec<String>) {
+    let id = id.trim();
+    if !id.is_empty() {
+        out.push(id.to_string());
+    }
+}
+
 pub async fn chat_completions(
     base_url: &str,
     api_key: Option<&str>,
@@ -219,4 +317,22 @@ pub async fn chat_completions_stream(
             }
         }]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_model_ids;
+
+    #[test]
+    fn openai_list_uses_data_ids() {
+        let ids = parse_model_ids(r#"{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"}]}"#).unwrap();
+        assert_eq!(ids, vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]);
+    }
+
+    #[test]
+    fn ollama_list_uses_model_names() {
+        let ids =
+            parse_model_ids(r#"{"models":[{"name":"qwen2.5"},{"name":"llama3.2"}]}"#).unwrap();
+        assert_eq!(ids, vec!["llama3.2".to_string(), "qwen2.5".to_string()]);
+    }
 }

@@ -49,7 +49,7 @@ pub struct KnowledgePane {
     find_case: bool,
     find_regex: bool,
     last_editor_scroll_y: f32,
-    last_preview_item: f32,
+    last_preview_px: f32,
     _subs: Vec<Subscription>,
 }
 
@@ -99,7 +99,7 @@ impl KnowledgePane {
             find_case: false,
             find_regex: false,
             last_editor_scroll_y: 0.0,
-            last_preview_item: 0.0,
+            last_preview_px: 0.0,
             _subs: Vec::new(),
         };
         this.spawn_live_scroll_sync(cx);
@@ -240,48 +240,101 @@ impl KnowledgePane {
         if line_h <= 0.0 {
             return;
         }
-        let editor_y = self.editor.read(cx).scroll_y_f64() as f32;
-        let editor_line = (-editor_y / line_h).max(0.0);
-        let preview_top = self.preview.read(cx).list_state().logical_scroll_top();
-        let preview_item =
-            preview_top.item_ix as f32 + f32::from(preview_top.offset_in_item) / line_h.max(1.0);
+
+        let (editor_y, editor_min) = {
+            let editor = self.editor.read(cx);
+            let content_h = editor.content_height_f64();
+            let view_h = f64::from(f32::from(editor.input_bounds().size.height));
+            let min_y = (view_h - content_h).min(0.0);
+            let y = editor.scroll_y_f64().clamp(min_y, 0.0);
+            (y as f32, min_y as f32)
+        };
+        let (preview_px, preview_max) = {
+            let list = self.preview.read(cx).list_state();
+            let max = f32::from(list.max_offset_for_scrollbar().y).max(0.0);
+            let y = (-f32::from(list.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max);
+            (y, max)
+        };
+
         let de = (editor_y - self.last_editor_scroll_y).abs();
-        let dp = (preview_item - self.last_preview_item).abs();
-        if de < 1.0 && dp < 0.15 {
+        let dp = (preview_px - self.last_preview_px).abs();
+        if de < 1.0 && dp < 1.0 {
             return;
         }
-        let outline = markdown_scroll_outline(&source);
+
+        const END_PX: f32 = 4.0;
+        let editor_at_end = editor_min < -1.0 && editor_y <= editor_min + END_PX;
+        let preview_at_end = preview_max > 1.0 && preview_px >= preview_max - END_PX;
+
         if de >= dp {
-            let item = outline.item_for_line(editor_line);
-            self.preview.update(cx, |state, cx| {
-                let list = state.list_state();
-                if list.item_count() == 0 {
-                    return;
-                }
-                let max_ix = list.item_count() - 1;
-                let ix = (item.floor() as usize).min(max_ix);
-                let frac = (item - ix as f32).clamp(0.0, 1.0);
-                let offset = list
-                    .bounds_for_item(ix)
-                    .map(|b| b.size.height * frac)
-                    .unwrap_or(px(0.));
-                list.scroll_to(ListOffset {
-                    item_ix: ix,
-                    offset_in_item: offset,
-                });
-                cx.notify();
-            });
+            if editor_at_end {
+                self.scroll_preview_to_px(preview_max, cx);
+            } else {
+                let editor_line = (-editor_y / line_h).max(0.0);
+                let item = markdown_scroll_outline(&source).item_for_line(editor_line);
+                self.scroll_preview_to_item(item, cx);
+            }
             self.last_editor_scroll_y = editor_y;
-            self.last_preview_item = item;
-        } else {
-            let line = outline.line_for_item(preview_item);
-            let y = -(line * line_h) as f64;
+            self.last_preview_px = self.preview_scroll_px(cx);
+        } else if preview_at_end {
             self.editor.update(cx, |editor, cx| {
-                editor.set_scroll_y_f64(y, cx);
+                editor.set_scroll_y_f64(editor_min as f64, cx);
             });
-            self.last_preview_item = preview_item;
-            self.last_editor_scroll_y = y as f32;
+            self.last_preview_px = preview_px;
+            self.last_editor_scroll_y = editor_min;
+        } else {
+            let preview_top = self.preview.read(cx).list_state().logical_scroll_top();
+            let preview_item = preview_top.item_ix as f32
+                + f32::from(preview_top.offset_in_item) / line_h.max(1.0);
+            let line = markdown_scroll_outline(&source).line_for_item(preview_item);
+            let y = (-(line * line_h)).clamp(editor_min, 0.0);
+            self.editor.update(cx, |editor, cx| {
+                editor.set_scroll_y_f64(y as f64, cx);
+            });
+            self.last_preview_px = preview_px;
+            self.last_editor_scroll_y = y;
         }
+    }
+
+    fn preview_scroll_px(&self, cx: &App) -> f32 {
+        let list = self.preview.read(cx).list_state();
+        let max = f32::from(list.max_offset_for_scrollbar().y).max(0.0);
+        (-f32::from(list.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max)
+    }
+
+    fn scroll_preview_to_px(&self, px_down: f32, cx: &mut Context<Self>) {
+        self.preview.update(cx, |state, cx| {
+            let list = state.list_state();
+            let max = f32::from(list.max_offset_for_scrollbar().y).max(0.0);
+            let y = px_down.clamp(0.0, max);
+            list.set_offset_from_scrollbar(point(px(0.), px(-y)));
+            cx.notify();
+        });
+    }
+
+    fn scroll_preview_to_item(&self, item: f32, cx: &mut Context<Self>) {
+        self.preview.update(cx, |state, cx| {
+            let list = state.list_state();
+            if list.item_count() == 0 {
+                return;
+            }
+            let max_ix = list.item_count() - 1;
+            let ix = (item.floor() as usize).min(max_ix);
+            let frac = (item - ix as f32).clamp(0.0, 1.0);
+            let item_h = list
+                .bounds_for_item(ix)
+                .map(|b| b.size.height)
+                .unwrap_or(px(0.));
+            let offset = item_h * frac;
+            list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: offset,
+            });
+            let max = f32::from(list.max_offset_for_scrollbar().y).max(0.0);
+            let y = (-f32::from(list.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max);
+            list.set_offset_from_scrollbar(point(px(0.), px(-y)));
+            cx.notify();
+        });
     }
 
     fn preview_style(&self) -> TextViewStyle {

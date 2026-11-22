@@ -411,11 +411,12 @@ fn dispatch_tool_calls(
             }
             ToolGate::Ask => {
                 asked = true;
-                let approval = create_approval(
+                let approval = create_approval_with_call(
                     &thread.id,
                     &call.name,
                     &call.args,
                     &format!("请求执行 {}（{}）", call.name, call.id),
+                    Some(&call.id),
                 );
                 repo.upsert_agent_approval(approval.clone());
                 msgs.push(tool_msg(
@@ -426,6 +427,37 @@ fn dispatch_tool_calls(
                 ));
             }
             ToolGate::Run => {
+                // A question is not answered by the runtime: park it as a pending
+                // approval so the turn stops until the user replies.
+                if call.name == "ask_user_question" {
+                    asked = true;
+                    let question = call
+                        .args
+                        .get("question")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let approval = create_approval_with_call(
+                        &thread.id,
+                        "ask_user_question",
+                        &call.args,
+                        if question.is_empty() {
+                            "Agent 有问题需要你回答"
+                        } else {
+                            &question
+                        },
+                        Some(&call.id),
+                    );
+                    repo.upsert_agent_approval(approval.clone());
+                    msgs.push(tool_msg(
+                        &thread.id,
+                        &call.name,
+                        Some(&call.id),
+                        &format!("等待回答：{question}（{}）", approval.id),
+                    ));
+                    continue;
+                }
                 let args = with_thread_id(&call.args, &thread.id);
                 let result =
                     execute_tool(repo, &call.name, &args, workspace_root).unwrap_or_else(|e| {
@@ -504,14 +536,13 @@ pub fn resolve_approval(
             format!("已拒绝 {}", approval.tool_name)
         };
 
-    let msg = tool_msg(&approval.thread_id, &approval.tool_name, None, &content);
+    let msg = tool_msg(
+        &approval.thread_id,
+        &approval.tool_name,
+        approval.tool_call_id.as_deref(),
+        &content,
+    );
     repo.upsert_agent_message(msg.clone());
-
-    let thread = repo
-        .list_agent_threads()
-        .into_iter()
-        .find(|t| t.id == approval.thread_id)
-        .ok_or_else(|| anyhow::anyhow!("找不到会话"))?;
 
     let outcome = TurnOutcome {
         assistant: msg.clone(),
@@ -519,7 +550,67 @@ pub fn resolve_approval(
         open_view,
     };
 
-    // If more approvals are still pending, stop and wait.
+    finish_after_user_input(repo, &approval, outcome, workspace_root)
+}
+
+/// Record the user's answer to a pending `ask_user_question` and resume the turn.
+pub fn answer_user_question(
+    repo: &mut MemoryWorkbenchRepository,
+    approval_id: &str,
+    answer: &str,
+    workspace_root: Option<&str>,
+) -> Result<TurnPhase> {
+    let Some(mut approval) = repo
+        .list_agent_approvals()
+        .into_iter()
+        .find(|a| a.id == approval_id)
+    else {
+        anyhow::bail!("提问不存在");
+    };
+    if approval.tool_name != "ask_user_question" {
+        anyhow::bail!("这不是待回答的提问");
+    }
+    if !matches!(approval.status, ApprovalStatus::Pending) {
+        anyhow::bail!("该提问已回答");
+    }
+    let answer = answer.trim();
+    if answer.is_empty() {
+        anyhow::bail!("回答不能为空");
+    }
+    approval.status = ApprovalStatus::Approved;
+    approval.resolved_at = Some(now_ms());
+    repo.upsert_agent_approval(approval.clone());
+
+    let msg = tool_msg(
+        &approval.thread_id,
+        &approval.tool_name,
+        approval.tool_call_id.as_deref(),
+        &format!("用户回答：{answer}"),
+    );
+    repo.upsert_agent_message(msg.clone());
+
+    let outcome = TurnOutcome {
+        assistant: msg.clone(),
+        tool_messages: vec![msg],
+        open_view: None,
+    };
+    finish_after_user_input(repo, &approval, outcome, workspace_root)
+}
+
+/// Wait for the remaining pending inputs, or build the next model round.
+fn finish_after_user_input(
+    repo: &mut MemoryWorkbenchRepository,
+    approval: &AgentApproval,
+    outcome: TurnOutcome,
+    workspace_root: Option<&str>,
+) -> Result<TurnPhase> {
+    let thread = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == approval.thread_id)
+        .ok_or_else(|| anyhow::anyhow!("找不到会话"))?;
+
+    // If more approvals/questions are still pending, stop and wait.
     if !pending_approvals_for_thread(repo, &approval.thread_id).is_empty() {
         return Ok(TurnPhase::Done(outcome));
     }
@@ -654,12 +745,18 @@ pub fn resume_thread_turn_blocking(
     rt.block_on(resume_thread_turn(repo, thread, proxy))
 }
 
-fn create_approval(thread_id: &str, tool_name: &str, args: &Value, summary: &str) -> AgentApproval {
+fn create_approval_with_call(
+    thread_id: &str,
+    tool_name: &str,
+    args: &Value,
+    summary: &str,
+    tool_call_id: Option<&str>,
+) -> AgentApproval {
     let now = now_ms();
     AgentApproval {
         id: create_id(now),
         thread_id: thread_id.into(),
-        tool_call_id: None,
+        tool_call_id: tool_call_id.map(|s| s.into()),
         tool_name: tool_name.into(),
         args_json: args.to_string(),
         summary: summary.into(),
@@ -1110,8 +1207,14 @@ async fn call_remote_model(
         .iter()
         .find(|p| p.id == provider_id)
         .ok_or_else(|| anyhow::anyhow!("未知 provider: {provider_id}"))?;
+    if !provider.enabled {
+        anyhow::bail!("供应商「{}」已停用", provider.name);
+    }
     let creds = load_credentials();
     let key = creds.keys.get(&provider.id).map(|s| s.as_str());
+    if provider.api_key_required && key.map(str::trim).unwrap_or("").is_empty() {
+        anyhow::bail!("供应商「{}」调用前必须有密钥", provider.name);
+    }
 
     let mut msgs = messages.to_vec();
     if let Ok(prefs) = wb_store::load_prefs()
@@ -1240,7 +1343,13 @@ mod tests {
         let thread = create_thread("ws1", "新会话", None);
         repo.upsert_agent_thread(thread.clone());
 
-        let approval = create_approval(&thread.id, "task_create", &json!({"title":"x"}), "create");
+        let approval = create_approval_with_call(
+            &thread.id,
+            "task_create",
+            &json!({"title":"x"}),
+            "create",
+            Some("call_1"),
+        );
         repo.upsert_agent_approval(approval.clone());
         assert_eq!(pending_approvals_for_thread(&repo, &thread.id).len(), 1);
 

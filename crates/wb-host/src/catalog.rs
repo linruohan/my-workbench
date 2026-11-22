@@ -162,14 +162,12 @@ fn walk_skills(dir: &Path, depth: usize, scan: &mut Scan<'_>) {
         return;
     }
     scan.visited += 1;
-    if let Some(skill_md) = find_skill_md(dir) {
-        push_skill(dir, &skill_md, scan);
-        return;
-    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     let mut children = Vec::new();
+    let mut loose = Vec::new();
+    let mut skill_md = None;
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -178,13 +176,22 @@ fn walk_skills(dir: &Path, depth: usize, scan: &mut Scan<'_>) {
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if file_type.is_dir() {
+        if file_type.is_file() && name.eq_ignore_ascii_case("SKILL.md") {
+            skill_md = Some(path);
+        } else if file_type.is_dir() {
             if !skip_dir(name) {
                 children.push(path);
             }
         } else if depth == 0 && file_type.is_file() && is_loose_skill_file(&path) {
-            push_loose(&path, scan);
+            loose.push(path);
         }
+    }
+    if let Some(skill_md) = skill_md {
+        push_skill(dir, &skill_md, scan);
+        return;
+    }
+    for path in loose {
+        push_loose(&path, scan);
     }
     children.sort();
     for child in children {
@@ -193,28 +200,6 @@ fn walk_skills(dir: &Path, depth: usize, scan: &mut Scan<'_>) {
             break;
         }
     }
-}
-
-fn find_skill_md(dir: &Path) -> Option<std::path::PathBuf> {
-    let direct = dir.join("SKILL.md");
-    if direct.is_file() {
-        return Some(direct);
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return None;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
-            && path.is_file()
-        {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn push_skill(dir: &Path, skill_md: &Path, scan: &mut Scan<'_>) {
