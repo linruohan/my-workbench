@@ -117,6 +117,9 @@ pub struct AgentMessage {
     pub tool_call_id: Option<String>,
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// Wall-clock time the tool took, for tool messages.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub created_at: i64,
 }
 
@@ -1169,6 +1172,7 @@ mod tests {
             tool_name: None,
             tool_call_id: None,
             tool_calls_json: None,
+            duration_ms: None,
             created_at: 0,
         }
     }

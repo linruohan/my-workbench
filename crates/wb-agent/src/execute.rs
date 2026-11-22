@@ -1,4 +1,4 @@
-use crate::fs_observe::{observe_path, require_observed_for_existing};
+﻿use crate::fs_observe::{observe_path, require_observed_for_existing};
 use crate::managed_agents::{
     finish_managed_agent, get_managed_agent, interrupt_managed_agent, list_managed_agents,
     register_managed_agent, send_managed_agent_message, take_managed_agent_inbox,
@@ -1146,6 +1146,7 @@ pub fn execute_tool(
                                 tool_name: None,
                                 tool_call_id: None,
                                 tool_calls_json: None,
+                                duration_ms: None,
                                 created_at: now,
                             });
                             match resume_thread_turn_blocking(repo, &thread, proxy.as_deref()) {
@@ -1163,6 +1164,7 @@ pub fn execute_tool(
                                         tool_name: None,
                                         tool_call_id: None,
                                         tool_calls_json: None,
+                                        duration_ms: None,
                                         created_at: now,
                                     });
                                     let _ = finish_managed_agent(agent_id, &reply);
@@ -2855,6 +2857,7 @@ fn spawn_subagent(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<
             tool_name: None,
             tool_call_id: None,
             tool_calls_json: None,
+            duration_ms: None,
             created_at: now,
         });
         let child_id_bg = child_id.clone();
@@ -3213,6 +3216,7 @@ mod tests {
             tool_name: None,
             tool_call_id: None,
             tool_calls_json: None,
+            duration_ms: None,
             created_at: now,
         });
         repo.upsert_agent_message(AgentMessage {
@@ -3223,6 +3227,7 @@ mod tests {
             tool_name: None,
             tool_call_id: None,
             tool_calls_json: None,
+            duration_ms: None,
             created_at: now + 1,
         });
         repo.upsert_agent_message(AgentMessage {
@@ -3233,6 +3238,7 @@ mod tests {
             tool_name: None,
             tool_call_id: None,
             tool_calls_json: None,
+            duration_ms: None,
             created_at: now + 2,
         });
         crate::session_goal::clear_goal();

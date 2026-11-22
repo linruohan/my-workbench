@@ -84,6 +84,27 @@ fn format_local_stamp(ms: i64) -> String {
     wb_domain::format_local_stamp(ms)
 }
 
+/// The first of `base`, `base (2)`, `base (3)`… that is not in `taken`.
+///
+/// Exporting twice within the same second would otherwise overwrite the
+/// previous file with no warning.
+pub fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    let (stem, ext) = match base.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (base, String::new()),
+    };
+    for n in 2.. {
+        let candidate = format!("{stem} ({n}){ext}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("an unused name always exists")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +121,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now,
+            duration_ms: None,
         }
     }
 
@@ -135,5 +157,22 @@ mod tests {
     #[test]
     fn blank_title_falls_back() {
         assert_eq!(export_file_name("   ", "s"), "wb-agent-thread-s.md");
+    }
+
+    #[test]
+    fn unique_name_avoids_overwriting() {
+        // Free name is used as is.
+        assert_eq!(unique_name("a.md", |_| false), "a.md");
+
+        // The second export in the same second must not clobber the first.
+        let taken = |name: &str| name == "a.md";
+        assert_eq!(unique_name("a.md", taken), "a (2).md");
+
+        // And keeps counting past an existing suffix.
+        let taken2 = |name: &str| name == "a.md" || name == "a (2).md";
+        assert_eq!(unique_name("a.md", taken2), "a (3).md");
+
+        // Names without an extension must not lose characters.
+        assert_eq!(unique_name("noext", |n| n == "noext"), "noext (2)");
     }
 }

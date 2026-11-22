@@ -66,6 +66,7 @@ pub fn begin_user_turn(
         tool_name: None,
         tool_call_id: None,
         tool_calls_json: None,
+        duration_ms: None,
         created_at: now,
     };
     repo.upsert_agent_message(user_msg);
@@ -320,6 +321,7 @@ fn apply_model_reply_inner(
         tool_name: None,
         tool_call_id: None,
         tool_calls_json,
+        duration_ms: None,
         created_at: now_ms(),
     };
     repo.upsert_agent_message(assistant.clone());
@@ -459,6 +461,7 @@ fn dispatch_tool_calls(
                     continue;
                 }
                 let args = with_thread_id(&call.args, &thread.id);
+                let started = std::time::Instant::now();
                 let result =
                     execute_tool(repo, &call.name, &args, workspace_root).unwrap_or_else(|e| {
                         ToolResult {
@@ -467,15 +470,13 @@ fn dispatch_tool_calls(
                             open_view: None,
                         }
                     });
+                let elapsed = started.elapsed().as_millis() as u64;
                 if result.open_view.is_some() {
                     open_view = result.open_view.clone();
                 }
-                msgs.push(tool_msg(
-                    &thread.id,
-                    &call.name,
-                    Some(&call.id),
-                    &result.content,
-                ));
+                let mut msg = tool_msg(&thread.id, &call.name, Some(&call.id), &result.content);
+                msg.duration_ms = Some(elapsed);
+                msgs.push(msg);
             }
         }
     }
@@ -775,6 +776,7 @@ fn tool_msg(thread_id: &str, tool: &str, call_id: Option<&str>, content: &str) -
         tool_name: Some(tool.into()),
         tool_call_id: call_id.map(|s| s.into()),
         tool_calls_json: None,
+        duration_ms: None,
         created_at: now_ms(),
     }
 }
@@ -992,6 +994,7 @@ pub fn compact_thread_history(
         tool_name: None,
         tool_call_id: None,
         tool_calls_json: None,
+        duration_ms: None,
         created_at: first_kept.created_at.saturating_sub(1),
     };
     let replaced: Vec<String> = older.iter().map(|m| m.id.clone()).collect();
