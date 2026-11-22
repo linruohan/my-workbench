@@ -1,5 +1,5 @@
 use crate::state::{AppNav, AppState};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{
     Escape as InputEscape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveRight,
@@ -140,7 +140,7 @@ impl AgentPane {
             TextareaState::new(window, cx)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder("给 Agent 发消息。Enter 发送，Shift+Enter 换行，↑ 历史，/ 斜杠命令")
+                .placeholder("给 Agent 发消息")
         });
         let web_title_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(WEB_AGENT_THREAD_TITLE));
@@ -2244,6 +2244,16 @@ impl AgentPane {
         let entity = cx.weak_entity();
         let active = self.state.with(|s| s.active_thread_id.clone());
         let status = self.status.clone();
+        let placeholder: &str = if messages.is_empty() {
+            "给 Agent 发消息"
+        } else {
+            "发送后续消息"
+        };
+        if self.input.read(cx).presentation().placeholder().as_ref() != placeholder {
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx);
+            });
+        }
         let radius = cx.theme().radius;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
@@ -2252,6 +2262,8 @@ impl AgentPane {
         let danger_theme = cx.theme().danger;
         let border = cx.theme().border;
         let danger = cx.theme().danger;
+        let foreground = cx.theme().foreground;
+        let background = cx.theme().background;
 
         let ask_card: Option<AnyElement> = approvals
             .iter()
@@ -3214,8 +3226,7 @@ impl AgentPane {
                         )
                     })
                     .child(
-                        // Hadron-style composer: one rounded card that owns the
-                        // focus ring, the live preview, the input and a tool row.
+                        // One rounded field, with the quiet context row underneath it.
                         {
                             let is_focused =
                                 self.input.read(cx).focus_handle(cx).is_focused(window);
@@ -3224,6 +3235,9 @@ impl AgentPane {
                             let draft_chars = draft.chars().count();
                             let preview_on = self.composer_preview && !draft_empty;
                             let draft_refs = draft_file_refs(&draft);
+                            let pin_controls = ghost.is_some()
+                                || !draft_refs.is_empty()
+                                || draft.contains('\n');
                             let branch = self.workspace_branch();
                             let active_ws = self.state.with(|s| {
                                 s.active_thread_id
@@ -3245,17 +3259,22 @@ impl AgentPane {
                                 })
                                 .unwrap_or_else(|| "本机".into());
                             v_flex()
-                                .id("agent-composer")
                                 .w_full()
                                 .gap_1p5()
-                                .p_2p5()
-                                .rounded(px(22.))
+                                .child(
+                            v_flex()
+                                .id("agent-composer")
+                                .w_full()
+                                .gap_1()
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded(px(12.))
                                 .bg(secondary)
                                 .border_1()
                                 .border_color(if self.drag_hover {
                                     accent
                                 } else if is_focused {
-                                    accent.opacity(0.65)
+                                    foreground.opacity(0.28)
                                 } else {
                                     border
                                 })
@@ -3362,15 +3381,25 @@ impl AgentPane {
                                     // Pill row: attach · input · model · mic · send.
                                     h_flex()
                                         .w_full()
-                                        .items_end()
-                                        .gap_1p5()
+                                        .items_center()
+                                        .when(pin_controls, |row| row.items_end())
+                                        .gap_2()
                                         .child(
                                             {
                                                 let entity = entity.clone();
                                                 let attach = Button::new("agent-attach")
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .icon(IconName::Plus);
+                                                    .custom(
+                                                        ButtonCustomVariant::new(cx)
+                                                            .color(border)
+                                                            .foreground(muted)
+                                                            .hover(foreground.opacity(0.08))
+                                                            .active(foreground.opacity(0.14)),
+                                                    )
+                                                    .outline()
+                                                    .small()
+                                                    .rounded(px(99.))
+                                                    .icon(IconName::Plus)
+                                                    .tooltip("添加");
                                                 attach.dropdown_menu_with_anchor(
                                                     Anchor::TopLeft,
                                                     move |menu, _, _| {
@@ -3644,7 +3673,7 @@ impl AgentPane {
                                             // voice, then the round send/stop button.
                                             h_flex()
                                                 .items_center()
-                                                .gap_1()
+                                                .gap_2()
                                                 .flex_shrink_0()
                                                 .child({
                                                     let entity = entity.clone();
@@ -3652,8 +3681,10 @@ impl AgentPane {
                                                     Button::new("agent-model-picker")
                                                         .ghost()
                                                         .xsmall()
+                                                        .compact()
                                                         .label(model_label.clone())
-                                                        .icon(IconName::ChevronDown)
+                                                        .dropdown_caret(true)
+                                                        .text_color(muted)
                                                         .dropdown_menu_with_anchor(
                                                         Anchor::TopRight,
                                                         move |menu, _, _| {
@@ -3684,10 +3715,10 @@ impl AgentPane {
                                                         .flex()
                                                         .items_center()
                                                         .justify_center()
-                                                        .size(px(28.))
+                                                        .size(px(26.))
                                                         .rounded_full()
                                                         .cursor_pointer()
-                                                        .hover(|s| s.bg(border))
+                                                        .hover(|s| s.bg(foreground.opacity(0.08)))
                                                         .child(
                                                             Icon::new(IconName::Mic)
                                                                 .xsmall()
@@ -3723,36 +3754,33 @@ impl AgentPane {
                                                         .flex()
                                                         .items_center()
                                                         .justify_center()
-                                                        .size(px(30.))
+                                                        .size(px(28.))
                                                         .flex_shrink_0()
                                                         .rounded_full()
-                                                        .bg(if busy {
-                                                            danger
-                                                        } else if enabled {
-                                                            accent
-                                                        } else {
-                                                            border
+                                                        .bg(if busy { danger } else { foreground })
+                                                        .when(!busy && !enabled, |s| {
+                                                            s.opacity(0.72).cursor_default()
                                                         })
-                                                        .when(!busy && !enabled, |s| s.cursor_default())
-                                                        .when(busy || enabled, |s| s.cursor_pointer())
+                                                        .when(busy || enabled, |s| {
+                                                            s.cursor_pointer().hover(|s| s.opacity(0.88))
+                                                        })
                                                         .tooltip(move |window, cx| {
                                                             gpui_kit::component::tooltip::Tooltip::new(
                                                                 tooltip,
                                                             )
                                                             .build(window, cx)
                                                         })
-                                                        .hover(|s| s.opacity(0.85))
                                                         .child(
                                                             Icon::new(if busy {
                                                                 IconName::Square
                                                             } else {
                                                                 IconName::ArrowUp
                                                             })
-                                                            .small()
-                                                            .text_color(if busy || enabled {
-                                                                cx.theme().background
+                                                            .xsmall()
+                                                            .text_color(if busy {
+                                                                foreground
                                                             } else {
-                                                                muted
+                                                                background
                                                             }),
                                                         )
                                                         .on_click(cx.listener(
@@ -3782,8 +3810,9 @@ impl AgentPane {
                                                 }),
                                         ),
                                 )
+                            )
                                 .child(
-                                    // Meta row under the pill: context chips and status.
+                                    // Context row under the field, outside the rounded box.
                                     h_flex()
                                         .w_full()
                                         .items_center()
@@ -3794,7 +3823,7 @@ impl AgentPane {
                                                 .flex_1()
                                                 .min_w_0()
                                                 .items_center()
-                                                .gap_1()
+                                                .gap_3()
                                                 .when_some(branch, |row, branch| {
                                                     let entity = entity.clone();
                                                     let root = self.workspace_root();
@@ -3802,10 +3831,11 @@ impl AgentPane {
                                                         Button::new("agent-branch-chip")
                                                             .ghost()
                                                             .xsmall()
+                                                            .compact()
                                                             .label(branch.clone())
-                                                            .icon(
-                                                                gpui_kit::assets::IconName::GitBranch,
-                                                            )
+                                                            .icon(gpui_kit::assets::IconName::GitBranch)
+                                                            .dropdown_caret(true)
+                                                            .text_color(muted)
                                                             .dropdown_menu_with_anchor(
                                                                 Anchor::TopLeft,
                                                                 move |menu, _, _| {
@@ -3878,8 +3908,11 @@ impl AgentPane {
                                                     Button::new("agent-env-chip")
                                                         .ghost()
                                                         .xsmall()
+                                                        .compact()
                                                         .label(root_name.clone())
-                                                        .icon(IconName::ChevronDown)
+                                                        .icon(gpui_kit::assets::IconName::Monitor)
+                                                        .dropdown_caret(true)
+                                                        .text_color(muted)
                                                         .dropdown_menu_with_anchor(
                                                             Anchor::TopLeft,
                                                             move |menu, _, _| {
@@ -3924,7 +3957,10 @@ impl AgentPane {
                                                     Button::new("agent-perm-chip")
                                                         .ghost()
                                                         .xsmall()
-                                                        .label(format!("权限 · {perm_label}"))
+                                                        .compact()
+                                                        .label(perm_label)
+                                                        .dropdown_caret(true)
+                                                        .text_color(muted)
                                                         .dropdown_menu_with_anchor(
                                                             Anchor::TopLeft,
                                                             move |menu, _, _| {
@@ -3953,114 +3989,12 @@ impl AgentPane {
                                                             },
                                                         )
                                                 })
-                                                .child({
-                                                    let entity = entity.clone();
-                                                    let current = model_ref.clone();
-                                                    Button::new("agent-model-chip")
-                                                        .ghost()
-                                                        .xsmall()
-                                                        .label(format!("模型 · {model_label}"))
-                                                        .dropdown_menu_with_anchor(
-                                                            Anchor::TopLeft,
-                                                            move |menu, _, _| {
-                                                                let mut menu = menu;
-                                                                for model in AgentPane::available_model_refs() {
-                                                                    let entity = entity.clone();
-                                                                    let pick = model.clone();
-                                                                    menu = menu.item(
-                                                                        PopupMenuItem::new(model_label_of(&model))
-                                                                            .checked(current == model)
-                                                                            .on_click(move |_, _, app| {
-                                                                                if let Some(e) = entity.upgrade() {
-                                                                                    let pick = pick.clone();
-                                                                                    e.update(app, |this, cx| {
-                                                                                        this.set_thread_model(pick, cx);
-                                                                                    });
-                                                                                }
-                                                                            }),
-                                                                    );
-                                                                }
-                                                                menu
-                                                            },
-                                                        )
-                                                })
-                                                .child(
-                                                    h_flex()
-                                                        .id("agent-slash-chip")
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_2()
-                                                        .py_0p5()
-                                                        .rounded(px(6.))
-                                                        .border_1()
-                                                        .border_color(border)
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.text_color(accent))
-                                                        .child("/命令")
-                                                        .on_click(cx.listener(
-                                                            |this, _, window, cx| {
-                                                                let value = this
-                                                                    .input
-                                                                    .read(cx)
-                                                                    .value()
-                                                                    .to_string();
-                                                                let next =
-                                                                    if value.trim().is_empty() {
-                                                                        "/".to_string()
-                                                                    } else {
-                                                                        format!("{value} /")
-                                                                    };
-                                                                let len = next.len();
-                                                                this.input.update(
-                                                                    cx,
-                                                                    |state, cx| {
-                                                                        state.set_value(
-                                                                            &next, window, cx,
-                                                                        );
-                                                                        state.set_selected_range(
-                                                                            len..len,
-                                                                            cx,
-                                                                        );
-                                                                    },
-                                                                );
-                                                                window.focus(
-                                                                    &this.input.focus_handle(cx),
-                                                                    cx,
-                                                                );
-                                                                cx.notify();
-                                                            },
-                                                        )),
-                                                )
                                                 .when(draft_chars > 0, |row| {
                                                     row.child(
                                                         div()
                                                             .text_xs()
                                                             .text_color(muted)
                                                             .child(format!("{draft_chars} 字")),
-                                                    )
-                                                })
-                                                .when(draft_chars == 0, |row| {
-                                                    row.child(
-                                                        h_flex()
-                                                            .items_center()
-                                                            .gap_1()
-                                                            .child(
-                                                                div()
-                                                                    .px_1()
-                                                                    .rounded(px(3.))
-                                                                    .bg(border)
-                                                                    .text_xs()
-                                                                    .text_color(muted)
-                                                                    .child("Enter"),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(muted)
-                                                                    .child("发送"),
-                                                            ),
                                                     )
                                                 }),
                                         )
@@ -4084,7 +4018,7 @@ impl AgentPane {
                                                             muted
                                                         })
                                                         .cursor_pointer()
-                                                        .hover(|s| s.bg(border))
+                                                        .hover(|s| s.bg(foreground.opacity(0.08)))
                                                         .child(if self.composer_preview {
                                                             "预览开"
                                                         } else {
@@ -4155,6 +4089,8 @@ impl AgentPane {
                                                     Button::new("agent-export")
                                                         .xsmall()
                                                         .ghost()
+                                                        .compact()
+                                                        .text_color(muted)
                                                         .label("导出")
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.export_active_thread(cx);
@@ -4164,6 +4100,8 @@ impl AgentPane {
                                                     Button::new("agent-term-toggle")
                                                         .xsmall()
                                                         .ghost()
+                                                        .compact()
+                                                        .text_color(muted)
                                                         .label(if self.show_terminal {
                                                             "收起终端"
                                                         } else {
