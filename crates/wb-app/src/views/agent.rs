@@ -35,28 +35,12 @@ use wb_host::{cleanup_tool_spill, global_terminals};
 
 /// `@path` tokens in the draft, in order of appearance, deduplicated.
 fn draft_file_refs(draft: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for token in draft.split_whitespace() {
-        let Some(rest) = token.strip_prefix('@') else {
-            continue;
-        };
-        if rest.is_empty() || rest.contains('@') {
-            continue;
-        }
-        if !out.iter().any(|existing| existing == rest) {
-            out.push(rest.to_string());
-        }
-    }
-    out
+    crate::composer_text::draft_file_refs(draft)
 }
 
 /// `provider/model` → `model` for compact chips and menus.
 fn model_label_of(model_ref: &str) -> String {
-    model_ref
-        .split('/')
-        .next_back()
-        .unwrap_or(model_ref)
-        .to_string()
+    crate::composer_text::model_label_of(model_ref)
 }
 
 fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {

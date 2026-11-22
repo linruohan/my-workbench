@@ -1,6 +1,7 @@
 mod app;
 mod appearance;
 mod command_palette;
+mod composer_text;
 mod state;
 mod themes;
 mod timed_deliver;
@@ -19,6 +20,11 @@ fn main() {
     app.run(move |cx| {
         gpui_kit::init(cx);
         themes::init(cx);
+        // TextView remote images (`![…](https://…)`) stay blank without a client.
+        match reqwest_client::ReqwestClient::user_agent("my-workbench") {
+            Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
+            Err(err) => log::warn!("无法创建图片 HTTP 客户端: {err}"),
+        }
 
         let restore = wb_store::load_prefs()
             .ok()
