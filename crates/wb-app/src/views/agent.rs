@@ -1208,6 +1208,18 @@ impl AgentPane {
         refs
     }
 
+    /// Append `text` to the composer; the value lands on the next render.
+    fn insert_composer_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let current = self.input.read(cx).value().to_string();
+        let next = if current.trim().is_empty() {
+            text.to_string()
+        } else {
+            format!("{} {text}", current.trim_end())
+        };
+        self.pending_edit = Some(next);
+        cx.notify();
+    }
+
     fn set_thread_workspace(&mut self, workspace_id: String, cx: &mut Context<Self>) {
         let tid = self.ensure_thread();
         self.state.with_mut(|s| {
@@ -3054,45 +3066,78 @@ impl AgentPane {
                                         .items_end()
                                         .gap_1p5()
                                         .child(
-                                            div()
-                                                .id("agent-attach")
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .size(px(28.))
-                                                .flex_shrink_0()
-                                                .mb(px(1.))
-                                                .rounded_full()
-                                                .border_1()
-                                                .border_color(border)
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(border))
-                                                .child(
-                                                    Icon::new(IconName::Plus)
-                                                        .xsmall()
-                                                        .text_color(muted),
-                                                )
-                                                .on_click(cx.listener(
-                                                    |this, _, window, cx| {
-                                                        let current =
-                                                            this.input.read(cx).value().to_string();
-                                                        let next = if current.trim().is_empty() {
-                                                            "@".to_string()
-                                                        } else {
-                                                            format!("{current} @")
-                                                        };
-                                                        let len = next.len();
-                                                        this.input.update(cx, |state, cx| {
-                                                            state.set_value(&next, window, cx);
-                                                            state.set_selected_range(len..len, cx);
-                                                        });
-                                                        window.focus(
-                                                            &this.input.focus_handle(cx),
-                                                            cx,
-                                                        );
-                                                        cx.notify();
+                                            {
+                                                let entity = entity.clone();
+                                                let attach = Button::new("agent-attach")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(IconName::Plus);
+                                                attach.dropdown_menu_with_anchor(
+                                                    Anchor::TopLeft,
+                                                    move |menu, _, _| {
+                                                        let mut menu = menu;
+                                                        let ent_file = entity.clone();
+                                                        let ent_cmd = entity.clone();
+                                                        let ent_term = entity.clone();
+                                                        let ent_compact = entity.clone();
+                                                        let ent_help = entity.clone();
+                                                        menu = menu
+                                                            .item(
+                                                                PopupMenuItem::new("@ 引用文件")
+                                                                    .on_click(move |_, _, app| {
+                                                                        if let Some(e) = ent_file.upgrade() {
+                                                                            e.update(app, |this, cx| {
+                                                                                this.insert_composer_text("@", cx);
+                                                                            });
+                                                                        }
+                                                                    }),
+                                                            )
+                                                            .item(
+                                                                PopupMenuItem::new("/ 斜杠命令")
+                                                                    .on_click(move |_, _, app| {
+                                                                        if let Some(e) = ent_cmd.upgrade() {
+                                                                            e.update(app, |this, cx| {
+                                                                                this.insert_composer_text("/", cx);
+                                                                            });
+                                                                        }
+                                                                    }),
+                                                            );
+                                                        menu = menu
+                                                            .separator()
+                                                            .item(
+                                                                PopupMenuItem::new("压缩上下文")
+                                                                    .on_click(move |_, _, app| {
+                                                                        if let Some(e) = ent_compact.upgrade() {
+                                                                            e.update(app, |this, cx| {
+                                                                                this.compact_history(cx);
+                                                                            });
+                                                                        }
+                                                                    }),
+                                                            )
+                                                            .item(
+                                                                PopupMenuItem::new("打开终端")
+                                                                    .on_click(move |_, _, app| {
+                                                                        if let Some(e) = ent_term.upgrade() {
+                                                                            e.update(app, |this, cx| {
+                                                                                this.open_terminal(cx);
+                                                                            });
+                                                                        }
+                                                                    }),
+                                                            )
+                                                            .item(
+                                                                PopupMenuItem::new("清空本会话")
+                                                                    .on_click(move |_, _, app| {
+                                                                        if let Some(e) = ent_help.upgrade() {
+                                                                            e.update(app, |this, cx| {
+                                                                                this.clear_active_thread(cx);
+                                                                            });
+                                                                        }
+                                                                    }),
+                                                            );
+                                                        menu
                                                     },
-                                                )),
+                                                )
+                                            }
                                         )
                                         .child(
                                             v_flex()
