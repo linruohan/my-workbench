@@ -3042,7 +3042,20 @@ impl AgentPane {
                                                 .child(cmd.hint.to_string()),
                                         )
                                         .into_any_element()
-                                })),
+                                }))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .pt_1()
+                                        .px_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child("↑↓ 选择 · Tab/Enter 补全 · Esc 关闭"),
+                                        ),
+                                ),
                         )
                     })
                     .when(!mention_hits.is_empty(), |col| {
