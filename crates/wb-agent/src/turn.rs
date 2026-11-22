@@ -60,6 +60,7 @@ pub fn begin_user_turn(
         created_at: now,
     };
     repo.upsert_agent_message(user_msg);
+    retitle_default_thread(repo, thread, user_text);
 
     let history = repo.messages_for_thread(&thread.id);
     let builtin_reply =
@@ -576,29 +577,203 @@ fn with_thread_id(args: &Value, thread_id: &str) -> Value {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlashCommand {
+    pub invoke: &'static str,
+    pub tool: &'static str,
+    pub hint: &'static str,
+}
+
+pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        invoke: "/task_list",
+        tool: "task_list",
+        hint: "列出任务",
+    },
+    SlashCommand {
+        invoke: "/project_list",
+        tool: "project_list",
+        hint: "列出项目",
+    },
+    SlashCommand {
+        invoke: "/tag_list",
+        tool: "tag_list",
+        hint: "列出标签",
+    },
+    SlashCommand {
+        invoke: "/note_list",
+        tool: "note_list",
+        hint: "列出笔记",
+    },
+    SlashCommand {
+        invoke: "/schedule_list",
+        tool: "schedule_list",
+        hint: "列出定时任务",
+    },
+    SlashCommand {
+        invoke: "/notification_list",
+        tool: "notification_list",
+        hint: "列出通知",
+    },
+    SlashCommand {
+        invoke: "/ui_open",
+        tool: "ui_open",
+        hint: "打开视图，如 /ui_open today",
+    },
+    SlashCommand {
+        invoke: "/search",
+        tool: "search",
+        hint: "检索任务与笔记",
+    },
+    SlashCommand {
+        invoke: "/host_tool_list",
+        tool: "host_tool_list",
+        hint: "列出可用工具",
+    },
+    SlashCommand {
+        invoke: "/get_goal",
+        tool: "get_goal",
+        hint: "查看当前目标",
+    },
+    SlashCommand {
+        invoke: "/goal",
+        tool: "get_goal",
+        hint: "查看或创建会话目标",
+    },
+];
+
+/// Suggestions for a composer that currently looks like a slash command.
+pub fn slash_suggestions(input: &str) -> Vec<&'static SlashCommand> {
+    let line = input.lines().last().unwrap_or(input);
+    let t = line.trim_start();
+    if !t.starts_with('/') {
+        return Vec::new();
+    }
+    let token = t.split_whitespace().next().unwrap_or(t);
+    if t.len() > token.len() {
+        return Vec::new();
+    }
+    let needle = token.to_ascii_lowercase();
+    SLASH_COMMANDS
+        .iter()
+        .filter(|c| {
+            c.invoke.starts_with(&needle) || c.invoke[1..].contains(needle.trim_start_matches('/'))
+        })
+        .collect()
+}
+
+/// Replace the last line's leading token with `invoke` plus a trailing space.
+pub fn apply_slash_completion(input: &str, invoke: &str) -> String {
+    match input.rfind('\n') {
+        Some(i) => format!("{}{invoke} ", &input[..=i]),
+        None => format!("{invoke} "),
+    }
+}
+
+pub fn prompt_char_count(messages: &[AgentMessage]) -> usize {
+    messages
+        .iter()
+        .rev()
+        .take(30)
+        .map(|m| m.content.chars().count())
+        .sum()
+}
+
+fn parse_queue(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+pub fn queued_user_texts(thread: &AgentThread) -> Vec<String> {
+    parse_queue(thread.queue_json.as_deref())
+}
+
+pub fn enqueue_user_text(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    text: &str,
+) -> usize {
+    let Some(mut thread) = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == thread_id)
+    else {
+        return 0;
+    };
+    let mut queue = parse_queue(thread.queue_json.as_deref());
+    queue.push(text.to_string());
+    let n = queue.len();
+    thread.queue_json = Some(serde_json::to_string(&queue).unwrap_or_else(|_| "[]".into()));
+    thread.updated_at = now_ms();
+    repo.upsert_agent_thread(thread);
+    n
+}
+
+pub fn dequeue_user_text(repo: &mut MemoryWorkbenchRepository, thread_id: &str) -> Option<String> {
+    let mut thread = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == thread_id)?;
+    let mut queue = parse_queue(thread.queue_json.as_deref());
+    if queue.is_empty() {
+        return None;
+    }
+    let next = queue.remove(0);
+    thread.queue_json = if queue.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&queue).unwrap_or_else(|_| "[]".into()))
+    };
+    thread.updated_at = now_ms();
+    repo.upsert_agent_thread(thread);
+    Some(next)
+}
+
+fn retitle_default_thread(
+    repo: &mut MemoryWorkbenchRepository,
+    thread: &AgentThread,
+    user_text: &str,
+) {
+    if thread.title != "新会话" && !thread.title.is_empty() {
+        return;
+    }
+    let title: String = user_text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(32)
+        .collect();
+    if title.is_empty() {
+        return;
+    }
+    let Some(mut t) = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|x| x.id == thread.id)
+    else {
+        return;
+    };
+    t.title = title;
+    t.updated_at = now_ms();
+    repo.upsert_agent_thread(t);
+}
+
 fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
     let t = text.trim();
-    const COMMANDS: &[(&str, &str)] = &[
-        ("/task_list", "task_list"),
-        ("/project_list", "project_list"),
-        ("/tag_list", "tag_list"),
-        ("/note_list", "note_list"),
-        ("/schedule_list", "schedule_list"),
-        ("/notification_list", "notification_list"),
-        ("/ui_open", "ui_open"),
-        ("/search", "search"),
-        ("/host_tool_list", "host_tool_list"),
-        ("/get_goal", "get_goal"),
-    ];
-    for (prefix, name) in COMMANDS {
-        if t == *prefix || t.starts_with(&format!("{prefix} ")) {
-            let rest = t[prefix.len()..].trim();
-            let args = match *name {
+    for cmd in SLASH_COMMANDS {
+        if cmd.invoke == "/goal" {
+            continue;
+        }
+        if t == cmd.invoke || t.starts_with(&format!("{} ", cmd.invoke)) {
+            let rest = t[cmd.invoke.len()..].trim();
+            let args = match cmd.tool {
                 "ui_open" => json!({ "view": rest }),
                 "search" => json!({ "query": rest }),
                 _ => json!({}),
             };
-            return Some((name, args));
+            return Some((cmd.tool, args));
         }
     }
     // /goal [status|clear] — map to get_goal / update_goal
@@ -907,5 +1082,49 @@ mod tests {
             cycle_permission_mode(AgentPermissionMode::Readonly),
             AgentPermissionMode::Confirm
         );
+    }
+
+    #[test]
+    fn slash_suggestions_filter_by_prefix() {
+        let hits = slash_suggestions("/task");
+        assert!(hits.iter().any(|c| c.invoke == "/task_list"));
+        assert!(slash_suggestions("hello").is_empty());
+        assert!(slash_suggestions("/search foo").is_empty());
+        assert_eq!(apply_slash_completion("/ta", "/task_list"), "/task_list ");
+        assert_eq!(apply_slash_completion("note\n/go", "/goal"), "note\n/goal ");
+    }
+
+    #[test]
+    fn first_user_turn_titles_new_thread_and_queue_fifo() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let now = now_ms();
+        repo.upsert_agent_workspace(AgentWorkspace {
+            id: "ws1".into(),
+            title: "t".into(),
+            root_path: None,
+            created_at: now,
+            updated_at: now,
+        });
+        let thread = create_thread("ws1", "新会话", None);
+        repo.upsert_agent_thread(thread.clone());
+        begin_user_turn(&mut repo, &thread, "整理今日任务清单");
+        let titled = repo
+            .list_agent_threads()
+            .into_iter()
+            .find(|t| t.id == thread.id)
+            .unwrap();
+        assert_eq!(titled.title, "整理今日任务清单");
+
+        assert_eq!(enqueue_user_text(&mut repo, &thread.id, "one"), 1);
+        assert_eq!(enqueue_user_text(&mut repo, &thread.id, "two"), 2);
+        assert_eq!(
+            dequeue_user_text(&mut repo, &thread.id).as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            dequeue_user_text(&mut repo, &thread.id).as_deref(),
+            Some("two")
+        );
+        assert_eq!(dequeue_user_text(&mut repo, &thread.id), None);
     }
 }

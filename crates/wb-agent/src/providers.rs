@@ -116,6 +116,24 @@ pub fn load_credentials() -> CredentialStore {
         .unwrap_or_default()
 }
 
+pub fn model_context_window(model_ref: &str) -> u32 {
+    let (provider_id, model_id) = match model_ref.split_once('/') {
+        Some((a, b)) => (a, b),
+        None => return 128_000,
+    };
+    for p in load_providers().providers {
+        if p.id != provider_id {
+            continue;
+        }
+        if let Some(caps) = p.models.get(model_id)
+            && let Some(ctx) = caps.get("context").and_then(|v| v.as_u64())
+        {
+            return ctx as u32;
+        }
+    }
+    128_000
+}
+
 pub fn save_credentials(store: &CredentialStore) -> anyhow::Result<()> {
     let path = data_file_path(CREDENTIALS_FILE)?;
     fs::write(path, serde_json::to_string_pretty(store)?)?;
