@@ -1039,6 +1039,60 @@ pub fn enqueue_user_text(
     n
 }
 
+/// Drop one queued entry by index. Returns the remaining queue length.
+pub fn remove_queued_user_text(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    index: usize,
+) -> usize {
+    let Some(mut thread) = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == thread_id)
+    else {
+        return 0;
+    };
+    let mut queue = parse_queue(thread.queue_json.as_deref());
+    if index >= queue.len() {
+        return queue.len();
+    }
+    queue.remove(index);
+    let n = queue.len();
+    thread.queue_json = if queue.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&queue).unwrap_or_else(|_| "[]".into()))
+    };
+    thread.updated_at = now_ms();
+    repo.upsert_agent_thread(thread);
+    n
+}
+
+/// Replace one queued entry, e.g. after the user edited it.
+pub fn update_queued_user_text(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    index: usize,
+    text: &str,
+) -> bool {
+    let Some(mut thread) = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == thread_id)
+    else {
+        return false;
+    };
+    let mut queue = parse_queue(thread.queue_json.as_deref());
+    let Some(slot) = queue.get_mut(index) else {
+        return false;
+    };
+    *slot = text.to_string();
+    thread.queue_json = Some(serde_json::to_string(&queue).unwrap_or_else(|_| "[]".into()));
+    thread.updated_at = now_ms();
+    repo.upsert_agent_thread(thread);
+    true
+}
+
 pub fn dequeue_user_text(repo: &mut MemoryWorkbenchRepository, thread_id: &str) -> Option<String> {
     let mut thread = repo
         .list_agent_threads()
@@ -1533,6 +1587,51 @@ mod tests {
             Some("two")
         );
         assert_eq!(dequeue_user_text(&mut repo, &thread.id), None);
+    }
+
+    #[test]
+    fn queue_entries_can_be_removed_and_replaced() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let now = now_ms();
+        repo.upsert_agent_workspace(AgentWorkspace {
+            id: "ws1".into(),
+            title: "t".into(),
+            root_path: None,
+            created_at: now,
+            updated_at: now,
+        });
+        let thread = create_thread("ws1", "会话", None);
+        repo.upsert_agent_thread(thread.clone());
+        enqueue_user_text(&mut repo, &thread.id, "one");
+        enqueue_user_text(&mut repo, &thread.id, "two");
+        enqueue_user_text(&mut repo, &thread.id, "three");
+
+        assert!(update_queued_user_text(
+            &mut repo,
+            &thread.id,
+            1,
+            "two-edited"
+        ));
+        let queued = repo
+            .list_agent_threads()
+            .into_iter()
+            .find(|t| t.id == thread.id)
+            .map(|t| queued_user_texts(&t))
+            .unwrap();
+        assert_eq!(queued, vec!["one", "two-edited", "three"]);
+
+        assert_eq!(remove_queued_user_text(&mut repo, &thread.id, 0), 2);
+        let left = repo
+            .list_agent_threads()
+            .into_iter()
+            .find(|t| t.id == thread.id)
+            .map(|t| queued_user_texts(&t))
+            .unwrap();
+        assert_eq!(left, vec!["two-edited", "three"]);
+
+        // Out-of-range edits/removals change nothing.
+        assert!(!update_queued_user_text(&mut repo, &thread.id, 9, "x"));
+        assert_eq!(remove_queued_user_text(&mut repo, &thread.id, 9), 2);
     }
 
     #[test]

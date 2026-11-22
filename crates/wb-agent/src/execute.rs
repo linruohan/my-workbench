@@ -1663,6 +1663,10 @@ pub fn execute_tool(
             let root = effective_root(workspace_root)?;
             let actions = parse_apply_patch(patch).map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut summary = Vec::new();
+            let mut added = 0usize;
+            let mut updated = 0usize;
+            let mut removed = 0usize;
+            let mut hunks_total = 0usize;
             for action in actions {
                 match action {
                     PatchAction::Add { path: rel, content } => {
@@ -1672,6 +1676,7 @@ pub fn execute_tool(
                         }
                         write_text(&path, &content)?;
                         observe_path(&path);
+                        added += 1;
                         summary.push(format!("+ {rel}"));
                     }
                     PatchAction::Delete { path: rel } => {
@@ -1681,6 +1686,7 @@ pub fn execute_tool(
                         }
                         if path.exists() {
                             std::fs::remove_file(&path)?;
+                            removed += 1;
                             summary.push(format!("- {rel}"));
                         } else {
                             summary.push(format!("- {rel}（不存在，跳过）"));
@@ -1696,12 +1702,29 @@ pub fn execute_tool(
                             apply_hunks(&text, &hunks).map_err(|e| anyhow::anyhow!("{e}"))?;
                         write_text(&path, &next)?;
                         observe_path(&path);
+                        updated += 1;
+                        hunks_total += hunks.len();
                         summary.push(format!("~ {rel}（{} hunk）", hunks.len()));
                     }
                 }
             }
+            let mut counts = Vec::new();
+            if added > 0 {
+                counts.push(format!("新增 {added}"));
+            }
+            if updated > 0 {
+                counts.push(format!("修改 {updated}（{hunks_total} 处）"));
+            }
+            if removed > 0 {
+                counts.push(format!("删除 {removed}"));
+            }
+            let head = if counts.is_empty() {
+                "没有变更".to_string()
+            } else {
+                counts.join(" · ")
+            };
             Ok(ToolResult::ok_text(format!(
-                "已应用补丁：\n{}",
+                "已应用补丁：{head}\n{}",
                 summary.join("\n")
             )))
         }

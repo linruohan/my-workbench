@@ -21,8 +21,8 @@ use wb_agent::{
     continue_turn_reply_streaming, create_thread, cycle_permission_mode, dequeue_user_text,
     enqueue_user_text, finish_continue_turn_with_stage, finish_user_turn_with_stage,
     load_providers, model_context_window, pending_approvals_for_thread, permission_mode_label,
-    prepare_goal_idle_round, prompt_char_count, queued_user_texts, resolve_approval,
-    resolve_turn_reply_streaming, slash_suggestions,
+    prepare_goal_idle_round, prompt_char_count, queued_user_texts, remove_queued_user_text,
+    resolve_approval, resolve_turn_reply_streaming, slash_suggestions,
 };
 use wb_domain::{
     AgentMessage, AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE,
@@ -74,6 +74,8 @@ pub struct AgentPane {
     cancel_flag: Arc<AtomicBool>,
     /// Message text to load into the composer on next render.
     pending_edit: Option<String>,
+    /// Whether the session todo list is expanded under the chat header.
+    show_todos: bool,
     /// Ask approvals that already have an auto-answer timer running.
     ask_timers: HashSet<String>,
     status: String,
@@ -120,6 +122,7 @@ impl AgentPane {
             stream_status: Arc::new(Mutex::new(String::new())),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pending_edit: None,
+            show_todos: false,
             ask_timers: HashSet::new(),
             status: String::new(),
             prompt_history: Vec::new(),
@@ -388,6 +391,28 @@ impl AgentPane {
             return;
         }
         clear_goal_round_flag();
+        // Keep the prompt inside the model window: fold old turns before sending.
+        let (ctx_chars, ctx_model) = self.state.with(|s| {
+            let msgs = s.repo.messages_for_thread(&thread_id);
+            let model = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == thread_id)
+                .map(|t| t.model_ref)
+                .unwrap_or_else(|| BUILTIN_MODEL_REF.to_string());
+            (prompt_char_count(&msgs), model)
+        });
+        let cap = model_context_window(&ctx_model).max(1) as usize;
+        if ctx_chars * 100 >= cap * 85 {
+            let removed = self
+                .state
+                .with_mut(|s| compact_thread_history(&mut s.repo, &thread_id, 8));
+            if removed > 0 {
+                self.state.persist_if_dirty();
+                self.status = format!("上下文接近上限，已自动折叠较早的 {removed} 条消息");
+            }
+        }
         let proxy = self.state.with(|s| s.prefs.http_proxy.clone());
         let thread = self.state.with(|s| {
             s.repo
@@ -892,6 +917,48 @@ impl AgentPane {
             return;
         }
         self.submit_ask_answer("（超时未回复，请按合理默认继续）".into(), cx);
+    }
+
+    /// Move a queued entry back into the composer so the user can rework it.
+    fn take_queued_into_input(
+        &mut self,
+        index: usize,
+        thread_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let texts = self.state.with(|s| {
+            s.repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == thread_id)
+                .map(|t| queued_user_texts(&t))
+                .unwrap_or_default()
+        });
+        let Some(text) = texts.get(index).cloned() else {
+            return;
+        };
+        self.state
+            .with_mut(|s| remove_queued_user_text(&mut s.repo, &thread_id, index));
+        self.state.persist_if_dirty();
+        self.input.update(cx, |input, cx| {
+            input.set_value(text, window, cx);
+        });
+        self.status = "已取回队列消息，编辑后再发送".into();
+        cx.notify();
+    }
+
+    fn remove_queued(&mut self, index: usize, thread_id: String, cx: &mut Context<Self>) {
+        let left = self
+            .state
+            .with_mut(|s| remove_queued_user_text(&mut s.repo, &thread_id, index));
+        self.state.persist_if_dirty();
+        self.status = if left == 0 {
+            "队列已清空".into()
+        } else {
+            format!("已移除，队列还剩 {left} 条")
+        };
+        cx.notify();
     }
 
     fn compact_history(&mut self, cx: &mut Context<Self>) {
@@ -1573,6 +1640,65 @@ impl AgentPane {
                     .into_any_element()
             });
 
+        let todos_all = wb_agent::list_todos();
+        let goal_chip: Option<AnyElement> = wb_agent::get_goal().map(|goal| {
+            let rounds = match goal.max_rounds {
+                Some(max) => format!("{}/{}", goal.rounds_started, max),
+                None => format!("{} 轮", goal.rounds_started),
+            };
+            let objective: String = goal.objective.chars().take(28).collect();
+            h_flex()
+                .gap_1()
+                .items_center()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(accent.opacity(0.6))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_bold()
+                        .text_color(accent)
+                        .child(format!("目标 {rounds}")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("{objective} · {}", goal.status)),
+                )
+                .into_any_element()
+        });
+        let todo_chip: Option<AnyElement> = {
+            let todos = wb_agent::list_todos();
+            (!todos.is_empty()).then(|| {
+                let done = todos.iter().filter(|t| t.status == "completed").count();
+                let running = todos.iter().find(|t| t.status == "in_progress").map(|t| {
+                    let text: String = t.content.chars().take(20).collect();
+                    text
+                });
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_bold()
+                            .child(format!("待办 {done}/{}", todos.len())),
+                    )
+                    .when_some(running, |row, text| {
+                        row.child(div().text_xs().text_color(muted).child(format!("· {text}")))
+                    })
+                    .into_any_element()
+            })
+        };
+
         let approval_rows: Vec<_> = approvals
             .into_iter()
             .filter(|a| a.tool_name != "ask_user_question")
@@ -1927,7 +2053,25 @@ impl AgentPane {
                                     .text_xs()
                                     .text_color(muted)
                                     .child("可用 /rename 改标题"),
-                            ),
+                            )
+                            .when_some(goal_chip, |row, chip| row.child(chip))
+                            .when_some(todo_chip, |row, chip| row.child(chip))
+                            .when(!todos_all.is_empty(), |row| {
+                                row.child(
+                                    Button::new("agent-todo-toggle")
+                                        .xsmall()
+                                        .ghost()
+                                        .label(if self.show_todos {
+                                            "收起待办"
+                                        } else {
+                                            "待办详情"
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_todos = !this.show_todos;
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
                     )
                     .child(
                         h_flex()
@@ -1966,6 +2110,43 @@ impl AgentPane {
                                     })),
                             ),
                     )
+                    .when(self.show_todos && !todos_all.is_empty(), |col| {
+                        col.child(
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .p_2()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(border)
+                                .children(todos_all.iter().map(|todo| {
+                                    let mark = match todo.status.as_str() {
+                                        "completed" => "✓",
+                                        "in_progress" => "▸",
+                                        _ => "·",
+                                    };
+                                    let color = if todo.status == "completed" {
+                                        muted
+                                    } else if todo.status == "in_progress" {
+                                        accent
+                                    } else {
+                                        cx.theme().foreground
+                                    };
+                                    h_flex()
+                                        .gap_2()
+                                        .items_start()
+                                        .child(div().text_xs().text_color(muted).child(mark))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_xs()
+                                                .text_color(color)
+                                                .child(todo.content.clone()),
+                                        )
+                                        .into_any_element()
+                                })),
+                        )
+                    })
                     .when(has_web, |col| {
                         col.child(
                             div()
@@ -2009,6 +2190,17 @@ impl AgentPane {
                                             .text_color(muted)
                                             .child(format!("{ctx_pct:.0}%")),
                                     )
+                                    .when(ctx_pct >= 80.0, |row| {
+                                        row.child(
+                                            Button::new("agent-compact-now")
+                                                .xsmall()
+                                                .ghost()
+                                                .label("压缩")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.compact_history(cx);
+                                                })),
+                                        )
+                                    })
                             })
                             .child(
                                 Button::new("agent-term-toggle")
@@ -2229,11 +2421,77 @@ impl AgentPane {
                         )
                     })
                     .when(!queued.is_empty(), |col| {
-                        col.child(div().text_xs().text_color(muted).child(format!(
-                            "队列 {} 条：{}",
-                            queued.len(),
-                            queued.join(" · ")
-                        )))
+                        let tid = active.clone();
+                        col.child(
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("队列 {} 条", queued.len())),
+                                )
+                                .children(queued.iter().enumerate().map(|(index, text)| {
+                                    let preview: String = text.chars().take(60).collect();
+                                    let more = text.chars().count() > 60;
+                                    let tid = tid.clone();
+                                    h_flex()
+                                        .w_full()
+                                        .gap_2()
+                                        .items_center()
+                                        .p_1()
+                                        .rounded(radius)
+                                        .border_1()
+                                        .border_color(border)
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .overflow_hidden()
+                                                .child(if more {
+                                                    format!("{preview}…")
+                                                } else {
+                                                    preview
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "queue-edit-{index}"
+                                            )))
+                                            .xsmall()
+                                            .ghost()
+                                            .label("编辑")
+                                            .on_click(cx.listener({
+                                                let tid = tid.clone();
+                                                move |this, _, window, cx| {
+                                                    if let Some(tid) = tid.clone() {
+                                                        this.take_queued_into_input(
+                                                            index, tid, window, cx,
+                                                        );
+                                                    }
+                                                }
+                                            })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "queue-del-{index}"
+                                            )))
+                                            .xsmall()
+                                            .ghost()
+                                            .label("移除")
+                                            .on_click(cx.listener({
+                                                let tid = tid.clone();
+                                                move |this, _, _, cx| {
+                                                    if let Some(tid) = tid.clone() {
+                                                        this.remove_queued(index, tid, cx);
+                                                    }
+                                                }
+                                            })),
+                                        )
+                                })),
+                        )
                     })
                     .when(!status.is_empty(), |col| {
                         col.child(div().text_sm().text_color(danger).child(status))
@@ -2404,7 +2662,16 @@ fn render_chat_message(
     let is_user = matches!(m.role, AgentRole::User);
     let is_tool = matches!(m.role, AgentRole::Tool);
     let expanded = expanded_tools.contains(&msg_id);
-    let body = if is_tool && !expanded {
+    let patch_card = is_tool
+        .then(|| {
+            render_patch_card(
+                &content, expanded, &msg_id, muted, accent, secondary, &entity,
+            )
+        })
+        .flatten();
+    let body = if let Some(card) = patch_card {
+        card
+    } else if is_tool && !expanded {
         let preview: String = content.chars().take(80).collect();
         div()
             .text_xs()
@@ -2505,4 +2772,84 @@ fn render_chat_message(
                 .child(body),
         )
         .into_any_element()
+}
+
+/// Summary line + per-file list for an `apply_patch` tool result.
+fn render_patch_card(
+    content: &str,
+    expanded: bool,
+    msg_id: &str,
+    muted: Hsla,
+    accent: Hsla,
+    secondary: Hsla,
+    entity: &WeakEntity<AgentPane>,
+) -> Option<AnyElement> {
+    let rest = content.strip_prefix("已应用补丁：")?;
+    let mut lines = rest.lines();
+    let head = lines.next().unwrap_or("").trim().to_string();
+    let files: Vec<String> = lines
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = if expanded {
+        files.clone()
+    } else {
+        files.iter().take(4).cloned().collect()
+    };
+    let hidden = files.len().saturating_sub(shown.len());
+    let tid = msg_id.to_string();
+    let toggle_entity = entity.clone();
+
+    Some(
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_bold()
+                            .text_color(accent)
+                            .child("补丁已应用"),
+                    )
+                    .child(div().text_xs().text_color(muted).child(head))
+                    .when(files.len() > 4, |row| {
+                        row.child(
+                            Button::new(SharedString::from(format!("patch-exp-{tid}")))
+                                .xsmall()
+                                .ghost()
+                                .label(if expanded { "收起" } else { "全部文件" })
+                                .on_click(move |_, _, app| {
+                                    if let Some(e) = toggle_entity.upgrade() {
+                                        e.update(app, |this, cx| {
+                                            this.toggle_tool_expand(tid.clone(), cx)
+                                        });
+                                    }
+                                }),
+                        )
+                    }),
+            )
+            .children(shown.into_iter().map(|line| {
+                let color = if line.starts_with('+') { accent } else { muted };
+                div().text_xs().text_color(color).child(line)
+            }))
+            .when(hidden > 0, |col| {
+                col.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("…还有 {hidden} 个文件")),
+                )
+            })
+            .bg(secondary.opacity(0.6))
+            .rounded(px(6.))
+            .p_2()
+            .into_any_element(),
+    )
 }
