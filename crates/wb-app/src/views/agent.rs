@@ -448,6 +448,27 @@ impl AgentPane {
         self.ghost_suffix = None;
 
         let thread_id = self.ensure_thread();
+        // Very long pastes are spilled to a file so the prompt (and the model
+        // window) keeps only a reference plus a preview.
+        let (text, spill_note) = if text.chars().count() > 4_000 {
+            match self.workspace_root() {
+                Some(root) => {
+                    let spilled =
+                        wb_host::maybe_spill(Some(std::path::Path::new(&root)), "paste", text);
+                    if spilled.contains(".wb") && spilled.contains("spill") {
+                        (spilled, true)
+                    } else {
+                        (spilled, false)
+                    }
+                }
+                None => (text, false),
+            }
+        } else {
+            (text, false)
+        };
+        if spill_note {
+            self.status = "长文本已写入 .wb/spill，消息里保留摘要".into();
+        }
         if self.busy {
             let n = self
                 .state
