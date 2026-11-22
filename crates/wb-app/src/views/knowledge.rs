@@ -1002,7 +1002,9 @@ impl Render for KnowledgePane {
                                         let pane_live = pane.clone();
                                         let pane_source = pane.clone();
                                         let pane_preview = pane.clone();
+                                        let pane_new = pane.clone();
                                         let reveal_path = path.clone();
+                                        let can_create = current_root.is_some();
                                         menu.item(
                                             PopupMenuItem::new("实时模式")
                                                 .checked(mode == KbMode::Live)
@@ -1042,6 +1044,17 @@ impl Render for KnowledgePane {
                                                 }),
                                         )
                                         .separator()
+                                        .item(
+                                            PopupMenuItem::new("新建笔记")
+                                                .disabled(!can_create)
+                                                .on_click(move |_, window, app| {
+                                                    if let Some(view) = pane_new.upgrade() {
+                                                        view.update(app, |this, cx| {
+                                                            this.new_md(window, cx)
+                                                        });
+                                                    }
+                                                }),
+                                        )
                                         .item(
                                             PopupMenuItem::new("在资源管理器中显示")
                                                 .disabled(reveal_path.is_none())
