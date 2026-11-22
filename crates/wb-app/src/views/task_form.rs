@@ -96,6 +96,8 @@ impl TaskForm {
         this._subs.push(
             cx.subscribe_in(&subtask, window, |this, input, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
+                    // 单行输入会把 Enter 继续交给对话框的确认动作，窗口会因此关掉。
+                    cx.stop_propagation();
                     let text = input.read(cx).value().to_string();
                     if !text.trim().is_empty() {
                         this.add_subtask(text.trim(), cx);
@@ -107,6 +109,7 @@ impl TaskForm {
         this._subs.push(
             cx.subscribe_in(&tag_input, window, |this, input, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
+                    cx.stop_propagation();
                     let text = input.read(cx).value().to_string();
                     if !text.trim().is_empty() {
                         this.add_tag(text.trim(), cx);
