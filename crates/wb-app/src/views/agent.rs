@@ -12,12 +12,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_webview::WebView;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wb_agent::{
-    SlashCommand, TurnPhase, apply_slash_completion, begin_user_turn, clear_goal_round_flag,
-    continue_turn_reply_streaming, create_thread, cycle_permission_mode, dequeue_user_text,
-    enqueue_user_text, finish_continue_turn, finish_user_turn, load_providers,
+    SlashCommand, StreamEvent, TurnPhase, apply_slash_completion, begin_user_turn,
+    clear_goal_round_flag, continue_turn_reply_streaming, create_thread, cycle_permission_mode,
+    dequeue_user_text, enqueue_user_text, finish_continue_turn, finish_user_turn, load_providers,
     model_context_window, pending_approvals_for_thread, permission_mode_label,
     prepare_goal_idle_round, prompt_char_count, queued_user_texts, resolve_approval,
     resolve_turn_reply_streaming, slash_suggestions,
@@ -29,6 +30,24 @@ use wb_domain::{
     format_local_day, normalize_agent_web_url, now_ms,
 };
 use wb_host::{cleanup_tool_spill, global_terminals};
+
+fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {
+    match event {
+        StreamEvent::Text(piece) => {
+            if let Ok(mut d) = draft.lock() {
+                d.push_str(&piece);
+            }
+            if let Ok(mut s) = status.lock() {
+                s.clear();
+            }
+        }
+        StreamEvent::Tool { name } => {
+            if let Ok(mut s) = status.lock() {
+                *s = format!("调用 {name}…");
+            }
+        }
+    }
+}
 
 pub struct AgentPane {
     state: AppState,
@@ -42,6 +61,12 @@ pub struct AgentPane {
     turn_gen: u64,
     /// Live assistant text while the model streams (plain text, not markdown).
     stream_draft: Arc<Mutex<String>>,
+    /// Live status line above the draft (tool name, stage, etc.).
+    stream_status: Arc<Mutex<String>>,
+    /// Flipped by [`Self::stop_turn`] so the HTTP read loop can exit.
+    cancel_flag: Arc<AtomicBool>,
+    /// Message text to load into the composer on next render.
+    pending_edit: Option<String>,
     status: String,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
@@ -79,6 +104,9 @@ impl AgentPane {
             busy: false,
             turn_gen: 0,
             stream_draft: Arc::new(Mutex::new(String::new())),
+            stream_status: Arc::new(Mutex::new(String::new())),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            pending_edit: None,
             status: String::new(),
             prompt_history: Vec::new(),
             history_index: None,
@@ -284,15 +312,12 @@ impl AgentPane {
         if text.is_empty() {
             return;
         }
-        if self.prompt_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
-            self.prompt_history.push(text.clone());
-        }
-        self.history_index = None;
-        self.history_draft.clear();
-        self.ghost_suffix = None;
-
         if text == "/clear" || text.starts_with("/clear ") {
             self.clear_active_thread(cx);
+            return;
+        }
+        if text == "/retry" {
+            self.retry_last_user(cx);
             return;
         }
         if text == "/rename" || text.starts_with("/rename ") {
@@ -309,6 +334,12 @@ impl AgentPane {
             cx.notify();
             return;
         }
+        if self.prompt_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
+            self.prompt_history.push(text.clone());
+        }
+        self.history_index = None;
+        self.history_draft.clear();
+        self.ghost_suffix = None;
 
         let thread_id = self.ensure_thread();
         if self.busy {
@@ -341,8 +372,12 @@ impl AgentPane {
         let expected = self.turn_gen;
         self.busy = true;
         self.status.clear();
+        self.cancel_flag.store(false, Ordering::Relaxed);
         if let Ok(mut draft) = self.stream_draft.lock() {
             draft.clear();
+        }
+        if let Ok(mut stage) = self.stream_status.lock() {
+            stage.clear();
         }
         self.scroll_chat_to_bottom(cx);
         cx.notify();
@@ -350,20 +385,27 @@ impl AgentPane {
 
         let drain_tid = thread_id.clone();
         let draft_buf = self.stream_draft.clone();
+        let status_buf = self.stream_status.clone();
+        let cancel_flag = self.cancel_flag.clone();
         cx.spawn(async move |this, cx| {
             let still_active = |this: &WeakEntity<AgentPane>, cx: &mut AsyncApp| -> bool {
                 this.update(cx, |pane, _| pane.turn_gen == expected && pane.busy)
                     .unwrap_or(false)
             };
-            let clear_draft = |buf: &Arc<Mutex<String>>| {
-                if let Ok(mut d) = buf.lock() {
+            let clear_draft = |draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>| {
+                if let Ok(mut d) = draft.lock() {
                     d.clear();
+                }
+                if let Ok(mut s) = status.lock() {
+                    s.clear();
                 }
             };
 
             let pending2 = pending.clone();
             let proxy2 = proxy.clone();
             let draft2 = draft_buf.clone();
+            let status2 = status_buf.clone();
+            let cancel2 = cancel_flag.clone();
             let reply = cx
                 .background_executor()
                 .spawn(async move {
@@ -374,11 +416,8 @@ impl AgentPane {
                     rt.block_on(resolve_turn_reply_streaming(
                         &pending2,
                         proxy2.as_deref(),
-                        |piece| {
-                            if let Ok(mut d) = draft2.lock() {
-                                d.push_str(piece);
-                            }
-                        },
+                        |event| apply_stream_event(event, &draft2, &status2),
+                        Some(&cancel2),
                     ))
                 })
                 .await;
@@ -389,7 +428,7 @@ impl AgentPane {
 
             let mut phase = this
                 .update(cx, |this, cx| {
-                    clear_draft(&this.stream_draft);
+                    clear_draft(&this.stream_draft, &this.stream_status);
                     let phase = this
                         .state
                         .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply));
@@ -410,10 +449,12 @@ impl AgentPane {
                     if !still_active(&this, cx) {
                         return;
                     }
-                    clear_draft(&draft_buf);
+                    clear_draft(&draft_buf, &status_buf);
                     let proxy3 = proxy.clone();
                     let cont2 = (*cont).clone();
                     let draft3 = draft_buf.clone();
+                    let status3 = status_buf.clone();
+                    let cancel3 = cancel_flag.clone();
                     let reply = cx
                         .background_executor()
                         .spawn(async move {
@@ -424,11 +465,8 @@ impl AgentPane {
                             rt.block_on(continue_turn_reply_streaming(
                                 &cont2,
                                 proxy3.as_deref(),
-                                |piece| {
-                                    if let Ok(mut d) = draft3.lock() {
-                                        d.push_str(piece);
-                                    }
-                                },
+                                |event| apply_stream_event(event, &draft3, &status3),
+                                Some(&cancel3),
                             ))
                         })
                         .await;
@@ -437,7 +475,7 @@ impl AgentPane {
                     }
                     phase = this
                         .update(cx, |this, cx| {
-                            clear_draft(&this.stream_draft);
+                            clear_draft(&this.stream_draft, &this.stream_status);
                             let next = this
                                 .state
                                 .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
@@ -476,10 +514,12 @@ impl AgentPane {
                     Ok(Some(p)) => p,
                     _ => break,
                 };
-                clear_draft(&draft_buf);
+                clear_draft(&draft_buf, &status_buf);
                 let pending2 = pending_goal.clone();
                 let proxy2 = proxy.clone();
                 let draft2 = draft_buf.clone();
+                let status2 = status_buf.clone();
+                let cancel2 = cancel_flag.clone();
                 let reply = cx
                     .background_executor()
                     .spawn(async move {
@@ -490,11 +530,8 @@ impl AgentPane {
                         rt.block_on(resolve_turn_reply_streaming(
                             &pending2,
                             proxy2.as_deref(),
-                            |piece| {
-                                if let Ok(mut d) = draft2.lock() {
-                                    d.push_str(piece);
-                                }
-                            },
+                            |event| apply_stream_event(event, &draft2, &status2),
+                            Some(&cancel2),
                         ))
                     })
                     .await;
@@ -503,7 +540,7 @@ impl AgentPane {
                 }
                 phase = this
                     .update(cx, |this, cx| {
-                        clear_draft(&this.stream_draft);
+                        clear_draft(&this.stream_draft, &this.stream_status);
                         let next = this
                             .state
                             .with_mut(|s| finish_user_turn(&mut s.repo, &pending_goal, reply));
@@ -518,7 +555,7 @@ impl AgentPane {
 
             this.update(cx, |this, cx| {
                 if this.turn_gen == expected {
-                    clear_draft(&this.stream_draft);
+                    clear_draft(&this.stream_draft, &this.stream_status);
                     this.status.clear();
                     this.busy = false;
                     this.scroll_chat_to_bottom(cx);
@@ -561,6 +598,13 @@ impl AgentPane {
             .unwrap_or_default()
     }
 
+    fn stream_status_text(&self) -> String {
+        self.stream_status
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
+    }
+
     fn drain_queue_for(&mut self, thread_id: &str, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -584,11 +628,81 @@ impl AgentPane {
         }
         self.turn_gen = self.turn_gen.wrapping_add(1);
         self.busy = false;
+        self.cancel_flag.store(true, Ordering::Relaxed);
         if let Ok(mut draft) = self.stream_draft.lock() {
             draft.clear();
         }
-        self.status = "已中止当前回合（进行中的模型请求可能仍会完成，但结果会被丢弃）".into();
+        if let Ok(mut stage) = self.stream_status.lock() {
+            stage.clear();
+        }
+        self.status = "已中止当前回合".into();
         cx.notify();
+    }
+
+    fn retry_last_user(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            self.status = "请先停止当前回合再重试".into();
+            cx.notify();
+            return;
+        }
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            self.status = "没有可重试的用户消息".into();
+            cx.notify();
+            return;
+        };
+        let last = self.state.with(|s| {
+            s.repo
+                .messages_for_thread(&tid)
+                .into_iter()
+                .rev()
+                .find(|m| m.role == AgentRole::User)
+        });
+        let Some(last) = last else {
+            self.status = "没有可重试的用户消息".into();
+            cx.notify();
+            return;
+        };
+        self.resend_message(&last.id, cx);
+    }
+
+    fn edit_message(&mut self, msg_id: &str, cx: &mut Context<Self>) {
+        let content = self.state.with(|s| {
+            s.repo
+                .list_agent_messages()
+                .into_iter()
+                .find(|m| m.id == msg_id)
+                .map(|m| m.content)
+        });
+        if let Some(content) = content {
+            self.pending_edit = Some(content);
+            cx.notify();
+        }
+    }
+
+    fn resend_message(&mut self, msg_id: &str, cx: &mut Context<Self>) {
+        let Some(msg) = self.state.with(|s| {
+            s.repo
+                .list_agent_messages()
+                .into_iter()
+                .find(|m| m.id == msg_id)
+        }) else {
+            return;
+        };
+        if msg.role != AgentRole::User {
+            return;
+        }
+        if self.busy {
+            self.status = "请先停止当前回合再重发".into();
+            cx.notify();
+            return;
+        }
+        self.state.with_mut(|s| {
+            s.repo
+                .truncate_agent_messages_at(&msg.thread_id, msg.created_at)
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+        self.send(msg.content, cx);
     }
 
     fn cycle_thread_permission(&mut self, cx: &mut Context<Self>) {
@@ -1003,6 +1117,11 @@ impl Render for AgentPane {
 impl AgentPane {
     #[allow(clippy::large_unopt_stack_frames)]
     fn render_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(text) = self.pending_edit.take() {
+            self.input.update(cx, |input, cx| {
+                input.set_value(text, window, cx);
+            });
+        }
         let (
             threads,
             messages,
@@ -1245,6 +1364,7 @@ impl AgentPane {
         let empty_chat = visible_messages.is_empty() && find_q.is_empty();
         let filter_miss = visible_messages.is_empty() && !find_q.is_empty();
         let draft_text = self.stream_draft_text();
+        let draft_stage = self.stream_status_text();
         let mut last_day = String::new();
         let message_rows: Vec<_> = visible_messages
             .into_iter()
@@ -1480,12 +1600,33 @@ impl AgentPane {
                             .gap_2()
                             .items_center()
                             .child(div().flex_1().child(Input::new(&self.find).cleanable(true)))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(format!("上下文 {ctx_pct:.0}%")),
-                            )
+                            .child({
+                                let ctx_frac = (ctx_pct / 100.0).min(1.0);
+                                let ctx_color = if ctx_pct >= 80.0 { danger } else { accent };
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(64.))
+                                            .h(px(4.))
+                                            .rounded_full()
+                                            .bg(cx.theme().border)
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .rounded_full()
+                                                    .bg(ctx_color)
+                                                    .w(relative(ctx_frac)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format!("{ctx_pct:.0}%")),
+                                    )
+                            })
                             .child(
                                 Button::new("agent-term-toggle")
                                     .xsmall()
@@ -1644,12 +1785,13 @@ impl AgentPane {
                                                         .text_color(muted)
                                                         .child("Agent"),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .child("正在回复…"),
-                                                ),
+                                                .child(div().text_xs().text_color(muted).child(
+                                                    if draft_stage.is_empty() {
+                                                        "正在回复…".to_string()
+                                                    } else {
+                                                        draft_stage.clone()
+                                                    },
+                                                )),
                                         )
                                         .child(
                                             div()
@@ -1890,6 +2032,38 @@ fn render_chat_message(
                     .on_click(move |_, _, app| {
                         if let Some(e) = entity.upgrade() {
                             e.update(app, |this, cx| this.toggle_tool_expand(tid.clone(), cx));
+                        }
+                    }),
+            )
+        })
+        .when(is_user, |row| {
+            let edit_mid = msg_id.clone();
+            let edit_entity = entity.clone();
+            let resend_mid = msg_id.clone();
+            let resend_entity = entity.clone();
+            row.child(
+                Button::new(SharedString::from(format!("msg-edit-{edit_mid}")))
+                    .xsmall()
+                    .ghost()
+                    .label("编辑")
+                    .on_click(move |_, _, app| {
+                        if let Some(e) = edit_entity.upgrade() {
+                            e.update(app, |this, cx| {
+                                this.edit_message(&edit_mid, cx);
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("msg-resend-{resend_mid}")))
+                    .xsmall()
+                    .ghost()
+                    .label("重发")
+                    .on_click(move |_, _, app| {
+                        if let Some(e) = resend_entity.upgrade() {
+                            e.update(app, |this, cx| {
+                                this.resend_message(&resend_mid, cx);
+                            });
                         }
                     }),
             )

@@ -118,7 +118,13 @@ impl KnowledgePane {
             &this.find,
             window,
             |this, _, event, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.find_next(window, cx),
+                InputEvent::PressEnter { shift, .. } => {
+                    if *shift {
+                        this.find_prev(window, cx);
+                    } else {
+                        this.find_next(window, cx);
+                    }
+                }
                 InputEvent::Change => this.sync_editor_search(cx),
                 _ => {}
             },
@@ -398,6 +404,34 @@ impl KnowledgePane {
                     .iter()
                     .position(|(start, _)| *start >= cursor)
                     .unwrap_or(0);
+                let (start, end) = spans[ix];
+                self.editor.update(cx, |input, cx| {
+                    input.set_selected_range(start..end, cx);
+                });
+                self.replace_status = format!("第 {}/{} 处", ix + 1, spans.len());
+            }
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    fn find_prev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let needle = self.find.read(cx).value().to_string();
+        if needle.is_empty() {
+            self.replace_status = "请输入查找内容".into();
+            cx.notify();
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        let cursor = self.editor.read(cx).selected_range().start;
+        match find_spans(&text, &needle, self.find_flags()) {
+            Err(err) => self.replace_status = err,
+            Ok(spans) if spans.is_empty() => self.replace_status = "未找到".into(),
+            Ok(spans) => {
+                let ix = spans
+                    .iter()
+                    .rposition(|(start, _)| *start < cursor)
+                    .unwrap_or(spans.len() - 1);
                 let (start, end) = spans[ix];
                 self.editor.update(cx, |input, cx| {
                     input.set_selected_range(start..end, cx);
@@ -1232,10 +1266,20 @@ impl Render for KnowledgePane {
                                                     .items_center()
                                                     .child(Input::new(&self.replace).cleanable(true).flex_1())
                                                     .child(
+                                                        Button::new("kb-find-prev")
+                                                            .xsmall()
+                                                            .outline()
+                                                            .label("上一处")
+                                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                                this.find_prev(window, cx);
+                                                            })),
+                                                    )
+                                                    .child(
                                                         Button::new("kb-find-go")
                                                             .xsmall()
                                                             .outline()
                                                             .label("查找")
+                                                            .tooltip("下一处；Enter 下一处，Shift+Enter 上一处")
                                                             .on_click(cx.listener(|this, _, window, cx| {
                                                                 this.find_next(window, cx);
                                                             })),

@@ -2,6 +2,7 @@ use crate::execute::{ToolResult, all_tools, check_gate, execute_tool};
 use crate::providers::{load_credentials, load_providers};
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::sync::atomic::AtomicBool;
 use wb_domain::{
     AgentApproval, AgentMessage, AgentPermissionMode, AgentRole, AgentThread, ApprovalStatus,
     BUILTIN_MODEL_REF, PlannedCall, ToolGate, create_id, now_ms,
@@ -22,6 +23,13 @@ pub struct TurnOutcome {
 pub struct ModelReply {
     pub content: String,
     pub tool_calls: Vec<PlannedCall>,
+}
+
+/// Incremental model output for the live draft card.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Text(String),
+    Tool { name: String },
 }
 
 /// Prepared turn state that can leave the repo lock before awaiting the model.
@@ -86,18 +94,22 @@ pub fn begin_user_turn(
 
 /// Resolve the assistant text / tool calls without holding the repository lock.
 pub async fn resolve_turn_reply(pending: &PendingTurn, proxy: Option<&str>) -> ModelReply {
-    resolve_turn_reply_streaming(pending, proxy, |_| {}).await
+    resolve_turn_reply_streaming(pending, proxy, |_| {}, None).await
 }
 
-/// Like [`resolve_turn_reply`], but invokes `on_delta` with each content fragment.
+/// Like [`resolve_turn_reply`], but invokes `on_event` with each content/tool fragment.
 pub async fn resolve_turn_reply_streaming(
     pending: &PendingTurn,
     proxy: Option<&str>,
-    mut on_delta: impl FnMut(&str) + Send,
+    mut on_event: impl FnMut(StreamEvent) + Send,
+    cancel: Option<&AtomicBool>,
 ) -> ModelReply {
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        return cancelled_reply();
+    }
     if let Some(ref text) = pending.builtin_reply {
         if !text.is_empty() {
-            on_delta(text);
+            on_event(StreamEvent::Text(text.clone()));
         }
         return ModelReply {
             content: text.clone(),
@@ -109,31 +121,55 @@ pub async fn resolve_turn_reply_streaming(
         &history_to_openai(&pending.history),
         proxy,
         true,
-        &mut on_delta,
+        &mut on_event,
+        cancel,
     )
     .await
-    .unwrap_or_else(|e| ModelReply {
-        content: format!("模型请求失败：{e}"),
-        tool_calls: Vec::new(),
-    })
+    .unwrap_or_else(model_error_reply)
 }
 
 pub async fn continue_turn_reply(cont: &ContinueTurn, proxy: Option<&str>) -> ModelReply {
-    continue_turn_reply_streaming(cont, proxy, |_| {}).await
+    continue_turn_reply_streaming(cont, proxy, |_| {}, None).await
 }
 
-/// Like [`continue_turn_reply`], but invokes `on_delta` with each content fragment.
+/// Like [`continue_turn_reply`], but invokes `on_event` with each content/tool fragment.
 pub async fn continue_turn_reply_streaming(
     cont: &ContinueTurn,
     proxy: Option<&str>,
-    mut on_delta: impl FnMut(&str) + Send,
+    mut on_event: impl FnMut(StreamEvent) + Send,
+    cancel: Option<&AtomicBool>,
 ) -> ModelReply {
-    call_remote_model(&cont.thread, &cont.messages, proxy, true, &mut on_delta)
-        .await
-        .unwrap_or_else(|e| ModelReply {
-            content: format!("模型请求失败：{e}"),
-            tool_calls: Vec::new(),
-        })
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        return cancelled_reply();
+    }
+    call_remote_model(
+        &cont.thread,
+        &cont.messages,
+        proxy,
+        true,
+        &mut on_event,
+        cancel,
+    )
+    .await
+    .unwrap_or_else(model_error_reply)
+}
+
+fn cancelled_reply() -> ModelReply {
+    ModelReply {
+        content: String::new(),
+        tool_calls: Vec::new(),
+    }
+}
+
+fn model_error_reply(e: anyhow::Error) -> ModelReply {
+    let msg = e.to_string();
+    if msg.contains("已取消") {
+        return cancelled_reply();
+    }
+    ModelReply {
+        content: format!("模型请求失败：{msg}"),
+        tool_calls: Vec::new(),
+    }
 }
 
 #[derive(Debug)]
@@ -672,6 +708,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         tool: "rename",
         hint: "重命名会话，如 /rename 今日复盘",
     },
+    SlashCommand {
+        invoke: "/retry",
+        tool: "retry",
+        hint: "重发上一条用户消息",
+    },
 ];
 
 /// Suggestions for a composer that currently looks like a slash command.
@@ -796,7 +837,7 @@ fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
     let t = text.trim();
     for cmd in SLASH_COMMANDS {
         // UI-only composer commands are handled by AgentPane before the turn loop.
-        if matches!(cmd.invoke, "/goal" | "/clear" | "/rename") {
+        if matches!(cmd.invoke, "/goal" | "/clear" | "/rename" | "/retry") {
             continue;
         }
         if t == cmd.invoke || t.starts_with(&format!("{} ", cmd.invoke)) {
@@ -934,7 +975,8 @@ async fn call_remote_model(
     messages: &[Value],
     proxy: Option<&str>,
     with_tools: bool,
-    on_delta: &mut (impl FnMut(&str) + Send),
+    on_event: &mut (impl FnMut(StreamEvent) + Send),
+    cancel: Option<&AtomicBool>,
 ) -> Result<ModelReply> {
     let providers = load_providers();
     let (provider_id, model_id) = split_model_ref(&thread.model_ref);
@@ -978,11 +1020,25 @@ async fn call_remote_model(
         }
     }
 
-    let resp = chat_completions_stream(&provider.base_url, key, &body, proxy, |delta| {
-        if !delta.content.is_empty() {
-            on_delta(&delta.content);
-        }
-    })
+    let resp = chat_completions_stream(
+        &provider.base_url,
+        key,
+        &body,
+        proxy,
+        |delta| {
+            if !delta.content.is_empty() {
+                on_event(StreamEvent::Text(delta.content));
+            }
+            for (_, _, name, _) in delta.tool_call_parts {
+                if let Some(name) = name {
+                    if !name.is_empty() {
+                        on_event(StreamEvent::Tool { name });
+                    }
+                }
+            }
+        },
+        cancel,
+    )
     .await?;
     Ok(parse_model_reply(&resp))
 }

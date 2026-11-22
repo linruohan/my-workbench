@@ -82,12 +82,14 @@ pub struct ChatStreamDelta {
 }
 
 /// Stream chat completions (SSE). Calls `on_delta` for each content/tool fragment.
+/// When `cancel` is set, the read loop exits with an error as soon as it flips true.
 pub async fn chat_completions_stream(
     base_url: &str,
     api_key: Option<&str>,
     body: &Value,
     proxy: Option<&str>,
     mut on_delta: impl FnMut(ChatStreamDelta) + Send,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Value> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut stream_body = body.clone();
@@ -106,6 +108,9 @@ pub async fn chat_completions_stream(
         .header("Accept", "text/event-stream");
     if let Some(key) = api_key.filter(|s| !s.is_empty()) {
         request = request.header("Authorization", format!("Bearer {key}"));
+    }
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        anyhow::bail!("已取消");
     }
     let resp = request
         .body(stream_body.to_string())
@@ -127,6 +132,9 @@ pub async fn chat_completions_stream(
         std::collections::BTreeMap::new();
 
     while let Some(chunk) = bytes.next().await {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            anyhow::bail!("已取消");
+        }
         let chunk = chunk.context("读取流失败")?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(pos) = buf.find('\n') {

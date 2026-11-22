@@ -571,6 +571,18 @@ impl MemoryWorkbenchRepository {
         self.dirty = true;
     }
 
+    /// Drop messages in `thread_id` created at or after `created_at` (inclusive).
+    pub fn truncate_agent_messages_at(&mut self, thread_id: &str, created_at: i64) {
+        self.agent_messages
+            .retain(|_, m| m.thread_id != thread_id || m.created_at < created_at);
+        self.agent_approvals
+            .retain(|_, a| a.thread_id != thread_id || a.created_at < created_at);
+        if let Some(thread) = self.agent_threads.get_mut(thread_id) {
+            thread.updated_at = now_ms();
+        }
+        self.dirty = true;
+    }
+
     pub fn list_agent_approvals(&self) -> Vec<AgentApproval> {
         let mut v: Vec<_> = self.agent_approvals.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.created_at));
@@ -657,5 +669,58 @@ mod tests {
             .find(|t| t.id == "th1")
             .unwrap();
         assert!(t.queue_json.is_none());
+    }
+
+    #[test]
+    fn truncate_agent_messages_keeps_earlier_turns() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        let now = now_ms();
+        repo.upsert_agent_message(AgentMessage {
+            id: "m1".into(),
+            thread_id: "th1".into(),
+            role: wb_domain::AgentRole::User,
+            content: "one".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now,
+        });
+        repo.upsert_agent_message(AgentMessage {
+            id: "m2".into(),
+            thread_id: "th1".into(),
+            role: wb_domain::AgentRole::Assistant,
+            content: "ok".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now + 1,
+        });
+        repo.upsert_agent_message(AgentMessage {
+            id: "m3".into(),
+            thread_id: "th1".into(),
+            role: wb_domain::AgentRole::User,
+            content: "two".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now + 2,
+        });
+        repo.upsert_agent_message(AgentMessage {
+            id: "m4".into(),
+            thread_id: "th1".into(),
+            role: wb_domain::AgentRole::Assistant,
+            content: "fail".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now + 3,
+        });
+        repo.truncate_agent_messages_at("th1", now + 2);
+        let left: Vec<_> = repo
+            .messages_for_thread("th1")
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(left, vec!["one".to_string(), "ok".to_string()]);
     }
 }
