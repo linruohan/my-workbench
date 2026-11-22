@@ -231,7 +231,7 @@ wb-domain
 
 - 图片附件按会话保存；支持多模态挂载，超出上限的旧图仍可 `read_image` 重读。
 - 纯文本模型通道（如本机 OpenCode）在需要看图时回退到本地 PaddleOCR 识图。
-- 语音输入：SenseVoiceSmall (INT8)、Fun-ASR-Nano-GGUF、QwenCTC；模型在数据目录 `models/<engine>`，首次使用在设置中下载；CapsLock 按住说话，释放后写回当前输入框，焦点不在可编辑区时走剪贴板粘贴。
+- 语音输入：SenseVoiceSmall (INT8)、QwenCTC (Qwen3-ASR)；模型在数据目录 `models/<engine>`，打开「语音输入」开关后可选引擎、查看逐文件完整性校验并一键下载（大小 + SHA-256）。SenseVoice 经 `wb-asr` 子进程推理，QwenCTC 由进程内 `ort` 跑 Whisper 式 log-mel + CTC 贪心解码。按住 CapsLock 说话，释放后写回当前输入框，焦点不在可编辑区时走剪贴板粘贴。
 - 输入历史、斜杠建议、上下文用量圆环、消息队列、终端面板与工作区 rail 都在 Agent 视图内。
 
 ## 8. 定时任务

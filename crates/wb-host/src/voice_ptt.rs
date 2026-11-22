@@ -9,8 +9,17 @@ static PTT_HELD: AtomicBool = AtomicBool::new(false);
 static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
-fn pending_text() -> &'static Mutex<Option<String>> {
-    static PENDING: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+/// What the PTT release handler produced.
+#[derive(Debug, Clone)]
+pub enum VoicePending {
+    /// Recognized text to insert.
+    Text(String),
+    /// Something failed; must be reported, never typed into the focused app.
+    Error(String),
+}
+
+fn pending() -> &'static Mutex<Option<VoicePending>> {
+    static PENDING: OnceLock<Mutex<Option<VoicePending>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(None))
 }
 
@@ -29,38 +38,42 @@ pub fn voice_ptt_is_held() -> bool {
     PTT_HELD.load(Ordering::SeqCst)
 }
 
-/// Take text produced by the CapsLock PTT release handler (if any).
-pub fn voice_ptt_take_pending() -> Option<String> {
-    pending_text().lock().ok()?.take()
+/// Take whatever the release handler produced (if anything).
+pub fn voice_ptt_take_pending() -> Option<VoicePending> {
+    pending().lock().ok()?.take()
 }
 
-fn push_pending(text: String) {
-    if let Ok(mut g) = pending_text().lock() {
-        *g = Some(text);
+fn push_text(text: String) {
+    if let Ok(mut slot) = pending().lock() {
+        *slot = Some(VoicePending::Text(text));
     }
 }
 
-/// Paste text via clipboard helper. On Windows uses PowerShell Set-Clipboard + Ctrl+V.
+fn push_error(message: String) {
+    if let Ok(mut slot) = pending().lock() {
+        *slot = Some(VoicePending::Error(message));
+    }
+}
+
+/// Insert text into the focused app through the clipboard.
+///
+/// The previous clipboard content is restored afterwards, and nothing is typed
+/// unless setting the clipboard actually succeeded.
 pub fn voice_ptt_paste(text: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        use std::process::Command;
-        let escaped = text.replace('\'', "''");
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("Set-Clipboard -Value '{escaped}'"),
-            ])
-            .output()?;
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            KEYEVENTF_KEYUP, VK_CONTROL, keybd_event,
-        };
-        unsafe {
-            keybd_event(VK_CONTROL as u8, 0, 0, 0);
-            keybd_event(b'V', 0, 0, 0);
-            keybd_event(b'V', 0, KEYEVENTF_KEYUP, 0);
-            keybd_event(VK_CONTROL as u8, 0, KEYEVENTF_KEYUP, 0);
+        if text.is_empty() {
+            anyhow::bail!("没有可粘贴的文本");
+        }
+        let previous = read_clipboard();
+        write_clipboard(text)?;
+        // Let the clipboard settle before the synthetic keystroke.
+        thread::sleep(Duration::from_millis(60));
+        send_ctrl_v();
+        thread::sleep(Duration::from_millis(150));
+        // Restore what the user had copied before, so PTT is not destructive.
+        if let Some(previous) = previous.filter(|text| !text.is_empty()) {
+            let _ = write_clipboard(&previous);
         }
         Ok(())
     }
@@ -68,6 +81,139 @@ pub fn voice_ptt_paste(text: &str) -> Result<()> {
     {
         let _ = text;
         anyhow::bail!("voice_ptt_paste 仅在 Windows 实现");
+    }
+}
+
+#[cfg(windows)]
+fn read_clipboard() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+    // Another process may hold the clipboard briefly; retry instead of failing.
+    for attempt in 0..10 {
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+            let handle = unsafe { GetClipboardData(CF_UNICODETEXT as u32) };
+            if handle.is_null() {
+                unsafe { CloseClipboard() };
+                return None;
+            }
+            let ptr = unsafe { GlobalLock(handle) };
+            if ptr.is_null() {
+                unsafe { CloseClipboard() };
+                return None;
+            }
+            // UTF-16, NUL-terminated.
+            let mut len = 0usize;
+            unsafe {
+                while *(ptr as *const u16).add(len) != 0 {
+                    len += 1;
+                    if len > 8 * 1024 * 1024 {
+                        break;
+                    }
+                }
+                let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+                let text = String::from_utf16_lossy(slice);
+                GlobalUnlock(handle);
+                CloseClipboard();
+                return (!text.is_empty()).then_some(text);
+            }
+        }
+        thread::sleep(Duration::from_millis(20 + attempt * 10));
+    }
+    None
+}
+
+#[cfg(windows)]
+fn write_clipboard(text: &str) -> Result<()> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+    let mut opened = false;
+    for attempt in 0..10 {
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+            opened = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20 + attempt * 10));
+    }
+    if !opened {
+        anyhow::bail!("剪贴板被其它程序占用");
+    }
+
+    // Keep the clipboard open until the data is handed over, then close.
+    let result = (|| -> Result<()> {
+        if unsafe { EmptyClipboard() } == 0 {
+            anyhow::bail!("清空剪贴板失败");
+        }
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes = wide.len() * 2;
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+        if handle.is_null() {
+            anyhow::bail!("分配剪贴板内存失败");
+        }
+        let ptr = unsafe { GlobalLock(handle) };
+        if ptr.is_null() {
+            anyhow::bail!("锁定剪贴板内存失败");
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
+            GlobalUnlock(handle);
+        }
+        // On success the system owns the handle; do not free it ourselves.
+        if unsafe { SetClipboardData(CF_UNICODETEXT as u32, handle) }.is_null() {
+            anyhow::bail!("写入剪贴板失败");
+        }
+        Ok(())
+    })();
+
+    unsafe { CloseClipboard() };
+    result
+}
+
+#[cfg(windows)]
+fn send_ctrl_v() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        KEYEVENTF_KEYUP, VK_CONTROL, keybd_event,
+    };
+    const VK_V: u8 = b'V';
+    unsafe {
+        keybd_event(VK_CONTROL as u8, 0, 0, 0);
+        keybd_event(VK_V, 0, 0, 0);
+        keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_CONTROL as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
+/// Read the Windows clipboard, for diagnostics and tests.
+pub fn voice_clipboard_read() -> Option<String> {
+    #[cfg(windows)]
+    {
+        read_clipboard()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Write the Windows clipboard, for diagnostics and tests.
+pub fn voice_clipboard_write(text: &str) -> Result<()> {
+    #[cfg(windows)]
+    {
+        write_clipboard(text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        anyhow::bail!("仅 Windows 支持")
     }
 }
 
@@ -103,9 +249,13 @@ fn run_capslock_hook() -> Result<()> {
                 let up = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
                 if down && voice_ptt_enabled() && !PTT_HELD.load(Ordering::SeqCst) {
                     PTT_HELD.store(true, Ordering::SeqCst);
+                    crate::voice_level_reset();
                     let _ = thread::spawn(|| {
-                        if let Err(e) = crate::voice_record_start() {
-                            push_pending(format!("无法开始录音：{e}"));
+                        let device = wb_store::load_prefs()
+                            .ok()
+                            .and_then(|p| p.voice.input_device);
+                        if let Err(e) = crate::voice_record_start_with(device.as_deref()) {
+                            push_error(format!("无法开始录音：{e}"));
                             PTT_HELD.store(false, Ordering::SeqCst);
                         }
                     });
@@ -137,10 +287,15 @@ fn run_capslock_hook() -> Result<()> {
 }
 
 fn on_ptt_release() {
+    // Prefer the configured engine, but fall back to one that is actually
+    // usable so a half-downloaded choice does not make dictation fail silently.
     let engine = wb_store::load_prefs()
         .ok()
         .and_then(|p| p.voice.engine)
-        .unwrap_or_else(|| "sensevoice".into());
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| crate::normalize_engine(&e))
+        .filter(|e| crate::speech_status(e).is_ok_and(|st| st.ready))
+        .unwrap_or_else(crate::speech_active_engine);
     let wav = match crate::voice_record_stop_to_wav() {
         Ok(p) => p,
         Err(e) => {
@@ -148,11 +303,11 @@ fn on_ptt_release() {
                 if path.is_file() {
                     path
                 } else {
-                    push_pending(format!("录音失败：{e}"));
+                    push_error(format!("录音失败：{e}"));
                     return;
                 }
             } else {
-                push_pending(format!("录音失败：{e}"));
+                push_error(format!("录音失败：{e}"));
                 return;
             }
         }
@@ -160,11 +315,71 @@ fn on_ptt_release() {
     match crate::speech_transcribe(&engine, &wav.to_string_lossy(), None) {
         Ok(text) if !text.trim().is_empty() => {
             let text = text.trim().to_string();
+            // Pasting can fail when the focused app blocks synthetic input;
+            // keep the text so the UI can show it instead of losing it.
             if voice_ptt_paste(&text).is_err() {
-                push_pending(text);
+                push_text(text);
             }
         }
-        Ok(_) => push_pending("（未识别到语音）".into()),
-        Err(e) => push_pending(format!("语音转写失败：{e}")),
+        Ok(_) => push_error("（未识别到语音）".into()),
+        Err(e) => push_error(format!("语音转写失败：{e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Errors must never be treated as text: they would be typed into
+    /// whatever window happens to have focus.
+    #[test]
+    fn error_and_text_stay_separate() {
+        push_error("录音失败".into());
+        match voice_ptt_take_pending() {
+            Some(VoicePending::Error(message)) => assert_eq!(message, "录音失败"),
+            other => panic!("expected an error, got {other:?}"),
+        }
+
+        push_text("你好".into());
+        match voice_ptt_take_pending() {
+            Some(VoicePending::Text(text)) => assert_eq!(text, "你好"),
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        assert!(voice_ptt_take_pending().is_none());
+    }
+
+    #[test]
+    fn empty_text_is_rejected() {
+        assert!(voice_ptt_paste("").is_err());
+    }
+
+    /// The clipboard must round-trip exactly: a stray newline here would
+    /// accumulate in the user's clipboard on every dictation.
+    #[cfg(windows)]
+    #[test]
+    fn clipboard_round_trips_verbatim() {
+        let original = voice_clipboard_read();
+        let cases = [
+            "single",
+            "line1\r\nline2",
+            "中文 English 123",
+            "quotes ' \" ` and $var 100%",
+            "trailing\n",
+            "  leading space",
+            "emoji 😀",
+        ];
+        for case in cases {
+            voice_clipboard_write(case).expect("write");
+            assert_eq!(
+                voice_clipboard_read().as_deref(),
+                Some(case),
+                "clipboard changed content for {case:?}"
+            );
+        }
+        // Leave the machine as we found it.
+        if let Some(original) = original {
+            let _ = voice_clipboard_write(&original);
+        }
     }
 }

@@ -35,8 +35,8 @@ pub fn paddleocr_files() -> Vec<OcrFileSpec> {
             min_bytes: 800_000,
         },
         OcrFileSpec {
-            name: "ch_ptocr_mobile_v2.0_cls_infer.onnx".into(),
-            url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv4/cls/ch_ptocr_mobile_v2.0_cls_infer.onnx".into(),
+            name: "ch_ppocr_mobile_v2.0_cls_mobile.onnx".into(),
+            url: "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx".into(),
             min_bytes: 500_000,
         },
         OcrFileSpec {
@@ -141,7 +141,7 @@ fn ensure_onnx_engine(dir: &Path) -> Result<()> {
         return Ok(());
     }
     let det = dir.join("PP-OCRv6_det_small.onnx");
-    let cls = dir.join("ch_ptocr_mobile_v2.0_cls_infer.onnx");
+    let cls = dir.join("ch_ppocr_mobile_v2.0_cls_mobile.onnx");
     let rec = dir.join("PP-OCRv6_rec_small.onnx");
     let dict = dir.join("ppocrv6_dict.txt");
     // load-dynamic：确保运行时已加载 onnxruntime.dll
@@ -307,6 +307,14 @@ mod tests {
     #[test]
     fn catalog_has_four_files() {
         assert_eq!(paddleocr_files().len(), 4);
-        assert!(paddleocr_files().iter().any(|f| f.name.contains("cls")));
+        assert!(paddleocr_files().iter().any(|f| {
+            f.name == "ch_ppocr_mobile_v2.0_cls_mobile.onnx"
+                && f.url.ends_with("ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+        }));
+        assert!(
+            paddleocr_files()
+                .iter()
+                .all(|f| !f.url.contains("ch_ptocr_mobile_v2.0_cls_infer"))
+        );
     }
 }

@@ -18,8 +18,10 @@ futures-util = "0.3"
 log.workspace = true
 reqwest.workspace = true
 rfd.workspace = true
+rustfft.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
@@ -41,5 +43,6 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
+  "Win32_System_Ole",
   "Win32_System_Threading",
 ] }

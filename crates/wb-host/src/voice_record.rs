@@ -16,6 +16,47 @@ struct ActiveRec {
     started: Instant,
 }
 
+static VOICE_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+/// Recent input level in `0.0..=1.0`, for the settings meter. Zero when idle.
+pub fn voice_level() -> f32 {
+    f32::from_bits(VOICE_LEVEL.load(Ordering::Relaxed))
+}
+
+/// Drop the meter back to silence, e.g. when a PTT press starts.
+pub fn voice_level_reset() {
+    VOICE_LEVEL.store(0f32.to_bits(), Ordering::Relaxed);
+}
+
+/// Open the configured device for a few hundred milliseconds and report the
+/// peak level, used by the settings page to show the meter is alive.
+/// Open the configured device for `duration` and report the loudest level
+/// seen. Used by the settings page so a user has time to actually speak.
+///
+/// A silent room is *not* an error: the returned level is simply low. Only a
+/// device that cannot be opened fails here.
+pub fn voice_probe_level(device: Option<&str>, duration: std::time::Duration) -> Result<f32> {
+    voice_record_start_with(device)?;
+    let deadline = std::time::Instant::now() + duration;
+    let mut peak = 0f32;
+    let mut blocks = 0u32;
+    while std::time::Instant::now() < deadline {
+        // `voice_level` holds the peak of the most recent audio block, so the
+        // loudest moment must be accumulated rather than read once at the end.
+        let level = voice_level();
+        if level > 0.0 {
+            blocks += 1;
+        }
+        peak = peak.max(level);
+        thread::sleep(Duration::from_millis(25));
+    }
+    voice_record_stop_silent();
+    if blocks == 0 {
+        bail!("没有收到任何音频数据（设备可能被其它程序占用或权限不足）");
+    }
+    Ok(peak)
+}
+
 fn active() -> &'static Mutex<Option<ActiveRec>> {
     static ACTIVE: OnceLock<Mutex<Option<ActiveRec>>> = OnceLock::new();
     ACTIVE.get_or_init(|| Mutex::new(None))
@@ -27,8 +68,30 @@ pub fn voice_wav_path() -> Result<PathBuf> {
     Ok(dir.join("ptt-last.wav"))
 }
 
+/// Input devices the audio host reports, default device first.
+pub fn voice_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let mut names: Vec<String> = host
+        .input_devices()
+        .map(|devices| devices.filter_map(|device| device.name().ok()).collect())
+        .unwrap_or_default();
+    if let Some(default_name) = default_name {
+        names.retain(|name| name != &default_name);
+        names.insert(0, default_name);
+    }
+    names
+}
+
 /// Start (or restart) capturing from the default input device.
 pub fn voice_record_start() -> Result<()> {
+    voice_record_start_with(None)
+}
+
+/// Start capturing from `device`, or the default input device when `None`.
+pub fn voice_record_start_with(device: Option<&str>) -> Result<()> {
     voice_record_stop_silent();
     let stop = Arc::new(AtomicBool::new(false));
     let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
@@ -36,11 +99,12 @@ pub fn voice_record_start() -> Result<()> {
     let stop_t = stop.clone();
     let samples_t = samples.clone();
     let rate_t = rate.clone();
+    let device = device.map(str::to_string);
 
     thread::Builder::new()
         .name("wb-voice-rec".into())
         .spawn(move || {
-            if let Err(e) = run_capture(stop_t, samples_t, rate_t) {
+            if let Err(e) = run_capture(stop_t, samples_t, rate_t, device) {
                 log::warn!("voice capture ended: {e}");
             }
         })
@@ -61,11 +125,22 @@ fn run_capture(
     stop: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<f32>>>,
     rate: Arc<AtomicU32>,
+    device_name: Option<String>,
 ) -> Result<()> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("没有可用的麦克风设备"))?;
+    let device = match device_name.as_deref() {
+        Some(wanted) => host
+            .input_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|device| device.name().is_ok_and(|name| name == wanted))
+            })
+            .or_else(|| host.default_input_device()),
+        None => host.default_input_device(),
+    }
+    .ok_or_else(|| anyhow::anyhow!("没有可用的麦克风设备"))?;
     let supported = device
         .default_input_config()
         .context("读取麦克风配置失败")?;
@@ -119,14 +194,24 @@ fn run_capture(
 }
 
 fn push_mono(data: &[f32], channels: usize, samples: &Mutex<Vec<f32>>) {
+    // Peak of this block drives the settings meter.
+    let mut peak = 0f32;
     let mut guard = samples.lock().unwrap();
     if channels <= 1 {
+        for &sample in data {
+            peak = peak.max(sample.abs());
+        }
         guard.extend_from_slice(data);
-        return;
+    } else {
+        for frame in data.chunks(channels) {
+            let sum: f32 = frame.iter().copied().sum();
+            let mono = sum / frame.len() as f32;
+            peak = peak.max(mono.abs());
+            guard.push(mono);
+        }
     }
-    for frame in data.chunks(channels) {
-        let sum: f32 = frame.iter().copied().sum();
-        guard.push(sum / frame.len() as f32);
+    if peak > 0.0 {
+        VOICE_LEVEL.store(peak.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -136,6 +221,7 @@ fn voice_record_stop_silent() {
         rec.stop.store(true, Ordering::SeqCst);
         thread::sleep(Duration::from_millis(40));
     }
+    VOICE_LEVEL.store(0f32.to_bits(), Ordering::Relaxed);
 }
 
 /// Stop capture and write `data/voice/ptt-last.wav` (16 kHz mono PCM).
