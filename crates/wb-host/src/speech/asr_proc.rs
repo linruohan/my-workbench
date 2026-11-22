@@ -101,7 +101,7 @@ pub(super) fn shutdown() {
 /// Load the model now, so the first release does not pay for process startup.
 pub(super) fn warm(bin: &Path, model_dir: &str, language: &str) -> Result<()> {
     if serve_unsupported() {
-        anyhow::bail!("wb-asr 不支持常驻模式，请重新构建 wb-asr");
+        anyhow::bail!("wb-asr 不支持常驻模式，请重新构建 {}", bin.display());
     }
     let key = WorkerKey::new(bin, model_dir, language)?;
     let mut guard = slot().lock().map_err(|_| anyhow!("语音引擎锁损坏"))?;
@@ -110,7 +110,10 @@ pub(super) fn warm(bin: &Path, model_dir: &str, language: &str) -> Result<()> {
 
 pub(super) fn transcribe(bin: &Path, model_dir: &str, wav_path: &str, language: &str) -> AsrReply {
     if serve_unsupported() {
-        return process_reply(anyhow!("wb-asr 不支持常驻模式"));
+        return process_reply(anyhow!(
+            "wb-asr 不支持常驻模式，请重新构建 {}",
+            bin.display()
+        ));
     }
     let key = match WorkerKey::new(bin, model_dir, language) {
         Ok(key) => key,
@@ -186,7 +189,7 @@ fn ensure_worker(slot: &mut Option<Worker>, key: &WorkerKey) -> Result<()> {
 
 fn spawn_worker(key: &WorkerKey) -> Result<Worker> {
     if serve_unsupported() {
-        anyhow::bail!("wb-asr 不支持常驻模式，请重新构建 wb-asr");
+        anyhow::bail!("wb-asr 不支持常驻模式，请重新构建 {}", key.bin.display());
     }
     let mut cmd = Command::new(&key.bin);
     cmd.arg("--model")
@@ -249,7 +252,7 @@ fn spawn_worker(key: &WorkerKey) -> Result<Worker> {
             .unwrap_or_default();
         if extra.contains("未知参数") {
             mark_unsupported();
-            anyhow::bail!("wb-asr 不支持常驻模式，请重新构建 wb-asr");
+            anyhow::bail!("wb-asr 不支持常驻模式，请重新构建 {}", key.bin.display());
         }
         if extra.is_empty() {
             return Err(err);
