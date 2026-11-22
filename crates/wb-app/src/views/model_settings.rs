@@ -1,5 +1,8 @@
 //! 模型设置里的供应商编辑器：本机 / 自定义列表，以及右侧的连接与模型配置。
 
+#[path = "model_form.rs"]
+mod model_form;
+
 use super::settings::SettingsPane;
 use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -12,7 +15,10 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use serde_json::{Value, json};
+use model_form::{ModelDraft, fetched_model_caps};
+use serde_json::Value;
+use std::cell::Cell;
+use std::rc::Rc;
 use uuid::Uuid;
 use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID, ProviderConfig, ProviderKind};
@@ -23,13 +29,13 @@ pub(crate) struct ModelEditor {
     selected_id: Option<String>,
     renaming: bool,
     key_visible: bool,
-    adding_model: bool,
-    fetching: bool,
+    fetching_ids: Vec<String>,
+    model_dialog_open: bool,
     message: String,
     name_input: Entity<InputState>,
     base_url_input: Entity<InputState>,
     api_key_input: Entity<InputState>,
-    model_id_input: Entity<InputState>,
+    draft: Entity<ModelDraft>,
 }
 
 struct ModelView {
@@ -38,13 +44,11 @@ struct ModelView {
     selected_id: Option<String>,
     renaming: bool,
     key_visible: bool,
-    adding_model: bool,
     fetching: bool,
     message: String,
     name_input: Entity<InputState>,
     base_url_input: Entity<InputState>,
     api_key_input: Entity<InputState>,
-    model_id_input: Entity<InputState>,
 }
 
 impl ModelEditor {
@@ -65,20 +69,21 @@ impl ModelEditor {
                 .placeholder("输入 API Key")
                 .masked(true)
         });
-        let model_id_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("模型 ID，例如 gpt-4o-mini"));
+        let pane = cx.weak_entity();
+        let draft = cx.new(|cx| ModelDraft::new(pane, window, cx));
+        let level_input = draft.read(cx).level.clone();
         let mut editor = Self {
             state,
             selected_id,
             renaming: false,
             key_visible: false,
-            adding_model: false,
-            fetching: false,
+            fetching_ids: Vec::new(),
+            model_dialog_open: false,
             message: String::new(),
             name_input,
             base_url_input,
             api_key_input,
-            model_id_input,
+            draft,
         };
         editor.bind(window, cx);
         let subs = vec![
@@ -97,6 +102,13 @@ impl ModelEditor {
                     && matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
                 {
                     pane.model_editor.commit_name(cx);
+                }
+            }),
+            cx.subscribe(&level_input, |pane, _, event, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    pane.model_editor.draft.update(cx, |draft, cx| {
+                        draft.commit_level(cx);
+                    });
                 }
             }),
         ];
@@ -132,7 +144,6 @@ impl ModelEditor {
         }
         self.selected_id = Some(id);
         self.renaming = false;
-        self.adding_model = false;
         self.key_visible = false;
         self.message.clear();
         self.bind(window, cx);
@@ -149,7 +160,6 @@ impl ModelEditor {
             self.selected_id = store.providers.first().map(|provider| provider.id.clone());
         }
         self.renaming = false;
-        self.adding_model = false;
         self.bind(window, cx);
         self.message = "已重新加载供应商".into();
         cx.notify();
@@ -174,7 +184,6 @@ impl ModelEditor {
         }
         self.selected_id = Some(id);
         self.renaming = false;
-        self.adding_model = false;
         self.key_visible = false;
         self.message.clear();
         self.bind(window, cx);
@@ -217,7 +226,6 @@ impl ModelEditor {
             .or(store.providers.last())
             .map(|provider| provider.id.clone());
         self.renaming = false;
-        self.adding_model = false;
         self.key_visible = false;
         self.bind(window, cx);
         cx.notify();
@@ -319,49 +327,135 @@ impl ModelEditor {
         cx.notify();
     }
 
-    fn start_add_model(&mut self, cx: &mut Context<SettingsPane>) {
-        self.adding_model = true;
-        cx.notify();
-    }
-
-    fn cancel_add_model(&mut self, cx: &mut Context<SettingsPane>) {
-        self.adding_model = false;
-        cx.notify();
-    }
-
-    fn add_model(&mut self, window: &mut Window, cx: &mut Context<SettingsPane>) {
-        let model_id = self.model_id_input.read(cx).value().trim().to_string();
-        if model_id.is_empty() {
-            self.message = "请填写模型 ID".into();
-            cx.notify();
+    fn open_add_model(&mut self, window: &mut Window, cx: &mut Context<SettingsPane>) {
+        if self.model_dialog_open || self.selected_is_local() {
             return;
         }
         let Some(provider_id) = self.selected_id.clone() else {
             return;
         };
-        let exists = load_providers()
-            .providers
-            .iter()
-            .any(|provider| provider.id == provider_id && provider.models.contains_key(&model_id));
-        if exists {
-            self.message = format!("模型 {model_id} 已在列表中");
-            cx.notify();
-            return;
-        }
-        let inserted = model_id.clone();
-        let saved = self.mutate_selected(cx, |provider| {
-            provider
-                .models
-                .insert(inserted.clone(), model_caps(&inserted));
+        self.model_dialog_open = true;
+        self.draft.update(cx, |draft, cx| {
+            draft.prepare(provider_id, window, cx);
         });
-        if !saved {
-            return;
+        let draft = self.draft.clone();
+        let model_id = self.draft.read(cx).model_id.clone();
+        let focus_once = Rc::new(Cell::new(true));
+        let pane = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if focus_once.replace(false) {
+                model_id.update(cx, |input, cx| input.focus(window, cx));
+            }
+            let save_draft = draft.clone();
+            let reset_draft = draft.clone();
+            let close_pane = pane.clone();
+            let save_pane = pane.clone();
+            dialog
+                .title("添加模型")
+                .w(px(480.))
+                .on_cancel({
+                    let close_pane = close_pane.clone();
+                    move |_, _, cx| {
+                        close_pane
+                            .update(cx, |pane, cx| {
+                                pane.model_editor.model_dialog_open = false;
+                                cx.notify();
+                            })
+                            .ok();
+                        true
+                    }
+                })
+                .child(draft.clone())
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            Button::new("reset-model-form")
+                                .ghost()
+                                .small()
+                                .label("重置表单")
+                                .on_click(move |_, window, cx| {
+                                    reset_draft.update(cx, |draft, cx| {
+                                        draft.reset(window, cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-add-model")
+                                        .small()
+                                        .label("取消")
+                                        .on_click({
+                                            let close_pane = close_pane.clone();
+                                            move |_, window, cx| {
+                                                close_pane
+                                                    .update(cx, |pane, cx| {
+                                                        pane.model_editor.model_dialog_open = false;
+                                                        cx.notify();
+                                                    })
+                                                    .ok();
+                                                window.close_dialog(cx);
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("save-add-model")
+                                        .small()
+                                        .primary()
+                                        .label("保存")
+                                        .on_click(move |_, window, cx| {
+                                            let saved =
+                                                save_draft.update(cx, |draft, cx| draft.save(cx));
+                                            if saved {
+                                                save_pane
+                                                    .update(cx, |pane, cx| {
+                                                        pane.model_editor.model_dialog_open = false;
+                                                        cx.notify();
+                                                    })
+                                                    .ok();
+                                                window.close_dialog(cx);
+                                            }
+                                        }),
+                                ),
+                        ),
+                )
+        });
+    }
+
+    pub(super) fn insert_model(
+        &mut self,
+        provider_id: &str,
+        model_id: String,
+        caps: Value,
+        cx: &mut Context<SettingsPane>,
+    ) -> Result<(), String> {
+        if model_id.is_empty() {
+            return Err("模型 ID 不能为空".into());
         }
-        self.model_id_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.adding_model = false;
+        let mut store = load_providers();
+        let Some(provider) = store
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return Err("供应商已不存在".into());
+        };
+        if is_local_provider(provider) {
+            return Err("本机供应商不能添加远程模型".into());
+        }
+        if provider.models.contains_key(&model_id) {
+            return Err(format!("模型 {model_id} 已在列表中"));
+        }
+        provider.models.insert(model_id.clone(), caps);
+        save_providers(&store).map_err(|err| format!("保存失败：{err}"))?;
         self.message = format!("已添加模型 {model_id}");
         cx.notify();
+        Ok(())
     }
 
     fn remove_model(&mut self, model_id: String, cx: &mut Context<SettingsPane>) {
@@ -375,13 +469,13 @@ impl ModelEditor {
     }
 
     fn fetch_models(&mut self, cx: &mut Context<SettingsPane>) {
-        if self.fetching {
-            return;
-        }
-        let store = load_providers();
         let Some(id) = self.selected_id.clone() else {
             return;
         };
+        if self.fetching_ids.iter().any(|item| item == &id) {
+            return;
+        }
+        let store = load_providers();
         let Some(provider) = store.providers.iter().find(|provider| provider.id == id) else {
             return;
         };
@@ -390,17 +484,27 @@ impl ModelEditor {
             cx.notify();
             return;
         }
-        if provider.base_url.trim().is_empty() {
+        let name = provider_title(provider);
+        let required = provider.api_key_required;
+        let anthropic = provider.kind == ProviderKind::AnthropicMessages;
+        let base_url = self.base_url_input.read(cx).value().trim().to_string();
+        let key = self.api_key_input.read(cx).value().trim().to_string();
+        if base_url.is_empty() {
             self.message = "先填写 Base URL".into();
             cx.notify();
             return;
         }
-        let base_url = provider.base_url.clone();
-        let anthropic = provider.kind == ProviderKind::AnthropicMessages;
-        let key = load_credentials().keys.get(&id).cloned();
+        if required && key.is_empty() {
+            self.message = format!("供应商「{name}」调用前必须有密钥");
+            cx.notify();
+            return;
+        }
+        self.commit_base_url(cx);
+        self.commit_api_key(cx);
+        let key = (!key.is_empty()).then_some(key);
         let proxy = self.state.with(|inner| inner.prefs.http_proxy.clone());
-        self.fetching = true;
-        self.message = "正在获取模型…".into();
+        self.fetching_ids.push(id.clone());
+        self.message = format!("正在用「{name}」的接口获取模型…");
         cx.notify();
         cx.spawn(async move |this, cx| {
             let fetched = cx
@@ -421,11 +525,13 @@ impl ModelEditor {
                 })
                 .await;
             this.update(cx, |pane, cx| {
-                pane.model_editor.fetching = false;
+                pane.model_editor.fetching_ids.retain(|item| item != &id);
                 match fetched {
                     Ok(ids) => pane.model_editor.apply_fetched(&id, ids, cx),
                     Err(err) => {
-                        pane.model_editor.message = format!("获取模型失败：{err}");
+                        if pane.model_editor.selected_id.as_deref() == Some(id.as_str()) {
+                            pane.model_editor.message = format!("获取模型失败：{err}");
+                        }
                         cx.notify();
                     }
                 }
@@ -459,7 +565,7 @@ impl ModelEditor {
         let mut added = 0;
         for id in ids {
             if !provider.models.contains_key(&id) {
-                provider.models.insert(id.clone(), model_caps(&id));
+                provider.models.insert(id.clone(), fetched_model_caps(&id));
                 added += 1;
             }
         }
@@ -562,13 +668,14 @@ fn render_model_settings(entity: &WeakEntity<SettingsPane>, cx: &mut App) -> Any
             selected_id: editor.selected_id.clone(),
             renaming: editor.renaming,
             key_visible: editor.key_visible,
-            adding_model: editor.adding_model,
-            fetching: editor.fetching,
+            fetching: editor
+                .selected_id
+                .as_ref()
+                .is_some_and(|id| editor.fetching_ids.iter().any(|item| item == id)),
             message: editor.message.clone(),
             name_input: editor.name_input.clone(),
             base_url_input: editor.base_url_input.clone(),
             api_key_input: editor.api_key_input.clone(),
-            model_id_input: editor.model_id_input.clone(),
         }
     };
     let providers = load_providers().providers;
@@ -995,7 +1102,6 @@ fn model_section(
 ) -> impl IntoElement {
     let local = is_local_provider(provider);
     let id = provider.id.clone();
-    let entity = view.entity.clone();
     let add_entity = view.entity.clone();
     let fetch_entity = view.entity.clone();
     let mut models: Vec<_> = provider.models.iter().collect();
@@ -1048,10 +1154,10 @@ fn model_section(
                                     .small()
                                     .icon(IconName::Plus)
                                     .label("添加模型")
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         add_entity
                                             .update(cx, |pane, cx| {
-                                                pane.model_editor.start_add_model(cx)
+                                                pane.model_editor.open_add_model(window, cx)
                                             })
                                             .ok();
                                     }),
@@ -1059,43 +1165,6 @@ fn model_section(
                     )
                 }),
         )
-        .when(view.adding_model && !local, |col| {
-            let entity = entity.clone();
-            let cancel = view.entity.clone();
-            col.child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&view.model_id_input).small().w_full()),
-                    )
-                    .child(
-                        Button::new("confirm-add-model")
-                            .small()
-                            .primary()
-                            .label("添加")
-                            .on_click(move |_, window, cx| {
-                                entity
-                                    .update(cx, |pane, cx| pane.model_editor.add_model(window, cx))
-                                    .ok();
-                            }),
-                    )
-                    .child(
-                        Button::new("cancel-add-model")
-                            .small()
-                            .ghost()
-                            .label("取消")
-                            .on_click(move |_, _, cx| {
-                                cancel
-                                    .update(cx, |pane, cx| pane.model_editor.cancel_add_model(cx))
-                                    .ok();
-                            }),
-                    ),
-            )
-        })
         .when(models.is_empty(), |col| {
             col.child(
                 div()
@@ -1251,14 +1320,6 @@ fn model_label(id: &str, caps: &Value) -> String {
         .filter(|title| !title.is_empty())
         .unwrap_or(id)
         .to_string()
-}
-
-fn model_caps(id: &str) -> Value {
-    json!({
-        "context": 128000,
-        "output": 8192,
-        "title": id,
-    })
 }
 
 fn new_provider_id(existing: &[ProviderConfig]) -> String {

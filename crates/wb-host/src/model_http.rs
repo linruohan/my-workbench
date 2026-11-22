@@ -48,17 +48,37 @@ pub async fn model_http(req: ModelHttpRequest) -> Result<ModelHttpResponse> {
     Ok(ModelHttpResponse { status, body })
 }
 
+/// 把供应商 Base URL 收成模型列表地址。
+///
+/// 配置里的 Base URL 有时带当前接口路径（`/chat/completions`、`/responses`、`/messages`）。
+/// 列表请求去掉这段，再访问同一主机上的 `/models`。
+pub fn provider_models_url(base_url: &str) -> Result<String> {
+    let mut root = base_url.trim().trim_end_matches('/').to_string();
+    if root.is_empty() {
+        anyhow::bail!("Base URL 为空");
+    }
+    for suffix in ["/chat/completions", "/responses", "/messages", "/models"] {
+        if let Some(stripped) = root.strip_suffix(suffix) {
+            root = stripped.trim_end_matches('/').to_string();
+            break;
+        }
+    }
+    if root.is_empty() {
+        anyhow::bail!("Base URL 为空");
+    }
+    Ok(format!("{root}/models"))
+}
+
 /// `GET {baseURL}/models`，兼容 OpenAI `data[].id` 与 Ollama `models[].name`。
+///
+/// `anthropic` 为真时用该供应商自己的 `x-api-key`，否则用它自己的 Bearer 密钥。
 pub async fn list_provider_models(
     base_url: &str,
     api_key: Option<&str>,
     proxy: Option<&str>,
     anthropic: bool,
 ) -> Result<Vec<String>> {
-    let root = base_url.trim().trim_end_matches('/');
-    if root.is_empty() {
-        anyhow::bail!("Base URL 为空");
-    }
+    let url = provider_models_url(base_url)?;
     let mut headers = vec![("Accept".into(), "application/json".into())];
     if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
         if anthropic {
@@ -69,7 +89,7 @@ pub async fn list_provider_models(
         }
     }
     let resp = model_http(ModelHttpRequest {
-        url: format!("{root}/models"),
+        url,
         method: "GET".into(),
         headers,
         body: None,
@@ -321,7 +341,7 @@ pub async fn chat_completions_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_model_ids;
+    use super::{parse_model_ids, provider_models_url};
 
     #[test]
     fn openai_list_uses_data_ids() {
@@ -334,5 +354,25 @@ mod tests {
         let ids =
             parse_model_ids(r#"{"models":[{"name":"qwen2.5"},{"name":"llama3.2"}]}"#).unwrap();
         assert_eq!(ids, vec!["llama3.2".to_string(), "qwen2.5".to_string()]);
+    }
+
+    #[test]
+    fn models_url_strips_the_current_api_path() {
+        assert_eq!(
+            provider_models_url("https://api.example.com/v1").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            provider_models_url("https://api.example.com/v1/chat/completions").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            provider_models_url("https://api.example.com/v1/responses/").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            provider_models_url("https://api.anthropic.com/v1/messages").unwrap(),
+            "https://api.anthropic.com/v1/models"
+        );
     }
 }

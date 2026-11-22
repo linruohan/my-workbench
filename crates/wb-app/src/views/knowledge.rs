@@ -969,34 +969,70 @@ fn kb_callout(
 }
 
 fn kb_markdown_extensions() -> MarkdownExtensions {
-    let palette = kb_preview_palette(true);
-    MarkdownExtensions::default()
-        .frontmatter()
-        .plugin(FrontmatterPlugin::new())
-        .block_surface("note", kb_callout("Note", IconName::Info, palette.note))
-        .block_surface("info", kb_callout("Info", IconName::Info, palette.note))
-        .block_surface("tip", kb_callout("Tip", IconName::CircleCheck, palette.tip))
-        .block_surface(
-            "success",
-            kb_callout("Success", IconName::CircleCheck, palette.tip),
-        )
-        .block_surface(
-            "warning",
-            kb_callout("Warning", IconName::TriangleAlert, palette.warning),
-        )
-        .block_surface(
-            "important",
-            kb_callout("Important", IconName::Star, palette.important),
-        )
-        .block_surface(
-            "caution",
-            kb_callout("Caution", IconName::CircleX, palette.caution),
-        )
-        .block_surface(
-            "danger",
-            kb_callout("Danger", IconName::CircleX, palette.caution),
-        )
-        .block_surface("quote", kb_callout("Quote", IconName::Info, palette.italic))
+    static EXTENSIONS: std::sync::OnceLock<MarkdownExtensions> = std::sync::OnceLock::new();
+    EXTENSIONS
+        .get_or_init(|| {
+            let palette = kb_preview_palette(true);
+            MarkdownExtensions::default()
+                .frontmatter()
+                .plugin(FrontmatterPlugin::new())
+                .block_surface("note", kb_callout("Note", IconName::Info, palette.note))
+                .block_surface("info", kb_callout("Info", IconName::Info, palette.note))
+                .block_surface(
+                    "abstract",
+                    kb_callout("Abstract", IconName::Info, palette.note),
+                )
+                .block_surface(
+                    "summary",
+                    kb_callout("Summary", IconName::Info, palette.note),
+                )
+                .block_surface("tldr", kb_callout("TL;DR", IconName::Info, palette.note))
+                .block_surface("faq", kb_callout("FAQ", IconName::Info, palette.note))
+                .block_surface("tip", kb_callout("Tip", IconName::CircleCheck, palette.tip))
+                .block_surface(
+                    "hint",
+                    kb_callout("Hint", IconName::CircleCheck, palette.tip),
+                )
+                .block_surface(
+                    "todo",
+                    kb_callout("Todo", IconName::CircleCheck, palette.tip),
+                )
+                .block_surface(
+                    "success",
+                    kb_callout("Success", IconName::CircleCheck, palette.tip),
+                )
+                .block_surface(
+                    "warning",
+                    kb_callout("Warning", IconName::TriangleAlert, palette.warning),
+                )
+                .block_surface(
+                    "important",
+                    kb_callout("Important", IconName::Star, palette.important),
+                )
+                .block_surface(
+                    "example",
+                    kb_callout("Example", IconName::Star, palette.important),
+                )
+                .block_surface(
+                    "caution",
+                    kb_callout("Caution", IconName::CircleX, palette.caution),
+                )
+                .block_surface(
+                    "danger",
+                    kb_callout("Danger", IconName::CircleX, palette.caution),
+                )
+                .block_surface("bug", kb_callout("Bug", IconName::CircleX, palette.caution))
+                .block_surface(
+                    "error",
+                    kb_callout("Error", IconName::CircleX, palette.caution),
+                )
+                .block_surface(
+                    "failure",
+                    kb_callout("Failure", IconName::CircleX, palette.caution),
+                )
+                .block_surface("quote", kb_callout("Quote", IconName::Info, palette.italic))
+        })
+        .clone()
 }
 
 /// Turn `[[note]]` / `[[note|别名]]` into Markdown links for the preview pane.

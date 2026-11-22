@@ -14,10 +14,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::ThemeModePref;
-use wb_host::{
-    list_skills, list_system_fonts, path_is_within, paths_equal, speech_ensure_models,
-    speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
-};
+use wb_host::{list_skills, list_system_fonts, path_is_within, paths_equal, voice_ptt_set_enabled};
 
 #[path = "tools_settings.rs"]
 mod tools_ui;
@@ -34,6 +31,20 @@ pub struct SettingsPane {
     _model_subs: Vec<Subscription>,
     font_count: usize,
     speech_msg: String,
+    /// Per-engine status, keyed by engine id.
+    speech_statuses: Vec<wb_host::SpeechStatus>,
+    /// Engine currently being downloaded (or prepared).
+    speech_busy: Option<String>,
+    /// Live progress of the running download, when there is one.
+    speech_progress: Option<wb_host::DownloadProgress>,
+    /// Input devices reported by the audio host.
+    speech_devices: Vec<String>,
+    /// Whether an engine is already loaded and warm.
+    speech_warm: bool,
+    /// Guards the one-time device / model scan on first paint.
+    speech_started: bool,
+    /// True while a background status scan is running.
+    speech_scanning: bool,
     tool_catalog: wb_host::ToolCatalog,
     tool_filter: tools_ui::ToolListFilter,
     tools_busy: bool,
@@ -87,16 +98,9 @@ impl SettingsPane {
         });
         let (model_editor, model_subs) = ModelEditor::new(state.clone(), window, cx);
         let font_count = list_system_fonts().map(|f| f.len()).unwrap_or(0);
-        let speech_msg = speech_status("sensevoice")
-            .map(|st| {
-                if st.ready {
-                    format!("SenseVoice 就绪：{}", st.model_dir)
-                } else {
-                    st.message
-                        .unwrap_or_else(|| format!("SenseVoice 未就绪：{}", st.model_dir))
-                }
-            })
-            .unwrap_or_else(|e| e.to_string());
+        // Speech models are scanned after the window is up: hashing a few
+        // hundred megabytes here would delay every cold start.
+        let speech_msg = String::new();
         let tool_catalog = wb_host::read_tool_catalog();
         Self {
             state,
@@ -110,6 +114,13 @@ impl SettingsPane {
             _model_subs: model_subs,
             font_count,
             speech_msg,
+            speech_statuses: Vec::new(),
+            speech_busy: None,
+            speech_progress: None,
+            speech_devices: Vec::new(),
+            speech_warm: false,
+            speech_started: false,
+            speech_scanning: false,
             tool_catalog,
             tool_filter: tools_ui::ToolListFilter::All,
             tools_busy: false,
@@ -287,38 +298,227 @@ impl SettingsPane {
         cx.notify();
     }
 
-    fn prepare_speech(&mut self, cx: &mut Context<Self>) {
-        match speech_ensure_models("sensevoice") {
-            Ok(st) => {
-                self.speech_msg = if st.ready {
-                    format!("模型就绪：{}", st.model_dir)
-                } else {
-                    st.message.unwrap_or_else(|| "待下载".into())
-                };
-            }
-            Err(e) => self.speech_msg = e.to_string(),
+    /// Re-check speech models and input devices off the UI thread.
+    ///
+    /// `speech_status` hashes model files, so it must never run inline in a
+    /// click handler or on the first paint.
+    fn refresh_speech(&mut self, cx: &mut Context<Self>) {
+        if self.speech_scanning {
+            return;
         }
+        self.speech_scanning = true;
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (statuses, devices) = cx
+                .background_executor()
+                .spawn(async { (wb_host::speech_status_all(), wb_host::voice_input_devices()) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.speech_scanning = false;
+                if this.speech_msg.is_empty() {
+                    this.speech_msg = statuses
+                        .iter()
+                        .find(|st| st.ready)
+                        .and_then(|st| st.message.clone())
+                        .unwrap_or_else(|| "尚无可用语音模型，选择引擎后下载即可离线识别".into());
+                }
+                this.speech_statuses = statuses;
+                this.speech_devices = devices;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    fn download_speech(&mut self, cx: &mut Context<Self>) {
-        self.speech_msg = "正在下载 SenseVoice 模型…".into();
+    /// Create the engine directory without downloading anything.
+    fn prepare_speech(&mut self, engine: String, cx: &mut Context<Self>) {
+        self.speech_msg = format!("正在准备 {} 的目录…", wb_host::speech_engine_label(&engine));
         cx.notify();
-        match speech_ensure_models_ex("sensevoice", true) {
-            Ok(st) => {
-                self.speech_msg = if st.ready {
-                    format!("下载完成：{}", st.model_dir)
-                } else {
-                    format!(
-                        "部分完成，仍缺 {:?}：{}",
-                        st.missing,
-                        st.message.unwrap_or_default()
-                    )
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { wb_host::speech_ensure_models(&engine) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.speech_msg = match result {
+                    Ok(st) => st
+                        .message
+                        .unwrap_or_else(|| format!("目录已准备：{}", st.model_dir)),
+                    Err(e) => format!("准备目录失败：{e}"),
                 };
-            }
-            Err(e) => self.speech_msg = format!("下载失败：{e}"),
+                this.refresh_speech(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Download (or repair) every file the engine needs, in the background.
+    fn download_speech(&mut self, engine: String, cx: &mut Context<Self>) {
+        if self.speech_busy.is_some() {
+            return;
         }
+        self.speech_busy = Some(engine.clone());
+        self.speech_progress = None;
+        self.speech_msg = format!("正在准备 {}…", wb_host::speech_engine_label(&engine));
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            let label = wb_host::speech_engine_label(&engine);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = cx.background_executor().spawn(async move {
+                let result = wb_host::speech_ensure_models_with(&engine, true, |progress| {
+                    // Dropping the receiver just means nobody is listening.
+                    let _ = tx.send(WorkerEvent::Progress(progress));
+                });
+                let _ = tx.send(WorkerEvent::Finished(result));
+            });
+            loop {
+                match rx.try_recv() {
+                    Ok(WorkerEvent::Progress(progress)) => {
+                        this.update(cx, |this, cx| {
+                            this.speech_progress = Some(progress);
+                            this.speech_msg = format!(
+                                "{label}：正在下载 {}（{}%）",
+                                this.speech_progress
+                                    .as_ref()
+                                    .map(|p| p.file.clone())
+                                    .unwrap_or_default(),
+                                this.speech_progress
+                                    .as_ref()
+                                    .map(|p| p.percent())
+                                    .unwrap_or(0)
+                            );
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Ok(WorkerEvent::Finished(result)) => {
+                        let message = match result {
+                            Ok(st) if st.ready => format!("{label} 下载完成，已通过完整性校验"),
+                            Ok(st) => format!(
+                                "{label} 部分完成：{}",
+                                st.message.unwrap_or_else(|| st.missing.join("、"))
+                            ),
+                            Err(e) => format!("{label} 下载失败：{e:#}"),
+                        };
+                        this.update(cx, |this, cx| {
+                            this.speech_busy = None;
+                            this.speech_progress = None;
+                            this.speech_msg = message;
+                            this.refresh_speech(cx);
+                            cx.notify();
+                        })
+                        .ok();
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(200))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        this.update(cx, |this, cx| {
+                            this.speech_busy = None;
+                            this.speech_progress = None;
+                            cx.notify();
+                        })
+                        .ok();
+                        break;
+                    }
+                }
+            }
+            worker.await;
+        })
+        .detach();
+    }
+
+    /// Delete an engine's files so it can be fetched again.
+    fn remove_speech(&mut self, engine: String, cx: &mut Context<Self>) {
+        if self.speech_busy.is_some() {
+            return;
+        }
+        let label = wb_host::speech_engine_label(&engine);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { wb_host::speech_remove_models(&engine) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.speech_msg = match result {
+                    Ok(_) => format!("已删除 {label} 的本地模型文件"),
+                    Err(e) => format!("删除 {label} 失败：{e}"),
+                };
+                this.refresh_speech(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Load the active engine so the first dictation is not slowed down by it.
+    fn warm_speech(&mut self, cx: &mut Context<Self>) {
+        let engine = wb_host::speech_active_engine();
+        self.speech_msg = format!("正在预热 {}…", wb_host::speech_engine_label(&engine));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let engine_for_worker = engine.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { wb_host::speech_warm(&engine_for_worker) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.speech_msg = match result {
+                    Ok(st) if st.ready => {
+                        this.speech_warm = true;
+                        format!(
+                            "{} 已热备，可以按 CapsLock 说话",
+                            wb_host::speech_engine_label(&engine)
+                        )
+                    }
+                    Ok(st) => st.message.unwrap_or_else(|| "模型尚未就绪".into()),
+                    Err(e) => format!("预热失败：{e:#}"),
+                };
+                this.refresh_speech(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Record briefly and report the loudest level, so the device can be verified.
+    fn probe_speech_device(&mut self, cx: &mut Context<Self>) {
+        let device = self.state.with(|s| s.prefs.voice.input_device.clone());
+        self.speech_devices = wb_host::voice_input_devices();
+        self.speech_msg = "正在测试麦克风，请对着麦克风说话（2.5 秒）…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    wb_host::voice_probe_level(
+                        device.as_deref(),
+                        std::time::Duration::from_millis(2_500),
+                    )
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.speech_msg = match result {
+                    // A quiet room is a valid outcome, not a broken device.
+                    Ok(level) if level < 0.01 => {
+                        "输入设备正常，但没有收到声音；请确认未静音后重试".to_string()
+                    }
+                    Ok(level) => format!("输入设备正常，峰值音量 {:.0}%", level * 100.0),
+                    Err(e) => format!("输入设备不可用：{e:#}"),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn bootstrap_tools(&mut self, cx: &mut Context<Self>) {
@@ -501,7 +701,6 @@ impl SettingsPane {
         let entity = cx.weak_entity();
         let theme_name = cx.theme().theme_name().clone();
         let font_count = self.font_count;
-        let speech_msg = self.speech_msg.clone();
         let data_msg = self.data_msg.clone();
         let agent = AgentForm {
             personality: self.personality.clone(),
@@ -519,7 +718,20 @@ impl SettingsPane {
             appearance_page(state.clone(), entity.clone(), theme_name, font_count)
                 .section("基础设置"),
             notify_page(state.clone(), entity.clone()).section("基础设置"),
-            voice_page(state.clone(), entity.clone(), speech_msg).section("基础设置"),
+            voice_page(
+                state.clone(),
+                entity.clone(),
+                VoiceForm {
+                    statuses: self.speech_statuses.clone(),
+                    busy: self.speech_busy.clone(),
+                    progress: self.speech_progress.clone(),
+                    devices: self.speech_devices.clone(),
+                    message: self.speech_msg.clone(),
+                    warm: self.speech_warm,
+                    scanning: self.speech_scanning,
+                },
+            )
+            .section("基础设置"),
         ];
         pages.extend(agent_pages(state.clone(), entity.clone(), agent));
         pages.push(
@@ -1065,78 +1277,633 @@ fn notify_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPage
         )
 }
 
-fn voice_page(
-    state: AppState,
-    entity: WeakEntity<SettingsPane>,
-    speech_msg: String,
-) -> SettingPage {
+/// Placeholder device id meaning "follow the system default".
+const SPEECH_DEFAULT_DEVICE: &str = "__system_default__";
+
+/// Messages from the background download thread back to the UI.
+enum WorkerEvent {
+    Progress(wb_host::DownloadProgress),
+    Finished(anyhow::Result<wb_host::SpeechStatus>),
+}
+
+/// Language choices for engines that accept one.
+fn speech_language_choices() -> Vec<(SharedString, SharedString)> {
+    [
+        ("auto", "自动识别"),
+        ("zh", "中文"),
+        ("en", "英文"),
+        ("ja", "日文"),
+        ("ko", "韩文"),
+        ("yue", "粤语"),
+    ]
+    .into_iter()
+    .map(|(value, label)| (value.into(), label.into()))
+    .collect()
+}
+
+/// Everything the voice page needs from `SettingsPane`.
+struct VoiceForm {
+    statuses: Vec<wb_host::SpeechStatus>,
+    busy: Option<String>,
+    progress: Option<wb_host::DownloadProgress>,
+    devices: Vec<String>,
+    message: String,
+    warm: bool,
+    /// A background status scan is in flight.
+    scanning: bool,
+}
+
+fn voice_page(state: AppState, entity: WeakEntity<SettingsPane>, form: VoiceForm) -> SettingPage {
+    let VoiceForm {
+        statuses,
+        busy,
+        progress,
+        devices,
+        message,
+        warm,
+        scanning,
+    } = form;
+
+    // Everything below the switch only exists once voice input is on.
+    let enabled = state.with(|s| s.prefs.voice.enabled);
     let read = state.clone();
-    let prep = entity.clone();
-    let download = entity.clone();
-    SettingPage::new("语音输入")
+    let toggle_state = state.clone();
+    let toggle_entity = entity.clone();
+    let page = SettingPage::new("语音输入")
         .icon(Icon::new(IconName::Mic))
         .resettable(false)
         .group(
             SettingGroup::new()
-                .title("CapsLock 说话")
-                .description("按住 CapsLock 录音，松手后转写并粘贴。需要麦克风权限和 SenseVoice。")
+                .title("语音输入")
+                .description(
+                    "本地识别，录音不出这台电脑。按住 CapsLock 说话，松手后转写并粘贴到当前输入框。",
+                )
                 .item(
                     SettingItem::new(
                         "启用语音输入",
                         SettingField::switch(
                             move |_| read.with(|s| s.prefs.voice.enabled),
                             move |enabled, cx: &mut App| {
-                                state.with_mut(|s| {
+                                toggle_state.with_mut(|s| {
                                     s.prefs.voice.enabled = enabled;
                                     s.prefs.voice.caps_lock_ptt = enabled;
                                 });
                                 voice_ptt_set_enabled(enabled);
-                                state.persist_prefs();
-                                poke(&entity, cx);
+                                toggle_state.persist_prefs();
+                                poke(&toggle_entity, cx);
                             },
                         ),
                     )
-                    .description("开启后按住 CapsLock 说话，松手结束。"),
-                )
-                .item(
-                    SettingItem::render(move |_, _, cx| {
-                        let muted = cx.theme().muted_foreground;
-                        let prep = prep.clone();
-                        let download = download.clone();
-                        let speech_msg = speech_msg.clone();
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("speech-prep")
-                                            .small()
-                                            .label("准备目录")
-                                            .on_click(move |_, _, cx| {
-                                                prep.update(cx, |this, cx| this.prepare_speech(cx))
-                                                    .ok();
-                                            }),
-                                    )
-                                    .child(
-                                        Button::new("speech-dl")
-                                            .small()
-                                            .primary()
-                                            .label("下载 SenseVoice")
-                                            .on_click(move |_, _, cx| {
-                                                download
-                                                    .update(cx, |this, cx| this.download_speech(cx))
-                                                    .ok();
-                                            }),
-                                    ),
-                            )
-                            .when(!speech_msg.is_empty(), |col| {
-                                col.child(div().text_sm().text_color(muted).child(speech_msg))
-                            })
-                    })
-                    .keywords(["SenseVoice", "模型", "下载"]),
+                    .description("开启后按住 CapsLock 说话，松手结束；关闭则收起下方全部设置。"),
                 ),
+        );
+
+    if !enabled {
+        return page;
+    }
+
+    page.group(engine_group(
+        state.clone(),
+        entity.clone(),
+        statuses,
+        busy,
+        progress,
+        scanning,
+    ))
+    .group(language_group(state.clone(), entity.clone(), devices))
+    .group(recording_group(entity, message, warm))
+}
+
+/// Engine picker plus the download / verify controls for the chosen engine.
+fn engine_group(
+    state: AppState,
+    entity: WeakEntity<SettingsPane>,
+    statuses: Vec<wb_host::SpeechStatus>,
+    busy: Option<String>,
+    progress: Option<wb_host::DownloadProgress>,
+    scanning: bool,
+) -> SettingGroup {
+    let options: Vec<(SharedString, SharedString)> = wb_host::speech_engines()
+        .into_iter()
+        .map(|info| (info.id.into(), info.label.into()))
+        .collect();
+    let engine_read = state.clone();
+    let engine_write = state.clone();
+    let engine_entity = entity.clone();
+    let active = active_engine(&state, &statuses);
+
+    SettingGroup::new()
+        .title("识别引擎")
+        .description("不同引擎的模型文件相互独立；换引擎后需要各自下载一次。")
+        .item(
+            SettingItem::new(
+                "识别引擎",
+                SettingField::dropdown(
+                    options,
+                    move |_| {
+                        engine_read
+                            .with(|s| active_engine_id(&s.prefs.voice.engine))
+                            .into()
+                    },
+                    move |value: SharedString, cx: &mut App| {
+                        let value = value.to_string();
+                        engine_write.with_mut(|s| s.prefs.voice.engine = Some(value));
+                        engine_write.persist_prefs();
+                        poke(&engine_entity, cx);
+                    },
+                ),
+            )
+            .description("切换后立即生效，按住 CapsLock 时使用所选引擎。"),
         )
+        .item(
+            SettingItem::render({
+                let entity = entity.clone();
+                move |_, _, cx| {
+                    render_engine_list(
+                        &entity,
+                        &statuses,
+                        busy.as_deref(),
+                        progress.as_ref(),
+                        scanning,
+                        &active,
+                        cx,
+                    )
+                }
+            })
+            .keywords(["SenseVoice", "QwenCTC", "Qwen3-ASR", "模型", "下载", "校验"]),
+        )
+}
+
+/// Language picker; only SenseVoice honours it, QwenCTC detects by itself.
+fn language_group(
+    state: AppState,
+    entity: WeakEntity<SettingsPane>,
+    devices: Vec<String>,
+) -> SettingGroup {
+    let lang_read = state.clone();
+    let lang_write = state.clone();
+    let lang_entity = entity.clone();
+    let device_read = state.clone();
+    let device_write = state.clone();
+    let device_entity = entity.clone();
+    let probe_entity = entity.clone();
+
+    let mut device_options: Vec<(SharedString, SharedString)> = vec![(
+        SPEECH_DEFAULT_DEVICE.into(),
+        match devices.first() {
+            Some(default) => format!("系统默认（{default}）").into(),
+            None => "系统默认".into(),
+        },
+    )];
+    device_options.extend(
+        devices
+            .iter()
+            .map(|name| (name.clone().into(), name.clone().into())),
+    );
+
+    SettingGroup::new()
+        .title("输入")
+        .item(
+            SettingItem::new(
+                "识别语言",
+                SettingField::dropdown(
+                    speech_language_choices(),
+                    move |_| {
+                        lang_read
+                            .with(|s| {
+                                s.prefs
+                                    .voice
+                                    .language
+                                    .clone()
+                                    .unwrap_or_else(|| "auto".into())
+                            })
+                            .into()
+                    },
+                    move |value: SharedString, cx: &mut App| {
+                        let value = value.to_string();
+                        lang_write.with_mut(|s| {
+                            s.prefs.voice.language =
+                                if value == "auto" { None } else { Some(value) };
+                        });
+                        lang_write.persist_prefs();
+                        poke(&lang_entity, cx);
+                    },
+                ),
+            )
+            .description("仅 SenseVoice 使用；QwenCTC 自行判断语种。"),
+        )
+        .item(
+            SettingItem::new(
+                "输入设备",
+                SettingField::dropdown(
+                    device_options,
+                    move |_| {
+                        device_read
+                            .with(|s| {
+                                s.prefs
+                                    .voice
+                                    .input_device
+                                    .clone()
+                                    .unwrap_or_else(|| SPEECH_DEFAULT_DEVICE.into())
+                            })
+                            .into()
+                    },
+                    move |value: SharedString, cx: &mut App| {
+                        let value = value.to_string();
+                        device_write.with_mut(|s| {
+                            s.prefs.voice.input_device = if value == SPEECH_DEFAULT_DEVICE {
+                                None
+                            } else {
+                                Some(value)
+                            };
+                        });
+                        device_write.persist_prefs();
+                        poke(&device_entity, cx);
+                    },
+                ),
+            )
+            .description("插拔耳机会重新读取设备；列表为空时表示系统没有可用的麦克风。"),
+        )
+        .item(
+            SettingItem::render(move |_, _, cx| {
+                let muted = cx.theme().muted_foreground;
+                let entity = probe_entity.clone();
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("speech-probe")
+                            .small()
+                            .label("测试麦克风")
+                            .on_click(move |_, _, cx| {
+                                entity
+                                    .update(cx, |this, cx| this.probe_speech_device(cx))
+                                    .ok();
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("录 2.5 秒并显示峰值音量，可用来确认设备是否可用。"),
+                    )
+            })
+            .keywords(["麦克风", "设备", "音量", "测试"]),
+        )
+}
+
+/// Recording hint plus the most recent status line.
+fn recording_group(entity: WeakEntity<SettingsPane>, message: String, warm: bool) -> SettingGroup {
+    let refresh = entity.clone();
+    let prepare = entity.clone();
+    let warm_entity = entity.clone();
+    SettingGroup::new()
+        .title("说话与状态")
+        .description("说出来，记下来。")
+        .item(
+            SettingItem::render(move |_, _, cx| {
+                let muted = cx.theme().muted_foreground;
+                let success = cx.theme().success;
+                let border = cx.theme().border;
+                let fg = cx.theme().foreground;
+                let refresh = refresh.clone();
+                let prepare = prepare.clone();
+                let warm_entity = warm_entity.clone();
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Button::new("speech-refresh")
+                                    .small()
+                                    .secondary()
+                                    .label("重新检查")
+                                    .on_click(move |_, _, cx| {
+                                        refresh.update(cx, |this, cx| this.refresh_speech(cx)).ok();
+                                    }),
+                            )
+                            .child(
+                                Button::new("speech-prepare")
+                                    .small()
+                                    .label("准备目录")
+                                    .on_click(move |_, _, cx| {
+                                        let engine = prepare
+                                            .upgrade()
+                                            .map(|pane| pane.read(cx).active_speech_engine())
+                                            .unwrap_or_else(wb_host::speech_active_engine);
+                                        prepare
+                                            .update(cx, |this, cx| this.prepare_speech(engine, cx))
+                                            .ok();
+                                    }),
+                            )
+                            .when(warm, |row| {
+                                row.child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            Icon::new(IconName::CircleCheck)
+                                                .size(px(14.))
+                                                .text_color(success),
+                                        )
+                                        .child(
+                                            div().text_sm().text_color(success).child("热备就绪"),
+                                        ),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(border)
+                            .p_2()
+                            .text_sm()
+                            .text_color(if warm { fg } else { muted })
+                            .child(if message.is_empty() {
+                                "尚未检查模型状态".to_string()
+                            } else {
+                                message.clone()
+                            }),
+                    )
+                    .when(!warm, |col| {
+                        col.child(
+                            Button::new("speech-warm")
+                                .small()
+                                .primary()
+                                .label("预热引擎")
+                                .on_click(move |_, _, cx| {
+                                    warm_entity.update(cx, |this, cx| this.warm_speech(cx)).ok();
+                                }),
+                        )
+                    })
+            })
+            .keywords(["预热", "状态", "检查", "就绪"]),
+        )
+}
+
+/// One card per engine: verified files, byte totals and its actions.
+fn render_engine_list(
+    entity: &WeakEntity<SettingsPane>,
+    statuses: &[wb_host::SpeechStatus],
+    busy: Option<&str>,
+    live: Option<&wb_host::DownloadProgress>,
+    scanning: bool,
+    active: &str,
+    cx: &App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let fg = cx.theme().foreground;
+    let border = cx.theme().border;
+    let success = cx.theme().success;
+    let warning = cx.theme().warning;
+    let radius = cx.theme().radius;
+
+    v_flex()
+        .w_full()
+        .gap_2()
+        .children(wb_host::speech_engines().into_iter().map(|info| {
+            let status = statuses.iter().find(|st| st.engine == info.id);
+            let selected = info.id == active;
+            let is_busy = busy == Some(info.id.as_str());
+            let ready = status.is_some_and(|st| st.ready);
+            // While a download runs, show the streamed file instead of the
+            // stale on-disk status.
+            let live = live.filter(|_| is_busy);
+            let (icon, tone, text) = match (live, status) {
+                (Some(p), _) => (
+                    IconName::LoaderCircle,
+                    warning,
+                    format!("正在下载 {}（{}%）", p.file, p.percent()),
+                ),
+                (None, Some(st)) if st.ready => (
+                    IconName::CircleCheck,
+                    success,
+                    if selected {
+                        "本地资源已准备，识别引擎保持热备"
+                    } else {
+                        "本地资源已准备"
+                    }
+                    .to_string(),
+                ),
+                // Files are fine but the runtime is missing: downloading again
+                // would not help, so say what is actually wrong.
+                (None, Some(st)) if st.runtime_missing => (
+                    IconName::CircleAlert,
+                    warning,
+                    st.message
+                        .clone()
+                        .unwrap_or_else(|| "缺少识别运行时".into()),
+                ),
+                (None, Some(st)) => (
+                    IconName::CircleAlert,
+                    warning,
+                    st.message.clone().unwrap_or_else(|| "尚未下载".into()),
+                ),
+                (None, None) => (
+                    IconName::CircleAlert,
+                    warning,
+                    "无法读取模型目录".to_string(),
+                ),
+            };
+            // Before the background scan finishes there is no status yet;
+            // saying the directory is unreadable would be wrong.
+            let (icon, tone, text) = if status.is_none() && scanning {
+                (
+                    IconName::LoaderCircle,
+                    warning,
+                    "正在检查本地模型…".to_string(),
+                )
+            } else {
+                (icon, tone, text)
+            };
+            let progress = match live {
+                Some(p) if p.total > 0 => p.done as f32 / p.total as f32,
+                _ => status.map(|st| st.progress()).unwrap_or(0.0),
+            };
+            let progress = progress.clamp(0.0, 1.0);
+            let bytes = match live {
+                Some(p) => format_bytes(p.done, p.total.max(p.done)),
+                None => status
+                    .map(|st| format_bytes(st.present_bytes, st.total_bytes))
+                    .unwrap_or_else(|| "—".into()),
+            };
+            let download = entity.clone();
+            let remove = entity.clone();
+            let download_id = info.id.clone();
+            let remove_id = info.id.clone();
+            let can_remove = status.is_some_and(|st| st.present_bytes > 0);
+
+            v_flex()
+                .w_full()
+                .gap_2()
+                .rounded(radius)
+                .border_1()
+                .border_color(if selected { tone } else { border })
+                .p_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(Icon::new(icon).size(px(16.)).text_color(tone))
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_semibold()
+                                                        .text_color(fg)
+                                                        .child(info.label.clone()),
+                                                )
+                                                .when(selected, |row| {
+                                                    row.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child("当前使用"),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(info.detail.clone()),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "speech-dl-{}",
+                                        info.id
+                                    )))
+                                    .small()
+                                    .when(!ready, |button| button.primary())
+                                    .disabled(busy.is_some())
+                                    .label(if is_busy {
+                                        "下载中"
+                                    } else if ready {
+                                        "重新下载"
+                                    } else {
+                                        "下载"
+                                    })
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let download_id = download_id.clone();
+                                            download
+                                                .update(cx, |this, cx| {
+                                                    this.download_speech(download_id, cx)
+                                                })
+                                                .ok();
+                                        },
+                                    ),
+                                )
+                                .when(can_remove && busy.is_none(), |row| {
+                                    row.child(
+                                        Button::new(SharedString::from(format!(
+                                            "speech-rm-{}",
+                                            info.id
+                                        )))
+                                        .small()
+                                        .ghost()
+                                        .label("删除")
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let remove_id = remove_id.clone();
+                                                remove
+                                                    .update(cx, |this, cx| {
+                                                        this.remove_speech(remove_id, cx)
+                                                    })
+                                                    .ok();
+                                            },
+                                        ),
+                                    )
+                                }),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().text_xs().text_color(tone).child(text))
+                                .child(div().text_xs().text_color(muted).child(bytes)),
+                        )
+                        .child(
+                            div().w_full().h(px(3.)).rounded_full().bg(border).child(
+                                div().h_full().rounded_full().w(relative(progress)).bg(tone),
+                            ),
+                        )
+                        .child(div().text_xs().text_color(muted).child(format!(
+                            "{} · 约 {} MB",
+                            info.languages,
+                            info.total_bytes / 1_000_000
+                        ))),
+                )
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+fn format_bytes(present: u64, total: u64) -> String {
+    let mb = |bytes: u64| bytes as f64 / 1_048_576.0;
+    if total == 0 {
+        return "—".into();
+    }
+    format!("{:.0} / {:.0} MB", mb(present), mb(total))
+}
+
+/// Stored engine id, falling back to SenseVoice.
+fn active_engine_id(engine: &Option<String>) -> String {
+    engine
+        .as_deref()
+        .map(wb_host::normalize_engine)
+        .unwrap_or_else(|| wb_host::ENGINE_SENSEVOICE.into())
+}
+
+/// The engine to act on: the stored choice, else the first one that is ready.
+fn active_engine(state: &AppState, statuses: &[wb_host::SpeechStatus]) -> String {
+    let stored = state.with(|s| active_engine_id(&s.prefs.voice.engine));
+    if statuses.iter().any(|st| st.engine == stored) {
+        return stored;
+    }
+    statuses
+        .iter()
+        .find(|st| st.ready)
+        .map(|st| st.engine.clone())
+        .unwrap_or(stored)
+}
+
+impl SettingsPane {
+    fn active_speech_engine(&self) -> String {
+        self.speech_statuses
+            .iter()
+            .find(|st| st.ready)
+            .map(|st| st.engine.clone())
+            .unwrap_or_else(|| active_engine_id(&self.state.with(|s| s.prefs.voice.engine.clone())))
+    }
 }
 
 fn agent_pages(
@@ -1510,6 +2277,7 @@ fn skill_dir_row(row: SkillDirRow) -> impl IntoElement {
     let toggle_path = path.clone();
     let remove_path = path.clone();
     h_flex()
+        .id(SharedString::from(format!("skill-dir-row-{index}")))
         .w_full()
         .items_center()
         .gap_3()
@@ -1518,7 +2286,7 @@ fn skill_dir_row(row: SkillDirRow) -> impl IntoElement {
         .rounded(radius)
         .border_1()
         .border_color(border)
-        .bg(card)
+        .hover(|row| row.bg(card))
         .child(Icon::new(IconName::Folder).size(px(16.)).text_color(muted))
         .child(
             v_flex()
@@ -1607,6 +2375,7 @@ fn skill_entry_row(row: SkillEntryRow) -> impl IntoElement {
     };
     let label = name.clone();
     h_flex()
+        .id(SharedString::from(format!("skill-row-{index}")))
         .w_full()
         .items_center()
         .gap_3()
@@ -1615,7 +2384,7 @@ fn skill_entry_row(row: SkillEntryRow) -> impl IntoElement {
         .rounded(radius)
         .border_1()
         .border_color(border)
-        .bg(card)
+        .hover(|row| row.bg(card))
         .child(
             Icon::new(IconName::FileText)
                 .size(px(16.))
@@ -1989,6 +2758,12 @@ fn about_page() -> SettingPage {
 impl Render for SettingsPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bootstrap_tools(cx);
+        // Device list and file checks must not run on every frame, so they are
+        // loaded once when the pane first paints.
+        if !self.speech_started {
+            self.speech_started = true;
+            self.refresh_speech(cx);
+        }
         div().size_full().child(
             Settings::new("wb-settings")
                 .search_placeholder("搜索设置")

@@ -209,18 +209,30 @@ fn filter_button(
         })
 }
 
+#[derive(Clone, Copy)]
+struct ToolRowPalette {
+    border: Hsla,
+    fg: Hsla,
+    muted: Hsla,
+    accent: Hsla,
+    hover: Hsla,
+    radius: Pixels,
+}
+
 fn render_group(
     title: &str,
     rows: &[ToolRow],
     entity: WeakEntity<SettingsPane>,
     cx: &App,
 ) -> AnyElement {
-    let border = cx.theme().border;
-    let card = cx.theme().secondary;
-    let fg = cx.theme().foreground;
-    let muted = cx.theme().muted_foreground;
-    let accent = cx.theme().success;
-    let radius = cx.theme().radius;
+    let palette = ToolRowPalette {
+        border: cx.theme().border,
+        fg: cx.theme().foreground,
+        muted: cx.theme().muted_foreground,
+        accent: cx.theme().success,
+        hover: cx.theme().accent.opacity(0.35),
+        radius: cx.theme().radius,
+    };
     v_flex()
         .w_full()
         .gap_2()
@@ -228,26 +240,18 @@ fn render_group(
             div()
                 .text_sm()
                 .font_semibold()
-                .text_color(fg)
+                .text_color(palette.fg)
                 .child(title.to_string()),
         )
         .child(
             v_flex()
                 .w_full()
-                .rounded(radius)
-                .border_1()
-                .border_color(border)
-                .bg(card)
-                .overflow_hidden()
                 .children(rows.iter().enumerate().map(|(index, row)| {
                     tool_row(
                         row.clone(),
                         index + 1 == rows.len(),
                         entity.clone(),
-                        border,
-                        fg,
-                        muted,
-                        accent,
+                        palette,
                     )
                 })),
         )
@@ -258,21 +262,29 @@ fn tool_row(
     row: ToolRow,
     last: bool,
     entity: WeakEntity<SettingsPane>,
-    border: Hsla,
-    fg: Hsla,
-    muted: Hsla,
-    accent: Hsla,
+    palette: ToolRowPalette,
 ) -> impl IntoElement {
+    let ToolRowPalette {
+        border,
+        fg,
+        muted,
+        accent,
+        hover,
+        radius,
+    } = palette;
     let id = row.id;
     let (status, installed) = status_of(&row);
     let toggle_entity = entity.clone();
     let detail_entity = entity;
     h_flex()
+        .id(SharedString::from(format!("tool-row-{id}")))
         .w_full()
         .items_start()
         .gap_3()
-        .px_3()
-        .py_3()
+        .px_2()
+        .py_2()
+        .rounded(radius)
+        .hover(move |row| row.bg(hover))
         .when(!last, |row| row.border_b_1().border_color(border))
         .child(
             v_flex()
@@ -280,11 +292,17 @@ fn tool_row(
                 .min_w(px(0.))
                 .gap_1()
                 .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(fg)
-                        .child(row.name),
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(tool_icon(id)).size(px(16.)).text_color(fg))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(fg)
+                                .child(row.name),
+                        ),
                 )
                 .child(div().text_xs().text_color(muted).child(row.description)),
         )
@@ -362,6 +380,14 @@ fn tool_dialog(
                 ))
                 .child(detail_line("位置", location.unwrap_or_else(|| "—".into())))
                 .child(detail_line("获取", row.lane_label))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .pt_2()
+                        .child(div().text_sm().font_semibold().child("安装介绍"))
+                        .child(div().text_sm().child(row.install_guide)),
+                )
                 .when_some(row.message, |col, message| {
                     col.child(div().text_sm().child(message))
                 }),
@@ -422,6 +448,49 @@ fn detail_line(label: &'static str, value: impl Into<SharedString>) -> impl Into
         .items_start()
         .child(div().w(px(48.)).text_sm().child(label))
         .child(div().flex_1().text_sm().child(value))
+}
+
+fn tool_icon(id: &str) -> gpui_kit::assets::IconName {
+    use gpui_kit::assets::IconName::{
+        AppWindow, Binary, Box, Braces, ChartArea, ChartBar, ChartLine, Chrome, Clapperboard, Code,
+        Coffee, Cog, Database, FileCode, FileText, FolderSync, Gem, Hash, Layers, Monitor,
+        MousePointer, Package, PackagePlus, Pen, PenTool, ScanText, Search, Terminal, Type,
+        Workflow,
+    };
+    match id {
+        "uv" => Box,
+        "node" => FileCode,
+        "git" => gpui_kit::assets::IconName::GitBranch,
+        "ripgrep" => Search,
+        "chromium" => Chrome,
+        "playwright" => Monitor,
+        "browser-mcp" => MousePointer,
+        "poppler" => FileText,
+        "cairo" => PenTool,
+        "mermaid" => Workflow,
+        "fontwasm" => Type,
+        "pp-ocr" => ScanText,
+        "inkscape" => Pen,
+        "ffmpeg" => Clapperboard,
+        "openssh" => Terminal,
+        "sshfs" => FolderSync,
+        "go" => Code,
+        "java-maven" => Coffee,
+        "rust" => Cog,
+        "ruby" => Gem,
+        "php" => Hash,
+        "dotnet" => Layers,
+        "webview2" => AppWindow,
+        "redis" => Database,
+        "nsis" => Package,
+        "inno" => PackagePlus,
+        "readelf" => Binary,
+        "matplotlib" => ChartLine,
+        "plotly" => ChartBar,
+        "altair" => ChartArea,
+        "bokeh" => Braces,
+        _ => Cog,
+    }
 }
 
 fn status_of(row: &ToolRow) -> (&'static str, bool) {

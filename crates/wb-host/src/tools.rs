@@ -71,6 +71,7 @@ pub struct ToolRow {
     pub busy: bool,
     pub fetchable: bool,
     pub lane_label: &'static str,
+    pub install_guide: String,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +138,33 @@ impl Spec {
             Fetch::Pip(_) => "Python（uv 或 pip）",
             Fetch::Ocr => "下载模型",
             Fetch::Rustup => "rustup",
+        }
+    }
+
+    fn install_guide(self) -> String {
+        match self.fetch {
+            Fetch::None => match self.id {
+                "uv" => "本机需要能直接运行 uv。可用安装脚本装到用户目录，或在已有 Scoop 时执行 scoop install uv。装好后同一环境里应有 uv 和 uvx。".into(),
+                "node" => "本机需要能直接运行 node。从 nodejs.org 安装，或执行 scoop install nodejs。装好后同一目录里应有 node、npm 和 npx。".into(),
+                "openssh" => "在 Windows「设置 → 应用 → 可选功能」里安装 OpenSSH 客户端。装好后应能运行 ssh.exe。".into(),
+                "webview2" => "安装微软 Evergreen WebView2 Runtime。Windows 11 多数已经自带，装好后注册表里能看到版本号。".into(),
+                "readelf" => "安装带 readelf 的 binutils，或执行 scoop install llvm，之后使用 llvm-readelf.exe。".into(),
+                _ => "本机需要已经装好这个命令。装好后点「扫描本机」。".into(),
+            },
+            Fetch::Scoop(pkgs) => format!(
+                "需要已经装好 Scoop。获取时执行 scoop install {}。也可以用官网安装包，装好后点「扫描本机」。",
+                pkgs.join(" ")
+            ),
+            Fetch::Npm(pkg) => format!(
+                "需要本机已有 Node.js 和 npm。获取时执行 npm install -g {pkg}，装到 npm 的全局目录。"
+            ),
+            Fetch::Playwright => "需要本机已有 Node.js。获取时执行 npx --yes playwright install chromium，浏览器下到本机的 Playwright 缓存目录。".into(),
+            Fetch::Pip(pkg) => format!(
+                "需要 uv 或 Python。获取时在工具目录里建 py 虚拟环境，再执行 uv pip install {pkg}。没有 uv 时改用 python -m venv 和 pip install {pkg}。不会改系统里的 Python。"
+            ),
+            Fetch::Ocr => "从 RapidOCR 的 ModelScope 仓库下载 PP-OCRv6 small 的检测模型、方向分类模型、识别模型和字典，保存到数据目录的 models/paddleocr。".into(),
+            Fetch::FontWasm => "需要 Node.js 24 或更高。把 Fontwasm 解码器放到工具目录的 fontwasm 文件夹，然后点「扫描本机」。".into(),
+            Fetch::Rustup => "本机已有 rustup 时，获取会执行 rustup toolchain install stable。还没有 rustup 时，先从 rustup.rs 安装，再点获取。".into(),
         }
     }
 }
@@ -214,6 +242,8 @@ pub fn read_tool_catalog() -> ToolCatalog {
 }
 
 pub fn scan_tool_catalog() -> ToolCatalog {
+    // A rescan must observe the current machine, not what startup saw.
+    crate::shell::which_bin_cache_clear();
     let _ = fs::create_dir_all(tools_directory());
     let ctx = ProbeCtx::full();
     let hits: Vec<(String, Hit)> = specs()
@@ -1083,8 +1113,32 @@ fn run_program_path(path: &Path, args: &[String]) -> Result<CmdOut, String> {
     run_resolved(&label, args, &label)
 }
 
+/// Extensionless `scoop` and `npm` shims are shell scripts. Run the sibling `.cmd` or `.exe`.
+fn resolve_launcher(resolved: &str) -> String {
+    let lower = resolved.to_ascii_lowercase();
+    if lower.ends_with(".exe")
+        || lower.ends_with(".cmd")
+        || lower.ends_with(".bat")
+        || lower.ends_with(".com")
+    {
+        return resolved.to_string();
+    }
+    #[cfg(windows)]
+    {
+        let path = Path::new(resolved);
+        for ext in ["exe", "cmd", "bat", "com"] {
+            let candidate = path.with_extension(ext);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    resolved.to_string()
+}
+
 fn run_resolved(resolved: &str, args: &[String], label: &str) -> Result<CmdOut, String> {
-    let mut cmd = Command::new(resolved);
+    let resolved = resolve_launcher(resolved);
+    let mut cmd = Command::new(&resolved);
     cmd.args(args);
     hide_console(&mut cmd);
     cmd.stdin(Stdio::null());
@@ -1275,6 +1329,7 @@ fn catalog_from_store(stored: &StoredCatalog) -> ToolCatalog {
                 busy: saved.is_some_and(|tool| tool.busy),
                 fetchable: spec.fetchable(),
                 lane_label: spec.lane_label(),
+                install_guide: spec.install_guide(),
             }
         })
         .collect();
@@ -1392,6 +1447,21 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(windows)]
+    #[test]
+    fn launcher_uses_sibling_cmd_instead_of_shell_script() {
+        let dir = std::env::temp_dir().join(format!("wb-launcher-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("npm");
+        let cmd = dir.join("npm.cmd");
+        fs::write(&script, "#!/bin/sh\necho no\n").unwrap();
+        fs::write(&cmd, "@echo off\r\n").unwrap();
+        let resolved = resolve_launcher(&script.display().to_string());
+        assert_eq!(resolved, cmd.display().to_string());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn catalog_matches_the_settings_groups() {
         let specs = specs();
@@ -1427,6 +1497,22 @@ mod tests {
             specs
                 .iter()
                 .any(|spec| spec.id == "matplotlib" && spec.fetchable())
+        );
+        let catalog = catalog_from_store(&default_store());
+        assert!(catalog.rows.iter().all(|row| !row.install_guide.is_empty()));
+        assert!(
+            catalog
+                .row("git")
+                .unwrap()
+                .install_guide
+                .contains("scoop install git")
+        );
+        assert!(
+            catalog
+                .row("pp-ocr")
+                .unwrap()
+                .install_guide
+                .contains("PP-OCRv6")
         );
     }
 
