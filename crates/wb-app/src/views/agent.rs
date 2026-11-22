@@ -2491,16 +2491,42 @@ impl AgentPane {
                     .child(if empty_chat {
                         v_flex()
                             .flex_1()
-                            .gap_2()
+                            .gap_3()
                             .justify_center()
                             .items_center()
-                            .child(div().text_sm().font_bold().child("开始一段 Agent 对话"))
+                            .child(div().text_lg().font_bold().child("开始一段 Agent 对话"))
                             .child(div().text_xs().text_color(muted).child(
-                                "Enter 发送 · Shift+Enter 换行 · / 斜杠 · ↑↓ 历史 · Ctrl+N 聚焦",
+                                "Enter 发送 · Shift+Enter 换行 · @ 引用文件 · / 斜杠命令 · ↑↓ 历史",
                             ))
                             .child(
+                                v_flex().gap_1().children(
+                                    [
+                                        ("@ 引用工作区文件", "@"),
+                                        ("/ 查看斜杠命令", "/"),
+                                        ("Ctrl+N 聚焦输入框", "ctrl-n"),
+                                    ]
+                                    .into_iter()
+                                    .map(|(label, id)| {
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .px_1()
+                                                    .rounded(px(3.))
+                                                    .bg(border)
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(id.to_string()),
+                                            )
+                                            .child(div().text_xs().text_color(muted).child(label))
+                                            .into_any_element()
+                                    }),
+                                ),
+                            )
+                            .child(
                                 h_flex().gap_2().flex_wrap().children(
-                                    ["/task_list", "/project_list", "/goal", "/clear"]
+                                    ["/task_list", "/project_list", "/goal", "/clear", "/compact"]
                                         .into_iter()
                                         .map(|cmd| {
                                             Button::new(SharedString::from(format!(
@@ -2803,6 +2829,49 @@ impl AgentPane {
                                 } else {
                                     border
                                 })
+                                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                                    let root = this.workspace_root();
+                                    let mut names: Vec<String> = Vec::new();
+                                    for path in paths.paths() {
+                                        let label = match &root {
+                                            Some(root) => path
+                                                .strip_prefix(std::path::Path::new(root))
+                                                .map(|p| p.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|_| {
+                                                    path.file_name()
+                                                        .map(|n| n.to_string_lossy().into_owned())
+                                                        .unwrap_or_else(|| {
+                                                            path.to_string_lossy().into_owned()
+                                                        })
+                                                }),
+                                            None => path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|| {
+                                                    path.to_string_lossy().into_owned()
+                                                }),
+                                        };
+                                        names.push(format!("@{label}"));
+                                    }
+                                    if names.is_empty() {
+                                        return;
+                                    }
+                                    let inserted = names.join(" ");
+                                    let current = this.input.read(cx).value().to_string();
+                                    let next = if current.trim().is_empty() {
+                                        inserted
+                                    } else {
+                                        format!("{current} {inserted}")
+                                    };
+                                    let len = next.len();
+                                    this.input.update(cx, |state, cx| {
+                                        state.set_value(&next, window, cx);
+                                        state.set_selected_range(len..len, cx);
+                                    });
+                                    window.focus(&this.input.focus_handle(cx), cx);
+                                    this.status = format!("已插入 {} 个文件引用", names.len());
+                                    cx.notify();
+                                }))
                                 .when(preview_on, |col| {
                                     col.child(
                                         v_flex()

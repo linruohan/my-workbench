@@ -94,8 +94,8 @@ impl AppState {
             inner: Arc::new(Mutex::new(AppStateInner {
                 repo,
                 prefs,
-                nav,
-                nav_before_settings: AppNav::Today,
+                nav: AppNav::Settings,
+                nav_before_settings: nav,
                 active_project_id: None,
                 active_tag_id: None,
                 active_thread_id: None,
