@@ -84,6 +84,8 @@ pub struct AgentPane {
     /// Show the draft as rendered Markdown above the input.
     composer_preview: bool,
     composer_preview_scroll: ScrollHandle,
+    /// `(workspace root, branch)` cache so rendering never shells out to git.
+    branch_cache: Option<(String, String)>,
     /// Ask approvals that already have an auto-answer timer running.
     ask_timers: HashSet<String>,
     status: String,
@@ -137,6 +139,7 @@ impl AgentPane {
             mention_dismissed: false,
             composer_preview: false,
             composer_preview_scroll: ScrollHandle::new(),
+            branch_cache: None,
             ask_timers: HashSet::new(),
             status: String::new(),
             prompt_history: Vec::new(),
@@ -1471,6 +1474,19 @@ impl AgentPane {
         true
     }
 
+    /// Git branch of the active workspace, cached per root.
+    fn workspace_branch(&mut self) -> Option<String> {
+        let root = self.workspace_root()?;
+        if let Some((cached_root, branch)) = &self.branch_cache {
+            if cached_root == &root {
+                return Some(branch.clone());
+            }
+        }
+        let branch = wb_host::git_branch(std::path::Path::new(&root))?;
+        self.branch_cache = Some((root, branch.clone()));
+        Some(branch)
+    }
+
     fn workspace_root(&self) -> Option<String> {
         self.state.with(|s| {
             let tid = s.active_thread_id.clone()?;
@@ -2053,6 +2069,7 @@ impl AgentPane {
                         .is_some_and(|n| n.to_lowercase().contains(&find_q))
             })
             .collect();
+        let visible_count = visible_messages.len();
         let empty_chat = visible_messages.is_empty() && find_q.is_empty();
         let filter_miss = visible_messages.is_empty() && !find_q.is_empty();
         let draft_text = self.stream_draft_text();
@@ -2488,6 +2505,41 @@ impl AgentPane {
                     .when(!approval_rows.is_empty(), |col| {
                         col.child(v_flex().gap_2().children(approval_rows))
                     })
+                    .when(!find_q.is_empty(), |col| {
+                        let hits = visible_count;
+                        let clearing = find_q.clone();
+                        col.child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(accent.opacity(0.5))
+                                .bg(secondary)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(accent)
+                                        .child(format!("筛选「{clearing}」· {hits} 条")),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("agent-find-clear-pill")
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Esc 清除")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.find.update(cx, |i, cx| {
+                                                i.set_value("", window, cx);
+                                            });
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
                     .child(if empty_chat {
                         v_flex()
                             .flex_1()
@@ -2816,12 +2868,21 @@ impl AgentPane {
                             let draft_empty = draft.trim().is_empty();
                             let draft_chars = draft.chars().count();
                             let preview_on = self.composer_preview && !draft_empty;
+                            let branch = self.workspace_branch();
+                            let root_name = self
+                                .workspace_root()
+                                .and_then(|root| {
+                                    std::path::Path::new(&root)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                })
+                                .unwrap_or_else(|| "本机".into());
                             v_flex()
                                 .id("agent-composer")
                                 .w_full()
                                 .gap_1p5()
-                                .p_2()
-                                .rounded(px(12.))
+                                .p_2p5()
+                                .rounded(px(22.))
                                 .bg(secondary)
                                 .border_1()
                                 .border_color(if is_focused {
@@ -2902,9 +2963,56 @@ impl AgentPane {
                                     )
                                 })
                                 .child(
-                                    v_flex()
+                                    // Pill row: attach · input · model · mic · send.
+                                    h_flex()
                                         .w_full()
-                                        .gap_0p5()
+                                        .items_end()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .id("agent-attach")
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .size(px(28.))
+                                                .flex_shrink_0()
+                                                .rounded_full()
+                                                .border_1()
+                                                .border_color(border)
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(border))
+                                                .child(
+                                                    Icon::new(IconName::Plus)
+                                                        .xsmall()
+                                                        .text_color(muted),
+                                                )
+                                                .on_click(cx.listener(
+                                                    |this, _, window, cx| {
+                                                        let current =
+                                                            this.input.read(cx).value().to_string();
+                                                        let next = if current.trim().is_empty() {
+                                                            "@".to_string()
+                                                        } else {
+                                                            format!("{current} @")
+                                                        };
+                                                        let len = next.len();
+                                                        this.input.update(cx, |state, cx| {
+                                                            state.set_value(&next, window, cx);
+                                                            state.set_selected_range(len..len, cx);
+                                                        });
+                                                        window.focus(
+                                                            &this.input.focus_handle(cx),
+                                                            cx,
+                                                        );
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_0p5()
                                         .capture_action(cx.listener(
                                             |this, _: &MoveDown, window, cx| {
                                                 let hits = this.live_slash(cx);
@@ -2989,7 +3097,7 @@ impl AgentPane {
                                             },
                                         ))
                                         .capture_action(cx.listener(
-                                            |this, _: &InputEscape, _, cx| {
+                                            |this, _: &InputEscape, window, cx| {
                                                 if !this.live_slash(cx).is_empty() {
                                                     this.slash_dismissed = true;
                                                     this.slash_selected = 0;
@@ -3001,6 +3109,13 @@ impl AgentPane {
                                                     cx.stop_propagation();
                                                 } else if this.composer_preview {
                                                     this.composer_preview = false;
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                } else if !this.find.read(cx).value().is_empty() {
+                                                    let find = this.find.clone();
+                                                    find.update(cx, |i, cx| {
+                                                        i.set_value("", window, cx);
+                                                    });
                                                     cx.notify();
                                                     cx.stop_propagation();
                                                 } else if this.ghost_suffix.take().is_some() {
@@ -3036,24 +3151,197 @@ impl AgentPane {
                                                     ),
                                             )
                                         }),
+                                        )
+                                        .child(
+                                            // Right cluster inside the pill: model picker,
+                                            // voice, then the round send/stop button.
+                                            h_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .flex_shrink_0()
+                                                .child(
+                                                    h_flex()
+                                                        .id("agent-model-picker")
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded(px(8.))
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .cursor_pointer()
+                                                        .hover(|s| {
+                                                            s.bg(border).text_color(accent)
+                                                        })
+                                                        .child(model_label.clone())
+                                                        .child(
+                                                            Icon::new(IconName::ChevronDown)
+                                                                .xsmall()
+                                                                .text_color(muted),
+                                                        )
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.cycle_thread_model(cx);
+                                                        })),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("agent-mic")
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .size(px(28.))
+                                                        .rounded_full()
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.bg(border))
+                                                        .child(
+                                                            Icon::new(IconName::Mic)
+                                                                .xsmall()
+                                                                .text_color(muted),
+                                                        )
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            let on = this.state.with(|s| {
+                                                                s.prefs.voice.enabled
+                                                                    || s.prefs.voice.caps_lock_ptt
+                                                            });
+                                                            wb_host::voice_ptt_set_enabled(true);
+                                                            this.status = if on {
+                                                                "按住 Caps Lock 说话".into()
+                                                            } else {
+                                                                "语音未启用，可到设置 → 语音开启（Caps Lock 说话）"
+                                                                    .into()
+                                                            };
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                                .child({
+                                                    let busy = self.busy;
+                                                    let enabled = !draft_empty;
+                                                    div()
+                                                        .id("agent-send")
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .size(px(30.))
+                                                        .flex_shrink_0()
+                                                        .rounded_full()
+                                                        .bg(if busy {
+                                                            danger
+                                                        } else if enabled {
+                                                            accent
+                                                        } else {
+                                                            border
+                                                        })
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.opacity(0.85))
+                                                        .child(
+                                                            Icon::new(if busy {
+                                                                IconName::Square
+                                                            } else {
+                                                                IconName::ArrowUp
+                                                            })
+                                                            .small()
+                                                            .text_color(if busy || enabled {
+                                                                cx.theme().background
+                                                            } else {
+                                                                muted
+                                                            }),
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                if this.busy {
+                                                                    this.stop_turn(cx);
+                                                                    return;
+                                                                }
+                                                                if this.accept_slash_if_open(
+                                                                    window, cx,
+                                                                ) {
+                                                                    return;
+                                                                }
+                                                                let text = this
+                                                                    .input
+                                                                    .read(cx)
+                                                                    .value()
+                                                                    .to_string();
+                                                                if !text.trim().is_empty() {
+                                                                    this.input.update(cx, |i, cx| {
+                                                                        i.set_value("", window, cx);
+                                                                    });
+                                                                    this.send(text, cx);
+                                                                }
+                                                            },
+                                                        ))
+                                                }),
+                                        ),
                                 )
                                 .child(
-                                    // Tool row: permission/model chips on the left,
-                                    // preview toggle + send on the right.
+                                    // Meta row under the pill: context chips and status.
                                     h_flex()
                                         .w_full()
                                         .items_center()
-                                        .justify_between()
                                         .gap_2()
+                                        .px_1()
                                         .child(
                                             h_flex()
                                                 .flex_1()
                                                 .min_w_0()
                                                 .items_center()
                                                 .gap_1()
+                                                .when_some(branch, |row, branch| {
+                                                    row.child(
+                                                        h_flex()
+                                                            .id("agent-branch-chip")
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .px_1p5()
+                                                            .py_0p5()
+                                                            .rounded(px(6.))
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .hover(|s| s.text_color(accent))
+                                                            .child(
+                                                                Icon::new(
+                                                                    gpui_kit::assets::IconName::GitBranch,
+                                                                )
+                                                                .xsmall()
+                                                                .text_color(muted),
+                                                            )
+                                                            .child(branch)
+                                                            .child(
+                                                                Icon::new(IconName::ChevronDown)
+                                                                    .xsmall()
+                                                                    .text_color(muted),
+                                                            ),
+                                                    )
+                                                })
+                                                .child(
+                                                    h_flex()
+                                                        .id("agent-env-chip")
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded(px(6.))
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .hover(|s| s.text_color(accent))
+                                                        .child(
+                                                            Icon::new(
+                                                                gpui_kit::assets::IconName::Computer,
+                                                            )
+                                                            .xsmall()
+                                                            .text_color(muted),
+                                                        )
+                                                        .child(root_name.clone())
+                                                        .child(
+                                                            Icon::new(IconName::ChevronDown)
+                                                                .xsmall()
+                                                                .text_color(muted),
+                                                        ),
+                                                )
                                                 .child(
                                                     h_flex()
                                                         .id("agent-perm-chip")
+
                                                         .items_center()
                                                         .gap_1()
                                                         .px_2()
@@ -3151,20 +3439,23 @@ impl AgentPane {
                                             h_flex()
                                                 .items_center()
                                                 .gap_1()
+                                                .flex_shrink_0()
+                                                .when(draft_chars > 0, |row| {
+                                                    row.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(format!("{draft_chars} 字")),
+                                                    )
+                                                })
                                                 .child(
                                                     h_flex()
                                                         .id("agent-preview-toggle")
                                                         .items_center()
                                                         .gap_1()
-                                                        .px_2()
+                                                        .px_1p5()
                                                         .py_0p5()
                                                         .rounded(px(6.))
-                                                        .border_1()
-                                                        .border_color(if self.composer_preview {
-                                                            accent.opacity(0.65)
-                                                        } else {
-                                                            border
-                                                        })
                                                         .text_xs()
                                                         .text_color(if self.composer_preview {
                                                             accent
@@ -3172,8 +3463,12 @@ impl AgentPane {
                                                             muted
                                                         })
                                                         .cursor_pointer()
-                                                        .hover(|s| s.text_color(accent))
-                                                        .child("预览")
+                                                        .hover(|s| s.bg(border))
+                                                        .child(if self.composer_preview {
+                                                            "预览开"
+                                                        } else {
+                                                            "预览"
+                                                        })
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
                                                                 this.composer_preview =
@@ -3185,53 +3480,7 @@ impl AgentPane {
                                                                 cx.notify();
                                                             },
                                                         )),
-                                                )
-                                                .child(
-                                                    Button::new("send")
-                                                        .primary()
-                                                        .label(if self.busy {
-                                                            "排队"
-                                                        } else {
-                                                            "发送"
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            |this, _, window, cx| {
-                                                                if this.accept_slash_if_open(
-                                                                    window, cx,
-                                                                ) {
-                                                                    return;
-                                                                }
-                                                                let text = this
-                                                                    .input
-                                                                    .read(cx)
-                                                                    .value()
-                                                                    .to_string();
-                                                                if !text.trim().is_empty() {
-                                                                    this.input.update(
-                                                                        cx,
-                                                                        |i, cx| {
-                                                                            i.set_value(
-                                                                                "", window, cx,
-                                                                            );
-                                                                        },
-                                                                    );
-                                                                    this.send(text, cx);
-                                                                }
-                                                            },
-                                                        )),
-                                                )
-                                                .when(self.busy, |row| {
-                                                    row.child(
-                                                        Button::new("agent-stop")
-                                                            .danger()
-                                                            .label("中止")
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.stop_turn(cx);
-                                                                },
-                                                            )),
-                                                    )
-                                                }),
+                                                ),
                                         ),
                                 )
                                 .into_any_element()
