@@ -96,6 +96,8 @@ pub struct AgentPane {
     composer_preview_scroll: ScrollHandle,
     /// Per-thread unsent composer text, so switching threads does not mix drafts.
     drafts: std::collections::HashMap<String, String>,
+    /// A file drag is hovering the composer.
+    drag_hover: bool,
     /// `(workspace root, branch)` cache so rendering never shells out to git.
     branch_cache: Option<(String, String)>,
     /// Ask approvals that already have an auto-answer timer running.
@@ -153,6 +155,7 @@ impl AgentPane {
             composer_preview: false,
             composer_preview_scroll: ScrollHandle::new(),
             drafts: std::collections::HashMap::new(),
+            drag_hover: false,
             branch_cache: None,
             ask_timers: HashSet::new(),
             status: String::new(),
@@ -3031,12 +3034,41 @@ impl AgentPane {
                                 .rounded(px(22.))
                                 .bg(secondary)
                                 .border_1()
-                                .border_color(if is_focused {
+                                .border_color(if self.drag_hover {
+                                    accent
+                                } else if is_focused {
                                     accent.opacity(0.65)
                                 } else {
                                     border
                                 })
+                                .when(self.drag_hover, |col| {
+                                    col.child(
+                                        div()
+                                            .w_full()
+                                            .pb_1()
+                                            .text_xs()
+                                            .text_color(accent)
+                                            .child("松开即可引用这些文件"),
+                                    )
+                                })
+                                .on_drag_move::<gpui::ExternalPaths>(cx.listener(
+                                    |this, _: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                                        if !this.drag_hover {
+                                            this.drag_hover = true;
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .on_file_drop_exit(cx.listener(
+                                    |this, _, _, cx| {
+                                        if this.drag_hover {
+                                            this.drag_hover = false;
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
                                 .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                                    this.drag_hover = false;
                                     let root = this.workspace_root();
                                     let mut names: Vec<String> = Vec::new();
                                     for path in paths.paths() {
