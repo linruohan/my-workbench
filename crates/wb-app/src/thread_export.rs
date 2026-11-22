@@ -26,7 +26,18 @@ pub fn thread_to_markdown(title: &str, messages: &[AgentMessage]) -> String {
             AgentRole::Tool => {
                 let name = m.tool_name.as_deref().unwrap_or("tool");
                 let fence = fence_for(&m.content);
-                out.push_str(&format!("### 工具 `{name}` · {stamp}\n\n{fence}text\n"));
+                // Timing and failure state go in the heading so the export keeps
+                // the same scan-ability as the chat transcript.
+                let mut meta = String::new();
+                if m.is_tool_error() {
+                    meta.push_str(" · ❌ 失败");
+                }
+                if let Some(ms) = m.duration_ms {
+                    meta.push_str(&format!(" · {}", format_duration(ms)));
+                }
+                out.push_str(&format!(
+                    "### 工具 `{name}` · {stamp}{meta}\n\n{fence}text\n"
+                ));
                 out.push_str(&m.content);
                 if !m.content.ends_with('\n') {
                     out.push('\n');
@@ -42,6 +53,15 @@ pub fn thread_to_markdown(title: &str, messages: &[AgentMessage]) -> String {
         }
     }
     out
+}
+
+/// `320 ms` under a second, `1.4 s` above, matching the chat transcript.
+pub fn format_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms} ms")
+    } else {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    }
 }
 
 /// A backtick fence longer than any run inside `body`, so the body cannot close it.
@@ -141,6 +161,23 @@ mod tests {
         assert!(md.contains("### 工具 `read` ·"));
         // The fence must be longer than the three backticks in the body.
         assert!(md.contains("````text"));
+    }
+
+    #[test]
+    fn tool_heading_carries_duration_and_failure() {
+        let mut m = msg(AgentRole::Tool, "失败：文件不存在");
+        m.tool_name = Some("read".into());
+        m.duration_ms = Some(1_450);
+        let md = thread_to_markdown("t", &[m]);
+        assert!(md.contains("❌ 失败"), "{md}");
+        assert!(md.contains("1.4 s"), "{md}");
+    }
+
+    #[test]
+    fn duration_formatting_matches_chat() {
+        assert_eq!(format_duration(320), "320 ms");
+        assert_eq!(format_duration(1_000), "1.0 s");
+        assert_eq!(format_duration(12_345), "12.3 s");
     }
 
     #[test]

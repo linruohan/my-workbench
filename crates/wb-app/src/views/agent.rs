@@ -4349,13 +4349,15 @@ fn render_chat_message(
         )
         .child(div().text_xs().text_color(muted).child(clock))
         .when_some(m.duration_ms, |row, ms| {
-            // Fast calls read better in ms; anything past a second in seconds.
-            let label = if ms < 1_000 {
-                format!("{ms} ms")
-            } else {
-                format!("{:.1} s", ms as f64 / 1000.0)
-            };
-            row.child(div().text_xs().text_color(muted).child(label))
+            // Slow tool calls get a warning tint so a 30 s `run_shell` stands out
+            // from the ms-scale reads around it.
+            let color = if ms >= 10_000 { danger } else { muted };
+            row.child(
+                div()
+                    .text_xs()
+                    .text_color(color)
+                    .child(crate::thread_export::format_duration(ms)),
+            )
         })
         .when(
             is_assistant && !content.contains("模型请求失败"),
