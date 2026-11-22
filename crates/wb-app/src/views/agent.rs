@@ -2416,6 +2416,7 @@ impl AgentPane {
             secondary,
             success,
             danger: danger_theme,
+            workspace_root: self.workspace_root(),
         };
         for m in visible_messages {
             let day = format_local_day(m.created_at);
@@ -2433,7 +2434,7 @@ impl AgentPane {
                     &tool_group_day,
                     &mut last_day,
                     &self.expanded_tools,
-                    chat_palette,
+                    chat_palette.clone(),
                     entity.clone(),
                 ));
             }
@@ -2444,7 +2445,7 @@ impl AgentPane {
             message_rows.push(render_chat_message(
                 &m,
                 &self.expanded_tools,
-                chat_palette,
+                chat_palette.clone(),
                 entity.clone(),
             ));
         }
@@ -2454,7 +2455,7 @@ impl AgentPane {
                 &tool_group_day,
                 &mut last_day,
                 &self.expanded_tools,
-                chat_palette,
+                chat_palette.clone(),
                 entity.clone(),
             ));
         }
@@ -4204,7 +4205,7 @@ impl AgentPane {
 
 /// Colours shared by every chat row, gathered so the render helpers keep a
 /// readable signature instead of eight theme arguments.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ChatPalette {
     radius: Pixels,
     muted: Hsla,
@@ -4212,6 +4213,8 @@ struct ChatPalette {
     secondary: Hsla,
     success: Hsla,
     danger: Hsla,
+    /// Workspace root, used to resolve relative paths in tool results.
+    workspace_root: Option<String>,
 }
 
 fn render_chat_message(
@@ -4227,7 +4230,9 @@ fn render_chat_message(
         secondary,
         success: cx_success,
         danger,
-    } = palette;
+        ..
+    } = palette.clone();
+    let patch_palette = palette.clone();
     let role = match m.role {
         AgentRole::User => "你",
         AgentRole::Assistant => "Agent",
@@ -4242,7 +4247,10 @@ fn render_chat_message(
     let is_tool = matches!(m.role, AgentRole::Tool);
     let expanded = expanded_tools.contains(&msg_id);
     let patch_card = is_tool
-        .then(|| render_patch_card(&content, expanded, &msg_id, palette, &entity))
+        .then(|| {
+            let root = patch_palette.workspace_root.clone();
+            render_patch_card(&content, expanded, &msg_id, patch_palette, root, &entity)
+        })
         .flatten();
     let body = if let Some(card) = patch_card {
         card
@@ -4467,7 +4475,7 @@ fn flush_tool_group(
         rows.push(render_chat_message(
             &group[0],
             expanded_tools,
-            palette,
+            palette.clone(),
             entity,
         ));
         return rows;
@@ -4488,7 +4496,7 @@ fn flush_tool_group(
     let body: Vec<AnyElement> = if expanded {
         group
             .iter()
-            .map(|m| render_chat_message(m, expanded_tools, palette, entity.clone()))
+            .map(|m| render_chat_message(m, expanded_tools, palette.clone(), entity.clone()))
             .collect()
     } else {
         Vec::new()
@@ -4540,6 +4548,7 @@ fn render_patch_card(
     expanded: bool,
     msg_id: &str,
     palette: ChatPalette,
+    root: Option<String>,
     entity: &WeakEntity<AgentPane>,
 ) -> Option<AnyElement> {
     let muted = palette.muted;
@@ -4625,9 +4634,34 @@ fn render_patch_card(
                         )
                     }),
             )
-            .children(shown.into_iter().map(|line| {
+            .children(shown.into_iter().enumerate().map(|(ix, line)| {
                 let color = if line.starts_with('+') { accent } else { muted };
-                div().text_xs().text_color(color).child(line)
+                // Strip the leading `+ ` / `~ ` / `- ` marker to get the path.
+                let path = line
+                    .split_once(' ')
+                    .map(|(_, rest)| rest.trim().to_string())
+                    .unwrap_or_else(|| line.clone());
+                let path = path.split('（').next().unwrap_or(&path).trim().to_string();
+                let click_root = root.clone();
+                let click_path = path.clone();
+                let clickable = click_root.is_some() && !click_path.is_empty();
+                div()
+                    .id(SharedString::from(format!("patch-file-{msg_id}-{ix}")))
+                    .text_xs()
+                    .text_color(color)
+                    .when(clickable, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(move |_, _, _| {
+                                if let Some(root) = click_root.as_deref() {
+                                    let full = std::path::Path::new(root).join(&click_path);
+                                    if let Err(e) = wb_host::open_path(&full) {
+                                        log::warn!("打开 {} 失败: {e}", full.display());
+                                    }
+                                }
+                            })
+                    })
+                    .child(line)
             }))
             .when(hidden > 0, |col| {
                 col.child(
