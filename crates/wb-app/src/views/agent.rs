@@ -1936,6 +1936,7 @@ impl AgentPane {
             threads,
             messages,
             workspaces,
+            all_messages,
             approvals,
             perm_label,
             thread_perm,
@@ -1980,6 +1981,7 @@ impl AgentPane {
                 s.repo.list_agent_threads(),
                 messages,
                 s.repo.list_agent_workspaces(),
+                s.repo.list_agent_messages(),
                 approvals,
                 perm,
                 thread_perm,
@@ -2203,7 +2205,15 @@ impl AgentPane {
                     .map(|id| &t.workspace_id == id)
                     .unwrap_or(true)
             })
-            .filter(|t| thread_q.is_empty() || t.title.to_lowercase().contains(&thread_q))
+            .filter(|t| {
+                thread_q.is_empty()
+                    || t.title.to_lowercase().contains(&thread_q)
+                    || all_messages.iter().any(|m| {
+                        m.thread_id == t.id
+                            && !m.content.is_empty()
+                            && m.content.to_lowercase().contains(&thread_q)
+                    })
+            })
             .map(|t| {
                 let id = t.id.clone();
                 let selected = active.as_deref() == Some(id.as_str());
@@ -2220,6 +2230,28 @@ impl AgentPane {
                     s
                 };
                 let entity = entity.clone();
+                // When the match is in a message body rather than the title,
+                // show a short snippet so the row is identifiable.
+                let snippet = if !thread_q.is_empty() && !t.title.to_lowercase().contains(&thread_q)
+                {
+                    all_messages
+                        .iter()
+                        .find(|m| {
+                            m.thread_id == t.id
+                                && !m.content.is_empty()
+                                && m.content.to_lowercase().contains(&thread_q)
+                        })
+                        .map(|m| {
+                            let body = m.content.replace('\n', " ");
+                            let lower = body.to_lowercase();
+                            let at = lower.find(&thread_q).unwrap_or(0);
+                            let start = at.saturating_sub(12);
+                            let text: String = body.chars().skip(start).take(48).collect();
+                            format!("…{text}")
+                        })
+                } else {
+                    None
+                };
                 h_flex()
                     .w_full()
                     .items_center()
@@ -2229,22 +2261,39 @@ impl AgentPane {
                     .when(selected, |d| d.bg(accent))
                     .hover(|d| d.bg(accent.opacity(0.5)))
                     .child(
-                        div()
-                            .id(SharedString::from(format!("thread-{id}")))
+                        v_flex()
                             .flex_1()
+                            .min_w_0()
                             .overflow_hidden()
-                            .cursor_pointer()
-                            .child(title)
-                            .on_click({
-                                let id = id.clone();
-                                let entity = entity.clone();
-                                move |_, _, app| {
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(app, |this, cx| {
-                                            this.select_thread(id.clone(), cx);
-                                        });
-                                    }
-                                }
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("thread-{id}")))
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .child(title)
+                                    .on_click({
+                                        let id = id.clone();
+                                        let entity = entity.clone();
+                                        move |_, _, app| {
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(app, |this, cx| {
+                                                    this.select_thread(id.clone(), cx);
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .when_some(snippet, |col, text| {
+                                col.child(
+                                    div()
+                                        .w_full()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .overflow_hidden()
+                                        .child(text),
+                                )
                             }),
                     )
                     .child(
