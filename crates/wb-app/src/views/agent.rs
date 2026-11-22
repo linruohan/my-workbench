@@ -19,9 +19,9 @@ use std::time::Duration;
 use wb_agent::{
     ContinueTurn, SlashCommand, StreamEvent, TurnPhase, answer_user_question,
     apply_slash_completion, begin_user_turn, clear_goal_round_flag, compact_thread_history,
-    continue_turn_reply_streaming, create_thread, cycle_permission_mode, dequeue_user_text,
-    enqueue_user_text, finish_continue_turn_with_stage, finish_user_turn_with_stage,
-    load_providers, model_context_window, pending_approvals_for_thread, permission_mode_label,
+    continue_turn_reply_streaming, create_thread, dequeue_user_text, enqueue_user_text,
+    finish_continue_turn_with_stage, finish_user_turn_with_stage, load_providers,
+    model_context_window, pending_approvals_for_thread, permission_mode_label,
     prepare_goal_idle_round, prompt_char_count, queued_user_texts, remove_queued_user_text,
     resolve_approval, resolve_turn_reply_streaming, slash_suggestions,
 };
@@ -140,6 +140,8 @@ pub struct AgentPane {
     expanded_tools: HashSet<String>,
     show_archived: bool,
     workspace_filter: Option<String>,
+    /// Workspace picked in the web-session dialog, used once a URL is entered.
+    pending_web_workspace: Option<String>,
     show_terminal: bool,
     term_id: Option<String>,
     chat_scroll: ScrollHandle,
@@ -201,6 +203,7 @@ impl AgentPane {
             expanded_tools: HashSet::new(),
             show_archived: false,
             workspace_filter: None,
+            pending_web_workspace: None,
             show_terminal: false,
             term_id: None,
             chat_scroll: ScrollHandle::new(),
@@ -277,7 +280,12 @@ impl AgentPane {
             |this, input, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
                     let url = input.read(cx).value().to_string();
-                    this.create_web_thread(&url, window, cx);
+                    // A workspace picked in the dialog wins; otherwise the
+                    // default workspace is used.
+                    match this.pending_web_workspace.clone() {
+                        Some(ws) => this.create_web_thread_in(&ws, &url, window, cx),
+                        None => this.create_web_thread(&url, window, cx),
+                    }
                 }
             },
         ));
@@ -349,6 +357,49 @@ impl AgentPane {
     }
 
     fn create_web_thread(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let default_ws = self
+            .state
+            .with(|s| s.repo.list_agent_workspaces())
+            .into_iter()
+            .min_by_key(|w| w.created_at)
+            .map(|w| w.id);
+        let Some(ws) = default_ws else {
+            self.status = "还没有可用的工作区".into();
+            cx.notify();
+            return;
+        };
+        self.create_web_thread_in(&ws, raw, window, cx);
+    }
+
+    /// Open a web session in the workspace picked from the dialog.
+    fn open_web_session_in(
+        &mut self,
+        workspace_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url = self.web_url_input.read(cx).value().to_string();
+        if url.trim().is_empty() {
+            let ws = workspace_id.to_string();
+            let entity = cx.weak_entity();
+            // No URL typed yet: remember the target and let the user enter one.
+            self.pending_web_workspace = Some(ws);
+            self.status = "请输入网址，回车即在该工作区新建网页会话".into();
+            window.focus(&self.web_url_input.focus_handle(cx), cx);
+            let _ = entity;
+            cx.notify();
+            return;
+        }
+        self.create_web_thread_in(workspace_id, &url, window, cx);
+    }
+
+    fn create_web_thread_in(
+        &mut self,
+        workspace_id: &str,
+        raw: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(url) = normalize_agent_web_url(raw) else {
             self.status = "请输入有效网址（例如 https://example.com）".into();
             cx.notify();
@@ -358,15 +409,21 @@ impl AgentPane {
             cx.notify();
             return;
         }
+        let ws_id = workspace_id.to_string();
         let thread_id = self.state.with_mut(|s| {
-            let ws = s
-                .repo
-                .list_agent_workspaces()
-                .into_iter()
-                .next()
-                .expect("default workspace");
+            // Fall back to the default workspace if the picked one vanished.
+            let ws_id = if s.repo.list_agent_workspaces().iter().any(|w| w.id == ws_id) {
+                ws_id
+            } else {
+                s.repo
+                    .list_agent_workspaces()
+                    .into_iter()
+                    .min_by_key(|w| w.created_at)
+                    .map(|w| w.id)
+                    .unwrap_or(ws_id)
+            };
             let mut thread = create_thread(
-                &ws.id,
+                &ws_id,
                 WEB_AGENT_THREAD_TITLE,
                 s.prefs.agent.default_model_ref.as_deref(),
             );
@@ -377,6 +434,7 @@ impl AgentPane {
             id
         });
         let _ = thread_id;
+        self.pending_web_workspace = None;
         self.web_url_input.update(cx, |i, cx| {
             i.set_value(&url, window, cx);
         });
@@ -1213,23 +1271,6 @@ impl AgentPane {
         self.send(msg.content, cx);
     }
 
-    fn cycle_thread_permission(&mut self, cx: &mut Context<Self>) {
-        let tid = self.ensure_thread();
-        self.state.with_mut(|s| {
-            if let Some(mut t) = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-            {
-                t.permission_mode = cycle_permission_mode(t.permission_mode);
-                s.repo.upsert_agent_thread(t);
-            }
-        });
-        self.state.persist_if_dirty();
-        cx.notify();
-    }
-
     fn available_model_refs() -> Vec<String> {
         let store = load_providers();
         let mut refs = Vec::new();
@@ -1337,28 +1378,9 @@ impl AgentPane {
         cx.notify();
     }
 
-    fn cycle_thread_model(&mut self, cx: &mut Context<Self>) {
-        let tid = self.ensure_thread();
-        let refs = Self::available_model_refs();
-        if refs.is_empty() {
-            return;
-        }
-        self.state.with_mut(|s| {
-            if let Some(mut t) = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-            {
-                let idx = refs.iter().position(|r| r == &t.model_ref).unwrap_or(0);
-                t.model_ref = refs[(idx + 1) % refs.len()].clone();
-                s.repo.upsert_agent_thread(t);
-            }
-        });
-        self.state.persist_if_dirty();
-        cx.notify();
-    }
-
+    /// Cycle to the next model. Kept for keyboard/CLI callers; the composer uses
+    /// the model dropdown (`set_thread_model`) instead.
+    #[allow(dead_code)]
     fn apply_open_view(&mut self, view: Option<&str>) {
         let Some(view) = view else {
             return;
@@ -1437,6 +1459,26 @@ impl AgentPane {
         let quote = format!("\n> {}{suffix}\n", clipped.replace('\n', "\n> "));
         self.pending_insert = Some(quote);
         self.status = "已把内容引用到输入框".into();
+        cx.notify();
+    }
+
+    /// Copy the per-tool aggregate as a Markdown table.
+    fn copy_tool_usage(
+        &mut self,
+        usage: &[(String, usize, u64, u64, usize)],
+        cx: &mut Context<Self>,
+    ) {
+        let mut out =
+            String::from("| 工具 | 次数 | 合计 | 最慢 | 失败 |\n| --- | --- | --- | --- | --- |\n");
+        for (name, calls, total, max, failures) in usage {
+            out.push_str(&format!(
+                "| {name} | {calls} | {} | {} | {failures} |\n",
+                crate::thread_export::format_duration(*total),
+                crate::thread_export::format_duration(*max),
+            ));
+        }
+        self.pending_insert = Some(out);
+        self.status = "已把工具汇总插入输入框".into();
         cx.notify();
     }
 
@@ -1520,10 +1562,116 @@ impl AgentPane {
 
     fn new_thread(&mut self, cx: &mut Context<Self>) {
         self.stop_turn(cx);
-        self.state.with_mut(|s| s.active_thread_id = None);
-        let _ = self.ensure_thread();
+        // A new thread always lands in the default workspace, even while the
+        // list is filtered to another one; otherwise it would be created
+        // somewhere the user cannot see.
+        let default_ws = self
+            .state
+            .with(|s| s.repo.list_agent_workspaces())
+            .into_iter()
+            .min_by_key(|w| w.created_at)
+            .map(|w| w.id);
+        match default_ws {
+            Some(ws) => self.new_thread_in(&ws, cx),
+            None => {
+                self.state.with_mut(|s| s.active_thread_id = None);
+                let _ = self.ensure_thread();
+                self.state.persist_if_dirty();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open a new thread inside `workspace_id`, leaving the current one intact.
+    fn new_thread_in(&mut self, workspace_id: &str, cx: &mut Context<Self>) {
+        self.stop_turn(cx);
+        let model_ref = self.state.with(|s| s.prefs.agent.default_model_ref.clone());
+        self.state.with_mut(|s| {
+            let thread = create_thread(workspace_id, "新会话", model_ref.as_deref());
+            let id = thread.id.clone();
+            s.repo.upsert_agent_thread(thread);
+            s.active_thread_id = Some(id);
+        });
+        self.workspace_filter = None;
         self.state.persist_if_dirty();
         cx.notify();
+    }
+
+    /// Let the user pick which workspace a web session belongs to.
+    ///
+    /// Creating a web session is rare and needs a target, so the choice lives
+    /// in a dialog instead of a permanent row of workspace buttons.
+    fn open_web_thread_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut workspaces = self.state.with(|s| s.repo.list_agent_workspaces());
+        if workspaces.is_empty() {
+            self.status = "还没有可用的工作区".into();
+            cx.notify();
+            return;
+        }
+        // The default workspace is the first one created.
+        workspaces.sort_by_key(|w| w.created_at);
+        let entity = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            let accent = cx.theme().accent;
+            let rows = workspaces.iter().map(|ws| {
+                let is_default = ws.title == wb_domain::DEFAULT_AGENT_WORKSPACE_TITLE;
+                let id = ws.id.clone();
+                let close_entity = entity.clone();
+                Button::new(SharedString::from(format!("web-ws-{id}")))
+                    .small()
+                    .w_full()
+                    .justify_start()
+                    .label(ws.title.clone())
+                    .when(is_default, |b| b.icon(IconName::CircleCheck))
+                    .on_click(move |_, window, cx| {
+                        close_entity
+                            .update(cx, |this, cx| {
+                                this.open_web_session_in(&id, window, cx);
+                            })
+                            .ok();
+                        window.close_dialog(cx);
+                    })
+                    .into_any_element()
+            });
+            dialog
+                .title("新建网页会话")
+                .w(px(420.))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .px_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child("选择会话所属工作区；带勾的是默认工作区。"),
+                        )
+                        .child(v_flex().w_full().gap_1().children(rows))
+                        .when(
+                            workspaces
+                                .iter()
+                                .any(|w| w.title == wb_domain::DEFAULT_AGENT_WORKSPACE_TITLE),
+                            |col| {
+                                col.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(accent)
+                                        .child("未选择时默认落到「默认工作区」。"),
+                                )
+                            },
+                        ),
+                )
+                .footer(
+                    h_flex().w_full().justify_end().gap_2().px_4().pb_2().child(
+                        Button::new("web-dialog-cancel")
+                            .small()
+                            .label("取消")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
+                )
+        });
     }
 
     fn clear_active_thread(&mut self, cx: &mut Context<Self>) {
@@ -2386,6 +2534,21 @@ impl AgentPane {
             })
             .collect();
 
+        // The tool aggregate needs the full transcript, not just what the filter
+        // shows, so compute it before `messages` is consumed below.
+        let tool_usage = crate::tool_summary::tool_usage(
+            &messages
+                .iter()
+                .filter(|m| m.role == AgentRole::Tool)
+                .map(|m| {
+                    (
+                        m.tool_name.clone().unwrap_or_else(|| "tool".into()),
+                        m.duration_ms,
+                        m.is_tool_error(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
         let visible_messages: Vec<AgentMessage> = messages
             .into_iter()
             .filter(|m| match msg_filter {
@@ -2489,9 +2652,13 @@ impl AgentPane {
                     .p_3()
                     .gap_2()
                     .child(
+                        // One primary action plus a web-page entry. Thread
+                        // settings (permission, model) live in the composer, and
+                        // workspace filters moved to the dialog, so the list
+                        // starts right under this row.
                         h_flex()
                             .gap_2()
-                            .flex_wrap()
+                            .items_center()
                             .child(
                                 Button::new("agent-new")
                                     .small()
@@ -2500,68 +2667,15 @@ impl AgentPane {
                                     .on_click(cx.listener(|this, _, _, cx| this.new_thread(cx))),
                             )
                             .child(
-                                Button::new("agent-clear")
+                                Button::new("agent-web-new")
                                     .small()
                                     .ghost()
-                                    .label("清空")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.clear_active_thread(cx);
+                                    .icon(IconName::Globe)
+                                    .tooltip("新建网页会话")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_web_thread_dialog(window, cx);
                                     })),
-                            )
-                            .child(
-                                Button::new("agent-ws")
-                                    .small()
-                                    .label("工作区")
-                                    .on_click(cx.listener(|this, _, _, cx| this.add_workspace(cx))),
-                            )
-                            .child(
-                                Button::new("agent-perm")
-                                    .small()
-                                    .ghost()
-                                    .label(format!("权限:{perm_label}"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cycle_thread_permission(cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("agent-model")
-                                    .small()
-                                    .ghost()
-                                    .label(format!("模型:{model_label}"))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.cycle_thread_model(cx)),
-                                    ),
                             ),
-                    )
-                    .child(
-                        h_flex().gap_1().flex_wrap().children(
-                            std::iter::once(
-                                Button::new("ws-filter-all")
-                                    .xsmall()
-                                    .ghost()
-                                    .label("全部")
-                                    .selected(ws_filter.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_filter = None;
-                                        cx.notify();
-                                    }))
-                                    .into_any_element(),
-                            )
-                            .chain(workspaces.iter().map(|ws| {
-                                let id = ws.id.clone();
-                                let selected = ws_filter.as_deref() == Some(id.as_str());
-                                Button::new(SharedString::from(format!("ws-filter-{id}")))
-                                    .xsmall()
-                                    .ghost()
-                                    .label(ws.title.clone())
-                                    .selected(selected)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.workspace_filter = Some(id.clone());
-                                        cx.notify();
-                                    }))
-                                    .into_any_element()
-                            })),
-                        ),
                     )
                     .child(Input::new(&self.thread_query).small().cleanable(true))
                     .child(
@@ -3262,6 +3376,93 @@ impl AgentPane {
                                     })
                             }),
                     )
+                    .when(msg_filter == MsgFilter::Tools && !tool_usage.is_empty(), |col| {
+                        let usage = tool_usage.clone();
+                        col.child(
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .p_2()
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(border)
+                                .bg(secondary)
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_bold()
+                                                .text_color(muted)
+                                                .child("按工具汇总（最慢在前）"),
+                                        )
+                                        .child(div().flex_1())
+                                        .child(
+                                            Button::new("agent-tool-usage-copy")
+                                                .xsmall()
+                                                .ghost()
+                                                .label("复制")
+                                                .on_click(cx.listener({
+                                                    let usage = usage.clone();
+                                                    move |this, _, _, cx| {
+                                                        this.copy_tool_usage(&usage, cx);
+                                                    }
+                                                })),
+                                        ),
+                                )
+                                .children(usage.iter().take(5).map(
+                                    |(name, calls, total, max, failures)| {
+                                        let color = if *failures > 0 { danger_theme } else { muted };
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_xs()
+                                                    .child(name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(format!("{calls} 次")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(format!(
+                                                        "合计 {}",
+                                                        crate::thread_export::format_duration(*total)
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(format!(
+                                                        "最慢 {}",
+                                                        crate::thread_export::format_duration(*max)
+                                                    )),
+                                            )
+                                            .when(*failures > 0, |row| {
+                                                row.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(color)
+                                                        .child(format!("失败 {failures}")),
+                                                )
+                                            })
+                                            .into_any_element()
+                                    },
+                                )),
+                        )
+                    })
                     .child(
                         // Hadron-style composer: one rounded card that owns the
                         // focus ring, the live preview, the input and a tool row.
