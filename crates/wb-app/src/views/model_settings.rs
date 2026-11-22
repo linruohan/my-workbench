@@ -1125,6 +1125,7 @@ fn model_section(
                 caps,
                 &default_model,
                 local,
+                border,
                 &view.entity,
             )
         }))
@@ -1136,6 +1137,7 @@ fn model_row(
     caps: &Value,
     default_model: &str,
     local: bool,
+    border: Hsla,
     entity: &WeakEntity<SettingsPane>,
 ) -> impl IntoElement {
     let model_ref = format!("{}/{}", provider.id, model_id);
@@ -1153,6 +1155,7 @@ fn model_row(
         .py(px(6.))
         .rounded_md()
         .border_1()
+        .border_color(border)
         .child(
             div()
                 .flex_1()

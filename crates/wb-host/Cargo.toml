@@ -11,6 +11,7 @@ wb-domain.workspace = true
 wb-store.workspace = true
 anyhow.workspace = true
 base64.workspace = true
+chrono.workspace = true
 dirs.workspace = true
 font-kit.workspace = true
 futures-util = "0.3"

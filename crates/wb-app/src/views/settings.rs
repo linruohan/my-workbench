@@ -15,9 +15,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::ThemeModePref;
 use wb_host::{
-    list_skills, list_system_fonts, ocr_ensure_models, ocr_status, path_is_within, paths_equal,
-    speech_ensure_models, speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
+    list_skills, list_system_fonts, path_is_within, paths_equal, speech_ensure_models,
+    speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
 };
+
+#[path = "tools_settings.rs"]
+mod tools_ui;
 
 pub struct SettingsPane {
     state: AppState,
@@ -31,7 +34,10 @@ pub struct SettingsPane {
     _model_subs: Vec<Subscription>,
     font_count: usize,
     speech_msg: String,
-    ocr_msg: String,
+    tool_catalog: wb_host::ToolCatalog,
+    tool_filter: tools_ui::ToolListFilter,
+    tools_busy: bool,
+    tools_started: bool,
     agent_json_msg: String,
     data_msg: String,
     skills_msg: String,
@@ -91,16 +97,7 @@ impl SettingsPane {
                 }
             })
             .unwrap_or_else(|e| e.to_string());
-        let ocr_msg = ocr_status()
-            .map(|st| {
-                if st.ready {
-                    format!("OCR 就绪：{}", st.model_dir)
-                } else {
-                    st.message
-                        .unwrap_or_else(|| format!("OCR 未就绪：{}", st.model_dir))
-                }
-            })
-            .unwrap_or_else(|e| e.to_string());
+        let tool_catalog = wb_host::read_tool_catalog();
         Self {
             state,
             memory_input,
@@ -113,7 +110,10 @@ impl SettingsPane {
             _model_subs: model_subs,
             font_count,
             speech_msg,
-            ocr_msg,
+            tool_catalog,
+            tool_filter: tools_ui::ToolListFilter::All,
+            tools_busy: false,
+            tools_started: false,
             agent_json_msg: String::new(),
             data_msg: String::new(),
             skills_msg: String::new(),
@@ -321,36 +321,113 @@ impl SettingsPane {
         cx.notify();
     }
 
-    fn prepare_ocr(&mut self, cx: &mut Context<Self>) {
-        match ocr_ensure_models(false) {
-            Ok(st) => {
-                self.ocr_msg = if st.ready {
-                    format!("模型就绪：{}", st.model_dir)
-                } else {
-                    st.message.unwrap_or_else(|| "待下载".into())
-                };
-            }
-            Err(e) => self.ocr_msg = e.to_string(),
+    fn bootstrap_tools(&mut self, cx: &mut Context<Self>) {
+        if self.tools_started {
+            return;
         }
-        cx.notify();
+        self.tools_started = true;
+        let fetch_after = !self.tool_catalog.bootstrapped;
+        let need_scan = self.tool_catalog.scanned_at.is_none();
+        if !fetch_after && !need_scan {
+            return;
+        }
+        self.tools_busy = true;
+        cx.spawn(async move |this, cx| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = cx.background_executor().spawn(async move {
+                if need_scan {
+                    let _ = tx.send(wb_host::scan_tool_catalog());
+                } else {
+                    wb_host::clear_tool_busy();
+                }
+                if fetch_after {
+                    let ids = wb_host::tools_pending_fetch();
+                    wb_host::acquire_tools(&ids, true, || {
+                        let _ = tx.send(wb_host::read_tool_catalog());
+                    });
+                }
+            });
+            loop {
+                match rx.try_recv() {
+                    Ok(catalog) => {
+                        this.update(cx, |this, cx| {
+                            this.tool_catalog = catalog;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(300))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+            worker.await;
+            let catalog = wb_host::read_tool_catalog();
+            this.update(cx, |this, cx| {
+                this.tool_catalog = catalog;
+                this.tools_busy = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    fn download_ocr(&mut self, cx: &mut Context<Self>) {
-        self.ocr_msg = "正在下载 PaddleOCR 模型…".into();
+    fn scan_tools(&mut self, cx: &mut Context<Self>) {
+        if self.tools_busy {
+            return;
+        }
+        self.tools_busy = true;
         cx.notify();
-        match ocr_ensure_models(true) {
-            Ok(st) => {
-                self.ocr_msg = if st.ready {
-                    format!("下载完成：{}", st.model_dir)
-                } else {
-                    format!(
-                        "部分完成，仍缺 {:?}：{}",
-                        st.missing,
-                        st.message.unwrap_or_default()
-                    )
-                };
-            }
-            Err(e) => self.ocr_msg = format!("下载失败：{e}"),
+        cx.spawn(async move |this, cx| {
+            let catalog = cx
+                .background_executor()
+                .spawn(async { wb_host::scan_tool_catalog() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.tool_catalog = catalog;
+                this.tools_busy = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn fetch_tool(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        if self.tools_busy {
+            return;
+        }
+        self.tools_busy = true;
+        if let Some(row) = self.tool_catalog.rows.iter_mut().find(|row| row.id == id) {
+            row.busy = true;
+        }
+        cx.notify();
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    wb_host::acquire_tools(&[id], false, || {});
+                })
+                .await;
+            let catalog = wb_host::read_tool_catalog();
+            this.update(cx, |this, cx| {
+                this.tool_catalog = catalog;
+                this.tools_busy = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_tool_enabled(&mut self, id: &'static str, enabled: bool, cx: &mut Context<Self>) {
+        wb_host::set_tool_enabled(id, enabled);
+        if let Some(row) = self.tool_catalog.rows.iter_mut().find(|row| row.id == id) {
+            row.enabled = enabled;
         }
         cx.notify();
     }
@@ -425,7 +502,6 @@ impl SettingsPane {
         let theme_name = cx.theme().theme_name().clone();
         let font_count = self.font_count;
         let speech_msg = self.speech_msg.clone();
-        let ocr_msg = self.ocr_msg.clone();
         let data_msg = self.data_msg.clone();
         let agent = AgentForm {
             personality: self.personality.clone(),
@@ -446,7 +522,15 @@ impl SettingsPane {
             voice_page(state.clone(), entity.clone(), speech_msg).section("基础设置"),
         ];
         pages.extend(agent_pages(state.clone(), entity.clone(), agent));
-        pages.push(ocr_page(entity.clone(), ocr_msg).section("Agent"));
+        pages.push(
+            tools_ui::tools_page(
+                entity.clone(),
+                self.tool_catalog.clone(),
+                self.tool_filter,
+                self.tools_busy,
+            )
+            .section("Agent"),
+        );
         pages.push(data_page(state, entity.clone(), data_msg).section("数据与关于"));
         pages.push(about_page().section("数据与关于"));
         pages
@@ -1051,56 +1135,6 @@ fn voice_page(
                             })
                     })
                     .keywords(["SenseVoice", "模型", "下载"]),
-                ),
-        )
-}
-
-fn ocr_page(entity: WeakEntity<SettingsPane>, ocr_msg: String) -> SettingPage {
-    let prep = entity.clone();
-    let download = entity;
-    SettingPage::new("工具")
-        .icon(Icon::new(IconName::Eye))
-        .resettable(false)
-        .group(
-            SettingGroup::new()
-                .title("PaddleOCR")
-                .description("本地识别图片里的文字。")
-                .item(
-                    SettingItem::render(move |_, _, cx| {
-                        let muted = cx.theme().muted_foreground;
-                        let prep = prep.clone();
-                        let download = download.clone();
-                        let ocr_msg = ocr_msg.clone();
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("ocr-prep").small().label("准备目录").on_click(
-                                            move |_, _, cx| {
-                                                prep.update(cx, |this, cx| this.prepare_ocr(cx))
-                                                    .ok();
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("ocr-dl")
-                                            .small()
-                                            .primary()
-                                            .label("下载 PaddleOCR")
-                                            .on_click(move |_, _, cx| {
-                                                download
-                                                    .update(cx, |this, cx| this.download_ocr(cx))
-                                                    .ok();
-                                            }),
-                                    ),
-                            )
-                            .when(!ocr_msg.is_empty(), |col| {
-                                col.child(div().text_sm().text_color(muted).child(ocr_msg))
-                            })
-                    })
-                    .keywords(["OCR", "Paddle", "模型"]),
                 ),
         )
 }
@@ -1954,6 +1988,7 @@ fn about_page() -> SettingPage {
 
 impl Render for SettingsPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.bootstrap_tools(cx);
         div().size_full().child(
             Settings::new("wb-settings")
                 .search_placeholder("搜索设置")

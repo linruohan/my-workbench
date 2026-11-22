@@ -216,8 +216,10 @@ pub fn probe_workspace_dependencies() -> Vec<(String, Option<String>)> {
 pub fn which_bin(name: &str) -> Option<String> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let out = Command::new("where")
             .arg(name)
+            .creation_flags(0x0800_0000)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()

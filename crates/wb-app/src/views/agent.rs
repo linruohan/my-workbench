@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wb_agent::{
     ContinueTurn, SlashCommand, StreamEvent, TurnPhase, answer_user_question,
-    apply_slash_completion, begin_user_turn, clear_goal_round_flag, continue_turn_reply_streaming,
-    create_thread, cycle_permission_mode, dequeue_user_text, enqueue_user_text,
-    finish_continue_turn_with_stage, finish_user_turn_with_stage, load_providers,
-    model_context_window, pending_approvals_for_thread, permission_mode_label,
+    apply_slash_completion, begin_user_turn, clear_goal_round_flag, compact_thread_history,
+    continue_turn_reply_streaming, create_thread, cycle_permission_mode, dequeue_user_text,
+    enqueue_user_text, finish_continue_turn_with_stage, finish_user_turn_with_stage,
+    load_providers, model_context_window, pending_approvals_for_thread, permission_mode_label,
     prepare_goal_idle_round, prompt_char_count, queued_user_texts, resolve_approval,
     resolve_turn_reply_streaming, slash_suggestions,
 };
@@ -88,6 +88,8 @@ pub struct AgentPane {
     show_terminal: bool,
     term_id: Option<String>,
     chat_scroll: ScrollHandle,
+    /// Keep the chat pinned to the newest message until the reader scrolls up.
+    chat_follow: bool,
     ghost_suffix: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -131,6 +133,7 @@ impl AgentPane {
             show_terminal: false,
             term_id: None,
             chat_scroll: ScrollHandle::new(),
+            chat_follow: true,
             ghost_suffix: None,
             _subs: Vec::new(),
         };
@@ -347,6 +350,10 @@ impl AgentPane {
         }
         if text == "/retry" {
             self.retry_last_user(cx);
+            return;
+        }
+        if text == "/compact" || text.starts_with("/compact ") {
+            self.compact_history(cx);
             return;
         }
         if text == "/rename" || text.starts_with("/rename ") {
@@ -629,6 +636,10 @@ impl AgentPane {
                         if pane.turn_gen != expected || !pane.busy {
                             return false;
                         }
+                        // Streaming text grows the draft; follow unless the reader scrolled up.
+                        if pane.chat_follow {
+                            pane.scroll_chat_to_bottom(cx);
+                        }
                         cx.notify();
                         true
                     })
@@ -881,6 +892,31 @@ impl AgentPane {
             return;
         }
         self.submit_ask_answer("（超时未回复，请按合理默认继续）".into(), cx);
+    }
+
+    fn compact_history(&mut self, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            self.status = "没有可压缩的会话".into();
+            cx.notify();
+            return;
+        };
+        if self.busy {
+            self.status = "请先等当前回合结束再压缩".into();
+            cx.notify();
+            return;
+        }
+        let keep = 6;
+        let removed = self
+            .state
+            .with_mut(|s| compact_thread_history(&mut s.repo, &tid, keep));
+        self.state.persist_if_dirty();
+        self.status = if removed == 0 {
+            "历史已经很短，无需压缩".into()
+        } else {
+            format!("已把较早的 {removed} 条消息折叠成摘要，保留最近 {keep} 条")
+        };
+        self.scroll_chat_to_bottom(cx);
+        cx.notify();
     }
 
     fn submit_ask_answer(&mut self, answer: String, cx: &mut Context<Self>) {
@@ -1326,6 +1362,7 @@ impl AgentPane {
     }
 
     fn scroll_chat_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.chat_follow = true;
         let handle = self.chat_scroll.clone();
         cx.spawn(async move |_this, cx| {
             cx.background_executor()
@@ -1335,6 +1372,17 @@ impl AgentPane {
             handle.set_offset(point(px(0.), -max.y.abs()));
         })
         .detach();
+    }
+
+    /// Distance from the bottom in pixels; small means the user is at the tail.
+    fn chat_distance_from_bottom(&self) -> f32 {
+        let max: f32 = self.chat_scroll.max_offset().y.into();
+        let cur: f32 = self.chat_scroll.offset().y.into();
+        (max.abs() + cur).max(0.0)
+    }
+
+    fn chat_near_bottom(&self) -> bool {
+        self.chat_distance_from_bottom() < 80.0
     }
 
     fn recompute_ghost(&mut self, cx: &App) {
@@ -2098,6 +2146,22 @@ impl AgentPane {
                             .overflow_y_scroll()
                             .track_scroll(&self.chat_scroll)
                             .vertical_scrollbar(&self.chat_scroll)
+                            .on_scroll(cx.listener(
+                                |this, event: &ScrollEvent, _window: &mut Window, cx| {
+                                    // Scrolling up detaches the view from the tail; scrolling
+                                    // back to the bottom re-arms following.
+                                    let up = match event.delta {
+                                        ScrollDelta::Pixels(p) => f32::from(p.y) > 0.0,
+                                        ScrollDelta::Lines(p) => p.y > 0.0,
+                                    };
+                                    if up {
+                                        this.chat_follow = false;
+                                    } else if this.chat_near_bottom() {
+                                        this.chat_follow = true;
+                                    }
+                                    cx.notify();
+                                },
+                            ))
                             .children(message_rows)
                             .when(self.busy, |col| {
                                 let draft = draft_text.clone();
@@ -2149,6 +2213,20 @@ impl AgentPane {
                                 )
                             })
                             .into_any_element()
+                    })
+                    .when(!self.chat_follow, |col| {
+                        col.child(
+                            h_flex().w_full().justify_center().child(
+                                Button::new("agent-jump-bottom")
+                                    .xsmall()
+                                    .outline()
+                                    .label("↓ 回到底部")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.scroll_chat_to_bottom(cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                        )
                     })
                     .when(!queued.is_empty(), |col| {
                         col.child(div().text_xs().text_color(muted).child(format!(

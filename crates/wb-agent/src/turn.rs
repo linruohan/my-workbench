@@ -884,6 +884,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         tool: "retry",
         hint: "重发上一条用户消息",
     },
+    SlashCommand {
+        invoke: "/compact",
+        tool: "compact",
+        hint: "把较早历史折叠成摘要，只保留最近几轮",
+    },
 ];
 
 /// Suggestions for a composer that currently looks like a slash command.
@@ -921,6 +926,87 @@ pub fn prompt_char_count(messages: &[AgentMessage]) -> usize {
         .take(30)
         .map(|m| m.content.chars().count())
         .sum()
+}
+
+/// Fold older turns into one system summary, keeping the most recent `keep_recent`.
+/// Returns how many messages were replaced, 0 when nothing changed.
+pub fn compact_thread_history(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    keep_recent: usize,
+) -> usize {
+    let history = repo.messages_for_thread(thread_id);
+    if history.len() <= keep_recent.max(2) {
+        return 0;
+    }
+    let split = history.len() - keep_recent.max(2);
+    let (older, kept) = history.split_at(split);
+    let Some(first_kept) = kept.first() else {
+        return 0;
+    };
+    // Nothing but an existing summary would be folded again.
+    if older.iter().all(|m| matches!(m.role, AgentRole::System)) {
+        return 0;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut user_turns = 0usize;
+    let mut tool_calls = 0usize;
+    for m in older {
+        match m.role {
+            AgentRole::User => {
+                user_turns += 1;
+                lines.push(format!("- 用户：{}", clip_line(&m.content, 120)));
+            }
+            AgentRole::Assistant => {
+                if !m.content.trim().is_empty() {
+                    lines.push(format!("- 助手：{}", clip_line(&m.content, 160)));
+                }
+            }
+            AgentRole::Tool => {
+                tool_calls += 1;
+            }
+            AgentRole::System => {}
+        }
+    }
+    // Keep the digest small: the tail of the conversation matters most.
+    const MAX_LINES: usize = 24;
+    if lines.len() > MAX_LINES {
+        lines = lines.split_off(lines.len() - MAX_LINES);
+        lines.insert(0, "（更早的内容已省略）".to_string());
+    }
+
+    let content = format!(
+        "【上下文摘要】此前 {} 条消息、{} 轮用户输入、{} 次工具调用。\n{}",
+        older.len(),
+        user_turns,
+        tool_calls,
+        lines.join("\n")
+    );
+
+    let summary = AgentMessage {
+        id: create_id(now_ms()),
+        thread_id: thread_id.to_string(),
+        role: AgentRole::System,
+        content,
+        tool_name: None,
+        tool_call_id: None,
+        tool_calls_json: None,
+        created_at: first_kept.created_at.saturating_sub(1),
+    };
+    let replaced: Vec<String> = older.iter().map(|m| m.id.clone()).collect();
+    repo.compact_agent_history(thread_id, summary, &replaced);
+    older.len()
+}
+
+fn clip_line(text: &str, limit: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        flat
+    } else {
+        let head: String = flat.chars().take(limit).collect();
+        format!("{head}…")
+    }
 }
 
 fn parse_queue(raw: Option<&str>) -> Vec<String> {
@@ -1008,7 +1094,10 @@ fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
     let t = text.trim();
     for cmd in SLASH_COMMANDS {
         // UI-only composer commands are handled by AgentPane before the turn loop.
-        if matches!(cmd.invoke, "/goal" | "/clear" | "/rename" | "/retry") {
+        if matches!(
+            cmd.invoke,
+            "/goal" | "/clear" | "/rename" | "/retry" | "/compact"
+        ) {
             continue;
         }
         if t == cmd.invoke || t.starts_with(&format!("{} ", cmd.invoke)) {
@@ -1444,5 +1533,35 @@ mod tests {
             Some("two")
         );
         assert_eq!(dequeue_user_text(&mut repo, &thread.id), None);
+    }
+
+    #[test]
+    fn compact_folds_old_messages_into_one_summary() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let now = now_ms();
+        repo.upsert_agent_workspace(AgentWorkspace {
+            id: "ws1".into(),
+            title: "t".into(),
+            root_path: None,
+            created_at: now,
+            updated_at: now,
+        });
+        let thread = create_thread("ws1", "会话", None);
+        repo.upsert_agent_thread(thread.clone());
+        for i in 0..10 {
+            begin_user_turn(&mut repo, &thread, &format!("问题 {i}"));
+        }
+        assert_eq!(repo.messages_for_thread(&thread.id).len(), 10);
+
+        let removed = compact_thread_history(&mut repo, &thread.id, 4);
+        assert_eq!(removed, 6);
+        let after = repo.messages_for_thread(&thread.id);
+        assert_eq!(after.len(), 5);
+        assert_eq!(after[0].role, AgentRole::System);
+        assert!(after[0].content.contains("上下文摘要"));
+        assert!(after[0].content.contains("问题 0"));
+
+        // Compacting an already-short history is a no-op.
+        assert_eq!(compact_thread_history(&mut repo, &thread.id, 4), 0);
     }
 }

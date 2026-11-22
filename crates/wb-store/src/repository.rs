@@ -571,6 +571,28 @@ impl MemoryWorkbenchRepository {
         self.dirty = true;
     }
 
+    /// Insert `summary` and drop the messages whose ids are listed in `replaced`.
+    pub fn compact_agent_history(
+        &mut self,
+        thread_id: &str,
+        summary: AgentMessage,
+        replaced: &[String],
+    ) {
+        if replaced.is_empty() {
+            return;
+        }
+        self.agent_messages
+            .retain(|id, _| !replaced.iter().any(|r| r == id));
+        self.agent_approvals
+            .retain(|_, a| a.thread_id != thread_id || a.created_at >= summary.created_at);
+        self.agent_messages
+            .insert(summary.id.clone(), summary.clone());
+        if let Some(thread) = self.agent_threads.get_mut(thread_id) {
+            thread.updated_at = now_ms();
+        }
+        self.dirty = true;
+    }
+
     /// Drop messages in `thread_id` created at or after `created_at` (inclusive).
     pub fn truncate_agent_messages_at(&mut self, thread_id: &str, created_at: i64) {
         self.agent_messages
