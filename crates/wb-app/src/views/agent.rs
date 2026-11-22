@@ -128,6 +128,7 @@ impl AgentPane {
             cx.new(|cx| InputState::new(window, cx).placeholder("https://… 新建网页会话"));
         let find = cx.new(|cx| InputState::new(window, cx).placeholder("筛选消息…"));
         let ask_input = cx.new(|cx| InputState::new(window, cx).placeholder("回答 Agent 的问题…"));
+        let state_seed = state.with(|s| s.prefs.agent.prompt_history.clone());
         let mut this = Self {
             state,
             input: input.clone(),
@@ -152,7 +153,7 @@ impl AgentPane {
             branch_cache: None,
             ask_timers: HashSet::new(),
             status: String::new(),
-            prompt_history: Vec::new(),
+            prompt_history: state_seed,
             history_index: None,
             history_draft: String::new(),
             slash_selected: 0,
@@ -195,6 +196,7 @@ impl AgentPane {
                     if *shift && !*secondary {
                         return;
                     }
+                    // Slash suggestion and @-mention both claim Enter first.
                     if this.accept_slash_if_open(window, cx) {
                         return;
                     }
@@ -422,6 +424,14 @@ impl AgentPane {
         }
         if self.prompt_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
             self.prompt_history.push(text.clone());
+            if self.prompt_history.len() > 200 {
+                let drop = self.prompt_history.len() - 200;
+                self.prompt_history.drain(..drop);
+            }
+            let recent = self.prompt_history.clone();
+            self.state
+                .with_mut(|s| s.prefs.agent.prompt_history = recent);
+            self.state.persist_prefs();
         }
         self.history_index = None;
         self.history_draft.clear();

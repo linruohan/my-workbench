@@ -246,6 +246,9 @@ pub struct VoicePrefs {
     pub language: Option<String>,
     #[serde(default)]
     pub caps_lock_ptt: bool,
+    /// Input device name; `None` means the system default.
+    #[serde(default)]
+    pub input_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -273,4 +276,7 @@ pub struct AgentPrefs {
     pub subagents: Vec<serde_json::Value>,
     #[serde(default)]
     pub hooks: Vec<serde_json::Value>,
+    /// Recent composer submissions, newest last. Capped when written.
+    #[serde(default)]
+    pub prompt_history: Vec<String>,
 }
