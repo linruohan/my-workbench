@@ -43,6 +43,30 @@ fn model_label_of(model_ref: &str) -> String {
     crate::composer_text::model_label_of(model_ref)
 }
 
+/// Quick filters over the chat transcript.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum MsgFilter {
+    #[default]
+    All,
+    User,
+    Tools,
+    Errors,
+}
+
+/// Whether a message is a failed tool call.
+///
+/// A failure is reported as a tool message whose body starts with something
+/// other than "已"; the keywords are a second signal. The role check must
+/// cover every keyword, or a user sentence mentioning "错误" would be listed
+/// under errors.
+fn is_error_message(m: &AgentMessage) -> bool {
+    if !matches!(m.role, AgentRole::Tool) {
+        return false;
+    }
+    let flagged = ["失败", "错误", "禁止"];
+    flagged.iter().any(|k| m.content.contains(k)) || !m.content.starts_with("已")
+}
+
 fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {
     match event {
         StreamEvent::Text(piece) => {
@@ -74,6 +98,8 @@ pub struct AgentPane {
     find: Entity<InputState>,
     /// Filters the thread list by title.
     thread_query: Entity<InputState>,
+    /// Quick filter over the message list (tools / errors / user only).
+    msg_filter: MsgFilter,
     /// Show only pinned threads in the list.
     pinned_only: bool,
     webview: Option<Entity<WebView>>,
@@ -148,6 +174,7 @@ impl AgentPane {
             ask_input: ask_input.clone(),
             find: find.clone(),
             thread_query: thread_query.clone(),
+            msg_filter: MsgFilter::All,
             pinned_only: false,
             webview: None,
             loaded_web_url: None,
@@ -2184,6 +2211,7 @@ impl AgentPane {
             .collect();
 
         let find_q = self.find.read(cx).value().trim().to_lowercase();
+        let msg_filter = self.msg_filter;
         let slash_hits = self.live_slash(cx);
         let mention_hits = self.live_file_mentions(cx);
         let mention_selected = self.mention_selected;
@@ -2345,6 +2373,12 @@ impl AgentPane {
 
         let visible_messages: Vec<AgentMessage> = messages
             .into_iter()
+            .filter(|m| match msg_filter {
+                MsgFilter::All => true,
+                MsgFilter::Tools => matches!(m.role, AgentRole::Tool),
+                MsgFilter::Errors => is_error_message(m),
+                MsgFilter::User => matches!(m.role, AgentRole::User),
+            })
             .filter(|m| {
                 find_q.is_empty()
                     || m.content.to_lowercase().contains(&find_q)
@@ -2354,8 +2388,10 @@ impl AgentPane {
             })
             .collect();
         let visible_count = visible_messages.len();
-        let empty_chat = visible_messages.is_empty() && find_q.is_empty();
-        let filter_miss = visible_messages.is_empty() && !find_q.is_empty();
+        let empty_chat =
+            visible_messages.is_empty() && find_q.is_empty() && msg_filter == MsgFilter::All;
+        let filter_miss =
+            visible_messages.is_empty() && (!find_q.is_empty() || msg_filter != MsgFilter::All);
         let draft_text = self.stream_draft_text();
         let draft_stage = self.stream_status_text();
         let mut last_day = String::new();
@@ -2700,6 +2736,34 @@ impl AgentPane {
                             .gap_2()
                             .items_center()
                             .child(div().flex_1().child(Input::new(&self.find).cleanable(true)))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .children(
+                                        [
+                                            (MsgFilter::All, "全部"),
+                                            (MsgFilter::User, "我"),
+                                            (MsgFilter::Tools, "工具"),
+                                            (MsgFilter::Errors, "问题"),
+                                        ]
+                                        .into_iter()
+                                        .map(|(filter, label)| {
+                                            Button::new(SharedString::from(format!(
+                                                "msg-filter-{label}"
+                                            )))
+                                            .xsmall()
+                                            .ghost()
+                                            .label(label)
+                                            .selected(msg_filter == filter)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.msg_filter = filter;
+                                                cx.notify();
+                                            }))
+                                            .into_any_element()
+                                        }),
+                                    ),
+                            )
                             .child({
                                 let ctx_frac = (ctx_pct / 100.0).min(1.0);
                                 let ctx_color = if ctx_pct >= 80.0 { danger } else { accent };
@@ -4490,4 +4554,48 @@ fn render_patch_card(
             .p_2()
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn msg(role: AgentRole, content: &str) -> AgentMessage {
+        AgentMessage {
+            id: "m".into(),
+            thread_id: "t".into(),
+            role,
+            content: content.into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn errors_filter_ignores_non_tool_messages() {
+        // The bug: a user sentence mentioning failure must not be an "error".
+        assert!(!is_error_message(&msg(
+            AgentRole::User,
+            "这里有个错误需要修复"
+        )));
+        assert!(!is_error_message(&msg(
+            AgentRole::Assistant,
+            "操作失败，原因是路径不存在"
+        )));
+    }
+
+    #[test]
+    fn errors_filter_keeps_failed_tool_results() {
+        assert!(is_error_message(&msg(AgentRole::Tool, "失败：文件不存在")));
+        assert!(is_error_message(&msg(AgentRole::Tool, "读取被禁止")));
+        // A tool body not starting with "已" counts as a failure.
+        assert!(is_error_message(&msg(AgentRole::Tool, "exit 1\nboom")));
+    }
+
+    #[test]
+    fn errors_filter_skips_successful_tool_results() {
+        assert!(!is_error_message(&msg(AgentRole::Tool, "已写入 3 个文件")));
+    }
 }
