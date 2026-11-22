@@ -1399,6 +1399,33 @@ impl AgentPane {
         });
     }
 
+    /// `Alt+↑`: pull the newest user message back into the composer for editing.
+    pub fn edit_last_user_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            return;
+        };
+        let last = self.state.with(|s| {
+            s.repo
+                .messages_for_thread(&tid)
+                .into_iter()
+                .rev()
+                .find(|m| m.role == AgentRole::User)
+        });
+        let Some(last) = last else {
+            self.status = "没有可编辑的用户消息".into();
+            cx.notify();
+            return;
+        };
+        let text = last.content.clone();
+        self.input.update(cx, |input, cx| {
+            input.set_value(&text, window, cx);
+        });
+        self.input.read(cx).focus_handle(cx).focus(window, cx);
+        self.history_index = None;
+        self.status = "已载入上一条消息，Enter 重新发送".into();
+        cx.notify();
+    }
+
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
@@ -2705,6 +2732,7 @@ impl AgentPane {
                                     [
                                         ("@ 引用工作区文件", "@"),
                                         ("/ 查看斜杠命令", "/"),
+                                        ("Alt+↑ 编辑上一条消息", "alt-↑"),
                                         ("Ctrl+N 聚焦输入框", "ctrl-n"),
                                     ]
                                     .into_iter()

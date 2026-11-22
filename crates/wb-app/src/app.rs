@@ -4,12 +4,10 @@ use crate::themes;
 use crate::title_bar::workbench_title_bar;
 use crate::tray::{self, TrayAction};
 use crate::views::{AgentPane, InspectorPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
-use gpui_kit::component::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarMenu, SidebarMenuItem,
-    SidebarToggleButton,
+    Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 };
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,7 +19,10 @@ use wb_domain::{
     is_today_member, now_ms,
 };
 
-actions!(workbench, [OpenPalette, FocusCapture, Escape]);
+actions!(
+    workbench,
+    [OpenPalette, FocusCapture, Escape, EditLastMessage]
+);
 
 const RIGHT_SIDEBAR_COLLAPSED_WIDTH: f32 = 40.0;
 
@@ -67,6 +68,7 @@ impl WorkbenchApp {
             KeyBinding::new("ctrl-p", OpenPalette, None),
             KeyBinding::new("ctrl-k", OpenPalette, None),
             KeyBinding::new("ctrl-n", FocusCapture, None),
+            KeyBinding::new("alt-up", EditLastMessage, None),
             KeyBinding::new("escape", Escape, None),
         ]);
 
@@ -262,14 +264,26 @@ impl WorkbenchApp {
             self.ptt_held = held;
             dirty = true;
         }
-        if let Some(text) = wb_host::voice_ptt_take_pending() {
-            if wb_host::voice_ptt_paste(&text).is_err() {
-                self.state.push_notification(
-                    wb_domain::NotificationKind::System,
-                    "语音输入",
-                    &text,
-                    None,
-                );
+        if let Some(pending) = wb_host::voice_ptt_take_pending() {
+            match pending {
+                wb_host::VoicePending::Text(text) => {
+                    // Paste failed inside the host, so surface the text instead
+                    // of losing it. The notification body is selectable.
+                    self.state.push_notification(
+                        wb_domain::NotificationKind::System,
+                        "语音已转写（未能自动粘贴）",
+                        &text,
+                        None,
+                    );
+                }
+                wb_host::VoicePending::Error(message) => {
+                    self.state.push_notification(
+                        wb_domain::NotificationKind::System,
+                        "语音输入",
+                        &message,
+                        None,
+                    );
+                }
             }
             dirty = true;
         }
@@ -423,6 +437,14 @@ impl Render for WorkbenchApp {
         let entity = cx.weak_entity();
         let collapsed = self.collapsed;
         let ptt_held = self.ptt_held;
+        let account_name = self.state.with(|s| {
+            let name = s.prefs.general.display_name.trim();
+            if name.is_empty() {
+                "本地用户".to_string()
+            } else {
+                name.to_string()
+            }
+        });
 
         let today_label = if today_count > 0 {
             format!("今日 ({today_count})")
@@ -601,6 +623,10 @@ impl Render for WorkbenchApp {
                     }
                 }
             }))
+            .on_action(cx.listener(|this, _: &EditLastMessage, window, cx| {
+                this.agent
+                    .update(cx, |agent, cx| agent.edit_last_user_message(window, cx));
+            }))
             .child(
                 v_flex()
                     .size_full()
@@ -620,20 +646,53 @@ impl Render for WorkbenchApp {
                             .child(SidebarGroup::new("项目").child(project_menu))
                             .child(SidebarGroup::new("标签").child(tag_menu))
                             .child(SidebarGroup::new("更多").child(more_menu))
-                            .footer(
-                                SidebarFooter::new()
-                                    .selected(nav == AppNav::Settings)
-                                    .child(
-                                        Button::new("settings-nav")
-                                            .ghost()
-                                            .icon(IconName::Settings)
-                                            .selected(nav == AppNav::Settings)
-                                            .label(if collapsed { "" } else { "设置" })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.set_nav(AppNav::Settings, cx);
-                                            })),
-                                    ),
-                            );
+                            .footer({
+                                let account_footer = div()
+                                    .id("account-nav")
+                                    .w_full()
+                                    .h_7()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_2()
+                                    .rounded(cx.theme().radius)
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(cx.theme().tokens.sidebar_accent)
+                                            .text_color(cx.theme().sidebar_accent_foreground)
+                                    })
+                                    .when(nav == AppNav::Settings, |this| {
+                                        this.bg(cx.theme().tokens.sidebar_accent)
+                                            .text_color(cx.theme().sidebar_accent_foreground)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_nav(AppNav::Settings, cx);
+                                    }));
+                                if collapsed {
+                                    account_footer
+                                        .justify_center()
+                                        .child(Icon::new(IconName::CircleUser).size_4())
+                                } else {
+                                    account_footer
+                                        .justify_between()
+                                        .child(
+                                            h_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(Icon::new(IconName::CircleUser).size_4())
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .child(account_name.clone()),
+                                                ),
+                                        )
+                                        .child(Icon::new(IconName::Settings).size_4())
+                                }
+                            });
                         let main = v_flex()
                             .flex_1()
                             .h_full()
