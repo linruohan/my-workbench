@@ -17,6 +17,7 @@ wb-host.workspace = true
 wb-agent.workspace = true
 gpui-kit.workspace = true
 gpui-webview.workspace = true
+reqwest_client.workspace = true
 wry.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

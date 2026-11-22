@@ -6,14 +6,18 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::text::{TextView, TextViewState, TextViewStyle};
+use gpui_kit::component::text::{
+    FrontmatterPlugin, MarkdownExtensions, TextView, TextViewState, TextViewStyle,
+};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use wb_domain::{FindFlags, body_links_to, extract_wikilinks, find_spans, resolve_wikilink};
+use wb_domain::{
+    FindFlags, body_links_to, extract_wikilinks, find_spans, is_image_extension, resolve_wikilink,
+};
 use wb_host::{create_markdown, list_files_recursive, read_text, search_kb_content, write_text};
 
 actions!(knowledge, [FindNote, CloseFind]);
@@ -337,13 +341,14 @@ impl KnowledgePane {
         });
     }
 
-    fn preview_style(&self) -> TextViewStyle {
-        if self.table_wrap {
-            return TextViewStyle::default();
+    fn preview_style(&self, cx: &App) -> TextViewStyle {
+        let mut style = kb_preview_style(cx.theme(), self.preview_zoom);
+        if !self.table_wrap {
+            let mut table = style.table.clone();
+            table.overflow.x = Some(Overflow::Scroll);
+            style = style.table(table);
         }
-        let mut table = StyleRefinement::default();
-        table.overflow.x = Some(Overflow::Scroll);
-        TextViewStyle::default().table(table)
+        style
     }
 
     fn cycle_preview_zoom(&mut self, cx: &mut Context<Self>) {
@@ -357,13 +362,22 @@ impl KnowledgePane {
         cx.notify();
     }
 
-    fn kb_preview(&self, entity: &WeakEntity<KnowledgePane>) -> TextView {
+    fn kb_preview(&self, entity: &WeakEntity<KnowledgePane>, cx: &App) -> TextView {
         let entity = entity.clone();
+        let note_dir = self
+            .current
+            .as_ref()
+            .and_then(|p| Path::new(p).parent().map(Path::to_path_buf));
+        let lib_root = self.root();
         TextView::new(&self.preview)
             .scrollable(true)
             .selectable(true)
-            .style(self.preview_style())
+            .style(self.preview_style(cx))
             .text_size(rems(self.preview_zoom))
+            .markdown_extensions(kb_markdown_extensions())
+            .image_source(move |uri| {
+                kb_preview_image_source(uri.as_ref(), note_dir.as_deref(), lib_root.as_deref())
+            })
             .px_5()
             .py_4()
             .code_block_actions(|code_block, _window, _cx| {
@@ -750,6 +764,239 @@ fn doc_stats(text: &str) -> (usize, usize) {
     (lines, chars)
 }
 
+/// Colors from `theme_only.css` (Obsidian snippet) that GPUI can actually paint:
+/// heading bars, wiki-gold links, coral quotes, GitHub-dark code panels.
+struct KbPreviewPalette {
+    primary: Hsla,
+    internal_link: Hsla,
+    bold: Hsla,
+    italic: Hsla,
+    code_bg: Hsla,
+    code_border: Hsla,
+    hr: Hsla,
+    selection: Hsla,
+    table_head: Hsla,
+    table_border: Hsla,
+    note: Hsla,
+    tip: Hsla,
+    warning: Hsla,
+    important: Hsla,
+    caution: Hsla,
+}
+
+fn hsl_css(h: f32, s: f32, l: f32) -> Hsla {
+    hsla(h / 360., s / 100., l / 100., 1.)
+}
+
+fn kb_preview_palette(dark: bool) -> KbPreviewPalette {
+    KbPreviewPalette {
+        primary: Hsla::from(rgb(0xf9826c)),
+        internal_link: hsl_css(37., 100., 50.),
+        bold: hsl_css(12., 65., 62.),
+        italic: hsl_css(346., 64., 57.),
+        code_bg: if dark {
+            Hsla::from(rgb(0x161b22))
+        } else {
+            Hsla::from(rgb(0xf3f4f6))
+        },
+        code_border: if dark {
+            Hsla::from(rgb(0x21262d))
+        } else {
+            Hsla::from(rgb(0xd0d7de))
+        },
+        hr: if dark {
+            hsl_css(270., 60., 40.)
+        } else {
+            hsl_css(270., 20., 70.)
+        },
+        selection: hsla(210. / 360., 0.37, 0.33, 0.45),
+        table_head: if dark {
+            Hsla::from(rgb(0x21262d))
+        } else {
+            Hsla::from(rgb(0xeaeef2))
+        },
+        table_border: if dark {
+            Hsla::from(rgb(0x21262d))
+        } else {
+            Hsla::from(rgb(0xd0d7de))
+        },
+        note: hsl_css(175., 45., 50.),
+        tip: hsl_css(80., 70., 32.),
+        warning: hsl_css(37., 100., 50.),
+        important: hsl_css(270., 65., 58.8),
+        caution: hsl_css(330., 85., 47.2),
+    }
+}
+
+fn kb_heading_accent(level: u8) -> Hsla {
+    match level {
+        1 => hsl_css(270., 65., 58.8),
+        2 => hsl_css(330., 85., 47.2),
+        3 => hsl_css(37., 100., 50.),
+        4 => hsl_css(80., 70., 28.5),
+        5 => hsl_css(165., 100., 26.),
+        _ => hsl_css(175., 45., 50.),
+    }
+}
+
+fn kb_heading_style(level: u8) -> StyleRefinement {
+    let accent = kb_heading_accent(level);
+    let weight = if level <= 2 {
+        FontWeight::EXTRA_BOLD
+    } else {
+        FontWeight::BOLD
+    };
+    StyleRefinement::default()
+        .font_weight(weight)
+        .text_color(accent)
+        .border_l(px(4.))
+        .border_color(accent)
+        .pl_3()
+        .py_1()
+        .rounded_l(px(10.))
+        .bg(accent.opacity(0.16))
+}
+
+fn kb_heading_size(level: u8, base: Pixels) -> Pixels {
+    let scale = match level {
+        1 => 2.0,
+        2 => 1.8,
+        3 => 1.6,
+        4 => 1.4,
+        5 => 1.3,
+        _ => 1.2,
+    };
+    base * scale
+}
+
+fn kb_preview_style(theme: &Theme, zoom: f32) -> TextViewStyle {
+    let palette = kb_preview_palette(theme.is_dark());
+    let mut code = StyleRefinement::default()
+        .p_3()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(palette.code_border)
+        .bg(palette.code_bg)
+        .font_family(theme.mono_font_family.clone());
+    code.overflow.y = Some(Overflow::Scroll);
+    let mut style = TextViewStyle::default()
+        .paragraph_gap(rems(0.85))
+        .heading_font_size(kb_heading_size)
+        .heading(kb_heading_style)
+        .link(palette.internal_link)
+        .list(
+            StyleRefinement::default()
+                .text_color(palette.internal_link)
+                .font_weight(FontWeight::BOLD),
+        )
+        .blockquote(
+            StyleRefinement::default()
+                .border_l(px(3.))
+                .border_color(palette.primary)
+                .pl_3()
+                .py_1()
+                .rounded_r(px(6.))
+                .bg(palette.primary.opacity(0.08))
+                .text_color(palette.italic),
+        )
+        .code_block(code)
+        .code_background(palette.code_bg)
+        .inline_code(HighlightStyle {
+            color: Some(palette.bold),
+            background_color: Some(palette.code_bg),
+            font_weight: Some(FontWeight::MEDIUM),
+            ..Default::default()
+        })
+        .inline_code_box(
+            StyleRefinement::default()
+                .px_1()
+                .py(px(1.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(palette.code_border)
+                .bg(palette.code_bg)
+                .text_color(palette.bold)
+                .font_family(theme.mono_font_family.clone()),
+        )
+        .table(
+            StyleRefinement::default()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(palette.table_border),
+        )
+        .table_head(
+            StyleRefinement::default()
+                .bg(palette.table_head)
+                .text_color(palette.internal_link)
+                .font_weight(FontWeight::SEMIBOLD)
+                .px_3()
+                .py_2(),
+        )
+        .table_cell(StyleRefinement::default().px_3().py_2())
+        .table_row_hover(palette.internal_link.opacity(0.12))
+        .border(palette.hr)
+        .selection(palette.selection);
+    style.heading_base_font_size = theme.font_size * zoom;
+    style.highlight_theme = theme.highlight_theme.clone();
+    style.is_dark = theme.is_dark();
+    style
+}
+
+fn kb_callout(
+    label: &'static str,
+    icon: IconName,
+    color: Hsla,
+) -> impl Fn(&mut Window, &mut App) -> Div + Send + Sync + 'static {
+    move |_, _| {
+        v_flex()
+            .p_3()
+            .gap_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(color.opacity(0.45))
+            .bg(color.opacity(0.1))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_color(color)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(Icon::new(icon.clone()).text_color(color))
+                    .child(label),
+            )
+    }
+}
+
+fn kb_markdown_extensions() -> MarkdownExtensions {
+    let palette = kb_preview_palette(true);
+    MarkdownExtensions::default()
+        .frontmatter()
+        .plugin(FrontmatterPlugin::new())
+        .block_surface("note", kb_callout("Note", IconName::Info, palette.note))
+        .block_surface("info", kb_callout("Info", IconName::Info, palette.note))
+        .block_surface("tip", kb_callout("Tip", IconName::CircleCheck, palette.tip))
+        .block_surface(
+            "success",
+            kb_callout("Success", IconName::CircleCheck, palette.tip),
+        )
+        .block_surface(
+            "warning",
+            kb_callout("Warning", IconName::TriangleAlert, palette.warning),
+        )
+        .block_surface(
+            "important",
+            kb_callout("Important", IconName::Star, palette.important),
+        )
+        .block_surface(
+            "caution",
+            kb_callout("Caution", IconName::CircleX, palette.caution),
+        )
+        .block_surface(
+            "danger",
+            kb_callout("Danger", IconName::CircleX, palette.caution),
+        )
+}
+
 /// Turn `[[note]]` / `[[note|别名]]` into Markdown links for the preview pane.
 fn wikilinks_for_preview(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
@@ -762,11 +1009,24 @@ fn wikilinks_for_preview(body: &str) -> String {
                 let target = inner.split('|').next().unwrap_or(inner).trim();
                 let label = inner.split('|').nth(1).unwrap_or(target).trim();
                 if !target.is_empty() {
-                    out.push('[');
-                    out.push_str(label);
-                    out.push_str("](wiki:///");
-                    out.push_str(target);
-                    out.push(')');
+                    let is_image = Path::new(target)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(is_image_extension);
+                    if is_image && i > 0 && bytes[i - 1] == b'!' {
+                        out.pop();
+                        out.push_str("![");
+                        out.push_str(label);
+                        out.push_str("](");
+                        out.push_str(target);
+                        out.push(')');
+                    } else {
+                        out.push('[');
+                        out.push_str(label);
+                        out.push_str("](wiki:///");
+                        out.push_str(target);
+                        out.push(')');
+                    }
                     i = i + 2 + rel + 2;
                     continue;
                 }
@@ -778,6 +1038,94 @@ fn wikilinks_for_preview(body: &str) -> String {
         i += len;
     }
     out
+}
+
+fn kb_preview_image_source(
+    uri: &str,
+    note_dir: Option<&Path>,
+    lib_root: Option<&Path>,
+) -> gpui::ImageSource {
+    let uri = uri.trim();
+    if uri.starts_with("data:")
+        || uri.starts_with("http://")
+        || uri.starts_with("https://")
+        || uri.starts_with("wiki:///")
+    {
+        return gpui::SharedUri::from(uri.to_string()).into();
+    }
+    if let Some(path) = file_uri_to_path(uri) {
+        return gpui::ImageSource::from(path);
+    }
+    if let Some(path) = resolve_preview_image_path(uri, note_dir, lib_root) {
+        return gpui::ImageSource::from(path);
+    }
+    gpui::SharedUri::from(uri.to_string()).into()
+}
+
+fn resolve_preview_image_path(
+    uri: &str,
+    note_dir: Option<&Path>,
+    lib_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let decoded = percent_decode_path(uri);
+    if decoded.is_empty() {
+        return None;
+    }
+    let raw = PathBuf::from(&decoded);
+    if raw.is_absolute() {
+        return Some(raw);
+    }
+    let rel = decoded.trim_start_matches("./");
+    let from_note = note_dir.map(|dir| dir.join(rel));
+    if from_note.as_ref().is_some_and(|p| p.is_file()) {
+        return from_note;
+    }
+    let from_root = lib_root.map(|root| root.join(rel));
+    if from_root.as_ref().is_some_and(|p| p.is_file()) {
+        return from_root;
+    }
+    from_note.or(from_root)
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file:")?;
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    let rest = rest
+        .strip_prefix("localhost")
+        .or_else(|| rest.strip_prefix("LOCALHOST"))
+        .unwrap_or(rest);
+    let decoded = percent_decode_path(rest);
+    if decoded.is_empty() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        let trimmed = decoded.trim_start_matches('/');
+        if trimmed.chars().nth(1) == Some(':') {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    Some(PathBuf::from(decoded))
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(value) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+        {
+            out.push(value);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn build_kb_tree(entries: &[(String, String, Option<String>)]) -> Vec<KbTreeNode> {
@@ -1294,7 +1642,7 @@ impl Render for KnowledgePane {
                                         .child(resizable_panel().child(kb_surface(
                                             cx,
                                             "渲染预览",
-                                            self.kb_preview(&entity),
+                                            self.kb_preview(&entity, cx),
                                         )))
                                         .into_any_element()
                                 }
@@ -1313,7 +1661,7 @@ impl Render for KnowledgePane {
                                         .child(kb_surface(
                                             cx,
                                             "渲染预览",
-                                            self.kb_preview(&entity),
+                                            self.kb_preview(&entity, cx),
                                         ))
                                         .into_any_element()
                                 }
@@ -1682,7 +2030,12 @@ fn markdown_scroll_outline(source: &str) -> ScrollOutline {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_kb_tree, markdown_scroll_outline, wikilinks_for_preview};
+    use super::{
+        build_kb_tree, file_uri_to_path, kb_heading_accent, kb_heading_size, kb_preview_palette,
+        markdown_scroll_outline, resolve_preview_image_path, wikilinks_for_preview,
+    };
+    use gpui_kit::px;
+    use std::path::PathBuf;
 
     #[test]
     fn wikilinks_become_preview_links() {
@@ -1691,6 +2044,50 @@ mod tests {
             wikilinks_for_preview(md),
             "见 [note](wiki:///note) 与 [其它](wiki:///other)。"
         );
+    }
+
+    #[test]
+    fn image_wikilinks_become_markdown_images() {
+        assert_eq!(
+            wikilinks_for_preview("见 ![[photo.png]] 与 [[note]]。"),
+            "见 ![photo.png](photo.png) 与 [note](wiki:///note)。"
+        );
+        assert_eq!(
+            wikilinks_for_preview("![[assets/a.jpg|图]]"),
+            "![图](assets/a.jpg)"
+        );
+    }
+
+    #[test]
+    fn relative_image_prefers_note_dir() {
+        let tmp = std::env::temp_dir().join(format!("wb-kb-img-{}", std::process::id()));
+        let note_dir = tmp.join("notes");
+        let root = tmp.clone();
+        std::fs::create_dir_all(&note_dir).unwrap();
+        std::fs::write(note_dir.join("a.png"), b"note").unwrap();
+        std::fs::write(root.join("a.png"), b"root").unwrap();
+        let path = resolve_preview_image_path("a.png", Some(&note_dir), Some(&root)).unwrap();
+        assert_eq!(path, note_dir.join("a.png"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn relative_image_falls_back_to_library_root() {
+        let tmp = std::env::temp_dir().join(format!("wb-kb-img-root-{}", std::process::id()));
+        let note_dir = tmp.join("notes");
+        std::fs::create_dir_all(tmp.join("assets")).unwrap();
+        std::fs::create_dir_all(&note_dir).unwrap();
+        std::fs::write(tmp.join("assets").join("pic.png"), b"root").unwrap();
+        let path =
+            resolve_preview_image_path("assets/pic.png", Some(&note_dir), Some(&tmp)).unwrap();
+        assert_eq!(path, tmp.join("assets").join("pic.png"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn file_uri_decodes_windows_path() {
+        let path = file_uri_to_path("file:///C:/kb/a%20b.png").unwrap();
+        assert_eq!(path, PathBuf::from(r"C:/kb/a b.png"));
     }
 
     #[test]
@@ -1727,5 +2124,23 @@ mod tests {
         let mid = outline.item_for_line(2.0);
         assert!(mid > 0.4 && mid < 1.6);
         assert!((outline.line_for_item(2.0) - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn heading_accents_follow_theme_snippet_levels() {
+        assert_eq!(kb_heading_accent(1), super::hsl_css(270., 65., 58.8));
+        assert_eq!(kb_heading_accent(2), super::hsl_css(330., 85., 47.2));
+        assert_eq!(kb_heading_accent(3), super::hsl_css(37., 100., 50.));
+        assert_eq!(kb_heading_size(1, px(16.)), px(32.));
+        assert_eq!(kb_heading_size(6, px(16.)), px(19.2));
+    }
+
+    #[test]
+    fn preview_palette_keeps_snippet_accents() {
+        let palette = kb_preview_palette(true);
+        assert_eq!(palette.italic, super::hsl_css(346., 64., 57.));
+        assert_eq!(palette.note, super::hsl_css(175., 45., 50.));
+        assert_eq!(palette.warning, super::hsl_css(37., 100., 50.));
+        assert_eq!(palette.caution, super::hsl_css(330., 85., 47.2));
     }
 }
