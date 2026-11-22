@@ -20,10 +20,11 @@ use wb_domain::{
     now_ms, parse_apply_patch, settle_timer_segment, shift_remind_at, workspace_tools,
 };
 use wb_host::{
-    cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive, list_plugins,
-    list_skills, load_skill, maybe_spill, mcp_http_call, mcp_stdio_call, present_path,
-    probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd, run_shell_in,
-    run_shell_kind, set_agent_cwd, web_fetch, web_search, which_bin, write_text,
+    active_skills, cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive,
+    list_plugins, list_skills, load_skill, maybe_spill, mcp_http_call, mcp_stdio_call,
+    path_is_within, paths_equal, present_path, probe_workspace_dependencies, read_image_info,
+    read_text, resolve_agent_cwd, run_shell_in, run_shell_kind, set_agent_cwd, web_fetch,
+    web_search, which_bin, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, update_prefs};
 
@@ -984,7 +985,18 @@ pub fn execute_tool(
                             Some(v.trim().to_string())
                         };
                     }
-                    "skillsDirs" => prefs.agent.skills_dirs = split_dirs(&as_str()),
+                    "skillsDirs" => {
+                        prefs.agent.skills_dirs = split_dirs(&as_str());
+                        let kept = prefs.agent.skills_dirs.clone();
+                        prefs
+                            .agent
+                            .disabled_skill_dirs
+                            .retain(|dir| kept.iter().any(|kept_dir| paths_equal(kept_dir, dir)));
+                        prefs
+                            .agent
+                            .disabled_skills
+                            .retain(|path| kept.iter().any(|dir| path_is_within(path, dir)));
+                    }
                     "pluginsDirs" => prefs.agent.plugins_dirs = split_dirs(&as_str()),
                     other => {
                         return Ok(ToolResult::err_text(format!(
@@ -2102,13 +2114,13 @@ pub fn execute_tool(
         }
         "skill_list" => {
             let prefs = load_prefs().unwrap_or_default();
-            let skills = list_skills(&prefs.agent.skills_dirs);
+            let skills = active_skills(&prefs.agent);
             let lines: Vec<_> = skills
                 .into_iter()
                 .map(|s| format!("- {} · {} ({})", s.name, s.summary, s.path))
                 .collect();
             Ok(ToolResult::ok_text(if lines.is_empty() {
-                "（无技能；请在设置中配置 skillsDirs）".into()
+                "（无已启用技能；请在设置 → 技能中添加技能目录）".into()
             } else {
                 lines.join("\n")
             }))
@@ -2119,6 +2131,19 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 name"))?;
             let prefs = load_prefs().unwrap_or_default();
+            let enabled = active_skills(&prefs.agent)
+                .iter()
+                .any(|skill| skill.name.eq_ignore_ascii_case(name));
+            if !enabled {
+                let known = list_skills(&prefs.agent.skills_dirs)
+                    .iter()
+                    .any(|skill| skill.name.eq_ignore_ascii_case(name));
+                return Ok(ToolResult::err_text(if known {
+                    format!("技能已停用：{name}")
+                } else {
+                    format!("未找到技能：{name}")
+                }));
+            }
             let text = load_skill(&prefs.agent.skills_dirs, name)?;
             Ok(ToolResult::ok_text(text))
         }

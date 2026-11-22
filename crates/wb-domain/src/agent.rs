@@ -812,13 +812,13 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
         tool(
             "skill_list",
             ToolEffect::Read,
-            "列出技能目录中的技能",
+            "列出已启用的技能",
             serde_json::json!({}),
         ),
         tool(
             "skill_load",
             ToolEffect::Read,
-            "加载指定技能全文",
+            "加载已启用技能的全文",
             serde_json::json!({
                 "name": { "type": "string" }
             }),

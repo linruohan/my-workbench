@@ -18,10 +18,11 @@ use std::time::Duration;
 use wb_agent::{
     ContinueTurn, SlashCommand, StreamEvent, TurnPhase, apply_slash_completion, begin_user_turn,
     clear_goal_round_flag, continue_turn_reply_streaming, create_thread, cycle_permission_mode,
-    dequeue_user_text, enqueue_user_text, finish_continue_turn, finish_user_turn, load_providers,
-    model_context_window, pending_approvals_for_thread, permission_mode_label,
-    prepare_goal_idle_round, prompt_char_count, queued_user_texts, resolve_approval,
-    resolve_turn_reply_streaming, slash_suggestions,
+    dequeue_user_text, enqueue_user_text, finish_continue_turn_with_stage,
+    finish_user_turn_with_stage, load_providers, model_context_window,
+    pending_approvals_for_thread, permission_mode_label, prepare_goal_idle_round,
+    prompt_char_count, queued_user_texts, resolve_approval, resolve_turn_reply_streaming,
+    slash_suggestions,
 };
 use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{
@@ -44,6 +45,11 @@ fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &A
         StreamEvent::Tool { name } => {
             if let Ok(mut s) = status.lock() {
                 *s = format!("调用 {name}…");
+            }
+        }
+        StreamEvent::Stage { label } => {
+            if let Ok(mut s) = status.lock() {
+                *s = label;
             }
         }
     }
@@ -429,9 +435,16 @@ impl AgentPane {
             let mut phase = this
                 .update(cx, |this, cx| {
                     clear_draft(&this.stream_draft, &this.stream_status);
-                    let phase = this
-                        .state
-                        .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply));
+                    let stage = this.stream_status.clone();
+                    let on_stage = move |label: &str| {
+                        if let Ok(mut s) = stage.lock() {
+                            s.clear();
+                            s.push_str(label);
+                        }
+                    };
+                    let phase = this.state.with_mut(|s| {
+                        finish_user_turn_with_stage(&mut s.repo, &pending, reply, on_stage)
+                    });
                     this.apply_open_view(phase.open_view());
                     this.state.persist_if_dirty();
                     this.scroll_chat_to_bottom(cx);
@@ -476,9 +489,16 @@ impl AgentPane {
                     phase = this
                         .update(cx, |this, cx| {
                             clear_draft(&this.stream_draft, &this.stream_status);
-                            let next = this
-                                .state
-                                .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
+                            let stage = this.stream_status.clone();
+                            let on_stage = move |label: &str| {
+                                if let Ok(mut s) = stage.lock() {
+                                    s.clear();
+                                    s.push_str(label);
+                                }
+                            };
+                            let next = this.state.with_mut(|s| {
+                                finish_continue_turn_with_stage(&mut s.repo, &cont, reply, on_stage)
+                            });
                             this.apply_open_view(next.open_view());
                             this.state.persist_if_dirty();
                             this.scroll_chat_to_bottom(cx);
@@ -541,9 +561,16 @@ impl AgentPane {
                 phase = this
                     .update(cx, |this, cx| {
                         clear_draft(&this.stream_draft, &this.stream_status);
-                        let next = this
-                            .state
-                            .with_mut(|s| finish_user_turn(&mut s.repo, &pending_goal, reply));
+                        let stage = this.stream_status.clone();
+                        let on_stage = move |label: &str| {
+                            if let Ok(mut s) = stage.lock() {
+                                s.clear();
+                                s.push_str(label);
+                            }
+                        };
+                        let next = this.state.with_mut(|s| {
+                            finish_user_turn_with_stage(&mut s.repo, &pending_goal, reply, on_stage)
+                        });
                         this.apply_open_view(next.open_view());
                         this.state.persist_if_dirty();
                         this.scroll_chat_to_bottom(cx);
@@ -748,9 +775,16 @@ impl AgentPane {
                 cont_opt = this
                     .update(cx, |this, cx| {
                         clear_draft(&this.stream_draft, &this.stream_status);
-                        let next = this
-                            .state
-                            .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
+                        let stage = this.stream_status.clone();
+                        let on_stage = move |label: &str| {
+                            if let Ok(mut s) = stage.lock() {
+                                s.clear();
+                                s.push_str(label);
+                            }
+                        };
+                        let next = this.state.with_mut(|s| {
+                            finish_continue_turn_with_stage(&mut s.repo, &cont, reply, on_stage)
+                        });
                         this.apply_open_view(next.open_view());
                         this.state.persist_if_dirty();
                         this.scroll_chat_to_bottom(cx);

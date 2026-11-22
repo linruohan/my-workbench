@@ -7,7 +7,7 @@ use wb_domain::{
     AgentApproval, AgentMessage, AgentPermissionMode, AgentRole, AgentThread, ApprovalStatus,
     BUILTIN_MODEL_REF, PlannedCall, ToolGate, create_id, now_ms,
 };
-use wb_host::chat_completions_stream;
+use wb_host::{active_skills, chat_completions_stream};
 use wb_store::MemoryWorkbenchRepository;
 
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -30,6 +30,7 @@ pub struct ModelReply {
 pub enum StreamEvent {
     Text(String),
     Tool { name: String },
+    Stage { label: String },
 }
 
 /// Prepared turn state that can leave the repo lock before awaiting the model.
@@ -192,6 +193,16 @@ pub fn finish_user_turn(
     pending: &PendingTurn,
     reply: ModelReply,
 ) -> TurnPhase {
+    finish_user_turn_with_stage(repo, pending, reply, |_| {})
+}
+
+/// Like [`finish_user_turn`], but reports tool-loop stage labels via `on_stage`.
+pub fn finish_user_turn_with_stage(
+    repo: &mut MemoryWorkbenchRepository,
+    pending: &PendingTurn,
+    reply: ModelReply,
+    mut on_stage: impl FnMut(&str),
+) -> TurnPhase {
     let mut tool_messages = Vec::new();
     let mut open_view = None;
     let mut openai_messages = history_to_openai(&pending.history);
@@ -212,6 +223,7 @@ pub fn finish_user_turn(
     }
 
     if let Some((tool_name, args)) = parse_slash_invocation(&pending.user_text) {
+        on_stage(&format!("执行 /{tool_name}…"));
         let (msgs, view, _) = dispatch_tool_calls(
             repo,
             &pending.thread,
@@ -243,6 +255,7 @@ pub fn finish_user_turn(
         &mut tool_messages,
         &mut open_view,
         0,
+        &mut on_stage,
     )
 }
 
@@ -250,6 +263,16 @@ pub fn finish_continue_turn(
     repo: &mut MemoryWorkbenchRepository,
     cont: &ContinueTurn,
     reply: ModelReply,
+) -> TurnPhase {
+    finish_continue_turn_with_stage(repo, cont, reply, |_| {})
+}
+
+/// Like [`finish_continue_turn`], but reports tool-loop stage labels via `on_stage`.
+pub fn finish_continue_turn_with_stage(
+    repo: &mut MemoryWorkbenchRepository,
+    cont: &ContinueTurn,
+    reply: ModelReply,
+    mut on_stage: impl FnMut(&str),
 ) -> TurnPhase {
     let mut tool_messages = Vec::new();
     let mut open_view = None;
@@ -263,6 +286,7 @@ pub fn finish_continue_turn(
         &mut tool_messages,
         &mut open_view,
         cont.round,
+        &mut on_stage,
     )
 }
 
@@ -276,6 +300,7 @@ fn apply_model_reply_inner(
     tool_messages: &mut Vec<AgentMessage>,
     open_view: &mut Option<String>,
     round: usize,
+    on_stage: &mut impl FnMut(&str),
 ) -> TurnPhase {
     let tool_calls_json = if reply.tool_calls.is_empty() {
         None
@@ -303,6 +328,12 @@ fn apply_model_reply_inner(
 
     let mut asked = false;
     if !reply.tool_calls.is_empty() {
+        let round_label = format!("工具轮 {}/{}", round + 1, MAX_TOOL_ROUNDS);
+        on_stage(&round_label);
+        let names = tool_names(&reply.tool_calls);
+        if !names.is_empty() {
+            on_stage(&format!("{round_label} · {names}"));
+        }
         let (msgs, view, had_ask) =
             dispatch_tool_calls(repo, thread, &reply.tool_calls, workspace_root.as_deref());
         if view.is_some() {
@@ -317,6 +348,11 @@ fn apply_model_reply_inner(
             }));
         }
         tool_messages.extend(msgs);
+        if asked {
+            on_stage(&format!("{round_label} · 等待审批"));
+        } else if !reply.tool_calls.is_empty() {
+            on_stage(&format!("{round_label} · 已执行，整理回复…"));
+        }
     }
 
     for m in tool_messages.iter() {
@@ -1008,6 +1044,57 @@ fn openai_tools_schema() -> Vec<Value> {
         .collect()
 }
 
+fn agent_system_content(prefs: &wb_domain::AppPrefs) -> Option<String> {
+    let mut parts = Vec::new();
+    let personality = prefs
+        .agent
+        .personality
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    if !prefs.agent.memories.is_empty() {
+        let personality = personality.unwrap_or("你是工作台助手。");
+        parts.push(format!(
+            "{personality}\n记忆：{}",
+            prefs.agent.memories.join("；")
+        ));
+    } else if let Some(personality) = personality {
+        parts.push(personality.to_string());
+    }
+    let skills = active_skills(&prefs.agent);
+    if !skills.is_empty() {
+        let shown = skills.len().min(80);
+        let lines = skills
+            .iter()
+            .take(shown)
+            .map(|skill| {
+                if skill.summary.is_empty() {
+                    format!("- {}", skill.name)
+                } else {
+                    format!("- {}：{}", skill.name, skill.summary)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let extra = if skills.len() > shown {
+            format!(
+                "\n其余 {} 个技能请调用 skill_list 查看。",
+                skills.len() - shown
+            )
+        } else {
+            String::new()
+        };
+        parts.push(format!(
+            "已启用技能（下面是短描述；需要完整说明时调用 skill_load，name 为技能名）：\n{lines}{extra}"
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
 async fn call_remote_model(
     thread: &AgentThread,
     messages: &[Value],
@@ -1027,26 +1114,10 @@ async fn call_remote_model(
     let key = creds.keys.get(&provider.id).map(|s| s.as_str());
 
     let mut msgs = messages.to_vec();
-    if let Ok(prefs) = wb_store::load_prefs() {
-        if !prefs.agent.memories.is_empty() {
-            let mem = prefs.agent.memories.join("；");
-            let personality = prefs
-                .agent
-                .personality
-                .as_deref()
-                .unwrap_or("你是工作台助手。");
-            msgs.insert(
-                0,
-                json!({
-                    "role": "system",
-                    "content": format!("{personality}\n记忆：{mem}")
-                }),
-            );
-        } else if let Some(ref p) = prefs.agent.personality {
-            if !p.trim().is_empty() {
-                msgs.insert(0, json!({ "role": "system", "content": p }));
-            }
-        }
+    if let Ok(prefs) = wb_store::load_prefs()
+        && let Some(content) = agent_system_content(&prefs)
+    {
+        msgs.insert(0, json!({ "role": "system", "content": content }));
     }
     let mut body = json!({
         "model": model_id,
@@ -1175,7 +1246,9 @@ mod tests {
 
         let phase = resolve_approval(&mut repo, &approval.id, true, None).unwrap();
         let tool_content = match &phase {
-            TurnPhase::Done(out) | TurnPhase::Continue(_, out) => out.tool_messages[0].content.clone(),
+            TurnPhase::Done(out) | TurnPhase::Continue(_, out) => {
+                out.tool_messages[0].content.clone()
+            }
         };
         assert!(tool_content.contains("已批准"));
         assert_eq!(repo.list_tasks().len(), 1);

@@ -8,6 +8,7 @@ use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -15,14 +16,13 @@ use std::collections::HashMap;
 use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_domain::ThemeModePref;
 use wb_host::{
-    list_system_fonts, ocr_ensure_models, ocr_status, speech_ensure_models,
-    speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
+    list_skills, list_system_fonts, ocr_ensure_models, ocr_status, path_is_within, paths_equal,
+    speech_ensure_models, speech_ensure_models_ex, speech_status, voice_ptt_set_enabled,
 };
 
 pub struct SettingsPane {
     state: AppState,
     memory_input: Entity<InputState>,
-    skills_dirs: Entity<InputState>,
     plugins_dirs: Entity<InputState>,
     personality: Entity<InputState>,
     mcp_json: Entity<InputState>,
@@ -35,6 +35,7 @@ pub struct SettingsPane {
     cred_msg: String,
     agent_json_msg: String,
     data_msg: String,
+    skills_msg: String,
 }
 
 impl SettingsPane {
@@ -49,13 +50,7 @@ impl SettingsPane {
         });
         let memory_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("新记忆，回车或点添加"));
-        let skills_val = state.with(|s| s.prefs.agent.skills_dirs.join(";"));
         let plugins_val = state.with(|s| s.prefs.agent.plugins_dirs.join(";"));
-        let skills_dirs = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("技能目录，多个用 ; 分隔")
-                .default_value(skills_val)
-        });
         let plugins_dirs = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("插件目录，多个用 ; 分隔")
@@ -122,7 +117,6 @@ impl SettingsPane {
         Self {
             state,
             memory_input,
-            skills_dirs,
             plugins_dirs,
             personality,
             mcp_json,
@@ -135,6 +129,7 @@ impl SettingsPane {
             cred_msg: String::new(),
             agent_json_msg: String::new(),
             data_msg: String::new(),
+            skills_msg: String::new(),
         }
     }
 
@@ -210,7 +205,6 @@ impl SettingsPane {
     }
 
     fn save_dirs(&mut self, cx: &mut Context<Self>) {
-        let skills = self.skills_dirs.read(cx).value().to_string();
         let plugins = self.plugins_dirs.read(cx).value().to_string();
         let split = |s: &str| -> Vec<String> {
             s.split([';', ','])
@@ -220,11 +214,99 @@ impl SettingsPane {
                 .collect()
         };
         self.state.with_mut(|s| {
-            s.prefs.agent.skills_dirs = split(&skills);
             s.prefs.agent.plugins_dirs = split(&plugins);
         });
         self.state.persist_prefs();
-        self.cred_msg = "技能/插件目录已保存".into();
+        self.cred_msg = "插件目录已保存".into();
+        cx.notify();
+    }
+
+    fn add_skill_dir(&mut self, cx: &mut Context<Self>) {
+        super::prompt_directory(cx, |this, picked, cx| {
+            let Some(path) = picked else {
+                return;
+            };
+            if !path.is_dir() {
+                this.skills_msg = "所选路径不是文件夹".into();
+                cx.notify();
+                return;
+            }
+            let text = path.display().to_string();
+            let duplicate = this.state.with(|s| {
+                s.prefs
+                    .agent
+                    .skills_dirs
+                    .iter()
+                    .any(|dir| paths_equal(dir, &text))
+            });
+            if duplicate {
+                this.skills_msg = "这个目录已经添加过了".into();
+                cx.notify();
+                return;
+            }
+            let found = list_skills(std::slice::from_ref(&text)).len();
+            this.state.with_mut(|s| {
+                s.prefs
+                    .agent
+                    .disabled_skill_dirs
+                    .retain(|dir| !paths_equal(dir, &text));
+                s.prefs.agent.skills_dirs.push(text);
+            });
+            this.state.persist_prefs();
+            this.skills_msg = if found == 0 {
+                "已添加，目录中没有发现 SKILL.md".into()
+            } else {
+                format!("已加载 {found} 个技能")
+            };
+            cx.notify();
+        });
+    }
+
+    fn remove_skill_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.prefs
+                .agent
+                .skills_dirs
+                .retain(|dir| !paths_equal(dir, &path));
+            s.prefs
+                .agent
+                .disabled_skill_dirs
+                .retain(|dir| !paths_equal(dir, &path));
+            s.prefs
+                .agent
+                .disabled_skills
+                .retain(|skill| !path_is_within(skill, &path));
+        });
+        self.state.persist_prefs();
+        self.skills_msg.clear();
+        cx.notify();
+    }
+
+    fn set_skill_dir_enabled(&mut self, path: String, enabled: bool, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.prefs
+                .agent
+                .disabled_skill_dirs
+                .retain(|dir| !paths_equal(dir, &path));
+            if !enabled {
+                s.prefs.agent.disabled_skill_dirs.push(path);
+            }
+        });
+        self.state.persist_prefs();
+        cx.notify();
+    }
+
+    fn set_skill_enabled(&mut self, path: String, enabled: bool, cx: &mut Context<Self>) {
+        self.state.with_mut(|s| {
+            s.prefs
+                .agent
+                .disabled_skills
+                .retain(|skill| !paths_equal(skill, &path));
+            if !enabled {
+                s.prefs.agent.disabled_skills.push(path);
+            }
+        });
+        self.state.persist_prefs();
         cx.notify();
     }
 
@@ -403,7 +485,6 @@ impl SettingsPane {
         let agent = AgentForm {
             personality: self.personality.clone(),
             memory_input: self.memory_input.clone(),
-            skills_dirs: self.skills_dirs.clone(),
             plugins_dirs: self.plugins_dirs.clone(),
             mcp_json: self.mcp_json.clone(),
             subagents_json: self.subagents_json.clone(),
@@ -415,6 +496,7 @@ impl SettingsPane {
                 .collect(),
             cred_msg: self.cred_msg.clone(),
             agent_json_msg: self.agent_json_msg.clone(),
+            skills_msg: self.skills_msg.clone(),
         };
 
         let mut pages = vec![
@@ -435,7 +517,6 @@ impl SettingsPane {
 struct AgentForm {
     personality: Entity<InputState>,
     memory_input: Entity<InputState>,
-    skills_dirs: Entity<InputState>,
     plugins_dirs: Entity<InputState>,
     mcp_json: Entity<InputState>,
     subagents_json: Entity<InputState>,
@@ -443,6 +524,7 @@ struct AgentForm {
     key_inputs: Vec<(String, Entity<InputState>)>,
     cred_msg: String,
     agent_json_msg: String,
+    skills_msg: String,
 }
 
 fn poke(entity: &WeakEntity<SettingsPane>, cx: &mut App) {
@@ -1094,7 +1176,6 @@ fn agent_pages(
     let AgentForm {
         personality,
         memory_input,
-        skills_dirs,
         plugins_dirs,
         mcp_json,
         subagents_json,
@@ -1102,6 +1183,7 @@ fn agent_pages(
         key_inputs,
         cred_msg,
         agent_json_msg,
+        skills_msg,
     } = form;
     let model_state = state.clone();
     let model_entity = entity.clone();
@@ -1114,6 +1196,8 @@ fn agent_pages(
     let proxy_read = state.clone();
     let proxy_write = state.clone();
     let proxy_entity = entity.clone();
+    let skills_state = state.clone();
+    let skills_entity = entity.clone();
     let _ = state;
     vec![
         agent_nav(
@@ -1352,7 +1436,7 @@ fn agent_pages(
             json_entity.clone(),
             agent_json_msg.clone(),
         )),
-        agent_nav(skills_page(skills_dirs.clone(), dirs_entity.clone())),
+        agent_nav(skills_page(skills_state, skills_entity, skills_msg)),
         agent_nav(commands_page()),
         agent_nav(hooks_page(hooks_json.clone(), json_entity, agent_json_msg)),
     ]
@@ -1464,18 +1548,314 @@ fn plugins_page(
 }
 
 fn skills_page(
-    skills_dirs: Entity<InputState>,
-    dirs_entity: WeakEntity<SettingsPane>,
+    state: AppState,
+    entity: WeakEntity<SettingsPane>,
+    skills_msg: String,
 ) -> SettingPage {
-    dir_page(
-        "技能",
-        IconName::Star,
-        skills_dirs,
-        dirs_entity,
-        "save-skills",
-        "保存技能目录",
-        &["技能", "目录"],
-    )
+    SettingPage::new("技能")
+        .icon(Icon::new(IconName::Star))
+        .group(
+            SettingGroup::new().item(
+                SettingItem::render(move |_, _, cx| {
+                    let muted = cx.theme().muted_foreground;
+                    let border = cx.theme().border;
+                    let card = cx.theme().secondary;
+                    let fg = cx.theme().foreground;
+                    let accent = cx.theme().success;
+                    let radius = cx.theme().radius;
+                    let (dirs, disabled_dirs, disabled_skills) = state.with(|s| {
+                        (
+                            s.prefs.agent.skills_dirs.clone(),
+                            s.prefs.agent.disabled_skill_dirs.clone(),
+                            s.prefs.agent.disabled_skills.clone(),
+                        )
+                    });
+                    let skills = list_skills(&dirs);
+                    let enabled_dirs = dirs
+                        .iter()
+                        .filter(|dir| !disabled_dirs.iter().any(|off| paths_equal(off, dir)))
+                        .count();
+                    let add_entity = entity.clone();
+                    let skills_msg = skills_msg.clone();
+                    v_flex()
+                        .gap_3()
+                        .w_full()
+                        .child(
+                            div().text_sm().text_color(muted).child(
+                                "添加本机技能目录。目录本身或子目录内含 SKILL.md 时会被发现；已启用技能的短描述进入会话，完整说明由 Agent 调用 skill_load 读取。",
+                            ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_3()
+                                .items_center()
+                                .child(
+                                    Button::new("add-skill-dir")
+                                        .small()
+                                        .secondary()
+                                        .label("添加技能目录")
+                                        .on_click(move |_, _, cx| {
+                                            add_entity
+                                                .update(cx, |this, cx| this.add_skill_dir(cx))
+                                                .ok();
+                                        }),
+                                )
+                                .when(!dirs.is_empty(), |row| {
+                                    row.child(
+                                        div().text_xs().text_color(muted).child(format!(
+                                            "{enabled_dirs} 个目录启用 · 发现 {} 个技能",
+                                            skills.len()
+                                        )),
+                                    )
+                                }),
+                        )
+                        .when(!skills_msg.is_empty(), |col| {
+                            col.child(div().text_sm().text_color(muted).child(skills_msg))
+                        })
+                        .children(dirs.iter().enumerate().map(|(index, dir)| {
+                            let count = skills
+                                .iter()
+                                .filter(|skill| paths_equal(&skill.root, dir))
+                                .count();
+                            let enabled = !disabled_dirs.iter().any(|off| paths_equal(off, dir));
+                            skill_dir_row(SkillDirRow {
+                                index,
+                                path: dir.clone(),
+                                count,
+                                enabled,
+                                entity: entity.clone(),
+                                border,
+                                card,
+                                fg,
+                                muted,
+                                accent,
+                                radius,
+                            })
+                        }))
+                        .when(!skills.is_empty(), |col| {
+                            col.child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .pt_2()
+                                    .child("已发现技能"),
+                            )
+                            .children(skills.iter().enumerate().map(|(index, skill)| {
+                                let dir_enabled = !disabled_dirs
+                                    .iter()
+                                    .any(|off| paths_equal(off, &skill.root));
+                                let skill_enabled = !disabled_skills
+                                    .iter()
+                                    .any(|off| paths_equal(off, &skill.path));
+                                skill_entry_row(SkillEntryRow {
+                                    index,
+                                    name: skill.name.clone(),
+                                    path: skill.path.clone(),
+                                    summary: skill.summary.clone(),
+                                    enabled: dir_enabled && skill_enabled,
+                                    switch_disabled: !dir_enabled,
+                                    entity: entity.clone(),
+                                    border,
+                                    card,
+                                    fg: if dir_enabled { fg } else { muted },
+                                    muted,
+                                    accent,
+                                    radius,
+                                })
+                            }))
+                        })
+                })
+                .keywords(["技能", "目录", "SKILL", "skill"]),
+            ),
+        )
+}
+
+struct SkillDirRow {
+    index: usize,
+    path: String,
+    count: usize,
+    enabled: bool,
+    entity: WeakEntity<SettingsPane>,
+    border: Hsla,
+    card: Hsla,
+    fg: Hsla,
+    muted: Hsla,
+    accent: Hsla,
+    radius: Pixels,
+}
+
+fn skill_dir_row(row: SkillDirRow) -> impl IntoElement {
+    let SkillDirRow {
+        index,
+        path,
+        count,
+        enabled,
+        entity,
+        border,
+        card,
+        fg,
+        muted,
+        accent,
+        radius,
+    } = row;
+    let name = dir_label(&path);
+    let toggle_entity = entity.clone();
+    let toggle_path = path.clone();
+    let remove_path = path.clone();
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .rounded(radius)
+        .border_1()
+        .border_color(border)
+        .bg(card)
+        .child(Icon::new(IconName::Folder).size(px(16.)).text_color(muted))
+        .child(
+            v_flex()
+                .flex_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(if enabled { fg } else { muted })
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("已发现 {count} 个技能")),
+                ),
+        )
+        .child(
+            Switch::new(SharedString::from(format!("skill-dir-{index}")))
+                .small()
+                .checked(enabled)
+                .color(accent)
+                .accessibility_label(SharedString::from(format!("启用目录 {name}")))
+                .on_click(move |checked, _, cx| {
+                    let enabled = *checked;
+                    let path = toggle_path.clone();
+                    toggle_entity
+                        .update(cx, |this, cx| this.set_skill_dir_enabled(path, enabled, cx))
+                        .ok();
+                }),
+        )
+        .child(
+            Button::new(SharedString::from(format!("skill-dir-del-{index}")))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Delete)
+                .tooltip(SharedString::from(format!("移除 {path}")))
+                .accessibility_label("移除技能目录")
+                .on_click(move |_, _, cx| {
+                    let path = remove_path.clone();
+                    entity
+                        .update(cx, |this, cx| this.remove_skill_dir(path, cx))
+                        .ok();
+                }),
+        )
+}
+
+struct SkillEntryRow {
+    index: usize,
+    name: String,
+    path: String,
+    summary: String,
+    enabled: bool,
+    switch_disabled: bool,
+    entity: WeakEntity<SettingsPane>,
+    border: Hsla,
+    card: Hsla,
+    fg: Hsla,
+    muted: Hsla,
+    accent: Hsla,
+    radius: Pixels,
+}
+
+fn skill_entry_row(row: SkillEntryRow) -> impl IntoElement {
+    let SkillEntryRow {
+        index,
+        name,
+        path,
+        summary,
+        enabled,
+        switch_disabled,
+        entity,
+        border,
+        card,
+        fg,
+        muted,
+        accent,
+        radius,
+    } = row;
+    let summary = if summary.is_empty() {
+        "无短描述".to_string()
+    } else {
+        summary
+    };
+    let label = name.clone();
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .rounded(radius)
+        .border_1()
+        .border_color(border)
+        .bg(card)
+        .child(
+            Icon::new(IconName::FileText)
+                .size(px(16.))
+                .text_color(muted),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .child(div().text_sm().font_semibold().text_color(fg).child(name))
+                .child(
+                    div()
+                        .w_full()
+                        .overflow_x_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(summary),
+                ),
+        )
+        .child(
+            Switch::new(SharedString::from(format!("skill-on-{index}")))
+                .small()
+                .checked(enabled)
+                .disabled(switch_disabled)
+                .color(accent)
+                .accessibility_label(SharedString::from(format!("启用技能 {label}")))
+                .on_click(move |checked, _, cx| {
+                    let enabled = *checked;
+                    entity
+                        .update(cx, |this, cx| {
+                            this.set_skill_enabled(path.clone(), enabled, cx)
+                        })
+                        .ok();
+                }),
+        )
+}
+
+fn dir_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 struct JsonPageSpec {

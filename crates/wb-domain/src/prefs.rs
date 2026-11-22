@@ -259,6 +259,12 @@ pub struct AgentPrefs {
     pub memories: Vec<String>,
     #[serde(default)]
     pub skills_dirs: Vec<String>,
+    /// Skill directories that stay in the list but are switched off.
+    #[serde(default)]
+    pub disabled_skill_dirs: Vec<String>,
+    /// SKILL.md paths switched off. Short descriptions stay out of the session.
+    #[serde(default)]
+    pub disabled_skills: Vec<String>,
     #[serde(default)]
     pub plugins_dirs: Vec<String>,
     #[serde(default)]
