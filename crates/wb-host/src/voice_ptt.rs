@@ -6,6 +6,10 @@ use std::time::Duration;
 
 static PTT_ENABLED: AtomicBool = AtomicBool::new(false);
 static PTT_HELD: AtomicBool = AtomicBool::new(false);
+/// Set when the key-down thread has finished opening the device, or failed.
+/// Key-up waits on this so it cannot run before the device exists and then
+/// leave the microphone open.
+static OPEN_DONE: AtomicBool = AtomicBool::new(true);
 static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
@@ -27,7 +31,38 @@ pub fn voice_ptt_set_enabled(enabled: bool) {
     PTT_ENABLED.store(enabled, Ordering::SeqCst);
     if enabled {
         ensure_capslock_hook();
+        warm_model();
+    } else {
+        let _ = thread::Builder::new()
+            .name("wb-voice-stop".into())
+            .spawn(|| {
+                crate::voice_record_stop_silent();
+                crate::speech_asr_release();
+            });
     }
+}
+
+/// Load the recognizer ahead of the first release. The microphone stays closed
+/// until a key press opens it.
+fn warm_model() {
+    let _ = thread::Builder::new()
+        .name("wb-voice-warm".into())
+        .spawn(|| {
+            let engine = configured_engine();
+            if let Err(err) = crate::speech_warm(&engine) {
+                log::warn!("语音模型预热失败：{err:#}");
+            }
+        });
+}
+
+fn configured_engine() -> String {
+    wb_store::load_prefs()
+        .ok()
+        .and_then(|prefs| prefs.voice.engine)
+        .filter(|engine| !engine.trim().is_empty())
+        .map(|engine| crate::normalize_engine(&engine))
+        .filter(|engine| crate::speech_status(engine).is_ok_and(|status| status.ready))
+        .unwrap_or_else(crate::speech_active_engine)
 }
 
 pub fn voice_ptt_enabled() -> bool {
@@ -68,7 +103,7 @@ pub fn voice_ptt_paste(text: &str) -> Result<()> {
         let previous = read_clipboard();
         write_clipboard(text)?;
         // Let the clipboard settle before the synthetic keystroke.
-        thread::sleep(Duration::from_millis(60));
+        thread::sleep(Duration::from_millis(20));
         send_ctrl_v();
         thread::sleep(Duration::from_millis(150));
         // Restore what the user had copied before, so PTT is not destructive.
@@ -249,22 +284,24 @@ fn run_capslock_hook() -> Result<()> {
                 let up = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
                 if down && voice_ptt_enabled() && !PTT_HELD.load(Ordering::SeqCst) {
                     PTT_HELD.store(true, Ordering::SeqCst);
+                    OPEN_DONE.store(false, Ordering::SeqCst);
                     crate::voice_level_reset();
-                    let _ = thread::spawn(|| {
-                        let device = wb_store::load_prefs()
-                            .ok()
-                            .and_then(|p| p.voice.input_device);
-                        if let Err(e) = crate::voice_record_start_with(device.as_deref()) {
-                            push_error(format!("无法开始录音：{e}"));
-                            PTT_HELD.store(false, Ordering::SeqCst);
-                        }
-                    });
+                    let spawned = thread::Builder::new()
+                        .name("wb-voice-open".into())
+                        .spawn(|| {
+                            let device = wb_store::load_prefs()
+                                .ok()
+                                .and_then(|prefs| prefs.voice.input_device);
+                            open_input(device);
+                        });
+                    if spawned.is_err() {
+                        OPEN_DONE.store(true, Ordering::SeqCst);
+                        PTT_HELD.store(false, Ordering::SeqCst);
+                        push_error("无法开始录音".into());
+                    }
                 }
                 if up && voice_ptt_enabled() && PTT_HELD.swap(false, Ordering::SeqCst) {
-                    let _ = thread::spawn(|| {
-                        thread::sleep(Duration::from_millis(40));
-                        on_ptt_release();
-                    });
+                    let _ = thread::spawn(on_ptt_release);
                 }
                 return 1;
             }
@@ -286,30 +323,42 @@ fn run_capslock_hook() -> Result<()> {
     Ok(())
 }
 
+/// Open the microphone for the press that just started.
+///
+/// The device is not touched until this runs. If voice input was switched off
+/// while it was opening, the device is closed again and nothing is kept.
+fn open_input(device: Option<String>) {
+    let opened = crate::voice_record_start_with(device.as_deref());
+    if let Err(err) = opened {
+        PTT_HELD.store(false, Ordering::SeqCst);
+        push_error(format!("无法开始录音：{err}"));
+    } else if !voice_ptt_enabled() {
+        crate::voice_record_stop_silent();
+    }
+    OPEN_DONE.store(true, Ordering::SeqCst);
+}
+
+fn wait_until_input_settled() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(9);
+    while !OPEN_DONE.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn on_ptt_release() {
+    wait_until_input_settled();
     // Prefer the configured engine, but fall back to one that is actually
     // usable so a half-downloaded choice does not make dictation fail silently.
-    let engine = wb_store::load_prefs()
-        .ok()
-        .and_then(|p| p.voice.engine)
-        .filter(|e| !e.trim().is_empty())
-        .map(|e| crate::normalize_engine(&e))
-        .filter(|e| crate::speech_status(e).is_ok_and(|st| st.ready))
-        .unwrap_or_else(crate::speech_active_engine);
+    let engine = configured_engine();
+    // Stop waits if the key-down thread is still opening the device, then
+    // closes it and keeps only this take.
     let wav = match crate::voice_record_stop_to_wav() {
-        Ok(p) => p,
-        Err(e) => {
-            if let Ok(path) = crate::voice_wav_path() {
-                if path.is_file() {
-                    path
-                } else {
-                    push_error(format!("录音失败：{e}"));
-                    return;
-                }
-            } else {
-                push_error(format!("录音失败：{e}"));
-                return;
-            }
+        Ok(path) => path,
+        // Opening failed on the key-down thread, which already reported it.
+        Err(err) if err.to_string().contains("没有进行中的录音") => return,
+        Err(err) => {
+            push_error(format!("录音失败：{err}"));
+            return;
         }
     };
     match crate::speech_transcribe(&engine, &wav.to_string_lossy(), None) {

@@ -748,6 +748,11 @@ fn report_progress(
 /// Remove every file of an engine so it can be downloaded again.
 pub fn speech_remove_models(engine: &str) -> Result<SpeechStatus> {
     let engine = normalize_engine(engine);
+    // The resident recognizer keeps the model file open.
+    speech_asr_release();
+    if engine == ENGINE_QWENCTC {
+        qwenctc::unload();
+    }
     let dir = speech_model_dir(&engine)?;
     for spec in files_for(&engine) {
         let path = dir.join(&spec.rel_path);
@@ -755,21 +760,43 @@ pub fn speech_remove_models(engine: &str) -> Result<SpeechStatus> {
             fs::remove_file(&path).with_context(|| format!("删除 {} 失败", path.display()))?;
         }
     }
-    if engine == ENGINE_QWENCTC {
-        qwenctc::unload();
-    }
     speech_status(&engine)
 }
 
 /// Load the engine up front so the first dictation is not slowed by it.
-/// SenseVoice loads in `wb-asr` per invocation, so it only re-checks files.
+///
+/// SenseVoice stays in a resident `wb-asr` process. QwenCTC stays in-process.
 pub fn speech_warm(engine: &str) -> Result<SpeechStatus> {
     let engine = normalize_engine(engine);
     let status = speech_status(&engine)?;
-    if status.ready && engine == ENGINE_QWENCTC {
-        qwenctc::warm(Path::new(&status.model_dir))?;
+    if !status.ready {
+        return Ok(status);
+    }
+    match engine.as_str() {
+        ENGINE_QWENCTC => {
+            speech_asr_release();
+            qwenctc::warm(Path::new(&status.model_dir))?;
+        }
+        _ => {
+            let bin = find_wb_asr().context("找不到 wb-asr，无法预热 SenseVoice")?;
+            asr_proc::warm(&bin, &status.model_dir, &preferred_language())?;
+        }
     }
     Ok(status)
+}
+
+/// Stop the resident SenseVoice process and release its model memory.
+pub fn speech_asr_release() {
+    asr_proc::shutdown();
+}
+
+fn preferred_language() -> String {
+    wb_store::load_prefs()
+        .ok()
+        .and_then(|prefs| prefs.voice.language)
+        .map(|lang| lang.trim().to_string())
+        .filter(|lang| !lang.is_empty())
+        .unwrap_or_else(|| "auto".into())
 }
 
 fn find_wb_asr() -> Option<PathBuf> {
@@ -801,18 +828,39 @@ fn find_wb_asr() -> Option<PathBuf> {
 }
 
 fn run_wb_asr(bin: &Path, model_dir: &str, wav_path: &str, language: &str) -> Result<String> {
+    let asr_proc::AsrReply { text, fallback } =
+        asr_proc::transcribe(bin, model_dir, wav_path, language);
+    match text {
+        Ok(text) if !text.trim().is_empty() => return Ok(text),
+        Ok(_) => bail!("未识别到语音内容"),
+        Err(err) if !fallback => return Err(err),
+        Err(err) => log::warn!("常驻 wb-asr 不可用（{err:#}），改为单次启动"),
+    }
+    run_wb_asr_oneshot(bin, model_dir, wav_path, language)
+}
+
+fn run_wb_asr_oneshot(
+    bin: &Path,
+    model_dir: &str,
+    wav_path: &str,
+    language: &str,
+) -> Result<String> {
     let tokens = Path::new(model_dir).join("sensevoice-onnx/tokens.txt");
     let model = Path::new(model_dir).join("sensevoice-onnx/model.int8.onnx");
-    let out = Command::new(bin)
-        .arg("--tokens")
+    let mut cmd = Command::new(bin);
+    cmd.arg("--tokens")
         .arg(&tokens)
         .arg("--model")
         .arg(&model)
         .arg("--language")
         .arg(language)
-        .arg(wav_path)
-        .output()
-        .context("启动 wb-asr 失败")?;
+        .arg(wav_path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().context("启动 wb-asr 失败")?;
     if out.status.success() {
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !text.is_empty() {
@@ -858,7 +906,9 @@ fn transcribe_sensevoice(status: &SpeechStatus, wav_path: &str, language: &str) 
     {
         match run_wb_asr(&bin, &status.model_dir, wav_path, language) {
             Ok(text) => return Ok(text),
-            Err(e) => log::warn!("wb-asr failed: {e}"),
+            // Silence is a real answer. Starting another recognizer only adds delay.
+            Err(err) if err.to_string().contains("未识别到语音内容") => return Err(err),
+            Err(err) => log::warn!("wb-asr failed: {err}"),
         }
     }
     if let Some(result) = run_sherpa_cli(&status.model_dir, wav_path, language) {
@@ -884,10 +934,14 @@ pub fn speech_transcribe(engine: &str, wav_path: &str, language: Option<&str>) -
     }
     let engine = normalize_engine(engine);
     let status = speech_status(&engine)?;
-    let lang = language.unwrap_or("auto");
+    let lang = language
+        .map(str::trim)
+        .filter(|lang| !lang.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(preferred_language);
     match engine.as_str() {
         ENGINE_QWENCTC => qwenctc::transcribe(&status, wav),
-        _ => transcribe_sensevoice(&status, wav_path, lang),
+        _ => transcribe_sensevoice(&status, wav_path, &lang),
     }
 }
 
@@ -913,6 +967,7 @@ pub fn speech_active_engine() -> String {
 }
 
 /// Whisper-style log-mel front end + greedy CTC decoder for Qwen3-ASR.
+mod asr_proc;
 mod qwenctc;
 
 #[cfg(test)]

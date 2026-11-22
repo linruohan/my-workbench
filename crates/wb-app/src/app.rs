@@ -91,7 +91,7 @@ impl WorkbenchApp {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(200))
+                    .timer(Duration::from_millis(50))
                     .await;
                 this.update(cx, |this, cx| {
                     this.on_ptt_poll(cx);

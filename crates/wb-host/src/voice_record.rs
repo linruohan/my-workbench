@@ -1,19 +1,32 @@
 //! Push-to-talk microphone capture → 16 kHz mono WAV.
+//!
+//! The input device stays closed until a recording actually starts, and it is
+//! closed again as soon as that recording stops.
 
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use wb_store::ensure_data_dir;
 
 struct ActiveRec {
     stop: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<f32>>>,
     rate: Arc<AtomicU32>,
-    started: Instant,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for ActiveRec {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 static VOICE_LEVEL: AtomicU32 = AtomicU32::new(0);
@@ -28,38 +41,47 @@ pub fn voice_level_reset() {
     VOICE_LEVEL.store(0f32.to_bits(), Ordering::Relaxed);
 }
 
-/// Open the configured device for a few hundred milliseconds and report the
-/// peak level, used by the settings page to show the meter is alive.
 /// Open the configured device for `duration` and report the loudest level
 /// seen. Used by the settings page so a user has time to actually speak.
 ///
 /// A silent room is *not* an error: the returned level is simply low. Only a
-/// device that cannot be opened fails here.
-pub fn voice_probe_level(device: Option<&str>, duration: std::time::Duration) -> Result<f32> {
+/// device that cannot be opened fails here. The device is closed before this
+/// returns.
+pub fn voice_probe_level(device: Option<&str>, duration: Duration) -> Result<f32> {
     voice_record_start_with(device)?;
-    let deadline = std::time::Instant::now() + duration;
-    let mut peak = 0f32;
-    let mut blocks = 0u32;
-    while std::time::Instant::now() < deadline {
-        // `voice_level` holds the peak of the most recent audio block, so the
-        // loudest moment must be accumulated rather than read once at the end.
-        let level = voice_level();
-        if level > 0.0 {
-            blocks += 1;
+    let result = (|| {
+        let deadline = std::time::Instant::now() + duration;
+        let mut peak = 0f32;
+        let mut blocks = 0u32;
+        while std::time::Instant::now() < deadline {
+            // `voice_level` holds the peak of the most recent audio block, so
+            // the loudest moment must be accumulated rather than read once.
+            let level = voice_level();
+            if level > 0.0 {
+                blocks += 1;
+            }
+            peak = peak.max(level);
+            thread::sleep(Duration::from_millis(25));
         }
-        peak = peak.max(level);
-        thread::sleep(Duration::from_millis(25));
-    }
+        if blocks == 0 {
+            bail!("没有收到任何音频数据（设备可能被其它程序占用或权限不足）");
+        }
+        Ok(peak)
+    })();
     voice_record_stop_silent();
-    if blocks == 0 {
-        bail!("没有收到任何音频数据（设备可能被其它程序占用或权限不足）");
-    }
-    Ok(peak)
+    result
 }
 
 fn active() -> &'static Mutex<Option<ActiveRec>> {
     static ACTIVE: OnceLock<Mutex<Option<ActiveRec>>> = OnceLock::new();
     ACTIVE.get_or_init(|| Mutex::new(None))
+}
+
+/// Serializes open and close so a key-up waits for the device the key-down
+/// is still opening, then closes it.
+fn session_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub fn voice_wav_path() -> Result<PathBuf> {
@@ -90,35 +112,68 @@ pub fn voice_record_start() -> Result<()> {
     voice_record_start_with(None)
 }
 
-/// Start capturing from `device`, or the default input device when `None`.
+/// Open `device` (or the default input) and capture until stop.
+///
+/// Returns once the stream is playing, so the caller knows the device is open.
 pub fn voice_record_start_with(device: Option<&str>) -> Result<()> {
-    voice_record_stop_silent();
+    let _guard = session_lock().lock().unwrap();
+    start_locked(device)
+}
+
+/// Close the input device and drop any samples.
+pub fn voice_record_stop_silent() {
+    let _guard = session_lock().lock().unwrap();
+    close_locked();
+    voice_level_reset();
+}
+
+fn start_locked(device: Option<&str>) -> Result<()> {
+    close_locked();
     let stop = Arc::new(AtomicBool::new(false));
     let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
     let rate = Arc::new(AtomicU32::new(16_000));
+    let (tx, rx) = mpsc::channel();
     let stop_t = stop.clone();
     let samples_t = samples.clone();
     let rate_t = rate.clone();
     let device = device.map(str::to_string);
 
-    thread::Builder::new()
+    let handle = thread::Builder::new()
         .name("wb-voice-rec".into())
         .spawn(move || {
-            if let Err(e) = run_capture(stop_t, samples_t, rate_t, device) {
-                log::warn!("voice capture ended: {e}");
+            if let Err(err) = run_capture(stop_t, samples_t, rate_t, device, tx.clone()) {
+                log::warn!("voice capture ended: {err:#}");
+                let _ = tx.send(Err(format!("{err:#}")));
             }
         })
         .context("启动录音线程失败")?;
 
-    // Give the audio thread a moment to open the device.
-    thread::sleep(Duration::from_millis(30));
-    *active().lock().unwrap() = Some(ActiveRec {
-        stop,
-        samples,
-        rate,
-        started: Instant::now(),
-    });
-    Ok(())
+    match rx.recv_timeout(Duration::from_secs(8)) {
+        Ok(Ok(())) => {
+            *active().lock().unwrap() = Some(ActiveRec {
+                stop,
+                samples,
+                rate,
+                thread: Some(handle),
+            });
+            Ok(())
+        }
+        Ok(Err(err)) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+            bail!(err);
+        }
+        Err(_) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+            bail!("打开麦克风超时");
+        }
+    }
+}
+
+fn close_locked() {
+    let previous = active().lock().unwrap().take();
+    drop(previous);
 }
 
 fn run_capture(
@@ -126,6 +181,7 @@ fn run_capture(
     samples: Arc<Mutex<Vec<f32>>>,
     rate: Arc<AtomicU32>,
     device_name: Option<String>,
+    ready_tx: mpsc::Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
     let host = cpal::default_host();
     let device = match device_name.as_deref() {
@@ -147,7 +203,7 @@ fn run_capture(
     rate.store(supported.sample_rate().0, Ordering::SeqCst);
     let channels = supported.channels().max(1) as usize;
     let config: cpal::StreamConfig = supported.clone().into();
-    let err_fn = |e| log::warn!("cpal input error: {e}");
+    let err_fn = |err| log::warn!("cpal input error: {err}");
 
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
@@ -164,7 +220,7 @@ fn run_capture(
             {
                 let samples = samples.clone();
                 move |data: &[i16], _| {
-                    let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+                    let f: Vec<f32> = data.iter().map(|&sample| sample as f32 / 32768.0).collect();
                     push_mono(&f, channels, &samples);
                 }
             },
@@ -176,7 +232,10 @@ fn run_capture(
             {
                 let samples = samples.clone();
                 move |data: &[u16], _| {
-                    let f: Vec<f32> = data.iter().map(|&s| (s as f32 / 32768.0) - 1.0).collect();
+                    let f: Vec<f32> = data
+                        .iter()
+                        .map(|&sample| (sample as f32 / 32768.0) - 1.0)
+                        .collect();
                     push_mono(&f, channels, &samples);
                 }
             },
@@ -186,6 +245,7 @@ fn run_capture(
         other => bail!("不支持的采样格式：{other}"),
     };
     stream.play()?;
+    let _ = ready_tx.send(Ok(()));
     while !stop.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(15));
     }
@@ -194,7 +254,6 @@ fn run_capture(
 }
 
 fn push_mono(data: &[f32], channels: usize, samples: &Mutex<Vec<f32>>) {
-    // Peak of this block drives the settings meter.
     let mut peak = 0f32;
     let mut guard = samples.lock().unwrap();
     if channels <= 1 {
@@ -215,35 +274,23 @@ fn push_mono(data: &[f32], channels: usize, samples: &Mutex<Vec<f32>>) {
     }
 }
 
-fn voice_record_stop_silent() {
-    let prev = active().lock().unwrap().take();
-    if let Some(rec) = prev {
-        rec.stop.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(40));
-    }
-    VOICE_LEVEL.store(0f32.to_bits(), Ordering::Relaxed);
-}
-
-/// Stop capture and write `data/voice/ptt-last.wav` (16 kHz mono PCM).
+/// Close the device and write `data/voice/ptt-last.wav` (16 kHz mono PCM).
 pub fn voice_record_stop_to_wav() -> Result<PathBuf> {
-    let rec = active()
+    let _guard = session_lock().lock().unwrap();
+    let mut rec = active()
         .lock()
         .unwrap()
         .take()
         .ok_or_else(|| anyhow::anyhow!("当前没有进行中的录音"))?;
     rec.stop.store(true, Ordering::SeqCst);
-    // Wait until we have some audio or a short timeout.
-    let deadline = Instant::now() + Duration::from_millis(200);
-    while Instant::now() < deadline {
-        let n = rec.samples.lock().unwrap().len();
-        if n > 0 || rec.started.elapsed() > Duration::from_millis(80) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
+    // Join first so the last callback has landed and the device is closed.
+    // The samples lock must not be held across the join.
+    if let Some(handle) = rec.thread.take() {
+        let _ = handle.join();
     }
-    thread::sleep(Duration::from_millis(50));
     let rate = rec.rate.load(Ordering::SeqCst).max(1);
     let mono = rec.samples.lock().unwrap().clone();
+    voice_level_reset();
     if mono.is_empty() {
         bail!("录音为空（请检查麦克风权限与默认输入设备）");
     }
@@ -266,9 +313,9 @@ fn write_wav_16k(path: &Path, mono: &[f32], src_rate: u32) -> Result<()> {
         sample_format: hound::SampleFormat::Int,
     };
     let mut writer = hound::WavWriter::create(path, spec).context("创建 wav 失败")?;
-    for &s in &resampled {
-        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-        writer.write_sample(v)?;
+    for &sample in &resampled {
+        let value = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+        writer.write_sample(value)?;
     }
     writer.finalize()?;
     Ok(())

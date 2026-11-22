@@ -1280,6 +1280,14 @@ fn notify_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPage
 /// Placeholder device id meaning "follow the system default".
 const SPEECH_DEFAULT_DEVICE: &str = "__system_default__";
 
+/// Reload the resident recognizer after a voice preference change.
+fn rewarm_voice(state: &AppState) {
+    let on = state.with(|s| s.prefs.voice.enabled || s.prefs.voice.caps_lock_ptt);
+    if on {
+        voice_ptt_set_enabled(true);
+    }
+}
+
 /// Messages from the background download thread back to the UI.
 enum WorkerEvent {
     Progress(wb_host::DownloadProgress),
@@ -1409,6 +1417,7 @@ fn engine_group(
                         let value = value.to_string();
                         engine_write.with_mut(|s| s.prefs.voice.engine = Some(value));
                         engine_write.persist_prefs();
+                        rewarm_voice(&engine_write);
                         poke(&engine_entity, cx);
                     },
                 ),
@@ -1486,6 +1495,7 @@ fn language_group(
                                 if value == "auto" { None } else { Some(value) };
                         });
                         lang_write.persist_prefs();
+                        rewarm_voice(&lang_write);
                         poke(&lang_entity, cx);
                     },
                 ),
@@ -1518,6 +1528,7 @@ fn language_group(
                             };
                         });
                         device_write.persist_prefs();
+                        rewarm_voice(&device_write);
                         poke(&device_entity, cx);
                     },
                 ),
