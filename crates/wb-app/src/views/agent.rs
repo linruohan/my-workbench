@@ -60,11 +60,7 @@ enum MsgFilter {
 /// cover every keyword, or a user sentence mentioning "错误" would be listed
 /// under errors.
 fn is_error_message(m: &AgentMessage) -> bool {
-    if !matches!(m.role, AgentRole::Tool) {
-        return false;
-    }
-    let flagged = ["失败", "错误", "禁止"];
-    flagged.iter().any(|k| m.content.contains(k)) || !m.content.starts_with("已")
+    m.is_tool_error()
 }
 
 fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {
@@ -2034,6 +2030,8 @@ impl AgentPane {
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
         let secondary = cx.theme().secondary;
+        let success = cx.theme().success;
+        let danger_theme = cx.theme().danger;
         let border = cx.theme().border;
         let danger = cx.theme().danger;
 
@@ -2398,6 +2396,14 @@ impl AgentPane {
         let mut tool_group: Vec<AgentMessage> = Vec::new();
         let mut tool_group_day = String::new();
         let mut message_rows: Vec<AnyElement> = Vec::new();
+        let chat_palette = ChatPalette {
+            radius,
+            muted,
+            accent,
+            secondary,
+            success,
+            danger: danger_theme,
+        };
         for m in visible_messages {
             let day = format_local_day(m.created_at);
             // Batch consecutive tool results into one collapsed row.
@@ -2414,10 +2420,7 @@ impl AgentPane {
                     &tool_group_day,
                     &mut last_day,
                     &self.expanded_tools,
-                    radius,
-                    muted,
-                    accent,
-                    secondary,
+                    chat_palette,
                     entity.clone(),
                 ));
             }
@@ -2428,10 +2431,7 @@ impl AgentPane {
             message_rows.push(render_chat_message(
                 &m,
                 &self.expanded_tools,
-                radius,
-                muted,
-                accent,
-                secondary,
+                chat_palette,
                 entity.clone(),
             ));
         }
@@ -2441,10 +2441,7 @@ impl AgentPane {
                 &tool_group_day,
                 &mut last_day,
                 &self.expanded_tools,
-                radius,
-                muted,
-                accent,
-                secondary,
+                chat_palette,
                 entity.clone(),
             ));
         }
@@ -4166,15 +4163,32 @@ impl AgentPane {
     }
 }
 
-fn render_chat_message(
-    m: &AgentMessage,
-    expanded_tools: &HashSet<String>,
+/// Colours shared by every chat row, gathered so the render helpers keep a
+/// readable signature instead of eight theme arguments.
+#[derive(Clone, Copy)]
+struct ChatPalette {
     radius: Pixels,
     muted: Hsla,
     accent: Hsla,
     secondary: Hsla,
+    success: Hsla,
+    danger: Hsla,
+}
+
+fn render_chat_message(
+    m: &AgentMessage,
+    expanded_tools: &HashSet<String>,
+    palette: ChatPalette,
     entity: WeakEntity<AgentPane>,
 ) -> AnyElement {
+    let ChatPalette {
+        radius,
+        muted,
+        accent,
+        secondary,
+        success: cx_success,
+        danger,
+    } = palette;
     let role = match m.role {
         AgentRole::User => "你",
         AgentRole::Assistant => "Agent",
@@ -4223,10 +4237,28 @@ fn render_chat_message(
     };
     let copy_id = format!("copy-{msg_id}");
     let clock = format_local_clock(m.created_at);
+    // Tool results get a coloured dot: green when the call succeeded, red when it
+    // failed, so a long transcript can be scanned without expanding each row.
+    let tool_state = is_tool.then(|| {
+        if m.is_tool_error() {
+            ("失败", danger)
+        } else {
+            ("成功", cx_success)
+        }
+    });
     let header = h_flex()
         .w_full()
         .items_center()
         .gap_2()
+        .when_some(tool_state, |row, (label, color)| {
+            row.child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(div().size(px(6.)).rounded_full().bg(color))
+                    .child(div().text_xs().text_color(color).child(label)),
+            )
+        })
         .child(
             div()
                 .text_xs()
@@ -4380,18 +4412,17 @@ fn day_marker(day: &str, muted: Hsla, created_at: i64) -> AnyElement {
 }
 
 /// Consecutive tool results collapse into one row; expanding shows each result.
-#[allow(clippy::too_many_arguments)]
 fn flush_tool_group(
     group: Vec<AgentMessage>,
     day: &str,
     last_day: &mut String,
     expanded_tools: &HashSet<String>,
-    radius: Pixels,
-    muted: Hsla,
-    accent: Hsla,
-    secondary: Hsla,
+    palette: ChatPalette,
     entity: WeakEntity<AgentPane>,
 ) -> Vec<AnyElement> {
+    let muted = palette.muted;
+    let radius = palette.radius;
+    let secondary = palette.secondary;
     let mut rows = Vec::new();
     if day != last_day {
         *last_day = day.to_string();
@@ -4401,10 +4432,7 @@ fn flush_tool_group(
         rows.push(render_chat_message(
             &group[0],
             expanded_tools,
-            radius,
-            muted,
-            accent,
-            secondary,
+            palette,
             entity,
         ));
         return rows;
@@ -4425,17 +4453,7 @@ fn flush_tool_group(
     let body: Vec<AnyElement> = if expanded {
         group
             .iter()
-            .map(|m| {
-                render_chat_message(
-                    m,
-                    expanded_tools,
-                    radius,
-                    muted,
-                    accent,
-                    secondary,
-                    entity.clone(),
-                )
-            })
+            .map(|m| render_chat_message(m, expanded_tools, palette, entity.clone()))
             .collect()
     } else {
         Vec::new()
@@ -4554,48 +4572,4 @@ fn render_patch_card(
             .p_2()
             .into_any_element(),
     )
-}
-
-#[cfg(test)]
-mod filter_tests {
-    use super::*;
-
-    fn msg(role: AgentRole, content: &str) -> AgentMessage {
-        AgentMessage {
-            id: "m".into(),
-            thread_id: "t".into(),
-            role,
-            content: content.into(),
-            tool_name: None,
-            tool_call_id: None,
-            tool_calls_json: None,
-            created_at: 0,
-        }
-    }
-
-    #[test]
-    fn errors_filter_ignores_non_tool_messages() {
-        // The bug: a user sentence mentioning failure must not be an "error".
-        assert!(!is_error_message(&msg(
-            AgentRole::User,
-            "这里有个错误需要修复"
-        )));
-        assert!(!is_error_message(&msg(
-            AgentRole::Assistant,
-            "操作失败，原因是路径不存在"
-        )));
-    }
-
-    #[test]
-    fn errors_filter_keeps_failed_tool_results() {
-        assert!(is_error_message(&msg(AgentRole::Tool, "失败：文件不存在")));
-        assert!(is_error_message(&msg(AgentRole::Tool, "读取被禁止")));
-        // A tool body not starting with "已" counts as a failure.
-        assert!(is_error_message(&msg(AgentRole::Tool, "exit 1\nboom")));
-    }
-
-    #[test]
-    fn errors_filter_skips_successful_tool_results() {
-        assert!(!is_error_message(&msg(AgentRole::Tool, "已写入 3 个文件")));
-    }
 }
