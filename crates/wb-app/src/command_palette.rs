@@ -1,4 +1,5 @@
 use crate::state::{AppNav, AppState};
+use crate::views::TasksPane;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -18,27 +19,34 @@ struct PaletteItem {
 
 pub struct CommandPalette {
     state: AppState,
+    tasks: WeakEntity<TasksPane>,
     query: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
 
 impl CommandPalette {
-    pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: AppState,
+        tasks: WeakEntity<TasksPane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let query =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索任务、会话、笔记、页面…"));
         let mut this = Self {
             state,
+            tasks,
             query: query.clone(),
             _subs: Vec::new(),
         };
         this._subs.push(
-            cx.subscribe_in(&query, window, |this, _, event, _window, cx| {
+            cx.subscribe_in(&query, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
                     cx.notify();
                 }
                 if let InputEvent::PressEnter { .. } = event {
                     if let Some(item) = this.filtered(cx).into_iter().next() {
-                        this.activate(item, cx);
+                        this.activate(item, window, cx);
                     }
                 }
             }),
@@ -278,7 +286,8 @@ impl CommandPalette {
         items
     }
 
-    fn activate(&mut self, item: PaletteItem, cx: &mut Context<Self>) {
+    fn activate(&mut self, item: PaletteItem, window: &mut Window, cx: &mut Context<Self>) {
+        let opened_task = item.task_id.clone();
         self.state.with_mut(|s| {
             if let Some(nav) = item.nav {
                 if nav == AppNav::Settings && s.nav != AppNav::Settings {
@@ -318,6 +327,11 @@ impl CommandPalette {
             }
             s.palette_open = false;
         });
+        if let Some(id) = opened_task {
+            self.tasks
+                .update(cx, |tasks, cx| tasks.open_task_dialog(Some(id), window, cx))
+                .ok();
+        }
         cx.notify();
     }
 
@@ -377,10 +391,10 @@ impl Render for CommandPalette {
                                             .child(kind),
                                     ),
                                 )
-                                .on_mouse_down(MouseButton::Left, move |_, _, app| {
+                                .on_mouse_down(MouseButton::Left, move |_, window, app| {
                                     if let Some(e) = entity.upgrade() {
                                         e.update(app, |this, cx| {
-                                            this.activate(item.clone(), cx);
+                                            this.activate(item.clone(), window, cx);
                                         });
                                     }
                                 })

@@ -526,9 +526,17 @@ impl Render for TimedPane {
             } else {
                 let pending_delete_id = self.pending_delete_id.clone();
                 let editing_id = self.editing_id.clone();
-                v_flex()
-                    .gap_2()
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_stretch()
+                    .content_start()
+                    .justify_start()
+                    .gap_3()
+                    .w_full()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .children(tasks.into_iter().map(|task| {
                         let id = task.id.clone();
@@ -549,7 +557,9 @@ impl Render for TimedPane {
                         let entity = entity.clone();
                         v_flex()
                             .id(SharedString::from(format!("timed-{id}")))
-                            .w_full()
+                            .w(px(360.))
+                            .flex_shrink_1()
+                            .min_w(px(280.))
                             .gap_2()
                             .p_3()
                             .rounded(radius)
@@ -560,36 +570,49 @@ impl Render for TimedPane {
                                 _ if is_editing => cx.theme().primary,
                                 _ => border,
                             })
-                            .bg(cx.theme().background)
+                            .bg(cx.theme().secondary.opacity(0.22))
                             .when(!enabled, |card| card.opacity(0.62))
                             .child(
                                 h_flex()
-                                    .items_start()
                                     .gap_2()
+                                    .items_start()
+                                    .justify_between()
                                     .child(
-                                        v_flex()
+                                        div()
                                             .flex_1()
                                             .min_w_0()
-                                            .gap_1()
-                                            .child(
-                                                h_flex()
-                                                    .gap_2()
-                                                    .items_center()
-                                                    .flex_wrap()
-                                                    .child(div().font_bold().child(task.title.clone()))
-                                                    .child(status_tag(state)),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(format!(
-                                                        "{sched} · 下次 {next_label} · 上次 {last_label}"
-                                                    )),
-                                            ),
+                                            .font_bold()
+                                            .whitespace_normal()
+                                            .child(task.title.clone()),
+                                    )
+                                    .child(status_tag(state)),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .whitespace_normal()
+                                            .child(sched),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .whitespace_normal()
+                                            .child(format!("下次 {next_label} · 上次 {last_label}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(muted)
+                                            .whitespace_normal()
+                                            .child(preview),
                                     ),
                             )
-                            .child(div().text_sm().text_color(muted).child(preview))
                             .child(
                                 h_flex()
                                     .gap_2()

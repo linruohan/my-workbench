@@ -58,7 +58,9 @@ impl WorkbenchApp {
         let settings = cx.new(|cx| SettingsPane::new(state.clone(), window, cx));
         let host = cx.weak_entity();
         let inspector = cx.new(|cx| InspectorPane::new(state.clone(), host, window, cx));
-        let palette = cx.new(|cx| CommandPalette::new(state.clone(), window, cx));
+        let tasks_for_palette = tasks.downgrade();
+        let palette =
+            cx.new(|cx| CommandPalette::new(state.clone(), tasks_for_palette, window, cx));
         let sidebar_panels = cx.new(|_| ResizableState::default());
 
         let voice_on = state.with(|s| s.prefs.voice.enabled || s.prefs.voice.caps_lock_ptt);
@@ -311,20 +313,34 @@ impl WorkbenchApp {
         cx.notify();
     }
 
-    fn open_notification_task(&mut self, task_id: &str, cx: &mut Context<Self>) {
-        self.state.with_mut(|s| {
-            if let Some(task) = s.repo.get_task(task_id).cloned() {
-                s.selected_task_id = Some(task.id.clone());
-                if task.project_id == INBOX_PROJECT_ID {
-                    s.nav = AppNav::Inbox;
-                    s.active_project_id = None;
-                } else {
-                    s.nav = AppNav::Projects;
-                    s.active_project_id = Some(task.project_id);
-                }
+    fn open_notification_task(
+        &mut self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = self.state.with_mut(|s| {
+            let Some(task) = s.repo.get_task(task_id).cloned() else {
+                s.notifications_open = false;
+                return false;
+            };
+            s.selected_task_id = Some(task.id.clone());
+            if task.project_id == INBOX_PROJECT_ID {
+                s.nav = AppNav::Inbox;
+                s.active_project_id = None;
+            } else {
+                s.nav = AppNav::Projects;
+                s.active_project_id = Some(task.project_id);
             }
             s.notifications_open = false;
+            true
         });
+        if found {
+            let id = task_id.to_string();
+            self.tasks.update(cx, |tasks, cx| {
+                tasks.open_task_dialog(Some(id), window, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -547,14 +563,7 @@ impl Render for WorkbenchApp {
                     })
             }));
 
-        let more_menu = SidebarMenu::new().children([
-            Self::menu_item(
-                "标签",
-                IconName::Star,
-                AppNav::Tags,
-                nav == AppNav::Tags && self.state.with(|s| s.active_tag_id.is_none()),
-                entity.clone(),
-            ),
+        let tools_menu = SidebarMenu::new().children([
             Self::menu_item(
                 "知识库",
                 IconName::BookOpen,
@@ -670,7 +679,7 @@ impl Render for WorkbenchApp {
                                     .child(project_menu),
                             )
                             .child(SidebarGroup::new("标签").child(tag_menu))
-                            .child(SidebarGroup::new("更多").child(more_menu))
+                            .child(SidebarGroup::new("工具").child(tools_menu))
                             .footer({
                                 let account_footer = div()
                                     .id("account-nav")
@@ -911,11 +920,11 @@ impl Render for WorkbenchApp {
                                                         .xsmall()
                                                         .ghost()
                                                         .label("打开")
-                                                        .on_click(move |_, _, app| {
+                                                        .on_click(move |_, window, app| {
                                                             if let Some(e) = entity.upgrade() {
                                                                 e.update(app, |this, cx| {
                                                                     this.open_notification_task(
-                                                                        &task_id, cx,
+                                                                        &task_id, window, cx,
                                                                     );
                                                                 });
                                                             }
