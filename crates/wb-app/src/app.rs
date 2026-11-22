@@ -16,7 +16,7 @@ use std::time::Duration;
 use wb_domain::{
     INBOX_PROJECT_ID, NotificationStatus, RIGHT_SIDEBAR_WIDTH_MAX, RIGHT_SIDEBAR_WIDTH_MIN,
     SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, clamp_right_sidebar_width, clamp_sidebar_width,
-    is_today_member, now_ms,
+    format_local_day, is_today_member, now_ms,
 };
 
 actions!(
@@ -124,16 +124,18 @@ impl WorkbenchApp {
         let tray_on = state.with(|s| s.prefs.tray_enabled);
         let close_to_tray = state.with(|s| s.prefs.close_to_tray);
         let tray_icon = if tray_on { tray::create_tray() } else { None };
-        if tray_on && close_to_tray {
-            // Keep the process (and reminder ticks) alive: close → minimize; tray「退出」才真正退出。
-            window.on_window_should_close(cx, |window, _cx| {
-                if tray::is_force_quit() {
-                    return true;
-                }
+        let app = cx.weak_entity();
+        let minimize_on_close = tray_on && close_to_tray;
+        // Close always flushes. With the tray, close minimizes instead of quitting.
+        window.on_window_should_close(cx, move |window, cx| {
+            if minimize_on_close && !tray::is_force_quit() {
+                let _ = app.update(cx, |this, cx| this.flush_persistent_state(cx));
                 window.minimize_window();
-                false
-            });
-        }
+                return false;
+            }
+            let _ = app.update(cx, |this, cx| this.flush_persistent_state(cx));
+            true
+        });
 
         cx.spawn(async move |this, cx| {
             loop {
@@ -179,6 +181,7 @@ impl WorkbenchApp {
                 }
             }
             TrayAction::Quit => {
+                self.flush_persistent_state(cx);
                 tray::request_force_quit();
                 cx.quit();
             }
@@ -217,8 +220,36 @@ impl WorkbenchApp {
         }
     }
 
+    fn checkpoint_timer(&mut self) {
+        let now = now_ms();
+        let today = format_local_day(now);
+        self.state.with_mut(|s| {
+            let Some((task_id, started)) = s.active_timer.clone() else {
+                return;
+            };
+            let elapsed = now.saturating_sub(started);
+            if elapsed < 1_000 {
+                return;
+            }
+            if let Some(mut task) = s.repo.get_task(&task_id).cloned() {
+                wb_domain::settle_timer_segment(&mut task, &today, elapsed, now);
+                s.repo.upsert_task(task);
+            }
+            s.active_timer = Some((task_id, now));
+        });
+    }
+
+    fn flush_persistent_state(&mut self, cx: &mut Context<Self>) {
+        self.checkpoint_timer();
+        self.agent.update(cx, |pane, cx| pane.flush_composer(cx));
+        self.state.remember_session();
+        self.state.persist_if_dirty();
+    }
+
     fn on_tick(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
+        self.checkpoint_timer();
+        self.agent.update(cx, |pane, cx| pane.flush_composer(cx));
         self.timed.update(cx, |timed, cx| timed.tick_due(cx));
         // Keep timer UI fresh while a timer is running.
         let timing = self.state.with(|s| s.active_timer.is_some());
@@ -266,6 +297,7 @@ impl WorkbenchApp {
                 );
             }
         }
+        self.state.remember_session();
         self.state.persist_if_dirty();
         cx.notify();
     }
@@ -319,6 +351,7 @@ impl WorkbenchApp {
             }
             s.active_tag_id = None;
         });
+        self.state.remember_session();
         cx.notify();
     }
 
@@ -345,6 +378,7 @@ impl WorkbenchApp {
             true
         });
         if found {
+            self.state.remember_session();
             let id = task_id.to_string();
             self.tasks.update(cx, |tasks, cx| {
                 tasks.open_task_dialog(Some(id), window, cx);

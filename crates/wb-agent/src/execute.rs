@@ -159,12 +159,28 @@ pub fn check_gate(name: &str, mode: AgentPermissionMode) -> ToolGate {
     gate_tool(effect, mode)
 }
 
+/// Apply a session's stored working directory before tools run.
+/// Only an explicit `threadId` is honored, so calls that omit it keep the
+/// process cwd the caller already set.
+fn bind_persisted_cwd(repo: &MemoryWorkbenchRepository, args: &Value) {
+    let Some(thread_id) = args.get("threadId").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let cwd = repo
+        .get_agent_thread(thread_id)
+        .and_then(|thread| thread.cwd.clone())
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_dir());
+    set_agent_cwd(cwd);
+}
+
 pub fn execute_tool(
     repo: &mut MemoryWorkbenchRepository,
     name: &str,
     args: &Value,
     workspace_root: Option<&str>,
 ) -> Result<ToolResult> {
+    bind_persisted_cwd(repo, args);
     match name {
         "task_list" => {
             let q = args.get("query").and_then(|v| v.as_str());
@@ -1403,14 +1419,22 @@ pub fn execute_tool(
             }
             Ok(ToolResult::ok_text(lines.join("\n\n")))
         }
-        "get_goal" => match get_goal() {
-            Some(g) => Ok(ToolResult::ok_text(format!(
-                "goal [{}] rounds={}/{:?} blockedAfter={} · {}",
-                g.status, g.rounds_started, g.max_rounds, g.blocked_after, g.objective
-            ))),
-            None => Ok(ToolResult::ok_text("（无 goal）")),
-        },
+        "get_goal" => {
+            let Some(thread_id) = resolve_thread_id(repo, args) else {
+                return Ok(ToolResult::ok_text("（无 goal）"));
+            };
+            match get_goal(repo, &thread_id) {
+                Some(g) => Ok(ToolResult::ok_text(format!(
+                    "goal [{}] rounds={}/{:?} blockedAfter={} · {}",
+                    g.status, g.rounds_started, g.max_rounds, g.blocked_after, g.objective
+                ))),
+                None => Ok(ToolResult::ok_text("（无 goal）")),
+            }
+        }
         "create_goal" => {
+            let Some(thread_id) = resolve_thread_id(repo, args) else {
+                return Ok(ToolResult::err_text("没有会话，目标无法保存"));
+            };
             let objective = args
                 .get("objective")
                 .and_then(|v| v.as_str())
@@ -1424,16 +1448,21 @@ pub fn execute_tool(
                 .or_else(|| args.get("max_rounds"))
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32);
-            let g = create_goal(objective, max_rounds);
-            Ok(ToolResult::ok_text(format!(
-                "已创建 goal · {}{}",
-                g.objective,
-                max_rounds
-                    .map(|m| format!(" · maxRounds={m}"))
-                    .unwrap_or_default()
-            )))
+            match create_goal(repo, &thread_id, objective, max_rounds) {
+                Ok(g) => Ok(ToolResult::ok_text(format!(
+                    "已创建 goal · {}{}",
+                    g.objective,
+                    max_rounds
+                        .map(|m| format!(" · maxRounds={m}"))
+                        .unwrap_or_default()
+                ))),
+                Err(e) => Ok(ToolResult::err_text(e)),
+            }
         }
         "update_goal" => {
+            let Some(thread_id) = resolve_thread_id(repo, args) else {
+                return Ok(ToolResult::err_text("没有会话，目标无法保存"));
+            };
             let action = args
                 .get("action")
                 .and_then(|v| v.as_str())
@@ -1443,7 +1472,7 @@ pub fn execute_tool(
                 return Ok(ToolResult::err_text("缺少 action"));
             }
             let objective = args.get("objective").and_then(|v| v.as_str());
-            match update_goal(action, objective) {
+            match update_goal(repo, &thread_id, action, objective) {
                 Ok(g) if g.status == "cleared" => Ok(ToolResult::ok_text("已清除 goal")),
                 Ok(g) => Ok(ToolResult::ok_text(format!(
                     "goal [{}] rounds={} · {}",
@@ -1505,7 +1534,10 @@ pub fn execute_tool(
             Ok(result)
         }
         "todo_list" => {
-            let lines: Vec<_> = list_todos()
+            let Some(thread_id) = resolve_thread_id(repo, args) else {
+                return Ok(ToolResult::ok_text("（无待办）"));
+            };
+            let lines: Vec<_> = list_todos(repo, &thread_id)
                 .into_iter()
                 .map(|t| format!("- [{}] {} ({})", t.status, t.content, t.id))
                 .collect();
@@ -1516,6 +1548,9 @@ pub fn execute_tool(
             }))
         }
         "todo_write" => {
+            let Some(thread_id) = resolve_thread_id(repo, args) else {
+                return Ok(ToolResult::err_text("没有会话，待办无法保存"));
+            };
             let merge = args.get("merge").and_then(|v| v.as_bool()).unwrap_or(true);
             let mut parsed = Vec::new();
             if let Some(arr) = args.get("todos").and_then(|v| v.as_array()) {
@@ -1544,11 +1579,13 @@ pub fn execute_tool(
                     }
                 }
             }
-            let out = write_todos(parsed, merge);
-            Ok(ToolResult::ok_text(format!(
-                "待办已更新，共 {} 条",
-                out.len()
-            )))
+            match write_todos(repo, &thread_id, parsed, merge) {
+                Ok(out) => Ok(ToolResult::ok_text(format!(
+                    "待办已更新，共 {} 条",
+                    out.len()
+                ))),
+                Err(e) => Ok(ToolResult::err_text(e)),
+            }
         }
         "ask_user_question" => {
             let question = args
@@ -2352,6 +2389,9 @@ pub fn execute_tool(
                 safe_join(ws, path)?
             };
             set_agent_cwd(Some(next.clone()));
+            if let Some(thread_id) = args.get("threadId").and_then(|v| v.as_str()) {
+                repo.set_thread_cwd(thread_id, Some(next.display().to_string()));
+            }
             Ok(ToolResult::ok_text(format!(
                 "已设置工作目录：{}",
                 next.display()
@@ -2840,6 +2880,10 @@ fn spawn_subagent(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<
         web_url: None,
         archived_at: None,
         pinned_at: None,
+        session_todos: Vec::new(),
+        session_goal: None,
+        cwd: None,
+        draft: None,
         created_at: now,
         updated_at: now,
     };
@@ -3216,8 +3260,6 @@ mod tests {
     #[test]
     fn goal_and_session_trace() {
         use wb_domain::{AgentMessage, AgentRole, AgentThread, now_ms};
-        // Shares the process-global goal store with `session_goal` tests.
-        let _guard = crate::session_goal::goal_test_lock();
         let mut repo = MemoryWorkbenchRepository::default();
         let now = now_ms();
         let thread = AgentThread {
@@ -3231,6 +3273,10 @@ mod tests {
             web_url: None,
             archived_at: None,
             pinned_at: None,
+            session_todos: Vec::new(),
+            session_goal: None,
+            cwd: None,
+            draft: None,
             created_at: now,
             updated_at: now,
         };
@@ -3268,7 +3314,6 @@ mod tests {
             duration_ms: None,
             created_at: now + 2,
         });
-        crate::session_goal::clear_goal();
         let created = execute_tool(
             &mut repo,
             "create_goal",
@@ -3317,17 +3362,12 @@ mod tests {
         .unwrap();
         assert!(et.ok);
 
-        // Re-assert active goal in case a parallel test cleared the process-global store.
-        if crate::get_goal().is_none() {
-            let _ = execute_tool(
-                &mut repo,
-                "create_goal",
-                &json!({ "objective": "完成迁移", "maxRounds": 3 }),
-                None,
-            );
-        }
-        let idle = crate::prepare_goal_idle_round();
-        assert!(idle.is_some(), "goal={:?}", crate::get_goal());
+        let idle = crate::prepare_goal_idle_round(&mut repo, "th-goal");
+        assert!(
+            idle.is_some(),
+            "goal={:?}",
+            crate::get_goal(&repo, "th-goal")
+        );
 
         let _ = execute_tool(
             &mut repo,
@@ -3397,6 +3437,10 @@ mod tests {
     #[test]
     fn memory_and_todo_tools() {
         let mut repo = MemoryWorkbenchRepository::default();
+        let thread =
+            crate::turn::create_thread(&repo.list_agent_workspaces()[0].id.clone(), "todo", None);
+        let thread_id = thread.id.clone();
+        repo.upsert_agent_thread(thread);
         let add = execute_tool(
             &mut repo,
             "memory_add",
@@ -3413,14 +3457,32 @@ mod tests {
             "todo_write",
             &json!({
                 "merge": false,
+                "threadId": thread_id,
                 "todos": [{ "id": "1", "content": "写测试", "status": "pending" }]
             }),
             None,
         )
         .unwrap();
-        assert!(todos.ok);
-        let listed = execute_tool(&mut repo, "todo_list", &json!({}), None).unwrap();
+        assert!(todos.ok, "{}", todos.content);
+        let listed = execute_tool(
+            &mut repo,
+            "todo_list",
+            &json!({ "threadId": thread_id }),
+            None,
+        )
+        .unwrap();
         assert!(listed.content.contains("写测试"));
+        let snap = repo.export_snapshot();
+        let mut restored = MemoryWorkbenchRepository::new();
+        restored.import_snapshot(snap);
+        assert!(
+            restored
+                .get_agent_thread(&thread_id)
+                .unwrap()
+                .session_todos
+                .iter()
+                .any(|todo| todo.content == "写测试")
+        );
     }
 
     #[test]

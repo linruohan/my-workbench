@@ -74,6 +74,7 @@ pub fn fire_timed_task<T: 'static>(
 
     let pending = state.with_mut(|s| begin_user_turn(&mut s.repo, &thread, &prompt));
     state.persist_if_dirty();
+    state.remember_session();
 
     let state2 = state.clone();
     cx.spawn(async move |this, cx| {

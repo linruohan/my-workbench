@@ -4,6 +4,8 @@ pub const BUILTIN_PROVIDER_ID: &str = "builtin:workbench";
 pub const BUILTIN_MODEL_REF: &str = "builtin:workbench/local";
 pub const DEFAULT_AGENT_WORKSPACE_TITLE: &str = "默认工作区";
 pub const WEB_AGENT_THREAD_TITLE: &str = "网页会话";
+/// Autonomous goal rounds must reach this before `blocked` is accepted.
+pub const DEFAULT_GOAL_BLOCKED_AFTER: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +78,38 @@ pub struct AgentWorkspace {
     pub updated_at: i64,
 }
 
+/// Checklist kept with one agent thread (`todo_write` / `todo_list`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionTodo {
+    pub id: String,
+    pub content: String,
+    pub status: String,
+}
+
+fn default_goal_status() -> String {
+    "active".into()
+}
+
+fn default_blocked_after() -> u32 {
+    DEFAULT_GOAL_BLOCKED_AFTER
+}
+
+/// One goal per agent thread (`create_goal` / `update_goal`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionGoal {
+    pub objective: String,
+    #[serde(default = "default_goal_status")]
+    pub status: String,
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    #[serde(default)]
+    pub rounds_started: u32,
+    #[serde(default = "default_blocked_after")]
+    pub blocked_after: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentThread {
@@ -96,6 +130,18 @@ pub struct AgentThread {
     pub archived_at: Option<i64>,
     #[serde(default)]
     pub pinned_at: Option<i64>,
+    /// Session checklist. Empty stays out of older snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_todos: Vec<AgentSessionTodo>,
+    /// Session goal. Missing on threads that never set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_goal: Option<AgentSessionGoal>,
+    /// Working directory for this session's file and shell tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Unsent composer text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

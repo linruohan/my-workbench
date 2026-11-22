@@ -614,6 +614,75 @@ impl MemoryWorkbenchRepository {
         v
     }
 
+    pub fn get_agent_thread(&self, id: &str) -> Option<&AgentThread> {
+        self.agent_threads.get(id)
+    }
+
+    pub fn set_session_todos(&mut self, id: &str, todos: Vec<wb_domain::AgentSessionTodo>) -> bool {
+        let Some(thread) = self.agent_threads.get_mut(id) else {
+            return false;
+        };
+        if thread.session_todos == todos {
+            return false;
+        }
+        thread.session_todos = todos;
+        thread.updated_at = now_ms();
+        self.dirty = true;
+        true
+    }
+
+    pub fn set_session_goal(
+        &mut self,
+        id: &str,
+        goal: Option<wb_domain::AgentSessionGoal>,
+    ) -> bool {
+        let Some(thread) = self.agent_threads.get_mut(id) else {
+            return false;
+        };
+        if thread.session_goal == goal {
+            return false;
+        }
+        thread.session_goal = goal;
+        thread.updated_at = now_ms();
+        self.dirty = true;
+        true
+    }
+
+    pub fn set_thread_cwd(&mut self, id: &str, cwd: Option<String>) -> bool {
+        let Some(thread) = self.agent_threads.get_mut(id) else {
+            return false;
+        };
+        let cwd = cwd.and_then(|path| {
+            let path = path.trim().to_string();
+            if path.is_empty() { None } else { Some(path) }
+        });
+        if thread.cwd == cwd {
+            return false;
+        }
+        thread.cwd = cwd;
+        thread.updated_at = now_ms();
+        self.dirty = true;
+        true
+    }
+
+    /// Empty text clears the stored draft.
+    pub fn set_thread_draft(&mut self, id: &str, draft: &str) -> bool {
+        let Some(thread) = self.agent_threads.get_mut(id) else {
+            return false;
+        };
+        let draft = {
+            let draft = draft.to_string();
+            if draft.is_empty() { None } else { Some(draft) }
+        };
+        if thread.draft == draft {
+            return false;
+        }
+        thread.draft = draft;
+        thread.updated_at = now_ms();
+        self.dirty = true;
+        true
+    }
+
     pub fn upsert_agent_thread(&mut self, thread: AgentThread) {
         self.agent_threads.insert(thread.id.clone(), thread);
         self.dirty = true;
@@ -761,6 +830,80 @@ mod tests {
     }
 
     #[test]
+    fn tasks_timed_and_agent_session_round_trip() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        repo.create_task("买菜", None);
+        let now = now_ms();
+        let timed =
+            wb_domain::create_timed_task_draft(Some("晨报"), Some("总结今日"), None, Some(now));
+        let timed_id = timed.id.clone();
+        repo.upsert_timed_task(timed);
+        let ws = repo.list_agent_workspaces()[0].id.clone();
+        let thread = AgentThread {
+            id: "th-keep".into(),
+            workspace_id: ws,
+            project_id: None,
+            title: "持久会话".into(),
+            model_ref: wb_domain::BUILTIN_MODEL_REF.into(),
+            permission_mode: Default::default(),
+            queue_json: None,
+            web_url: None,
+            archived_at: None,
+            pinned_at: None,
+            session_todos: vec![wb_domain::AgentSessionTodo {
+                id: "1".into(),
+                content: "写测试".into(),
+                status: "pending".into(),
+            }],
+            session_goal: Some(wb_domain::AgentSessionGoal {
+                objective: "把数据落盘".into(),
+                status: "active".into(),
+                max_rounds: Some(3),
+                rounds_started: 1,
+                blocked_after: 3,
+            }),
+            cwd: Some("D:/work".into()),
+            draft: Some("还没发送".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        repo.upsert_agent_thread(thread);
+        repo.upsert_agent_message(AgentMessage {
+            id: "m-keep".into(),
+            thread_id: "th-keep".into(),
+            role: wb_domain::AgentRole::User,
+            content: "你好".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now,
+            duration_ms: None,
+        });
+
+        let snap = repo.export_snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: crate::snapshot::WorkbenchSnapshot = serde_json::from_str(&json).unwrap();
+        let mut restored = MemoryWorkbenchRepository::new();
+        restored.import_snapshot(parsed);
+
+        assert_eq!(restored.list_tasks()[0].title, "买菜");
+        assert_eq!(restored.get_timed_task(&timed_id).unwrap().title, "晨报");
+        assert_eq!(
+            restored.get_timed_task(&timed_id).unwrap().command,
+            "总结今日"
+        );
+        let thread = restored.get_agent_thread("th-keep").unwrap();
+        assert_eq!(thread.session_todos[0].content, "写测试");
+        assert_eq!(
+            thread.session_goal.as_ref().unwrap().objective,
+            "把数据落盘"
+        );
+        assert_eq!(thread.cwd.as_deref(), Some("D:/work"));
+        assert_eq!(thread.draft.as_deref(), Some("还没发送"));
+        assert_eq!(restored.messages_for_thread("th-keep")[0].content, "你好");
+    }
+
+    #[test]
     fn timed_runs_follow_the_task() {
         let mut repo = MemoryWorkbenchRepository::new();
         let now = now_ms();
@@ -861,6 +1004,10 @@ mod tests {
             web_url: None,
             archived_at: None,
             pinned_at: None,
+            session_todos: Vec::new(),
+            session_goal: None,
+            cwd: None,
+            draft: None,
             created_at: now,
             updated_at: now,
         };

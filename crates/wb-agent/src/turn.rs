@@ -1469,6 +1469,10 @@ pub fn create_thread(workspace_id: &str, title: &str, model_ref: Option<&str>) -
         web_url: None,
         archived_at: None,
         pinned_at: None,
+        session_todos: Vec::new(),
+        session_goal: None,
+        cwd: None,
+        draft: None,
         created_at: now,
         updated_at: now,
     }

@@ -978,6 +978,7 @@ impl TasksPane {
             s.selected_task_id = Some(id.to_string());
         });
         self.state.persist_if_dirty();
+        self.state.remember_session();
         cx.notify();
     }
 
@@ -1004,6 +1005,7 @@ impl TasksPane {
         }
         self.state
             .with_mut(|s| s.selected_task_id = Some(id.to_string()));
+        self.state.remember_session();
         self.open_task_dialog(Some(id.to_string()), window, cx);
         cx.notify();
     }

@@ -1,8 +1,12 @@
 use std::sync::{Arc, Mutex};
-use wb_domain::{AppPrefs, ThemeModePref, format_local_day, now_ms};
+use wb_domain::{AppPrefs, ThemeModePref, format_local_day, now_ms, settle_timer_segment};
 use wb_store::{
     MemoryWorkbenchRepository, SaveStatus, load_prefs, load_store, save_prefs, save_store,
 };
+
+/// Crash recovery only counts a short slice. A later relaunch must not add the
+/// hours the app was closed onto a running timer.
+const TIMER_RECOVER_CAP_MS: i64 = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppNav {
@@ -49,6 +53,21 @@ impl AppNav {
             _ => None,
         }
     }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Today => "today",
+            Self::Inbox => "inbox",
+            Self::Done => "done",
+            Self::Planner => "planner",
+            Self::Timed => "timed",
+            Self::Projects => "projects",
+            Self::Tags => "tags",
+            Self::Knowledge => "knowledge",
+            Self::Agent => "agent",
+            Self::Settings => "settings",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -77,35 +96,96 @@ pub struct AppStateInner {
 
 impl AppState {
     pub fn load() -> Self {
-        let repo = load_store().unwrap_or_else(|e| {
+        let mut repo = load_store().unwrap_or_else(|e| {
             log::warn!("加载快照失败，使用空库: {e}");
             MemoryWorkbenchRepository::new()
         });
-        let prefs = load_prefs().unwrap_or_default();
-        let nav = AppNav::from_view_id(&prefs.general.startup_view)
-            .filter(|nav| {
-                !matches!(
-                    nav,
-                    AppNav::Settings | AppNav::Projects | AppNav::Tags | AppNav::Done
-                )
+        let mut prefs = load_prefs().unwrap_or_default();
+        let now = now_ms();
+        let nav = prefs
+            .session
+            .nav
+            .as_deref()
+            .and_then(AppNav::from_view_id)
+            .or_else(|| {
+                AppNav::from_view_id(&prefs.general.startup_view).filter(|nav| {
+                    !matches!(
+                        nav,
+                        AppNav::Settings | AppNav::Projects | AppNav::Tags | AppNav::Done
+                    )
+                })
             })
             .unwrap_or(AppNav::Today);
+        let active_thread_id = prefs
+            .session
+            .thread_id
+            .clone()
+            .filter(|id| repo.get_agent_thread(id).is_some());
+        let selected_task_id = prefs
+            .session
+            .task_id
+            .clone()
+            .filter(|id| repo.get_task(id).is_some());
+        let active_project_id = prefs
+            .session
+            .project_id
+            .clone()
+            .filter(|id| repo.list_projects().iter().any(|project| &project.id == id));
+        let active_tag_id = prefs
+            .session
+            .tag_id
+            .clone()
+            .filter(|id| repo.list_tags().iter().any(|tag| &tag.id == id));
+        let mut prefs_dirty = false;
+        let active_timer = match (
+            prefs.session.timer_task_id.clone(),
+            prefs.session.timer_started_at,
+        ) {
+            (Some(id), Some(started)) if repo.get_task(&id).is_some_and(|task| !task.is_done) => {
+                let elapsed = now.saturating_sub(started);
+                if (0..TIMER_RECOVER_CAP_MS).contains(&elapsed)
+                    && let Some(mut task) = repo.get_task(&id).cloned()
+                {
+                    settle_timer_segment(&mut task, &format_local_day(now), elapsed, now);
+                    repo.upsert_task(task);
+                }
+                prefs.session.timer_task_id = Some(id.clone());
+                prefs.session.timer_started_at = Some(now);
+                prefs_dirty = true;
+                Some((id, now))
+            }
+            (Some(_), _) | (_, Some(_)) => {
+                prefs.session.timer_task_id = None;
+                prefs.session.timer_started_at = None;
+                prefs_dirty = true;
+                None
+            }
+            _ => None,
+        };
+        if repo.is_dirty()
+            && let Err(e) = save_store(&mut repo)
+        {
+            log::warn!("启动时写回计时失败: {e}");
+        }
+        if prefs_dirty && let Err(e) = save_prefs(&prefs) {
+            log::warn!("启动时写回会话现场失败: {e}");
+        }
         Self {
             inner: Arc::new(Mutex::new(AppStateInner {
                 repo,
                 prefs,
                 nav,
                 nav_before_settings: AppNav::Today,
-                active_project_id: None,
-                active_tag_id: None,
-                active_thread_id: None,
+                active_project_id,
+                active_tag_id,
+                active_thread_id,
                 save_status: SaveStatus::default(),
                 palette_open: false,
                 notifications_open: false,
-                selected_task_id: None,
+                selected_task_id,
                 kb_current_file: None,
-                last_tick: now_ms(),
-                active_timer: None,
+                last_tick: now,
+                active_timer,
             })),
         }
     }
@@ -143,6 +223,30 @@ impl AppState {
                 log::warn!("保存 prefs 失败: {e}");
             }
         });
+    }
+
+    /// Write the open page, thread, task, and running timer into `prefs.json`.
+    pub fn remember_session(&self) {
+        let changed = self.with_mut(|s| {
+            let next = wb_domain::UiSession {
+                nav: Some(s.nav.id().into()),
+                thread_id: s.active_thread_id.clone(),
+                task_id: s.selected_task_id.clone(),
+                project_id: s.active_project_id.clone(),
+                tag_id: s.active_tag_id.clone(),
+                timer_task_id: s.active_timer.as_ref().map(|(id, _)| id.clone()),
+                timer_started_at: s.active_timer.as_ref().map(|(_, started)| *started),
+            };
+            if s.prefs.session == next {
+                false
+            } else {
+                s.prefs.session = next;
+                true
+            }
+        });
+        if changed {
+            self.persist_prefs();
+        }
     }
 
     pub fn today(&self) -> String {

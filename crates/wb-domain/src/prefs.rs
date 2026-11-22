@@ -70,6 +70,30 @@ pub struct AppPrefs {
     pub close_to_tray: bool,
     #[serde(default)]
     pub general: GeneralPrefs,
+    /// Last open page, thread, task, and running timer. Restored on launch.
+    #[serde(default)]
+    pub session: UiSession,
+}
+
+/// Workspace the user left open. Entity ids that no longer exist are ignored on load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSession {
+    #[serde(default)]
+    pub nav: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub tag_id: Option<String>,
+    #[serde(default)]
+    pub timer_task_id: Option<String>,
+    /// Last time the running timer was checkpointed into `timeSpent`.
+    #[serde(default)]
+    pub timer_started_at: Option<i64>,
 }
 
 /// Local workspace preferences shown on the General settings page.
@@ -194,6 +218,7 @@ impl Default for AppPrefs {
             tray_enabled: true,
             close_to_tray: true,
             general: GeneralPrefs::default(),
+            session: UiSession::default(),
         }
     }
 }

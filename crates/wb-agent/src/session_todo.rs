@@ -1,40 +1,40 @@
-use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use wb_domain::AgentSessionTodo;
+use wb_store::MemoryWorkbenchRepository;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionTodo {
-    pub id: String,
-    pub content: String,
-    pub status: String,
+pub type SessionTodo = AgentSessionTodo;
+
+pub fn list_todos(repo: &MemoryWorkbenchRepository, thread_id: &str) -> Vec<SessionTodo> {
+    repo.get_agent_thread(thread_id)
+        .map(|thread| thread.session_todos.clone())
+        .unwrap_or_default()
 }
 
-fn store() -> &'static Mutex<Vec<SessionTodo>> {
-    static TODOS: OnceLock<Mutex<Vec<SessionTodo>>> = OnceLock::new();
-    TODOS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-pub fn list_todos() -> Vec<SessionTodo> {
-    store().lock().unwrap().clone()
-}
-
-pub fn write_todos(todos: Vec<SessionTodo>, merge: bool) -> Vec<SessionTodo> {
-    let mut guard = store().lock().unwrap();
+pub fn write_todos(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    todos: Vec<SessionTodo>,
+    merge: bool,
+) -> Result<Vec<SessionTodo>, String> {
+    if repo.get_agent_thread(thread_id).is_none() {
+        return Err("会话不存在，待办无法保存".into());
+    }
+    let mut current = list_todos(repo, thread_id);
     if merge {
-        for t in todos {
-            if let Some(existing) = guard.iter_mut().find(|x| x.id == t.id) {
-                if !t.content.is_empty() {
-                    existing.content = t.content;
+        for todo in todos {
+            if let Some(existing) = current.iter_mut().find(|item| item.id == todo.id) {
+                if !todo.content.is_empty() {
+                    existing.content = todo.content;
                 }
-                if !t.status.is_empty() {
-                    existing.status = t.status;
+                if !todo.status.is_empty() {
+                    existing.status = todo.status;
                 }
             } else {
-                guard.push(t);
+                current.push(todo);
             }
         }
     } else {
-        *guard = todos;
+        current = todos;
     }
-    guard.clone()
+    repo.set_session_todos(thread_id, current.clone());
+    Ok(current)
 }

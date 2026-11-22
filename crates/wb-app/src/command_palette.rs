@@ -326,6 +326,7 @@ impl CommandPalette {
             }
             s.palette_open = false;
         });
+        self.state.remember_session();
         if let Some(id) = opened_task {
             self.tasks
                 .update(cx, |tasks, cx| tasks.open_task_dialog(Some(id), window, cx))

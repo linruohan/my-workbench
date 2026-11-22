@@ -106,6 +106,9 @@ pub struct AgentPane {
     composer_preview_scroll: ScrollHandle,
     /// Per-thread unsent composer text, so switching threads does not mix drafts.
     drafts: std::collections::HashMap<String, String>,
+    /// Thread whose composer is on screen. A mismatch means the session changed
+    /// outside this pane (command palette, timed delivery) and drafts must move.
+    bound_thread: Option<String>,
     /// A file drag is hovering the composer.
     drag_hover: bool,
     /// `(workspace root, branch)` cache so rendering never shells out to git.
@@ -149,6 +152,20 @@ impl AgentPane {
         let thread_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话…"));
         let ask_input = cx.new(|cx| InputState::new(window, cx).placeholder("回答 Agent 的问题…"));
         let state_seed = state.with(|s| s.prefs.agent.prompt_history.clone());
+        let (pending_draft, bound_thread, bound_cwd) = state.with(|s| {
+            let id = s.active_thread_id.clone();
+            let thread = id.as_deref().and_then(|id| s.repo.get_agent_thread(id));
+            (
+                thread
+                    .and_then(|thread| thread.draft.clone())
+                    .filter(|text| !text.is_empty()),
+                id,
+                thread.and_then(|thread| thread.cwd.clone()),
+            )
+        });
+        if let Some(path) = bound_cwd.filter(|path| std::path::Path::new(path).is_dir()) {
+            wb_host::set_agent_cwd(Some(std::path::PathBuf::from(path)));
+        }
         let mut this = Self {
             state,
             input: input.clone(),
@@ -164,7 +181,7 @@ impl AgentPane {
             stream_draft: Arc::new(Mutex::new(String::new())),
             stream_status: Arc::new(Mutex::new(String::new())),
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            pending_edit: None,
+            pending_edit: pending_draft,
             pending_insert: None,
             show_todos: false,
             mention_cache: Vec::new(),
@@ -174,6 +191,7 @@ impl AgentPane {
             composer_preview: false,
             composer_preview_scroll: ScrollHandle::new(),
             drafts: std::collections::HashMap::new(),
+            bound_thread,
             drag_hover: false,
             branch_cache: None,
             ask_timers: HashSet::new(),
@@ -448,6 +466,69 @@ impl AgentPane {
         true
     }
 
+    /// Write unsent composer text onto the open thread so a restart keeps it.
+    pub(crate) fn flush_composer(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.state.with(|s| s.active_thread_id.clone()) else {
+            return;
+        };
+        let text = self.input.read(cx).value().to_string();
+        self.drafts.insert(thread_id, text);
+        let drafts = self.drafts.clone();
+        let changed = self.state.with_mut(|s| {
+            let mut dirty = false;
+            for (id, draft) in drafts {
+                if s.repo.set_thread_draft(&id, &draft) {
+                    dirty = true;
+                }
+            }
+            dirty
+        });
+        if changed {
+            self.state.persist_if_dirty();
+        }
+    }
+
+    /// Move the composer and working directory when the active thread changes.
+    fn sync_bound_thread(&mut self, cx: &mut Context<Self>) {
+        let current = self.state.with(|s| s.active_thread_id.clone());
+        if current == self.bound_thread {
+            return;
+        }
+        if let Some(prev) = self.bound_thread.clone() {
+            let text = self.input.read(cx).value().to_string();
+            if text.trim().is_empty() {
+                self.drafts.remove(&prev);
+            } else {
+                self.drafts.insert(prev.clone(), text.clone());
+            }
+            self.state.with_mut(|s| {
+                s.repo.set_thread_draft(&prev, &text);
+            });
+        }
+        self.bound_thread = current.clone();
+        let Some(id) = current else {
+            wb_host::set_agent_cwd(None);
+            self.state.persist_if_dirty();
+            self.state.remember_session();
+            return;
+        };
+        let (stored, cwd) = self.state.with(|s| {
+            let thread = s.repo.get_agent_thread(&id);
+            (
+                thread
+                    .and_then(|thread| thread.draft.clone())
+                    .unwrap_or_default(),
+                thread.and_then(|thread| thread.cwd.clone()),
+            )
+        });
+        let draft = self.drafts.get(&id).cloned().unwrap_or(stored);
+        self.pending_edit = Some(draft);
+        let cwd = cwd.filter(|path| std::path::Path::new(path).is_dir());
+        wb_host::set_agent_cwd(cwd.map(std::path::PathBuf::from));
+        self.state.persist_if_dirty();
+        self.state.remember_session();
+    }
+
     fn ensure_thread(&mut self) -> String {
         self.state.with_mut(|s| {
             if let Some(id) = s.active_thread_id.clone() {
@@ -517,6 +598,12 @@ impl AgentPane {
         self.ghost_suffix = None;
 
         let thread_id = self.ensure_thread();
+        self.bound_thread = Some(thread_id.clone());
+        self.drafts.remove(&thread_id);
+        self.state.with_mut(|s| {
+            s.repo.set_thread_draft(&thread_id, "");
+        });
+        self.state.remember_session();
         // Very long pastes are spilled to a file so the prompt (and the model
         // window) keeps only a reference plus a preview.
         let (text, spill_note) = if text.chars().count() > 4_000 {
@@ -547,7 +634,7 @@ impl AgentPane {
             cx.notify();
             return;
         }
-        clear_goal_round_flag();
+        clear_goal_round_flag(&thread_id);
         // Keep the prompt inside the model window: fold old turns before sending.
         let (ctx_chars, ctx_model) = self.state.with(|s| {
             let msgs = s.repo.messages_for_thread(&thread_id);
@@ -723,7 +810,20 @@ impl AgentPane {
                 if goal_followups >= 2 {
                     break;
                 }
-                let Some(goal_prompt) = prepare_goal_idle_round() else {
+                let Some(goal_prompt) = this
+                    .update(cx, |this, _cx| {
+                        let thread_id = this.state.with(|s| s.active_thread_id.clone())?;
+                        let prompt = this
+                            .state
+                            .with_mut(|s| prepare_goal_idle_round(&mut s.repo, &thread_id));
+                        if prompt.is_some() {
+                            this.state.persist_if_dirty();
+                        }
+                        prompt
+                    })
+                    .ok()
+                    .flatten()
+                else {
                     break;
                 };
                 goal_followups += 1;
@@ -1784,26 +1884,16 @@ impl AgentPane {
         let previous = self.state.with(|s| s.active_thread_id.clone());
         let changed = previous.as_deref() != Some(id.as_str());
         if changed {
-            // Stash the unsent text per thread before the composer is replaced.
-            let text = self.input.read(cx).value().to_string();
-            if let Some(prev) = previous.clone() {
-                if text.trim().is_empty() {
-                    self.drafts.remove(&prev);
-                } else {
-                    self.drafts.insert(prev, text);
-                }
-            }
             // A thread switch abandons the in-flight turn, but the partial text
             // belongs to the old thread and must not land in the new one.
+            // The composer draft is moved in `sync_bound_thread` on the next paint.
             self.abort_turn_quietly(cx);
-            // Per-thread caches are keyed by workspace and composer history.
             self.branch_cache = None;
             self.mention_cache.clear();
             self.mention_cache_key = None;
             self.history_index = None;
             self.ghost_suffix = None;
             self.slash_dismissed = false;
-            self.pending_edit = Some(self.drafts.get(&id).cloned().unwrap_or_default());
         }
         self.state.with_mut(|s| s.active_thread_id = Some(id));
         self.scroll_chat_to_bottom(cx);
@@ -2155,6 +2245,7 @@ impl Render for AgentPane {
 impl AgentPane {
     #[allow(clippy::large_unopt_stack_frames)]
     fn render_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_bound_thread(cx);
         if let Some(text) = self.pending_edit.take() {
             let caret = text.len();
             self.input.update(cx, |input, cx| {
@@ -2329,8 +2420,16 @@ impl AgentPane {
                     .into_any_element()
             });
 
-        let todos_all = wb_agent::list_todos();
-        let goal_chip: Option<AnyElement> = wb_agent::get_goal().map(|goal| {
+        let (todos_all, goal) = self.state.with(|s| {
+            let Some(id) = s.active_thread_id.as_deref() else {
+                return (Vec::new(), None);
+            };
+            (
+                wb_agent::list_todos(&s.repo, id),
+                wb_agent::get_goal(&s.repo, id),
+            )
+        });
+        let goal_chip: Option<AnyElement> = goal.map(|goal| {
             let rounds = match goal.max_rounds {
                 Some(max) => format!("{}/{}", goal.rounds_started, max),
                 None => format!("{} 轮", goal.rounds_started),
@@ -2360,7 +2459,7 @@ impl AgentPane {
                 .into_any_element()
         });
         let todo_chip: Option<AnyElement> = {
-            let todos = wb_agent::list_todos();
+            let todos = todos_all.clone();
             (!todos.is_empty()).then(|| {
                 let done = todos.iter().filter(|t| t.status == "completed").count();
                 let running = todos.iter().find(|t| t.status == "in_progress").map(|t| {

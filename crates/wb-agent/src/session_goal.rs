@@ -1,79 +1,90 @@
-//! Lightweight per-process session goal (not full DSH round driver).
+//! Per-thread session goal. The goal itself lives on the agent thread so a
+//! restart keeps it; the "in a goal round" flag is only meaningful for the
+//! live turn and stays in memory.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use wb_domain::{AgentSessionGoal, DEFAULT_GOAL_BLOCKED_AFTER};
+use wb_store::MemoryWorkbenchRepository;
 
-const DEFAULT_BLOCKED_AFTER: u32 = 3;
+pub type SessionGoal = AgentSessionGoal;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionGoal {
-    pub objective: String,
-    #[serde(default = "default_status")]
-    pub status: String,
-    #[serde(default)]
-    pub max_rounds: Option<u32>,
-    #[serde(default)]
-    pub rounds_started: u32,
-    /// Autonomous goal rounds must reach this before `blocked` is accepted.
-    #[serde(default = "default_blocked_after")]
-    pub blocked_after: u32,
+fn round_flags() -> &'static Mutex<HashMap<String, bool>> {
+    static FLAGS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn default_status() -> String {
-    "active".into()
+pub fn in_goal_round(thread_id: &str) -> bool {
+    round_flags()
+        .lock()
+        .unwrap()
+        .get(thread_id)
+        .copied()
+        .unwrap_or(false)
 }
 
-fn default_blocked_after() -> u32 {
-    DEFAULT_BLOCKED_AFTER
+pub fn clear_goal_round_flag(thread_id: &str) {
+    round_flags()
+        .lock()
+        .unwrap()
+        .insert(thread_id.to_string(), false);
 }
 
-struct GoalState {
-    goal: Option<SessionGoal>,
-    /// True while the current turn was started by `prepare_goal_idle_round`.
-    in_goal_round: bool,
+fn set_round_flag(thread_id: &str, on: bool) {
+    round_flags()
+        .lock()
+        .unwrap()
+        .insert(thread_id.to_string(), on);
 }
 
-fn store() -> &'static Mutex<GoalState> {
-    static GOAL: OnceLock<Mutex<GoalState>> = OnceLock::new();
-    GOAL.get_or_init(|| {
-        Mutex::new(GoalState {
-            goal: None,
-            in_goal_round: false,
-        })
-    })
+pub fn get_goal(repo: &MemoryWorkbenchRepository, thread_id: &str) -> Option<SessionGoal> {
+    repo.get_agent_thread(thread_id)
+        .and_then(|thread| thread.session_goal.clone())
 }
 
-pub fn get_goal() -> Option<SessionGoal> {
-    store().lock().unwrap().goal.clone()
-}
-
-pub fn in_goal_round() -> bool {
-    store().lock().unwrap().in_goal_round
-}
-
-pub fn clear_goal_round_flag() {
-    store().lock().unwrap().in_goal_round = false;
-}
-
-pub fn create_goal(objective: &str, max_rounds: Option<u32>) -> SessionGoal {
+pub fn create_goal(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    objective: &str,
+    max_rounds: Option<u32>,
+) -> Result<SessionGoal, String> {
+    if repo.get_agent_thread(thread_id).is_none() {
+        return Err("会话不存在，目标无法保存".into());
+    }
     let goal = SessionGoal {
         objective: objective.trim().to_string(),
         status: "active".into(),
         max_rounds,
         rounds_started: 0,
-        blocked_after: DEFAULT_BLOCKED_AFTER,
+        blocked_after: DEFAULT_GOAL_BLOCKED_AFTER,
     };
-    let mut guard = store().lock().unwrap();
-    guard.goal = Some(goal.clone());
-    guard.in_goal_round = false;
-    goal
+    repo.set_session_goal(thread_id, Some(goal.clone()));
+    set_round_flag(thread_id, false);
+    Ok(goal)
 }
 
-pub fn update_goal(action: &str, objective: Option<&str>) -> Result<SessionGoal, String> {
-    let mut guard = store().lock().unwrap();
-    let in_goal_round = guard.in_goal_round;
-    let Some(goal) = guard.goal.as_mut() else {
+pub fn update_goal(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    action: &str,
+    objective: Option<&str>,
+) -> Result<SessionGoal, String> {
+    if repo.get_agent_thread(thread_id).is_none() {
+        return Err("会话不存在，目标无法保存".into());
+    }
+    let in_goal_round = in_goal_round(thread_id);
+    if action == "clear" {
+        repo.set_session_goal(thread_id, None);
+        set_round_flag(thread_id, false);
+        return Ok(SessionGoal {
+            objective: String::new(),
+            status: "cleared".into(),
+            max_rounds: None,
+            rounds_started: 0,
+            blocked_after: DEFAULT_GOAL_BLOCKED_AFTER,
+        });
+    }
+    let Some(mut goal) = get_goal(repo, thread_id) else {
         return Err("当前无 goal，请先 create_goal".into());
     };
     match action {
@@ -98,23 +109,12 @@ pub fn update_goal(action: &str, objective: Option<&str>) -> Result<SessionGoal,
             }
             goal.status = "blocked".into();
         }
-        "clear" => {
-            guard.goal = None;
-            guard.in_goal_round = false;
-            return Ok(SessionGoal {
-                objective: String::new(),
-                status: "cleared".into(),
-                max_rounds: None,
-                rounds_started: 0,
-                blocked_after: DEFAULT_BLOCKED_AFTER,
-            });
-        }
         "tick" => {
             goal.rounds_started = goal.rounds_started.saturating_add(1);
-            if let Some(max) = goal.max_rounds {
-                if goal.rounds_started >= max {
-                    goal.status = "blocked".into();
-                }
+            if let Some(max) = goal.max_rounds
+                && goal.rounds_started >= max
+            {
+                goal.status = "blocked".into();
             }
         }
         other => {
@@ -123,23 +123,21 @@ pub fn update_goal(action: &str, objective: Option<&str>) -> Result<SessionGoal,
             ));
         }
     }
-    Ok(goal.clone())
-}
-
-pub fn clear_goal() {
-    let mut guard = store().lock().unwrap();
-    guard.goal = None;
-    guard.in_goal_round = false;
+    repo.set_session_goal(thread_id, Some(goal.clone()));
+    Ok(goal)
 }
 
 /// If an active goal should drive another idle round, tick it and return a prompt.
-pub fn prepare_goal_idle_round() -> Option<String> {
-    let g = get_goal()?;
-    if g.status != "active" {
+pub fn prepare_goal_idle_round(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+) -> Option<String> {
+    let goal = get_goal(repo, thread_id)?;
+    if goal.status != "active" {
         return None;
     }
-    let updated = update_goal("tick", None).ok()?;
-    store().lock().unwrap().in_goal_round = true;
+    let updated = update_goal(repo, thread_id, "tick", None).ok()?;
+    set_round_flag(thread_id, true);
     if updated.status == "blocked" {
         return Some(format!(
             "[Goal] 已达回合上限并标记 blocked。目标：{}\n请总结进度或 update_goal(action=complete)。",
@@ -155,35 +153,65 @@ pub fn prepare_goal_idle_round() -> Option<String> {
     ))
 }
 
-/// Serialises tests that mutate the process-global goal store.
-///
-/// `session_goal` and `execute` both drive the same statics, so two tests
-/// running concurrently would observe each other's goal and fail spuriously.
-#[cfg(test)]
-pub(crate) fn goal_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wb_domain::{AgentThread, BUILTIN_MODEL_REF, now_ms};
+
+    fn thread(repo: &mut MemoryWorkbenchRepository) -> String {
+        let now = now_ms();
+        let id = format!("goal-{}", uuid::Uuid::new_v4());
+        repo.upsert_agent_thread(AgentThread {
+            id: id.clone(),
+            workspace_id: repo.list_agent_workspaces()[0].id.clone(),
+            project_id: None,
+            title: "goal".into(),
+            model_ref: BUILTIN_MODEL_REF.into(),
+            permission_mode: Default::default(),
+            queue_json: None,
+            web_url: None,
+            archived_at: None,
+            pinned_at: None,
+            session_todos: Vec::new(),
+            session_goal: None,
+            cwd: None,
+            draft: None,
+            created_at: now,
+            updated_at: now,
+        });
+        id
+    }
 
     #[test]
     fn blocked_threshold_in_goal_round() {
-        let _guard = goal_test_lock();
-        clear_goal();
-        create_goal("测阈值", None);
-        assert!(prepare_goal_idle_round().is_some());
-        let err = update_goal("blocked", None).unwrap_err();
+        let mut repo = MemoryWorkbenchRepository::default();
+        let id = thread(&mut repo);
+        create_goal(&mut repo, &id, "测阈值", None).unwrap();
+        assert!(prepare_goal_idle_round(&mut repo, &id).is_some());
+        let err = update_goal(&mut repo, &id, "blocked", None).unwrap_err();
         assert!(err.contains("GOAL_TOOL_BLOCK_THRESHOLD"));
-        clear_goal_round_flag();
-        create_goal("测阈值2", None);
+        clear_goal_round_flag(&id);
+        create_goal(&mut repo, &id, "测阈值2", None).unwrap();
         for _ in 0..3 {
-            let _ = update_goal("tick", None);
+            update_goal(&mut repo, &id, "tick", None).unwrap();
         }
-        store().lock().unwrap().in_goal_round = true;
-        assert!(update_goal("blocked", None).is_ok());
-        clear_goal();
+        set_round_flag(&id, true);
+        assert!(update_goal(&mut repo, &id, "blocked", None).is_ok());
+        let stored = get_goal(&repo, &id).unwrap();
+        assert_eq!(stored.status, "blocked");
+        assert_eq!(stored.objective, "测阈值2");
+    }
+
+    #[test]
+    fn goal_survives_snapshot() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let id = thread(&mut repo);
+        create_goal(&mut repo, &id, "写完持久化", Some(4)).unwrap();
+        let snap = repo.export_snapshot();
+        let mut restored = MemoryWorkbenchRepository::new();
+        restored.import_snapshot(snap);
+        let goal = get_goal(&restored, &id).unwrap();
+        assert_eq!(goal.objective, "写完持久化");
+        assert_eq!(goal.max_rounds, Some(4));
     }
 }
