@@ -308,9 +308,8 @@ impl CommandPalette {
                 s.active_project_id = Some(pid);
                 s.active_tag_id = None;
                 s.nav = AppNav::Projects;
-            } else if item.id.starts_with("tag-") {
-                let tid = item.id.trim_start_matches("tag-").to_string();
-                s.active_tag_id = Some(tid);
+            } else if item.id.starts_with("tag-") || item.id == "nav-tags" {
+                s.active_tag_id = None;
                 s.active_project_id = None;
                 s.nav = AppNav::Tags;
             }

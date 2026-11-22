@@ -43,6 +43,7 @@ pub struct TasksPane {
     project_title: Entity<InputState>,
     project_title_id: Option<String>,
     task_query: Entity<InputState>,
+    tag_title: Entity<InputState>,
     task_form: Entity<TaskForm>,
     task_dialog_open: bool,
     project_dialog_open: bool,
@@ -52,6 +53,8 @@ pub struct TasksPane {
     schedule_day_offset: i64,
     /// When confirm-before-delete is on, first click stores the id here.
     pending_delete_id: Option<String>,
+    editing_tag_id: Option<String>,
+    pending_delete_tag_id: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -107,6 +110,7 @@ impl TasksPane {
         let project_title =
             cx.new(|cx| InputState::new(window, cx).placeholder("项目名称，回车保存"));
         let task_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索任务"));
+        let tag_title = cx.new(|cx| InputState::new(window, cx).placeholder("标签名称，回车保存"));
         let task_form = cx.new(|cx| TaskForm::new(state.clone(), window, cx));
         let mut this = Self {
             state,
@@ -114,6 +118,7 @@ impl TasksPane {
             project_title: project_title.clone(),
             project_title_id: None,
             task_query: task_query.clone(),
+            tag_title: tag_title.clone(),
             task_form,
             task_dialog_open: false,
             project_dialog_open: false,
@@ -121,6 +126,8 @@ impl TasksPane {
             mode: TasksMode::List,
             schedule_day_offset: 0,
             pending_delete_id: None,
+            editing_tag_id: None,
+            pending_delete_tag_id: None,
             _subs: Vec::new(),
         };
         this._subs.push(
@@ -158,6 +165,13 @@ impl TasksPane {
                     cx.notify();
                 }
             }));
+        this._subs.push(
+            cx.subscribe_in(&tag_title, window, |this, _, event, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.commit_tag_edit(cx);
+                }
+            }),
+        );
         this
     }
 
@@ -1285,7 +1299,189 @@ impl TasksPane {
     }
 
     pub fn focus_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.with(|s| s.nav) == AppNav::Tags {
+            return;
+        }
         self.capture.focus_handle(cx).focus(window, cx);
+    }
+
+    fn begin_tag_edit(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.state.with(|s| {
+            s.repo
+                .list_tags()
+                .into_iter()
+                .find(|tag| tag.id == id)
+                .map(|tag| tag.title)
+                .unwrap_or_default()
+        });
+        self.editing_tag_id = Some(id.to_string());
+        self.pending_delete_tag_id = None;
+        self.tag_title.update(cx, |input, cx| {
+            input.set_value(title, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn commit_tag_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.editing_tag_id.clone() else {
+            return;
+        };
+        let title = self.tag_title.read(cx).value().to_string();
+        let saved = self
+            .state
+            .with_mut(|s| s.repo.rename_tag(&id, title.trim()));
+        if saved {
+            self.editing_tag_id = None;
+            self.state.persist_if_dirty();
+        }
+        cx.notify();
+    }
+
+    fn delete_tag(&mut self, id: &str, cx: &mut Context<Self>) {
+        let confirm = self.state.with(|s| s.prefs.general.confirm_before_delete);
+        if confirm && self.pending_delete_tag_id.as_deref() != Some(id) {
+            self.pending_delete_tag_id = Some(id.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_delete_tag_id = None;
+        if self.editing_tag_id.as_deref() == Some(id) {
+            self.editing_tag_id = None;
+        }
+        self.state.with_mut(|s| {
+            s.repo.delete_tag(id);
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn render_tag_list(
+        &mut self,
+        radius: Pixels,
+        muted: Hsla,
+        border: Hsla,
+        accent: Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tags = self.state.with(|s| {
+            s.repo
+                .list_tags()
+                .into_iter()
+                .map(|tag| {
+                    let count = s.repo.count_tasks_for_tag(&tag.id);
+                    (tag.id, tag.title, count)
+                })
+                .collect::<Vec<_>>()
+        });
+        if tags.is_empty() {
+            return Empty::new()
+                .header(
+                    EmptyHeader::new()
+                        .title(EmptyTitle::new().child("还没有标签"))
+                        .description(
+                            EmptyDescription::new().child("在任务详情里添加标签后，会出现在这里。"),
+                        ),
+                )
+                .into_any_element();
+        }
+        let editing = self.editing_tag_id.clone();
+        let pending = self.pending_delete_tag_id.clone();
+        let rows = tags.into_iter().map(|(id, title, count)| {
+            let editing_this = editing.as_deref() == Some(id.as_str());
+            let pending_delete = pending.as_deref() == Some(id.as_str());
+            h_flex()
+                .id(SharedString::from(format!("tag-row-{id}")))
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded(radius)
+                .border_1()
+                .border_color(border)
+                .hover(move |row| row.bg(accent.opacity(0.18)))
+                .child(if editing_this {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.tag_title).small())
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().truncate().child(format!("#{title}")))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("{count} 个任务")),
+                        )
+                        .into_any_element()
+                })
+                .child(if editing_this {
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(SharedString::from(format!("tag-save-{id}")))
+                                .xsmall()
+                                .primary()
+                                .label("保存")
+                                .on_click(cx.listener(|this, _, _, cx| this.commit_tag_edit(cx))),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("tag-cancel-{id}")))
+                                .xsmall()
+                                .ghost()
+                                .label("取消")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.editing_tag_id = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(SharedString::from(format!("tag-edit-{id}")))
+                                .xsmall()
+                                .ghost()
+                                .label("编辑")
+                                .on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.begin_tag_edit(&id, window, cx);
+                                    })
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("tag-del-{id}")))
+                                .xsmall()
+                                .ghost()
+                                .danger()
+                                .label(if pending_delete {
+                                    "确认删除"
+                                } else {
+                                    "删除"
+                                })
+                                .on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, _, cx| this.delete_tag(&id, cx))
+                                }),
+                        )
+                        .into_any_element()
+                })
+        });
+        v_flex()
+            .gap_1()
+            .flex_1()
+            .overflow_y_scrollbar()
+            .children(rows)
+            .into_any_element()
     }
 
     fn mode_button(
@@ -1305,9 +1501,32 @@ impl TasksPane {
             }))
     }
 
+    /// Title stays on one line so the view buttons beside it are not pushed off.
+    fn header_title(&self, title: String) -> impl IntoElement {
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_xl()
+            .font_bold()
+            .child(title)
+    }
+
     /// Title, count, and view switcher that used to sit under the page bar.
     /// The shell draws this in the top bar so the name is not shown twice.
     pub fn chrome_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.state.with(|s| s.nav) == AppNav::Tags {
+            let count = self.state.with(|s| s.repo.list_tags().len());
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(div().text_xl().font_bold().child("标签"))
+                .child(Tag::secondary().small().child(format!("{count} 项")))
+                .into_any_element();
+        }
         let (title, tasks) = self.filtered_tasks();
         let show_archive = self.state.with(|s| {
             s.nav == AppNav::Projects
@@ -1321,8 +1540,22 @@ impl TasksPane {
                 .min_w_0()
                 .items_center()
                 .gap_2()
-                .child(div().text_xl().font_bold().child(title))
+                .child(self.header_title(title))
                 .child(div().flex_1())
+                .child(
+                    Button::new("project-new-task")
+                        .small()
+                        .icon(IconName::Plus)
+                        .tooltip("新建任务")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_task_dialog(None, window, cx);
+                        })),
+                )
+                .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
+                .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
+                .child(self.mode_button("mode-calendar", "日历", TasksMode::Calendar, cx))
+                .child(self.mode_button("mode-schedule", "时间表", TasksMode::Schedule, cx))
+                .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx))
                 .child(
                     Button::new("rename-project")
                         .small()
@@ -1361,8 +1594,7 @@ impl TasksPane {
             .min_w_0()
             .items_center()
             .gap_2()
-            .flex_wrap()
-            .child(div().text_xl().font_bold().child(title))
+            .child(self.header_title(title))
             .child(
                 Tag::secondary()
                     .small()
@@ -1493,12 +1725,15 @@ impl Render for TasksPane {
             self.mode = TasksMode::List;
         }
 
-        let body = match self.mode {
-            TasksMode::List => {
-                let is_planner = self.state.with(|s| s.nav == AppNav::Planner);
-                if is_planner {
-                    if tasks.is_empty() {
-                        Empty::new()
+        let body = if nav == AppNav::Tags {
+            self.render_tag_list(radius, muted, border, accent, cx)
+        } else {
+            match self.mode {
+                TasksMode::List => {
+                    let is_planner = self.state.with(|s| s.nav == AppNav::Planner);
+                    if is_planner {
+                        if tasks.is_empty() {
+                            Empty::new()
                             .header(
                                 EmptyHeader::new()
                                     .title(EmptyTitle::new().child("计划是空的"))
@@ -1507,82 +1742,82 @@ impl Render for TasksPane {
                                     )),
                             )
                             .into_any_element()
-                    } else {
-                        let roots: Vec<Task> = tasks
-                            .iter()
-                            .filter(|(_, d)| *d == 0)
-                            .map(|(t, _)| t.clone())
-                            .collect();
-                        let groups = group_tasks_by_plan_day(&roots);
-                        let sections: Vec<_> = groups
-                            .into_iter()
-                            .map(|(day, day_tasks)| {
-                                let label = if day == today {
-                                    format!("今天 · {day}")
-                                } else if day.as_str() < today.as_str() {
-                                    format!("逾期 · {day}")
-                                } else {
-                                    day.clone()
-                                };
-                                let rows: Vec<_> = day_tasks
-                                    .into_iter()
-                                    .map(|task| {
-                                        let selected =
-                                            selected_id.as_deref() == Some(task.id.as_str());
-                                        let timing =
-                                            active_timer_id.as_deref() == Some(task.id.as_str());
-                                        let tag_label = self.state.with(|s| {
-                                            s.repo
-                                                .tags_for_task(&task.id)
-                                                .into_iter()
-                                                .map(|t| format!("#{}", t.title))
-                                                .collect::<Vec<_>>()
-                                                .join(" ")
-                                        });
-                                        let pending_delete = self.pending_delete_id.as_deref()
-                                            == Some(task.id.as_str());
-                                        Self::render_task_row(
-                                            task,
-                                            &all_for_stats,
-                                            entity.clone(),
-                                            radius,
-                                            muted,
-                                            accent,
-                                            &today,
-                                            selected,
-                                            0,
-                                            timing,
-                                            tag_label,
-                                            pending_delete,
-                                            focus_mode,
+                        } else {
+                            let roots: Vec<Task> = tasks
+                                .iter()
+                                .filter(|(_, d)| *d == 0)
+                                .map(|(t, _)| t.clone())
+                                .collect();
+                            let groups = group_tasks_by_plan_day(&roots);
+                            let sections: Vec<_> = groups
+                                .into_iter()
+                                .map(|(day, day_tasks)| {
+                                    let label = if day == today {
+                                        format!("今天 · {day}")
+                                    } else if day.as_str() < today.as_str() {
+                                        format!("逾期 · {day}")
+                                    } else {
+                                        day.clone()
+                                    };
+                                    let rows: Vec<_> = day_tasks
+                                        .into_iter()
+                                        .map(|task| {
+                                            let selected =
+                                                selected_id.as_deref() == Some(task.id.as_str());
+                                            let timing = active_timer_id.as_deref()
+                                                == Some(task.id.as_str());
+                                            let tag_label = self.state.with(|s| {
+                                                s.repo
+                                                    .tags_for_task(&task.id)
+                                                    .into_iter()
+                                                    .map(|t| format!("#{}", t.title))
+                                                    .collect::<Vec<_>>()
+                                                    .join(" ")
+                                            });
+                                            let pending_delete = self.pending_delete_id.as_deref()
+                                                == Some(task.id.as_str());
+                                            Self::render_task_row(
+                                                task,
+                                                &all_for_stats,
+                                                entity.clone(),
+                                                radius,
+                                                muted,
+                                                accent,
+                                                &today,
+                                                selected,
+                                                0,
+                                                timing,
+                                                tag_label,
+                                                pending_delete,
+                                                focus_mode,
+                                            )
+                                            .into_any_element()
+                                        })
+                                        .collect();
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_bold()
+                                                .text_sm()
+                                                .text_color(muted)
+                                                .mt_2()
+                                                .child(format!("{label} · {}", rows.len())),
                                         )
+                                        .children(rows)
                                         .into_any_element()
-                                    })
-                                    .collect();
-                                v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .font_bold()
-                                            .text_sm()
-                                            .text_color(muted)
-                                            .mt_2()
-                                            .child(format!("{label} · {}", rows.len())),
-                                    )
-                                    .children(rows)
-                                    .into_any_element()
-                            })
-                            .collect();
-                        v_flex()
-                            .gap_2()
-                            .flex_1()
-                            .overflow_y_scrollbar()
-                            .children(sections)
-                            .into_any_element()
-                    }
-                } else if tasks.is_empty() {
-                    let hint = self.state.with(|s| s.prefs.general.show_empty_hints);
-                    Empty::new()
+                                })
+                                .collect();
+                            v_flex()
+                                .gap_2()
+                                .flex_1()
+                                .overflow_y_scrollbar()
+                                .children(sections)
+                                .into_any_element()
+                        }
+                    } else if tasks.is_empty() {
+                        let hint = self.state.with(|s| s.prefs.general.show_empty_hints);
+                        Empty::new()
                         .header(
                             EmptyHeader::new()
                                 .title(EmptyTitle::new().child("暂无任务"))
@@ -1597,410 +1832,412 @@ impl Render for TasksPane {
                                 })),
                         )
                         .into_any_element()
-                } else {
-                    let rows: Vec<_> = tasks
-                        .into_iter()
-                        .map(|(task, indent)| {
-                            let selected = selected_id.as_deref() == Some(task.id.as_str());
-                            let timing = active_timer_id.as_deref() == Some(task.id.as_str());
-                            let tag_label = self.state.with(|s| {
-                                s.repo
-                                    .tags_for_task(&task.id)
-                                    .into_iter()
-                                    .map(|t| format!("#{}", t.title))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            });
-                            let pending_delete =
-                                self.pending_delete_id.as_deref() == Some(task.id.as_str());
-                            Self::render_task_row(
-                                task,
-                                &all_for_stats,
-                                entity.clone(),
-                                radius,
-                                muted,
-                                accent,
-                                &today,
-                                selected,
-                                indent,
-                                timing,
-                                tag_label,
-                                pending_delete,
-                                focus_mode,
-                            )
-                            .into_any_element()
-                        })
-                        .collect();
-                    v_flex()
-                        .gap_1()
-                        .flex_1()
-                        .overflow_y_scrollbar()
-                        .children(rows)
-                        .into_any_element()
-                }
-            }
-            TasksMode::Board => {
-                let roots: Vec<Task> = tasks
-                    .iter()
-                    .filter(|(_, d)| *d == 0)
-                    .map(|(t, _)| t.clone())
-                    .collect();
-                let todo: Vec<_> = roots.iter().filter(|t| !t.is_done).cloned().collect();
-                let done: Vec<_> = roots.iter().filter(|t| t.is_done).cloned().collect();
-                let active: Vec<_> = todo
-                    .iter()
-                    .filter(|t| t.due_day.is_some() || t.due_with_time.is_some())
-                    .cloned()
-                    .collect();
-                let backlog: Vec<_> = todo
-                    .iter()
-                    .filter(|t| t.due_day.is_none() && t.due_with_time.is_none())
-                    .cloned()
-                    .collect();
-                let columns: Vec<_> = [
-                    ("进行中", "已有计划日或时刻", 0u8, active),
-                    ("待排期", "还没有安排到某一天", 1u8, backlog),
-                    ("已完成", "重复任务会推进到下一次", 2u8, done),
-                ]
-                .into_iter()
-                .map(|(label, hint, lane, col)| {
-                    let move_id = selected_id.clone();
-                    let move_entity = entity.clone();
-                    let rows: Vec<_> = col
-                        .into_iter()
-                        .map(|task| {
-                            let selected = selected_id.as_deref() == Some(task.id.as_str());
-                            let timing = active_timer_id.as_deref() == Some(task.id.as_str());
-                            let tag_label = self.state.with(|s| {
-                                s.repo
-                                    .tags_for_task(&task.id)
-                                    .into_iter()
-                                    .map(|t| format!("#{}", t.title))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            });
-                            let pending_delete =
-                                self.pending_delete_id.as_deref() == Some(task.id.as_str());
-                            Self::render_task_row(
-                                task,
-                                &all_for_stats,
-                                entity.clone(),
-                                radius,
-                                muted,
-                                accent,
-                                &today,
-                                selected,
-                                0,
-                                timing,
-                                tag_label,
-                                pending_delete,
-                                focus_mode,
-                            )
-                            .into_any_element()
-                        })
-                        .collect();
-                    v_flex()
-                        .flex_1()
-                        .gap_2()
-                        .p_3()
-                        .rounded(radius)
-                        .border_1()
-                        .border_color(border)
-                        .bg(cx.theme().secondary.opacity(0.28))
-                        .overflow_y_scrollbar()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .gap_0p5()
-                                        .child(
-                                            div()
-                                                .font_bold()
-                                                .child(format!("{label} · {}", rows.len())),
-                                        )
-                                        .child(div().text_xs().text_color(muted).child(hint)),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("lane-{lane}")))
-                                        .xsmall()
-                                        .label("移入")
-                                        .disabled(move_id.is_none())
-                                        .on_click(move |_, _, app| {
-                                            let Some(id) = move_id.clone() else {
-                                                return;
-                                            };
-                                            if let Some(e) = move_entity.upgrade() {
-                                                e.update(app, |this, cx| {
-                                                    this.place_in_lane(&id, lane, cx);
-                                                });
-                                            }
-                                        }),
-                                ),
-                        )
-                        .children(rows)
-                        .into_any_element()
-                })
-                .collect();
-                h_flex()
-                    .gap_3()
-                    .flex_1()
-                    .children(columns)
-                    .into_any_element()
-            }
-            TasksMode::Calendar => {
-                let (skip, monday) = self.state.with(|s| {
-                    (
-                        s.prefs.planner_skip_weekends,
-                        s.prefs.general.week_starts_on != "sunday",
-                    )
-                });
-                let week_start = start_of_week(&today, monday);
-                let day_cols = planner_day_columns(&week_start, PLANNER_CALENDAR_COLUMNS, skip);
-                let roots: Vec<Task> = tasks
-                    .iter()
-                    .filter(|(_, d)| *d == 0)
-                    .map(|(t, _)| t.clone())
-                    .collect();
-                let (overdue, buckets) = bucket_tasks_for_calendar(&roots, &day_cols);
-                let mut col_els: Vec<AnyElement> = Vec::new();
-                if !overdue.is_empty() {
-                    let chips: Vec<_> = overdue
-                        .into_iter()
-                        .map(|task| {
-                            let selected = selected_id.as_deref() == Some(task.id.as_str());
-                            Self::render_calendar_chip(
-                                task,
-                                entity.clone(),
-                                radius,
-                                muted,
-                                accent,
-                                border,
-                                selected,
-                            )
-                            .into_any_element()
-                        })
-                        .collect();
-                    col_els.push(
-                        v_flex()
-                            .w(px(132.))
-                            .gap_1()
-                            .p_2()
-                            .rounded(radius)
-                            .border_1()
-                            .border_color(border)
-                            .overflow_y_scrollbar()
-                            .child(
-                                div()
-                                    .font_bold()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(format!("逾期 · {}", chips.len())),
-                            )
-                            .children(chips)
-                            .into_any_element(),
-                    );
-                }
-                for (day, day_tasks) in day_cols.iter().zip(buckets) {
-                    let is_today = day == &today;
-                    let weekday = weekday_cn_short(day);
-                    let md = day.get(5..).unwrap_or(day.as_str()).to_string();
-                    let header = if is_today {
-                        format!("今天 · 周{weekday} · {md}")
                     } else {
-                        format!("周{weekday} · {md}")
-                    };
-                    let chips: Vec<_> = day_tasks
-                        .into_iter()
-                        .map(|task| {
-                            let selected = selected_id.as_deref() == Some(task.id.as_str());
-                            Self::render_calendar_chip(
-                                task,
-                                entity.clone(),
-                                radius,
-                                muted,
-                                accent,
-                                border,
-                                selected,
-                            )
-                            .into_any_element()
-                        })
-                        .collect();
-                    let count = chips.len();
-                    let day_for_click = day.clone();
-                    let day_entity = entity.clone();
-                    col_els.push(
-                        v_flex()
-                            .w(px(148.))
-                            .gap_1()
-                            .p_2()
-                            .rounded(radius)
-                            .border_1()
-                            .border_color(if is_today { accent } else { border })
-                            .when(is_today, |col| col.bg(accent.opacity(0.12)))
-                            .overflow_y_scrollbar()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("cal-day-{day}")))
-                                    .cursor_pointer()
-                                    .font_bold()
-                                    .text_xs()
-                                    .text_color(if is_today { accent } else { muted })
-                                    .child(format!("{header} · {count}"))
-                                    .hover(|style| style.text_color(accent))
-                                    .on_click(move |_, _, app| {
-                                        if let Some(pane) = day_entity.upgrade() {
-                                            pane.update(app, |this, cx| {
-                                                let Some(id) =
-                                                    this.state.with(|s| s.selected_task_id.clone())
-                                                else {
-                                                    return;
-                                                };
-                                                this.schedule_day(
-                                                    &id,
-                                                    Some(day_for_click.clone()),
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }),
-                            )
-                            .when(count == 0, |col| {
-                                col.child(div().text_xs().text_color(muted).child("点标题放入"))
+                        let rows: Vec<_> = tasks
+                            .into_iter()
+                            .map(|(task, indent)| {
+                                let selected = selected_id.as_deref() == Some(task.id.as_str());
+                                let timing = active_timer_id.as_deref() == Some(task.id.as_str());
+                                let tag_label = self.state.with(|s| {
+                                    s.repo
+                                        .tags_for_task(&task.id)
+                                        .into_iter()
+                                        .map(|t| format!("#{}", t.title))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                });
+                                let pending_delete =
+                                    self.pending_delete_id.as_deref() == Some(task.id.as_str());
+                                Self::render_task_row(
+                                    task,
+                                    &all_for_stats,
+                                    entity.clone(),
+                                    radius,
+                                    muted,
+                                    accent,
+                                    &today,
+                                    selected,
+                                    indent,
+                                    timing,
+                                    tag_label,
+                                    pending_delete,
+                                    focus_mode,
+                                )
+                                .into_any_element()
                             })
-                            .children(chips)
-                            .into_any_element(),
-                    );
-                }
-                v_flex()
-                    .gap_2()
-                    .flex_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_xs().text_color(muted).child(format!(
-                                "{} 列 · 自 {today}{} · 先选任务，再点日期标题",
-                                PLANNER_CALENDAR_COLUMNS,
-                                if skip { " · 已跳过周末" } else { "" }
-                            )))
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("cal-skip-weekends")
-                                    .xsmall()
-                                    .label(if skip { "显示周末" } else { "跳过周末" })
-                                    .selected(skip)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_skip_weekends(cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .flex_1()
-                            .overflow_x_scrollbar()
-                            .children(col_els),
-                    )
-                    .into_any_element()
-            }
-            TasksMode::Schedule => self.render_schedule_body(
-                &tasks,
-                &today,
-                &selected_id,
-                entity.clone(),
-                radius,
-                muted,
-                accent,
-                border,
-                cx,
-            ),
-            TasksMode::Stats => {
-                let rate = stats.completion_rate * 100.0;
-                let max_project = stats.by_project.iter().map(|(_, n)| *n).max().unwrap_or(1);
-                let cards: Vec<_> = [
-                    ("未完成", stats.open.to_string(), false),
-                    ("已逾期", stats.overdue.to_string(), stats.overdue > 0),
-                    ("今日到期", stats.due_today.to_string(), false),
-                    ("未排期", stats.unscheduled.to_string(), false),
-                    ("今日完成", stats.done_today.to_string(), false),
-                    ("全部完成", stats.done_total.to_string(), false),
-                ]
-                .into_iter()
-                .map(|(k, v, alert)| {
-                    v_flex()
-                        .w(px(148.))
-                        .gap_1()
-                        .p_3()
-                        .rounded(radius)
-                        .border_1()
-                        .border_color(if alert { cx.theme().danger } else { border })
-                        .bg(if alert {
-                            cx.theme().danger.opacity(0.12)
-                        } else {
-                            cx.theme().secondary.opacity(0.35)
-                        })
-                        .child(div().text_xs().text_color(muted).child(k))
-                        .child(div().text_xl().font_bold().child(v))
-                        .into_any_element()
-                })
-                .collect();
-                let project_rows: Vec<_> = stats
-                    .by_project
-                    .into_iter()
-                    .map(|(pid, n)| {
-                        let title = projects
-                            .iter()
-                            .find(|p| p.id == pid)
-                            .map(|p| p.title.clone())
-                            .unwrap_or_else(|| pid.clone());
-                        let width = if max_project == 0 {
-                            0.0
-                        } else {
-                            n as f32 / max_project as f32 * 100.0
-                        };
+                            .collect();
                         v_flex()
                             .gap_1()
-                            .child(
-                                h_flex()
-                                    .justify_between()
-                                    .text_sm()
-                                    .child(title)
-                                    .child(n.to_string()),
-                            )
-                            .child(
-                                Progress::new(SharedString::from(format!("proj-{pid}")))
-                                    .value(width),
-                            )
+                            .flex_1()
+                            .overflow_y_scrollbar()
+                            .children(rows)
                             .into_any_element()
-                    })
-                    .collect();
-                v_flex()
-                    .gap_3()
-                    .flex_1()
-                    .overflow_y_scrollbar()
-                    .child(
+                    }
+                }
+                TasksMode::Board => {
+                    let roots: Vec<Task> = tasks
+                        .iter()
+                        .filter(|(_, d)| *d == 0)
+                        .map(|(t, _)| t.clone())
+                        .collect();
+                    let todo: Vec<_> = roots.iter().filter(|t| !t.is_done).cloned().collect();
+                    let done: Vec<_> = roots.iter().filter(|t| t.is_done).cloned().collect();
+                    let active: Vec<_> = todo
+                        .iter()
+                        .filter(|t| t.due_day.is_some() || t.due_with_time.is_some())
+                        .cloned()
+                        .collect();
+                    let backlog: Vec<_> = todo
+                        .iter()
+                        .filter(|t| t.due_day.is_none() && t.due_with_time.is_none())
+                        .cloned()
+                        .collect();
+                    let columns: Vec<_> = [
+                        ("进行中", "已有计划日或时刻", 0u8, active),
+                        ("待排期", "还没有安排到某一天", 1u8, backlog),
+                        ("已完成", "重复任务会推进到下一次", 2u8, done),
+                    ]
+                    .into_iter()
+                    .map(|(label, hint, lane, col)| {
+                        let move_id = selected_id.clone();
+                        let move_entity = entity.clone();
+                        let rows: Vec<_> = col
+                            .into_iter()
+                            .map(|task| {
+                                let selected = selected_id.as_deref() == Some(task.id.as_str());
+                                let timing = active_timer_id.as_deref() == Some(task.id.as_str());
+                                let tag_label = self.state.with(|s| {
+                                    s.repo
+                                        .tags_for_task(&task.id)
+                                        .into_iter()
+                                        .map(|t| format!("#{}", t.title))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                });
+                                let pending_delete =
+                                    self.pending_delete_id.as_deref() == Some(task.id.as_str());
+                                Self::render_task_row(
+                                    task,
+                                    &all_for_stats,
+                                    entity.clone(),
+                                    radius,
+                                    muted,
+                                    accent,
+                                    &today,
+                                    selected,
+                                    0,
+                                    timing,
+                                    tag_label,
+                                    pending_delete,
+                                    focus_mode,
+                                )
+                                .into_any_element()
+                            })
+                            .collect();
                         v_flex()
+                            .flex_1()
                             .gap_2()
                             .p_3()
                             .rounded(radius)
                             .border_1()
                             .border_color(border)
+                            .bg(cx.theme().secondary.opacity(0.28))
+                            .overflow_y_scrollbar()
                             .child(
                                 h_flex()
-                                    .justify_between()
                                     .items_center()
-                                    .child(div().font_bold().child("完成率"))
-                                    .child(div().font_bold().child(format!("{rate:.0}%"))),
+                                    .gap_2()
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .font_bold()
+                                                    .child(format!("{label} · {}", rows.len())),
+                                            )
+                                            .child(div().text_xs().text_color(muted).child(hint)),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!("lane-{lane}")))
+                                            .xsmall()
+                                            .label("移入")
+                                            .disabled(move_id.is_none())
+                                            .on_click(move |_, _, app| {
+                                                let Some(id) = move_id.clone() else {
+                                                    return;
+                                                };
+                                                if let Some(e) = move_entity.upgrade() {
+                                                    e.update(app, |this, cx| {
+                                                        this.place_in_lane(&id, lane, cx);
+                                                    });
+                                                }
+                                            }),
+                                    ),
                             )
-                            .child(Progress::new("task-completion").value(rate)),
-                    )
-                    .child(h_flex().gap_2().flex_wrap().children(cards))
-                    .child(div().font_bold().mt_1().child("项目分布"))
-                    .children(project_rows)
-                    .into_any_element()
+                            .children(rows)
+                            .into_any_element()
+                    })
+                    .collect();
+                    h_flex()
+                        .gap_3()
+                        .flex_1()
+                        .children(columns)
+                        .into_any_element()
+                }
+                TasksMode::Calendar => {
+                    let (skip, monday) = self.state.with(|s| {
+                        (
+                            s.prefs.planner_skip_weekends,
+                            s.prefs.general.week_starts_on != "sunday",
+                        )
+                    });
+                    let week_start = start_of_week(&today, monday);
+                    let day_cols = planner_day_columns(&week_start, PLANNER_CALENDAR_COLUMNS, skip);
+                    let roots: Vec<Task> = tasks
+                        .iter()
+                        .filter(|(_, d)| *d == 0)
+                        .map(|(t, _)| t.clone())
+                        .collect();
+                    let (overdue, buckets) = bucket_tasks_for_calendar(&roots, &day_cols);
+                    let mut col_els: Vec<AnyElement> = Vec::new();
+                    if !overdue.is_empty() {
+                        let chips: Vec<_> = overdue
+                            .into_iter()
+                            .map(|task| {
+                                let selected = selected_id.as_deref() == Some(task.id.as_str());
+                                Self::render_calendar_chip(
+                                    task,
+                                    entity.clone(),
+                                    radius,
+                                    muted,
+                                    accent,
+                                    border,
+                                    selected,
+                                )
+                                .into_any_element()
+                            })
+                            .collect();
+                        col_els.push(
+                            v_flex()
+                                .w(px(132.))
+                                .gap_1()
+                                .p_2()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(border)
+                                .overflow_y_scrollbar()
+                                .child(
+                                    div()
+                                        .font_bold()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("逾期 · {}", chips.len())),
+                                )
+                                .children(chips)
+                                .into_any_element(),
+                        );
+                    }
+                    for (day, day_tasks) in day_cols.iter().zip(buckets) {
+                        let is_today = day == &today;
+                        let weekday = weekday_cn_short(day);
+                        let md = day.get(5..).unwrap_or(day.as_str()).to_string();
+                        let header = if is_today {
+                            format!("今天 · 周{weekday} · {md}")
+                        } else {
+                            format!("周{weekday} · {md}")
+                        };
+                        let chips: Vec<_> = day_tasks
+                            .into_iter()
+                            .map(|task| {
+                                let selected = selected_id.as_deref() == Some(task.id.as_str());
+                                Self::render_calendar_chip(
+                                    task,
+                                    entity.clone(),
+                                    radius,
+                                    muted,
+                                    accent,
+                                    border,
+                                    selected,
+                                )
+                                .into_any_element()
+                            })
+                            .collect();
+                        let count = chips.len();
+                        let day_for_click = day.clone();
+                        let day_entity = entity.clone();
+                        col_els.push(
+                            v_flex()
+                                .w(px(148.))
+                                .gap_1()
+                                .p_2()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(if is_today { accent } else { border })
+                                .when(is_today, |col| col.bg(accent.opacity(0.12)))
+                                .overflow_y_scrollbar()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("cal-day-{day}")))
+                                        .cursor_pointer()
+                                        .font_bold()
+                                        .text_xs()
+                                        .text_color(if is_today { accent } else { muted })
+                                        .child(format!("{header} · {count}"))
+                                        .hover(|style| style.text_color(accent))
+                                        .on_click(move |_, _, app| {
+                                            if let Some(pane) = day_entity.upgrade() {
+                                                pane.update(app, |this, cx| {
+                                                    let Some(id) = this
+                                                        .state
+                                                        .with(|s| s.selected_task_id.clone())
+                                                    else {
+                                                        return;
+                                                    };
+                                                    this.schedule_day(
+                                                        &id,
+                                                        Some(day_for_click.clone()),
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        }),
+                                )
+                                .when(count == 0, |col| {
+                                    col.child(div().text_xs().text_color(muted).child("点标题放入"))
+                                })
+                                .children(chips)
+                                .into_any_element(),
+                        );
+                    }
+                    v_flex()
+                        .gap_2()
+                        .flex_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_xs().text_color(muted).child(format!(
+                                    "{} 列 · 自 {today}{} · 先选任务，再点日期标题",
+                                    PLANNER_CALENDAR_COLUMNS,
+                                    if skip { " · 已跳过周末" } else { "" }
+                                )))
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("cal-skip-weekends")
+                                        .xsmall()
+                                        .label(if skip { "显示周末" } else { "跳过周末" })
+                                        .selected(skip)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_skip_weekends(cx);
+                                        })),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .flex_1()
+                                .overflow_x_scrollbar()
+                                .children(col_els),
+                        )
+                        .into_any_element()
+                }
+                TasksMode::Schedule => self.render_schedule_body(
+                    &tasks,
+                    &today,
+                    &selected_id,
+                    entity.clone(),
+                    radius,
+                    muted,
+                    accent,
+                    border,
+                    cx,
+                ),
+                TasksMode::Stats => {
+                    let rate = stats.completion_rate * 100.0;
+                    let max_project = stats.by_project.iter().map(|(_, n)| *n).max().unwrap_or(1);
+                    let cards: Vec<_> = [
+                        ("未完成", stats.open.to_string(), false),
+                        ("已逾期", stats.overdue.to_string(), stats.overdue > 0),
+                        ("今日到期", stats.due_today.to_string(), false),
+                        ("未排期", stats.unscheduled.to_string(), false),
+                        ("今日完成", stats.done_today.to_string(), false),
+                        ("全部完成", stats.done_total.to_string(), false),
+                    ]
+                    .into_iter()
+                    .map(|(k, v, alert)| {
+                        v_flex()
+                            .w(px(148.))
+                            .gap_1()
+                            .p_3()
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(if alert { cx.theme().danger } else { border })
+                            .bg(if alert {
+                                cx.theme().danger.opacity(0.12)
+                            } else {
+                                cx.theme().secondary.opacity(0.35)
+                            })
+                            .child(div().text_xs().text_color(muted).child(k))
+                            .child(div().text_xl().font_bold().child(v))
+                            .into_any_element()
+                    })
+                    .collect();
+                    let project_rows: Vec<_> = stats
+                        .by_project
+                        .into_iter()
+                        .map(|(pid, n)| {
+                            let title = projects
+                                .iter()
+                                .find(|p| p.id == pid)
+                                .map(|p| p.title.clone())
+                                .unwrap_or_else(|| pid.clone());
+                            let width = if max_project == 0 {
+                                0.0
+                            } else {
+                                n as f32 / max_project as f32 * 100.0
+                            };
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .text_sm()
+                                        .child(title)
+                                        .child(n.to_string()),
+                                )
+                                .child(
+                                    Progress::new(SharedString::from(format!("proj-{pid}")))
+                                        .value(width),
+                                )
+                                .into_any_element()
+                        })
+                        .collect();
+                    v_flex()
+                        .gap_3()
+                        .flex_1()
+                        .overflow_y_scrollbar()
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .p_3()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(border)
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .items_center()
+                                        .child(div().font_bold().child("完成率"))
+                                        .child(div().font_bold().child(format!("{rate:.0}%"))),
+                                )
+                                .child(Progress::new("task-completion").value(rate)),
+                        )
+                        .child(h_flex().gap_2().flex_wrap().children(cards))
+                        .child(div().font_bold().mt_1().child("项目分布"))
+                        .children(project_rows)
+                        .into_any_element()
+                }
             }
         };
 
@@ -2010,35 +2247,12 @@ impl Render for TasksPane {
             .gap_3()
             .p_4()
             .when(show_archive, |col| {
-                col.child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Input::new(&self.task_query).cleanable(true)),
-                        )
-                        .child(
-                            Button::new("project-new-task")
-                                .small()
-                                .icon(IconName::Plus)
-                                .tooltip("新建任务")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_task_dialog(None, window, cx);
-                                })),
-                        )
-                        .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
-                        .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
-                        .child(self.mode_button("mode-calendar", "日历", TasksMode::Calendar, cx))
-                        .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx)),
-                )
+                col.child(Input::new(&self.task_query).cleanable(true))
             })
-            .when(!show_archive, |col| {
+            .when(nav != AppNav::Tags && !show_archive, |col| {
                 col.child(Input::new(&self.capture).cleanable(true))
             })
-            .when(!suggestions.is_empty(), |col| {
+            .when(nav != AppNav::Tags && !suggestions.is_empty(), |col| {
                 let entity = entity.clone();
                 col.child(
                     v_flex()

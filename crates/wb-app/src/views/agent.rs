@@ -2190,7 +2190,6 @@ impl AgentPane {
             active_web_url,
             queued,
             model_ref,
-            thread_title,
         ) = self.state.with(|s| {
             let tid = s.active_thread_id.clone();
             let messages = tid
@@ -2206,10 +2205,6 @@ impl AgentPane {
                 .and_then(|id| s.repo.list_agent_threads().into_iter().find(|t| t.id == id));
             let web_url = thread.as_ref().and_then(|t| t.web_url.clone());
             let queued = thread.as_ref().map(queued_user_texts).unwrap_or_default();
-            let title = thread
-                .as_ref()
-                .map(|t| t.title.clone())
-                .unwrap_or_else(|| "新会话".into());
             let perm = thread
                 .as_ref()
                 .map(|t| permission_mode_label(t.permission_mode))
@@ -2234,7 +2229,6 @@ impl AgentPane {
                 web_url,
                 queued,
                 model_ref,
-                title,
             )
         });
         self.sync_webview(active_web_url.as_deref(), window, cx);
@@ -2393,6 +2387,8 @@ impl AgentPane {
                     .into_any_element()
             })
         };
+        let has_todos = !todos_all.is_empty();
+        let has_session_bar = goal_chip.is_some() || todo_chip.is_some() || has_todos;
 
         let approval_rows: Vec<_> = approvals
             .into_iter()
@@ -2754,46 +2750,30 @@ impl AgentPane {
                     .h_full()
                     .p_3()
                     .gap_2()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .overflow_x_hidden()
-                                    .text_ellipsis()
-                                    .child(thread_title),
-                            )
-                            .when_some(goal_chip, |row, chip| row.child(chip))
-                            .when_some(todo_chip, |row, chip| row.child(chip))
-                            .when(!todos_all.is_empty(), |row| {
-                                row.child(
-                                    Button::new("agent-todo-toggle")
-                                        .xsmall()
-                                        .ghost()
-                                        .label(if self.show_todos { "收起待办" } else { "待办" })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_todos = !this.show_todos;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("agent-export")
-                                    .xsmall()
-                                    .ghost()
-                                    .label("导出")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.export_active_thread(cx);
-                                    })),
-                            ),
-                    )
-                    .when(self.show_todos && !todos_all.is_empty(), |col| {
+                    .when(has_session_bar, |col| {
+                        col.child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .items_center()
+                                .gap_2()
+                                .when_some(goal_chip, |row, chip| row.child(chip))
+                                .when_some(todo_chip, |row, chip| row.child(chip))
+                                .when(has_todos, |row| {
+                                    row.child(
+                                        Button::new("agent-todo-toggle")
+                                            .xsmall()
+                                            .ghost()
+                                            .label(if self.show_todos { "收起待办" } else { "待办" })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_todos = !this.show_todos;
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        )
+                    })
+                    .when(self.show_todos && has_todos, |col| {
                         col.child(
                             v_flex()
                                 .w_full()

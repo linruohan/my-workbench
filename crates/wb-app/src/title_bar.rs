@@ -9,6 +9,7 @@ use crate::themes;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollbarMode;
+use gpui_kit::component::sidebar::SidebarToggleButton;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use wb_domain::{NotificationStatus, ThemeModePref};
@@ -16,6 +17,7 @@ use wb_domain::{NotificationStatus, ThemeModePref};
 pub fn workbench_title_bar(
     state: AppState,
     host: WeakEntity<WorkbenchApp>,
+    sidebar_collapsed: bool,
     cx: &mut App,
 ) -> impl IntoElement {
     let pending = state.with(|inner| {
@@ -35,16 +37,31 @@ pub fn workbench_title_bar(
     let bell_state = state.clone();
     let bell_host = host.clone();
     let menu_state = state;
-    let menu_host = host;
+    let menu_host = host.clone();
+    let toggle_host = host;
 
     TitleBar::new()
         .child(
             div()
                 .flex()
                 .items_center()
+                .gap_1()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .child("个人工作台"),
+                .child("个人工作台")
+                .child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            SidebarToggleButton::new()
+                                .collapsed(sidebar_collapsed)
+                                .on_click(move |_, window, cx| {
+                                    toggle_host
+                                        .update(cx, |this, cx| this.toggle_collapsed(window, cx))
+                                        .ok();
+                                }),
+                        ),
+                ),
         )
         .child(
             div()

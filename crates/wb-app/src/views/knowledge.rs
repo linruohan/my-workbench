@@ -199,14 +199,6 @@ impl KnowledgePane {
             .unwrap_or_else(|| "添加库".into())
     }
 
-    fn current_file_name(&self) -> Option<String> {
-        self.current.as_ref().and_then(|path| {
-            Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        })
-    }
-
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
         let source = self.editor.read(cx).value();
         let rendered = self.preview_source(source.as_str());
@@ -1925,12 +1917,8 @@ impl Render for KnowledgePane {
         let find_word = self.find_word;
         let find_case = self.find_case;
         let find_regex = self.find_regex;
-        let note_title = self
-            .current_file_name()
-            .unwrap_or_else(|| "未打开笔记".into());
         let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
-        let accent = cx.theme().accent;
         let popover = cx.theme().popover;
         let popover_fg = cx.theme().popover_foreground;
 
@@ -2025,22 +2013,7 @@ impl Render for KnowledgePane {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(
-                                Icon::new(IconName::BookOpen)
-                                    .size(px(16.))
-                                    .text_color(accent),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .overflow_x_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(note_title),
-                            )
+                            .justify_end()
                             .child(
                                 Button::new("kb-find-toggle")
                                     .small()

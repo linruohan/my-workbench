@@ -69,14 +69,25 @@ jobs:
       - name: Build release
         run: cargo build -p wb-app --release
 
+      - name: Package themes next to the executable
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE "my-workbench/dist/my-workbench"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release/my-workbench.exe" $stage
+          Copy-Item -Recurse "themes" (Join-Path $stage "themes")
+          $zip = Join-Path $env:GITHUB_WORKSPACE "my-workbench/dist/my-workbench-windows.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: my-workbench-windows
-          path: my-workbench/target/release/my-workbench.exe
+          path: my-workbench/dist/my-workbench-windows.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: my-workbench/target/release/my-workbench.exe
+          files: my-workbench/dist/my-workbench-windows.zip

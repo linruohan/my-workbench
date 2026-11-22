@@ -9,6 +9,7 @@ cargo build -p wb-app -p wb-asr --release
 产物（Windows）：
 
 - `target/release/my-workbench.exe` — 主程序
+- `themes/` — 主题 JSON。发版压缩包根目录为 `my-workbench.exe` 与同级 `themes/`，程序优先从 exe 所在目录加载
 - `target/release/wb-asr.exe` — SenseVoice 转写助手（与主程序同目录分发）
 - sherpa-onnx shared 运行时 DLL（构建 `wb-asr` 时会拷到 `target/release/`，需一并打包）
 

@@ -7,7 +7,7 @@ use crate::views::{AgentPane, InspectorPane, KnowledgePane, SettingsPane, TasksP
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
+    Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,6 +25,17 @@ actions!(
 );
 
 const RIGHT_SIDEBAR_COLLAPSED_WIDTH: f32 = 40.0;
+
+fn recording_chip(bg: Hsla, fg: Hsla) -> impl IntoElement {
+    div()
+        .text_xs()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(bg)
+        .text_color(fg)
+        .child("正在录音… 松开 CapsLock 结束")
+}
 
 pub struct WorkbenchApp {
     state: AppState,
@@ -306,9 +317,7 @@ impl WorkbenchApp {
             if nav != AppNav::Projects {
                 s.active_project_id = None;
             }
-            if nav != AppNav::Tags {
-                s.active_tag_id = None;
-            }
+            s.active_tag_id = None;
         });
         cx.notify();
     }
@@ -344,7 +353,7 @@ impl WorkbenchApp {
         cx.notify();
     }
 
-    fn toggle_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.collapsed = !self.collapsed;
         self.state
             .with_mut(|s| s.prefs.sidebar_collapsed = self.collapsed);
@@ -504,6 +513,13 @@ impl Render for WorkbenchApp {
                 nav == AppNav::Timed,
                 entity.clone(),
             ),
+            Self::menu_item(
+                "标签",
+                IconName::Star,
+                AppNav::Tags,
+                nav == AppNav::Tags,
+                entity.clone(),
+            ),
         ]);
 
         let project_menu =
@@ -605,6 +621,7 @@ impl Render for WorkbenchApp {
                     .child(workbench_title_bar(
                         self.state.clone(),
                         cx.weak_entity(),
+                        collapsed,
                         cx,
                     ))
                     .child(div().flex_1().min_h_0().child(if nav == AppNav::Settings {
@@ -689,56 +706,45 @@ impl Render for WorkbenchApp {
                                         .child(Icon::new(IconName::Settings).size_4())
                                 }
                             });
-                        let page_header = match nav {
-                            AppNav::Today
-                            | AppNav::Inbox
-                            | AppNav::Done
-                            | AppNav::Planner
-                            | AppNav::Projects
-                            | AppNav::Tags => {
-                                self.tasks.update(cx, |pane, cx| pane.chrome_header(cx))
-                            }
-                            AppNav::Timed => {
-                                self.timed.update(cx, |pane, cx| pane.chrome_header(cx))
-                            }
-                            AppNav::Knowledge | AppNav::Agent | AppNav::Settings => {
-                                div().flex_1().into_any_element()
-                            }
+                        let hide_page_bar = matches!(nav, AppNav::Knowledge | AppNav::Agent);
+                        let page_header = if hide_page_bar {
+                            None
+                        } else if nav == AppNav::Timed {
+                            Some(self.timed.update(cx, |pane, cx| pane.chrome_header(cx)))
+                        } else {
+                            Some(self.tasks.update(cx, |pane, cx| pane.chrome_header(cx)))
                         };
+                        let recording_bg = cx.theme().danger;
+                        let recording_fg = cx.theme().danger_foreground;
                         let main = v_flex()
                             .flex_1()
                             .h_full()
                             .min_w_0()
-                            .child(
-                                h_flex()
-                                    .min_h(px(44.))
-                                    .px_3()
-                                    .py_1()
-                                    .items_center()
-                                    .gap_2()
-                                    .border_b_1()
-                                    .border_color(cx.theme().border)
-                                    .child(
-                                        SidebarToggleButton::new().collapsed(collapsed).on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.toggle_collapsed(window, cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(page_header)
-                                    .when(ptt_held, |row| {
-                                        row.child(
-                                            div()
-                                                .text_xs()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_md()
-                                                .bg(cx.theme().danger)
-                                                .text_color(cx.theme().danger_foreground)
-                                                .child("正在录音… 松开 CapsLock 结束"),
-                                        )
-                                    }),
-                            )
+                            .when_some(page_header, |col, header| {
+                                col.child(
+                                    h_flex()
+                                        .min_h(px(44.))
+                                        .px_3()
+                                        .py_1()
+                                        .items_center()
+                                        .gap_2()
+                                        .border_b_1()
+                                        .border_color(cx.theme().border)
+                                        .child(header)
+                                        .when(ptt_held, |row| {
+                                            row.child(recording_chip(recording_bg, recording_fg))
+                                        }),
+                                )
+                            })
+                            .when(hide_page_bar && ptt_held, |col| {
+                                col.child(
+                                    h_flex()
+                                        .px_3()
+                                        .py_1()
+                                        .justify_end()
+                                        .child(recording_chip(recording_bg, recording_fg)),
+                                )
+                            })
                             .child(div().flex_1().min_h_0().child(main_view));
 
                         let entity = entity.clone();

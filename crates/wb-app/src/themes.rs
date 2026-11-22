@@ -153,6 +153,11 @@ fn resolve_themes_dir() -> PathBuf {
     }
 
     let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("themes"));
+        }
+    }
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("themes"));
         candidates.push(cwd.join("../gpui-kit/themes"));

@@ -397,6 +397,37 @@ impl MemoryWorkbenchRepository {
             .count()
     }
 
+    pub fn rename_tag(&mut self, id: &str, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() || !self.tags.contains_key(id) {
+            return false;
+        }
+        if self
+            .tags
+            .values()
+            .any(|tag| tag.id != id && tag.title == title)
+        {
+            return false;
+        }
+        if let Some(tag) = self.tags.get_mut(id) {
+            tag.title = title.to_string();
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn delete_tag(&mut self, id: &str) -> bool {
+        if self.tags.remove(id).is_none() {
+            return false;
+        }
+        for tags in self.task_tags.values_mut() {
+            tags.remove(id);
+        }
+        self.dirty = true;
+        true
+    }
+
     pub fn list_notes(&self) -> Vec<Note> {
         let mut v: Vec<_> = self.notes.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.updated_at));

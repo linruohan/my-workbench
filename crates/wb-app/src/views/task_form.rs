@@ -4,8 +4,10 @@ use crate::state::AppState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime};
+use gpui_kit::component::dialog::Confirm;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::time_field::TimePrecision;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -109,7 +111,6 @@ impl TaskForm {
         this._subs.push(
             cx.subscribe_in(&tag_input, window, |this, input, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
-                    cx.stop_propagation();
                     let text = input.read(cx).value().to_string();
                     if !text.trim().is_empty() {
                         this.add_tag(text.trim(), cx);
@@ -262,12 +263,11 @@ impl TaskForm {
     }
 
     pub fn toggle_tag(&mut self, tag_id: &str, cx: &mut Context<Self>) {
-        if let Some(index) = self.tag_ids.iter().position(|id| id == tag_id) {
-            self.tag_ids.remove(index);
+        if self.tag_ids.iter().any(|id| id == tag_id) {
+            self.remove_tag(tag_id, cx);
         } else {
-            self.tag_ids.push(tag_id.to_string());
+            self.attach_tag(tag_id, cx);
         }
-        cx.notify();
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
@@ -404,12 +404,51 @@ impl TaskForm {
     }
 
     fn add_tag(&mut self, title: &str, cx: &mut Context<Self>) {
-        let id = self.state.with_mut(|s| s.repo.create_tag(title).id);
-        if !self.tag_ids.iter().any(|tag_id| tag_id == &id) {
-            self.tag_ids.push(id);
+        let title = title.trim();
+        if title.is_empty() {
+            return;
         }
+        let id = self.state.with_mut(|s| s.repo.create_tag(title).id);
+        self.attach_tag(&id, cx);
         self.state.persist_if_dirty();
+    }
+
+    /// 把标签挂到当前表单。已保存的任务会立刻写入绑定。
+    fn attach_tag(&mut self, tag_id: &str, cx: &mut Context<Self>) {
+        if !self.tag_ids.iter().any(|id| id == tag_id) {
+            self.tag_ids.push(tag_id.to_string());
+        }
+        if let Some(task_id) = self.task_id.clone() {
+            self.state
+                .with_mut(|s| s.repo.add_tag_to_task(&task_id, tag_id));
+            self.state.persist_if_dirty();
+        }
         cx.notify();
+    }
+
+    /// 从当前任务拿掉标签。已保存的任务会立刻解除绑定，标签本身仍留在标签库。
+    fn remove_tag(&mut self, tag_id: &str, cx: &mut Context<Self>) {
+        self.tag_ids.retain(|id| id != tag_id);
+        if let Some(task_id) = self.task_id.clone() {
+            self.state
+                .with_mut(|s| s.repo.remove_tag_from_task(&task_id, tag_id));
+            self.state.persist_if_dirty();
+        }
+        cx.notify();
+    }
+
+    fn bound_tags(&self) -> Vec<(String, String)> {
+        self.state.with(|s| {
+            let tags = s.repo.list_tags();
+            self.tag_ids
+                .iter()
+                .filter_map(|id| {
+                    tags.iter()
+                        .find(|tag| &tag.id == id)
+                        .map(|tag| (tag.id.clone(), tag.title.clone()))
+                })
+                .collect()
+        })
     }
 
     fn add_subtask(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -482,7 +521,9 @@ impl Render for TaskForm {
         let repeat = self.repeat;
         let project_id = self.project_id.clone();
         let tag_ids = self.tag_ids.clone();
+        let bound_tags = self.bound_tags();
         let subtasks = self.subtask_rows();
+        let danger = cx.theme().danger;
 
         v_flex()
             .w_full()
@@ -512,7 +553,32 @@ impl Render for TaskForm {
                         tag_menu(form.clone(), tag_ids, tag_label),
                     )),
             )
-            .child(Input::new(&self.tag_input).w_full().small())
+            .child({
+                let form = form.clone();
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .when(!bound_tags.is_empty(), |col| {
+                        let form = form.clone();
+                        col.child(
+                            h_flex().w_full().gap_1().flex_wrap().children(
+                                bound_tags
+                                    .into_iter()
+                                    .map(|(id, title)| tag_chip(form.clone(), id, title, danger)),
+                            ),
+                        )
+                    })
+                    .child(
+                        // 单行输入会把 Enter 冒泡成对话框的 Confirm。吃掉确认，窗口才不会被回车关掉。
+                        div()
+                            .id("task-tag-field")
+                            .w_full()
+                            .on_action(|_: &Confirm, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(Input::new(&self.tag_input).w_full().small()),
+                    )
+            })
             .child(
                 h_flex()
                     .w_full()
@@ -603,6 +669,33 @@ impl TaskForm {
         }
         rows
     }
+}
+
+fn tag_chip(
+    form: WeakEntity<TaskForm>,
+    id: String,
+    title: String,
+    danger: Hsla,
+) -> impl IntoElement {
+    let tag_id = id.clone();
+    Tag::secondary().xsmall().outline().child(
+        h_flex()
+            .items_center()
+            .gap_1()
+            .child(format!("#{title}"))
+            .child(
+                div()
+                    .id(SharedString::from(format!("task-tag-x-{id}")))
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(danger))
+                    .child(Icon::new(IconName::Close).xsmall())
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        form.update(cx, |form, cx| form.remove_tag(&tag_id, cx))
+                            .ok();
+                    }),
+            ),
+    )
 }
 
 fn field(label: &'static str, muted: Hsla, control: impl IntoElement) -> impl IntoElement {

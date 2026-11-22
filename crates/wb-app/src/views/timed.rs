@@ -861,8 +861,16 @@ impl TimedPane {
             .min_w_0()
             .items_center()
             .gap_2()
-            .flex_wrap()
-            .child(div().text_xl().font_bold().child("定时任务"))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_xl()
+                    .font_bold()
+                    .child("定时任务"),
+            )
             .child(
                 Tag::secondary()
                     .small()
