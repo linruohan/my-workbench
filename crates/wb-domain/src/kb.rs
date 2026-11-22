@@ -78,9 +78,14 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
                 let inner = &body[i + 2..i + 2 + end];
                 let target = inner.split('|').next().unwrap_or(inner).trim();
                 if !target.is_empty() {
-                    let key = target.to_string();
-                    if seen.insert(normalize_wikilink_key(&key)) {
-                        out.push(key);
+                    let (note, heading) = split_wikilink_target(target);
+                    let mut key = normalize_wikilink_key(note);
+                    if let Some(heading) = heading {
+                        key.push('#');
+                        key.push_str(&heading.to_ascii_lowercase());
+                    }
+                    if !key.is_empty() && seen.insert(key) {
+                        out.push(target.to_string());
                     }
                 }
                 i += 2 + end + 2;
@@ -93,10 +98,30 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
 }
 
 pub fn normalize_wikilink_key(raw: &str) -> String {
-    let t = raw.trim().replace('\\', "/");
+    let (note, _) = split_wikilink_target(raw);
+    let t = note.replace('\\', "/");
     let t = t.trim_start_matches("./");
     let without_ext = strip_md_ext(t);
     without_ext.to_ascii_lowercase()
+}
+
+/// Split `note`, `note#Heading`, or `#Heading` into (path, heading).
+pub fn split_wikilink_target(target: &str) -> (&str, Option<&str>) {
+    let t = target.trim();
+    match t.split_once('#') {
+        Some((note, heading)) => {
+            let heading = heading.trim();
+            (
+                note.trim(),
+                if heading.is_empty() {
+                    None
+                } else {
+                    Some(heading)
+                },
+            )
+        }
+        None => (t, None),
+    }
 }
 
 fn strip_md_ext(s: &str) -> &str {
@@ -139,7 +164,8 @@ pub fn wikilink_keys_for_relative(relative: &str) -> Vec<String> {
 
 /// Resolve a wikilink target to an absolute path. `files` is `(abs_path, relative)`.
 pub fn resolve_wikilink<'a>(target: &str, files: &'a [(String, String)]) -> Option<&'a str> {
-    let want = normalize_wikilink_key(target);
+    let (note, _) = split_wikilink_target(target);
+    let want = normalize_wikilink_key(note);
     if want.is_empty() {
         return None;
     }
@@ -268,6 +294,10 @@ mod tests {
     fn extracts_wikilinks_with_alias() {
         let links = extract_wikilinks("见 [[Foo|显示名]] 与 [[bar/Baz]] 再 [[Foo]]");
         assert_eq!(links, vec!["Foo", "bar/Baz"]);
+        assert_eq!(
+            extract_wikilinks("[[Foo#A]] 与 [[#Here]] 再 [[Foo#B]]"),
+            vec!["Foo#A", "#Here", "Foo#B"]
+        );
     }
 
     #[test]
@@ -285,6 +315,15 @@ mod tests {
             Some("C:/vault/notes/Foo.md")
         );
         assert_eq!(resolve_wikilink("Bar.md", &files), Some("C:/vault/Bar.md"));
+        assert_eq!(
+            resolve_wikilink("Foo#Heading", &files),
+            Some("C:/vault/notes/Foo.md")
+        );
+        assert_eq!(split_wikilink_target("#Heading"), ("", Some("Heading")));
+        assert_eq!(
+            split_wikilink_target("Foo#A section"),
+            ("Foo", Some("A section"))
+        );
         assert!(resolve_wikilink("missing", &files).is_none());
     }
 

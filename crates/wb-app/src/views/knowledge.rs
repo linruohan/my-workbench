@@ -7,8 +7,10 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::text::{
-    FrontmatterPlugin, MarkdownExtensions, TaskToggleEvent, TextView, TextViewState, TextViewStyle,
+    FrontmatterPlugin, Link, MarkdownExtensions, TaskToggleEvent, TextView, TextViewState,
+    TextViewStyle,
 };
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use wb_domain::{
     FindFlags, body_links_to, extract_wikilinks, find_spans, is_image_extension, resolve_wikilink,
+    split_wikilink_target,
 };
 use wb_host::{create_markdown, list_files_recursive, read_text, search_kb_content, write_text};
 
@@ -389,19 +392,38 @@ impl KnowledgePane {
                 let entity = entity.clone();
                 move |event, window, cx| kb_toggle_task(&entity, event, window, cx)
             })
+            .link({
+                let entity = entity.clone();
+                move |link: &Link, cx| {
+                    let mut out = link.clone();
+                    if let Some((note, _)) = parse_wiki_href(link.url.as_str()) {
+                        if !note.is_empty() {
+                            let found = entity.upgrade().is_some_and(|view| {
+                                resolve_wikilink(&note, &view.read(cx).files).is_some()
+                            });
+                            if !found {
+                                out = out.unresolved(true);
+                            }
+                        }
+                    }
+                    Some(out)
+                }
+            })
+            .link_tooltip({
+                let entity = entity.clone();
+                move |url, window, cx| {
+                    Tooltip::new(wiki_link_tooltip(url.as_str(), &entity, cx)).build(window, cx)
+                }
+            })
             .on_link_click(move |url, event, window, cx| {
                 if event.is_right_click() {
                     return;
                 }
                 let url = url.as_str();
-                if let Some(target) = url.strip_prefix("wiki:///") {
+                if let Some((note, heading)) = parse_wiki_href(url) {
                     if let Some(view) = entity.upgrade() {
                         view.update(cx, |this, cx| {
-                            let files = this.files.clone();
-                            if let Some(path) = resolve_wikilink(target, &files).map(str::to_string)
-                            {
-                                this.open_file(&path, window, cx);
-                            }
+                            this.open_wiki_target(&note, heading.as_deref(), window, cx);
                         });
                     }
                     return;
@@ -492,6 +514,41 @@ impl KnowledgePane {
     }
 
     fn open_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_at(path, None, window, cx);
+    }
+
+    fn open_wiki_target(
+        &mut self,
+        note: &str,
+        heading: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if note.is_empty() {
+            if let Some(heading) = heading {
+                self.reveal_preview_heading(heading, cx);
+            }
+            return;
+        }
+        let files = self.files.clone();
+        let Some(path) = resolve_wikilink(note, &files).map(str::to_string) else {
+            return;
+        };
+        let already_open = self.current.as_deref() == Some(path.as_str());
+        if !already_open {
+            self.open_file_at(&path, heading, window, cx);
+        } else if let Some(heading) = heading {
+            self.reveal_preview_heading(heading, cx);
+        }
+    }
+
+    fn open_file_at(
+        &mut self,
+        path: &str,
+        heading: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match read_text(std::path::Path::new(path)) {
             Ok(text) => {
                 self.current = Some(path.to_string());
@@ -512,10 +569,39 @@ impl KnowledgePane {
                     state.set_text(&preview_markdown(&text), cx);
                 });
                 self.replace_status.clear();
+                if let Some(heading) = heading {
+                    self.reveal_preview_heading(heading, cx);
+                }
                 cx.notify();
             }
             Err(e) => log::warn!("打开文件失败: {e}"),
         }
+    }
+
+    fn reveal_preview_heading(&mut self, heading: &str, cx: &mut Context<Self>) {
+        let heading = heading.to_string();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..12 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(32))
+                    .await;
+                let shown = this
+                    .update(cx, |this, cx| {
+                        let text = preview_markdown(&this.editor.read(cx).value());
+                        let Some(range) = markdown_heading_range(&text, &heading) else {
+                            return true;
+                        };
+                        this.preview
+                            .update(cx, |state, cx| state.reveal_range(range, cx).is_ok())
+                    })
+                    .ok()
+                    .unwrap_or(true);
+                if shown {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn save_current(&mut self, text: &str) {
@@ -889,6 +975,7 @@ fn kb_preview_style(theme: &Theme, zoom: f32) -> TextViewStyle {
         .heading_font_size(kb_heading_size)
         .heading(kb_heading_style)
         .link(palette.internal_link)
+        .unresolved_link(palette.caution)
         .list(
             StyleRefinement::default()
                 .text_color(palette.internal_link)
@@ -980,61 +1067,61 @@ fn kb_markdown_extensions() -> MarkdownExtensions {
             MarkdownExtensions::default()
                 .frontmatter()
                 .plugin(FrontmatterPlugin::new())
-                .block_surface("note", kb_callout("Note", IconName::Info, palette.note))
-                .block_surface("info", kb_callout("Info", IconName::Info, palette.note))
-                .block_surface(
-                    "abstract",
-                    kb_callout("Abstract", IconName::Info, palette.note),
-                )
-                .block_surface(
-                    "summary",
-                    kb_callout("Summary", IconName::Info, palette.note),
-                )
-                .block_surface("tldr", kb_callout("TL;DR", IconName::Info, palette.note))
+                .block_surface("note", kb_callout("笔记", IconName::Info, palette.note))
+                .block_surface("info", kb_callout("信息", IconName::Info, palette.note))
+                .block_surface("abstract", kb_callout("摘要", IconName::Info, palette.note))
+                .block_surface("summary", kb_callout("摘要", IconName::Info, palette.note))
+                .block_surface("tldr", kb_callout("要点", IconName::Info, palette.note))
                 .block_surface("faq", kb_callout("FAQ", IconName::Info, palette.note))
-                .block_surface("tip", kb_callout("Tip", IconName::CircleCheck, palette.tip))
+                .block_surface(
+                    "tip",
+                    kb_callout("提示", IconName::CircleCheck, palette.tip),
+                )
                 .block_surface(
                     "hint",
-                    kb_callout("Hint", IconName::CircleCheck, palette.tip),
+                    kb_callout("提示", IconName::CircleCheck, palette.tip),
                 )
                 .block_surface(
                     "todo",
-                    kb_callout("Todo", IconName::CircleCheck, palette.tip),
+                    kb_callout("待办", IconName::CircleCheck, palette.tip),
                 )
                 .block_surface(
                     "success",
-                    kb_callout("Success", IconName::CircleCheck, palette.tip),
+                    kb_callout("成功", IconName::CircleCheck, palette.tip),
                 )
                 .block_surface(
                     "warning",
-                    kb_callout("Warning", IconName::TriangleAlert, palette.warning),
+                    kb_callout("警告", IconName::TriangleAlert, palette.warning),
                 )
                 .block_surface(
                     "important",
-                    kb_callout("Important", IconName::Star, palette.important),
+                    kb_callout("重要", IconName::Star, palette.important),
                 )
                 .block_surface(
                     "example",
-                    kb_callout("Example", IconName::Star, palette.important),
+                    kb_callout("示例", IconName::Star, palette.important),
                 )
                 .block_surface(
                     "caution",
-                    kb_callout("Caution", IconName::CircleX, palette.caution),
+                    kb_callout("注意", IconName::CircleX, palette.caution),
                 )
                 .block_surface(
                     "danger",
-                    kb_callout("Danger", IconName::CircleX, palette.caution),
+                    kb_callout("危险", IconName::CircleX, palette.caution),
                 )
-                .block_surface("bug", kb_callout("Bug", IconName::CircleX, palette.caution))
+                .block_surface(
+                    "bug",
+                    kb_callout("缺陷", IconName::CircleX, palette.caution),
+                )
                 .block_surface(
                     "error",
-                    kb_callout("Error", IconName::CircleX, palette.caution),
+                    kb_callout("错误", IconName::CircleX, palette.caution),
                 )
                 .block_surface(
                     "failure",
-                    kb_callout("Failure", IconName::CircleX, palette.caution),
+                    kb_callout("失败", IconName::CircleX, palette.caution),
                 )
-                .block_surface("quote", kb_callout("Quote", IconName::Info, palette.italic))
+                .block_surface("quote", kb_callout("引用", IconName::Info, palette.italic))
         })
         .clone()
 }
@@ -1065,8 +1152,8 @@ fn wikilinks_for_preview(body: &str) -> String {
                     } else {
                         out.push('[');
                         out.push_str(label);
-                        out.push_str("](wiki:///");
-                        out.push_str(target);
+                        out.push_str("](");
+                        out.push_str(&wiki_href(target));
                         out.push(')');
                     }
                     i = i + 2 + rel + 2;
@@ -1084,6 +1171,150 @@ fn wikilinks_for_preview(body: &str) -> String {
 
 fn preview_markdown(body: &str) -> String {
     highlights_for_preview(&wikilinks_for_preview(body))
+}
+
+fn wiki_href(target: &str) -> String {
+    let (note, heading) = split_wikilink_target(target);
+    let mut href = format!("wiki:///{}", percent_encode_wiki(note));
+    if let Some(heading) = heading {
+        href.push('#');
+        href.push_str(&percent_encode_wiki(heading));
+    }
+    href
+}
+
+fn parse_wiki_href(url: &str) -> Option<(String, Option<String>)> {
+    let rest = url.strip_prefix("wiki:///")?;
+    let (note, heading) = split_wikilink_target(rest);
+    Some((
+        percent_decode_wiki(note),
+        heading.map(percent_decode_wiki).filter(|s| !s.is_empty()),
+    ))
+}
+
+fn percent_encode_wiki(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode_wiki(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn wiki_link_tooltip(url: &str, entity: &WeakEntity<KnowledgePane>, cx: &App) -> String {
+    let Some((note, heading)) = parse_wiki_href(url) else {
+        return url.to_string();
+    };
+    let Some(view) = entity.upgrade() else {
+        return url.to_string();
+    };
+    let this = view.read(cx);
+    let heading_s = heading
+        .as_deref()
+        .map(|h| format!(" → {h}"))
+        .unwrap_or_default();
+    let resolved = if note.is_empty() {
+        this.current.clone()
+    } else {
+        resolve_wikilink(&note, &this.files).map(str::to_string)
+    };
+    match resolved {
+        Some(path) => {
+            let rel = this
+                .files
+                .iter()
+                .find(|(abs, _)| abs == &path)
+                .map(|(_, rel)| rel.as_str())
+                .unwrap_or(path.as_str());
+            format!("{rel}{heading_s}")
+        }
+        None => {
+            if note.is_empty() {
+                format!("未找到{heading_s}")
+            } else {
+                format!("未找到：{note}{heading_s}")
+            }
+        }
+    }
+}
+
+fn markdown_heading_range(markdown: &str, fragment: &str) -> Option<std::ops::Range<usize>> {
+    let want = fragment.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let want_slug = heading_slug(want);
+    let mut start = 0usize;
+    while start <= markdown.len() {
+        let rest = &markdown[start..];
+        let nl = rest.find('\n').unwrap_or(rest.len());
+        let line = rest[..nl].strip_suffix('\r').unwrap_or(&rest[..nl]);
+        if let Some(text) = atx_heading_text(line) {
+            if text.eq_ignore_ascii_case(want) || heading_slug(text) == want_slug {
+                return Some(start..start + line.len());
+            }
+        }
+        if nl == rest.len() {
+            break;
+        }
+        start += nl + 1;
+    }
+    None
+}
+
+fn atx_heading_text(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    let hashes = t.bytes().take_while(|&b| b == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let after = &t[hashes..];
+    let rest = after
+        .strip_prefix(' ')
+        .or_else(|| after.strip_prefix('\t'))?;
+    Some(rest.trim_end_matches('#').trim())
+}
+
+fn heading_slug(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in s.trim().chars() {
+        if ch.is_whitespace() || ch == '_' {
+            if !prev_dash && !out.is_empty() {
+                out.push('-');
+                prev_dash = true;
+            }
+        } else if ch.is_alphanumeric() || ch == '-' {
+            for c in ch.to_lowercase() {
+                out.push(c);
+            }
+            prev_dash = ch == '-';
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Obsidian `==highlight==` is not CommonMark; render it as `<mark>`.
@@ -2234,8 +2465,9 @@ fn markdown_scroll_outline(source: &str) -> ScrollOutline {
 mod tests {
     use super::{
         apply_preview_task_toggle, build_kb_tree, file_uri_to_path, highlights_for_preview,
-        kb_heading_accent, kb_heading_size, kb_preview_palette, markdown_scroll_outline,
-        preview_markdown, resolve_preview_image_path, wikilinks_for_preview,
+        kb_heading_accent, kb_heading_size, kb_preview_palette, markdown_heading_range,
+        markdown_scroll_outline, parse_wiki_href, preview_markdown, resolve_preview_image_path,
+        wikilinks_for_preview,
     };
     use gpui_kit::px;
     use std::path::PathBuf;
@@ -2247,6 +2479,30 @@ mod tests {
             wikilinks_for_preview(md),
             "见 [note](wiki:///note) 与 [其它](wiki:///other)。"
         );
+        assert_eq!(
+            wikilinks_for_preview("[[note#A section]] 与 [[#Here]] 与 [[a b]]"),
+            "[note#A section](wiki:///note#A%20section) 与 [#Here](wiki:///#Here) 与 [a b](wiki:///a%20b)"
+        );
+        assert_eq!(
+            parse_wiki_href("wiki:///note#A%20section"),
+            Some(("note".into(), Some("A section".into())))
+        );
+        assert_eq!(
+            parse_wiki_href("wiki:///#Here"),
+            Some(("".into(), Some("Here".into())))
+        );
+    }
+
+    #[test]
+    fn preview_heading_range_matches_fragment() {
+        let md = "# Intro\n\npara\n\n## A section\n";
+        let range = markdown_heading_range(md, "A section").unwrap();
+        assert_eq!(&md[range.clone()], "## A section");
+        assert_eq!(
+            markdown_heading_range(md, "a-section").map(|r| &md[r]),
+            Some("## A section")
+        );
+        assert!(markdown_heading_range(md, "missing").is_none());
     }
 
     #[test]
