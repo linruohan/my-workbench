@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use wb_domain::ProviderKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +53,7 @@ pub async fn model_http(req: ModelHttpRequest) -> Result<ModelHttpResponse> {
 ///
 /// 配置里的 Base URL 有时带当前接口路径（`/chat/completions`、`/responses`、`/messages`）。
 /// 列表请求去掉这段，再访问同一主机上的 `/models`。
-pub fn provider_models_url(base_url: &str) -> Result<String> {
+pub fn provider_api_root(base_url: &str) -> Result<String> {
     let mut root = base_url.trim().trim_end_matches('/').to_string();
     if root.is_empty() {
         anyhow::bail!("Base URL 为空");
@@ -66,7 +67,77 @@ pub fn provider_models_url(base_url: &str) -> Result<String> {
     if root.is_empty() {
         anyhow::bail!("Base URL 为空");
     }
-    Ok(format!("{root}/models"))
+    Ok(root)
+}
+
+pub fn provider_models_url(base_url: &str) -> Result<String> {
+    Ok(format!("{}/models", provider_api_root(base_url)?))
+}
+
+/// 按当前 API 格式拼出连通性探测地址。
+pub fn probe_model_url(base_url: &str, kind: ProviderKind) -> Result<String> {
+    let root = provider_api_root(base_url)?;
+    let path = match kind {
+        ProviderKind::AnthropicMessages => "messages",
+        ProviderKind::OpenaiResponses => "responses",
+        ProviderKind::OpenaiChatCompletions | ProviderKind::Builtin => "chat/completions",
+    };
+    Ok(format!("{root}/{path}"))
+}
+
+/// 用该供应商自己的接口和密钥发一条短请求，确认这个模型能连上。
+pub async fn probe_provider_model(
+    base_url: &str,
+    api_key: Option<&str>,
+    proxy: Option<&str>,
+    kind: ProviderKind,
+    model_id: &str,
+) -> Result<()> {
+    let url = probe_model_url(base_url, kind)?;
+    let anthropic = kind == ProviderKind::AnthropicMessages;
+    let mut headers = vec![
+        ("Accept".into(), "application/json".into()),
+        ("Content-Type".into(), "application/json".into()),
+    ];
+    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+        if anthropic {
+            headers.push(("x-api-key".into(), key.to_string()));
+            headers.push(("anthropic-version".into(), "2023-06-01".into()));
+        } else {
+            headers.push(("Authorization".into(), format!("Bearer {key}")));
+        }
+    }
+    let body = if anthropic {
+        json!({
+            "model": model_id,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}]
+        })
+    } else if kind == ProviderKind::OpenaiResponses {
+        json!({
+            "model": model_id,
+            "max_output_tokens": 16,
+            "input": "ping"
+        })
+    } else {
+        json!({
+            "model": model_id,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}]
+        })
+    };
+    let resp = model_http(ModelHttpRequest {
+        url,
+        method: "POST".into(),
+        headers,
+        body: Some(body.to_string()),
+        proxy: proxy.map(str::to_string),
+    })
+    .await?;
+    if resp.status >= 400 {
+        anyhow::bail!("HTTP {}: {}", resp.status, trim_error(&resp.body));
+    }
+    Ok(())
 }
 
 /// `GET {baseURL}/models`，兼容 OpenAI `data[].id` 与 Ollama `models[].name`。
@@ -341,7 +412,8 @@ pub async fn chat_completions_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_model_ids, provider_models_url};
+    use super::{parse_model_ids, probe_model_url, provider_models_url};
+    use wb_domain::ProviderKind;
 
     #[test]
     fn openai_list_uses_data_ids() {
@@ -373,6 +445,34 @@ mod tests {
         assert_eq!(
             provider_models_url("https://api.anthropic.com/v1/messages").unwrap(),
             "https://api.anthropic.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn probe_url_follows_the_api_format() {
+        assert_eq!(
+            probe_model_url(
+                "https://api.example.com/v1",
+                ProviderKind::OpenaiChatCompletions
+            )
+            .unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            probe_model_url(
+                "https://api.example.com/v1/chat/completions",
+                ProviderKind::OpenaiResponses
+            )
+            .unwrap(),
+            "https://api.example.com/v1/responses"
+        );
+        assert_eq!(
+            probe_model_url(
+                "https://api.anthropic.com/v1",
+                ProviderKind::AnthropicMessages
+            )
+            .unwrap(),
+            "https://api.anthropic.com/v1/messages"
         );
     }
 }

@@ -22,7 +22,7 @@ use std::rc::Rc;
 use uuid::Uuid;
 use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
 use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID, ProviderConfig, ProviderKind};
-use wb_host::list_provider_models;
+use wb_host::{list_provider_models, probe_provider_model};
 
 pub(crate) struct ModelEditor {
     state: AppState,
@@ -30,6 +30,7 @@ pub(crate) struct ModelEditor {
     renaming: bool,
     key_visible: bool,
     fetching_ids: Vec<String>,
+    testing_refs: Vec<String>,
     model_dialog_open: bool,
     message: String,
     name_input: Entity<InputState>,
@@ -45,6 +46,7 @@ struct ModelView {
     renaming: bool,
     key_visible: bool,
     fetching: bool,
+    testing_refs: Vec<String>,
     message: String,
     name_input: Entity<InputState>,
     base_url_input: Entity<InputState>,
@@ -78,6 +80,7 @@ impl ModelEditor {
             renaming: false,
             key_visible: false,
             fetching_ids: Vec::new(),
+            testing_refs: Vec::new(),
             model_dialog_open: false,
             message: String::new(),
             name_input,
@@ -334,10 +337,14 @@ impl ModelEditor {
         let Some(provider_id) = self.selected_id.clone() else {
             return;
         };
-        self.model_dialog_open = true;
         self.draft.update(cx, |draft, cx| {
             draft.prepare(provider_id, window, cx);
         });
+        self.present_model_dialog(window, cx);
+    }
+
+    fn present_model_dialog(&mut self, window: &mut Window, cx: &mut Context<SettingsPane>) {
+        self.model_dialog_open = true;
         let draft = self.draft.clone();
         let model_id = self.draft.read(cx).model_id.clone();
         let focus_once = Rc::new(Cell::new(true));
@@ -350,8 +357,13 @@ impl ModelEditor {
             let reset_draft = draft.clone();
             let close_pane = pane.clone();
             let save_pane = pane.clone();
+            let title = if draft.read(cx).is_editing() {
+                "编辑模型"
+            } else {
+                "添加模型"
+            };
             dialog
-                .title("添加模型")
+                .title(title)
                 .w(px(480.))
                 .on_cancel({
                     let close_pane = close_pane.clone();
@@ -427,9 +439,43 @@ impl ModelEditor {
         });
     }
 
-    pub(super) fn insert_model(
+    fn open_edit_model(
+        &mut self,
+        model_id: String,
+        window: &mut Window,
+        cx: &mut Context<SettingsPane>,
+    ) {
+        if self.model_dialog_open {
+            return;
+        }
+        let Some(provider_id) = self.selected_id.clone() else {
+            return;
+        };
+        let store = load_providers();
+        let Some(provider) = store
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+        else {
+            self.message = "供应商已不存在".into();
+            cx.notify();
+            return;
+        };
+        let Some(caps) = provider.models.get(&model_id).cloned() else {
+            self.message = format!("模型 {model_id} 已不存在");
+            cx.notify();
+            return;
+        };
+        self.draft.update(cx, |draft, cx| {
+            draft.prepare_edit(provider_id, model_id, caps, window, cx);
+        });
+        self.present_model_dialog(window, cx);
+    }
+
+    pub(super) fn write_model(
         &mut self,
         provider_id: &str,
+        previous_id: Option<String>,
         model_id: String,
         caps: Value,
         cx: &mut Context<SettingsPane>,
@@ -437,6 +483,7 @@ impl ModelEditor {
         if model_id.is_empty() {
             return Err("模型 ID 不能为空".into());
         }
+        let editing = previous_id.is_some();
         let mut store = load_providers();
         let Some(provider) = store
             .providers
@@ -445,15 +492,42 @@ impl ModelEditor {
         else {
             return Err("供应商已不存在".into());
         };
-        if is_local_provider(provider) {
+        if !editing && is_local_provider(provider) {
             return Err("本机供应商不能添加远程模型".into());
         }
-        if provider.models.contains_key(&model_id) {
+        if provider.models.contains_key(&model_id)
+            && previous_id.as_deref() != Some(model_id.as_str())
+        {
             return Err(format!("模型 {model_id} 已在列表中"));
+        }
+        if let Some(previous) = previous_id
+            .as_deref()
+            .filter(|previous| *previous != model_id)
+        {
+            provider.models.remove(previous);
         }
         provider.models.insert(model_id.clone(), caps);
         save_providers(&store).map_err(|err| format!("保存失败：{err}"))?;
-        self.message = format!("已添加模型 {model_id}");
+        if let Some(previous) = previous_id.filter(|previous| previous != &model_id) {
+            let old_ref = format!("{provider_id}/{previous}");
+            let new_ref = format!("{provider_id}/{model_id}");
+            let changed = self.state.with_mut(|inner| {
+                if inner.prefs.agent.default_model_ref.as_deref() == Some(old_ref.as_str()) {
+                    inner.prefs.agent.default_model_ref = Some(new_ref);
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                self.state.persist_prefs();
+            }
+        }
+        self.message = if editing {
+            format!("已更新模型 {model_id}")
+        } else {
+            format!("已添加模型 {model_id}")
+        };
         cx.notify();
         Ok(())
     }
@@ -535,6 +609,90 @@ impl ModelEditor {
                         cx.notify();
                     }
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn test_model(&mut self, model_id: String, cx: &mut Context<SettingsPane>) {
+        let Some(provider_id) = self.selected_id.clone() else {
+            return;
+        };
+        let model_ref = format!("{provider_id}/{model_id}");
+        if self.testing_refs.iter().any(|item| item == &model_ref) {
+            return;
+        }
+        let store = load_providers();
+        let Some(provider) = store
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return;
+        };
+        let label = model_label(
+            &model_id,
+            provider.models.get(&model_id).unwrap_or(&Value::Null),
+        );
+        if is_local_provider(provider) {
+            self.message = format!("本机模型「{label}」无需远程连接");
+            cx.notify();
+            return;
+        }
+        let name = provider_title(provider);
+        let kind = provider.kind;
+        let required = provider.api_key_required;
+        let base_url = self.base_url_input.read(cx).value().trim().to_string();
+        let key = self.api_key_input.read(cx).value().trim().to_string();
+        if base_url.is_empty() {
+            self.message = "先填写 Base URL".into();
+            cx.notify();
+            return;
+        }
+        if required && key.is_empty() {
+            self.message = format!("供应商「{name}」调用前必须有密钥");
+            cx.notify();
+            return;
+        }
+        self.commit_base_url(cx);
+        self.commit_api_key(cx);
+        let key = (!key.is_empty()).then_some(key);
+        let proxy = self.state.with(|inner| inner.prefs.http_proxy.clone());
+        self.testing_refs.push(model_ref.clone());
+        self.message = format!("正在测试「{label}」…");
+        cx.notify();
+        let provider_id_done = provider_id.clone();
+        cx.spawn(async move |this, cx| {
+            let probed = cx
+                .background_executor()
+                .spawn(async move {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|err| format!("运行时创建失败：{err}"))?;
+                    runtime
+                        .block_on(probe_provider_model(
+                            &base_url,
+                            key.as_deref(),
+                            proxy.as_deref(),
+                            kind,
+                            &model_id,
+                        ))
+                        .map_err(|err| err.to_string())
+                })
+                .await;
+            this.update(cx, |pane, cx| {
+                pane.model_editor
+                    .testing_refs
+                    .retain(|item| item != &model_ref);
+                if pane.model_editor.selected_id.as_deref() == Some(provider_id_done.as_str()) {
+                    pane.model_editor.message = match probed {
+                        Ok(()) => format!("模型「{label}」连通正常"),
+                        Err(err) => format!("模型「{label}」连通失败：{err}"),
+                    };
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -672,6 +830,7 @@ fn render_model_settings(entity: &WeakEntity<SettingsPane>, cx: &mut App) -> Any
                 .selected_id
                 .as_ref()
                 .is_some_and(|id| editor.fetching_ids.iter().any(|item| item == id)),
+            testing_refs: editor.testing_refs.clone(),
             message: editor.message.clone(),
             name_input: editor.name_input.clone(),
             base_url_input: editor.base_url_input.clone(),
@@ -1188,12 +1347,16 @@ fn model_section(
             )
         })
         .children(models.into_iter().map(|(model_id, caps)| {
+            let testing = view
+                .testing_refs
+                .iter()
+                .any(|item| item == &format!("{}/{}", provider.id, model_id));
             model_row(
                 provider,
                 model_id,
                 caps,
                 &default_model,
-                local,
+                testing,
                 border,
                 &view.entity,
             )
@@ -1205,17 +1368,22 @@ fn model_row(
     model_id: &str,
     caps: &Value,
     default_model: &str,
-    local: bool,
+    testing: bool,
     border: Hsla,
     entity: &WeakEntity<SettingsPane>,
 ) -> impl IntoElement {
+    let local = is_local_provider(provider);
     let model_ref = format!("{}/{}", provider.id, model_id);
     let is_default = model_ref == default_model;
     let label = model_label(model_id, caps);
     let set_entity = entity.clone();
     let remove_entity = entity.clone();
+    let edit_entity = entity.clone();
+    let test_entity = entity.clone();
     let model_ref_click = model_ref.clone();
     let remove_id = model_id.to_string();
+    let edit_id = model_id.to_string();
+    let test_id = model_id.to_string();
     h_flex()
         .w_full()
         .items_center()
@@ -1234,6 +1402,33 @@ fn model_row(
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .child(label),
+        )
+        .child(
+            Button::new(SharedString::from(format!("test-{model_ref}")))
+                .xsmall()
+                .ghost()
+                .disabled(testing)
+                .label(if testing { "测试中…" } else { "测试" })
+                .on_click(move |_, _, cx| {
+                    let test_id = test_id.clone();
+                    test_entity
+                        .update(cx, |pane, cx| pane.model_editor.test_model(test_id, cx))
+                        .ok();
+                }),
+        )
+        .child(
+            Button::new(SharedString::from(format!("edit-{model_ref}")))
+                .xsmall()
+                .ghost()
+                .label("修改")
+                .on_click(move |_, window, cx| {
+                    let edit_id = edit_id.clone();
+                    edit_entity
+                        .update(cx, |pane, cx| {
+                            pane.model_editor.open_edit_model(edit_id, window, cx)
+                        })
+                        .ok();
+                }),
         )
         .when(is_default, |row| row.child(div().text_xs().child("默认")))
         .when(!is_default, |row| {

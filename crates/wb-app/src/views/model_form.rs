@@ -1,4 +1,4 @@
-//! 添加模型弹窗：智能配置、上下文、输入类型、能力与推理映射。
+//! 添加 / 编辑模型弹窗：智能配置、上下文、输入类型、能力与推理映射。
 
 use crate::views::settings::SettingsPane;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -33,6 +33,9 @@ pub(super) struct ModelDraft {
     system_in_chat: bool,
     levels: Vec<String>,
     composing: bool,
+    /// 正在编辑的模型 ID。为空表示这次是添加。
+    editing_id: Option<String>,
+    baseline: Option<Value>,
     error: SharedString,
     pub(super) model_id: Entity<InputState>,
     context: Entity<InputState>,
@@ -65,6 +68,8 @@ impl ModelDraft {
             system_in_chat: false,
             levels: Vec::new(),
             composing: false,
+            editing_id: None,
+            baseline: None,
             error: SharedString::default(),
             model_id,
             context,
@@ -76,6 +81,10 @@ impl ModelDraft {
         draft
     }
 
+    pub(super) fn is_editing(&self) -> bool {
+        self.editing_id.is_some()
+    }
+
     pub(super) fn prepare(
         &mut self,
         provider_id: String,
@@ -83,6 +92,25 @@ impl ModelDraft {
         cx: &mut Context<Self>,
     ) {
         self.provider_id = provider_id;
+        self.editing_id = None;
+        self.baseline = None;
+        self.reset(window, cx);
+        self.model_id
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(super) fn prepare_edit(
+        &mut self,
+        provider_id: String,
+        model_id: String,
+        caps: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.provider_id = provider_id;
+        self.editing_id = Some(model_id);
+        self.baseline = Some(caps);
         self.reset(window, cx);
         self.model_id
             .update(cx, |input, cx| input.focus(window, cx));
@@ -90,6 +118,15 @@ impl ModelDraft {
     }
 
     pub(super) fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composing = false;
+        self.error = SharedString::default();
+        self.level
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(caps) = self.baseline.clone() {
+            let model_id = self.editing_id.clone().unwrap_or_default();
+            self.apply_caps(&model_id, &caps, window, cx);
+            return;
+        }
         self.smart = true;
         self.advanced = true;
         self.image = false;
@@ -99,18 +136,66 @@ impl ModelDraft {
         self.web_search = false;
         self.system_in_chat = false;
         self.levels.clear();
-        self.composing = false;
-        self.error = SharedString::default();
         self.model_id
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.context
             .update(cx, |input, cx| input.set_value(DEFAULT_CONTEXT, window, cx));
         self.output
             .update(cx, |input, cx| input.set_value(DEFAULT_OUTPUT, window, cx));
-        self.level
-            .update(cx, |input, cx| input.set_value("", window, cx));
         self.reasoning_map
             .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    fn apply_caps(
+        &mut self,
+        model_id: &str,
+        caps: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.smart = caps.get("smart").and_then(Value::as_bool).unwrap_or(true);
+        self.advanced = true;
+        self.image = flag(caps, "/input/image");
+        self.video = flag(caps, "/input/video");
+        self.pdf = flag(caps, "/input/pdf");
+        self.structured = flag(caps, "/capabilities/jsonSchema");
+        self.web_search = flag(caps, "/capabilities/webSearch");
+        self.system_in_chat = flag(caps, "/capabilities/systemMessage");
+        self.levels = caps
+            .pointer("/reasoning/levels")
+            .and_then(Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|level| !level.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let context = caps
+            .get("context")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_CONTEXT.parse().unwrap_or(8192));
+        let output = caps
+            .get("output")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_OUTPUT.parse().unwrap_or(2048));
+        let map = caps
+            .pointer("/reasoning/map")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        self.model_id
+            .update(cx, |input, cx| input.set_value(model_id, window, cx));
+        self.context.update(cx, |input, cx| {
+            input.set_value(context.to_string(), window, cx)
+        });
+        self.output.update(cx, |input, cx| {
+            input.set_value(output.to_string(), window, cx)
+        });
+        self.reasoning_map
+            .update(cx, |input, cx| input.set_value(map, window, cx));
     }
 
     pub(super) fn commit_level(&mut self, cx: &mut Context<Self>) -> bool {
@@ -191,9 +276,10 @@ impl ModelDraft {
             }
         });
         let provider_id = self.provider_id.clone();
+        let previous_id = self.editing_id.clone();
         let saved = self.pane.update(cx, |pane, cx| {
             pane.model_editor
-                .insert_model(&provider_id, model_id, caps, cx)
+                .write_model(&provider_id, previous_id, model_id, caps, cx)
         });
         match saved {
             Ok(Ok(())) => true,
@@ -566,6 +652,12 @@ fn reasoning_levels(
                         .ok();
                 })
         })
+}
+
+fn flag(caps: &Value, pointer: &str) -> bool {
+    caps.pointer(pointer)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn positive_u32(raw: &str) -> Option<u32> {
