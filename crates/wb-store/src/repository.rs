@@ -561,6 +561,16 @@ impl MemoryWorkbenchRepository {
         self.dirty = true;
     }
 
+    pub fn clear_agent_messages(&mut self, thread_id: &str) {
+        self.agent_messages.retain(|_, m| m.thread_id != thread_id);
+        self.agent_approvals.retain(|_, a| a.thread_id != thread_id);
+        if let Some(thread) = self.agent_threads.get_mut(thread_id) {
+            thread.queue_json = None;
+            thread.updated_at = now_ms();
+        }
+        self.dirty = true;
+    }
+
     pub fn list_agent_approvals(&self) -> Vec<AgentApproval> {
         let mut v: Vec<_> = self.agent_approvals.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.created_at));
@@ -588,5 +598,64 @@ mod tests {
         repo2.import_snapshot(parsed);
         assert_eq!(repo2.list_tasks().len(), 1);
         assert_eq!(repo2.list_tasks()[0].title, "hello");
+    }
+
+    #[test]
+    fn clear_agent_messages_drops_queue_and_approvals() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        let now = now_ms();
+        let ws = AgentWorkspace {
+            id: "ws1".into(),
+            title: "t".into(),
+            root_path: None,
+            created_at: now,
+            updated_at: now,
+        };
+        repo.upsert_agent_workspace(ws);
+        let thread = AgentThread {
+            id: "th1".into(),
+            workspace_id: "ws1".into(),
+            project_id: None,
+            title: "会话".into(),
+            model_ref: "builtin:workbench/local".into(),
+            permission_mode: Default::default(),
+            queue_json: Some(r#"["queued"]"#.into()),
+            web_url: None,
+            archived_at: None,
+            pinned_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        repo.upsert_agent_thread(thread);
+        repo.upsert_agent_message(AgentMessage {
+            id: "m1".into(),
+            thread_id: "th1".into(),
+            role: wb_domain::AgentRole::User,
+            content: "hi".into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now,
+        });
+        repo.upsert_agent_approval(AgentApproval {
+            id: "a1".into(),
+            thread_id: "th1".into(),
+            tool_call_id: None,
+            tool_name: "task_create".into(),
+            args_json: "{}".into(),
+            summary: "x".into(),
+            status: wb_domain::ApprovalStatus::Pending,
+            created_at: now,
+            resolved_at: None,
+        });
+        repo.clear_agent_messages("th1");
+        assert!(repo.messages_for_thread("th1").is_empty());
+        assert!(repo.list_agent_approvals().is_empty());
+        let t = repo
+            .list_agent_threads()
+            .into_iter()
+            .find(|t| t.id == "th1")
+            .unwrap();
+        assert!(t.queue_json.is_none());
     }
 }

@@ -278,6 +278,26 @@ impl AgentPane {
         }
         self.history_index = None;
         self.history_draft.clear();
+
+        if text == "/clear" || text.starts_with("/clear ") {
+            self.clear_active_thread(cx);
+            return;
+        }
+        if text == "/rename" || text.starts_with("/rename ") {
+            let rest = text.trim_start_matches("/rename").trim();
+            if rest.is_empty() {
+                self.status = "用法：/rename 新标题".into();
+            } else {
+                self.rename_active_thread(rest, cx);
+                self.status = format!(
+                    "已重命名为「{}」",
+                    rest.chars().take(48).collect::<String>()
+                );
+            }
+            cx.notify();
+            return;
+        }
+
         let thread_id = self.ensure_thread();
         if self.busy {
             let n = self
@@ -596,14 +616,62 @@ impl AgentPane {
         });
     }
 
+    pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
     fn new_thread(&mut self, cx: &mut Context<Self>) {
+        self.stop_turn(cx);
         self.state.with_mut(|s| s.active_thread_id = None);
         let _ = self.ensure_thread();
         self.state.persist_if_dirty();
         cx.notify();
     }
 
+    fn clear_active_thread(&mut self, cx: &mut Context<Self>) {
+        self.stop_turn(cx);
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            return;
+        };
+        self.state.with_mut(|s| s.repo.clear_agent_messages(&tid));
+        self.expanded_tools.clear();
+        self.status = "已清空当前会话".into();
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
+    fn rename_active_thread(&mut self, title: &str, cx: &mut Context<Self>) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            return;
+        };
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+            {
+                t.title = title.chars().take(48).collect();
+                t.updated_at = now_ms();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn delete_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .state
+            .with(|s| s.active_thread_id.as_deref() == Some(id))
+        {
+            self.stop_turn(cx);
+        }
         self.state.with_mut(|s| {
             s.repo.delete_agent_thread(id);
             if s.active_thread_id.as_deref() == Some(id) {
@@ -615,6 +683,12 @@ impl AgentPane {
     }
 
     fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
+        if self
+            .state
+            .with(|s| s.active_thread_id.as_deref() != Some(id.as_str()))
+        {
+            self.stop_turn(cx);
+        }
         self.state.with_mut(|s| s.active_thread_id = Some(id));
         cx.notify();
     }
@@ -1024,6 +1098,7 @@ impl AgentPane {
             })
             .collect();
         let empty_chat = visible_messages.is_empty() && find_q.is_empty();
+        let filter_miss = visible_messages.is_empty() && !find_q.is_empty();
         let message_rows: Vec<_> = visible_messages
             .into_iter()
             .map(|m| {
@@ -1059,6 +1134,15 @@ impl AgentPane {
                                     .primary()
                                     .label("新会话")
                                     .on_click(cx.listener(|this, _, _, cx| this.new_thread(cx))),
+                            )
+                            .child(
+                                Button::new("agent-clear")
+                                    .small()
+                                    .ghost()
+                                    .label("清空")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.clear_active_thread(cx);
+                                    })),
                             )
                             .child(
                                 Button::new("agent-ws")
@@ -1303,14 +1387,12 @@ impl AgentPane {
                             .justify_center()
                             .items_center()
                             .child(div().text_sm().font_bold().child("开始一段 Agent 对话"))
-                            .child(
-                                div().text_xs().text_color(muted).child(
-                                    "Enter 发送 · Shift+Enter 换行 · / 斜杠命令 · ↑↓ 输入历史",
-                                ),
-                            )
+                            .child(div().text_xs().text_color(muted).child(
+                                "Enter 发送 · Shift+Enter 换行 · / 斜杠 · ↑↓ 历史 · Ctrl+N 聚焦",
+                            ))
                             .child(
                                 h_flex().gap_2().flex_wrap().children(
-                                    ["/task_list", "/project_list", "/goal", "/host_tool_list"]
+                                    ["/task_list", "/project_list", "/goal", "/clear"]
                                         .into_iter()
                                         .map(|cmd| {
                                             Button::new(SharedString::from(format!(
@@ -1327,6 +1409,18 @@ impl AgentPane {
                                             }))
                                         }),
                                 ),
+                            )
+                            .into_any_element()
+                    } else if filter_miss {
+                        v_flex()
+                            .flex_1()
+                            .justify_center()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .child("没有匹配筛选条件的消息"),
                             )
                             .into_any_element()
                     } else {

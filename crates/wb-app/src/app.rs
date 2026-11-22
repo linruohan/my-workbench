@@ -580,19 +580,26 @@ impl Render for WorkbenchApp {
             }))
             .on_action(cx.listener(|this, _: &FocusCapture, window, cx| {
                 let nav = this.state.with(|s| s.nav);
-                if !matches!(
-                    nav,
+                match nav {
+                    AppNav::Agent => {
+                        this.agent
+                            .update(cx, |agent, cx| agent.focus_composer(window, cx));
+                    }
                     AppNav::Today
-                        | AppNav::Inbox
-                        | AppNav::Done
-                        | AppNav::Planner
-                        | AppNav::Projects
-                        | AppNav::Tags
-                ) {
-                    this.set_nav(AppNav::Today, cx);
+                    | AppNav::Inbox
+                    | AppNav::Done
+                    | AppNav::Planner
+                    | AppNav::Projects
+                    | AppNav::Tags => {
+                        this.tasks
+                            .update(cx, |tasks, cx| tasks.focus_capture(window, cx));
+                    }
+                    _ => {
+                        this.set_nav(AppNav::Today, cx);
+                        this.tasks
+                            .update(cx, |tasks, cx| tasks.focus_capture(window, cx));
+                    }
                 }
-                this.tasks
-                    .update(cx, |tasks, cx| tasks.focus_capture(window, cx));
             }))
             .child(
                 v_flex()

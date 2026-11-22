@@ -640,6 +640,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         tool: "get_goal",
         hint: "查看或创建会话目标",
     },
+    SlashCommand {
+        invoke: "/clear",
+        tool: "clear",
+        hint: "清空当前会话消息",
+    },
+    SlashCommand {
+        invoke: "/rename",
+        tool: "rename",
+        hint: "重命名会话，如 /rename 今日复盘",
+    },
 ];
 
 /// Suggestions for a composer that currently looks like a slash command.
@@ -763,7 +773,8 @@ fn retitle_default_thread(
 fn parse_slash_invocation(text: &str) -> Option<(&'static str, Value)> {
     let t = text.trim();
     for cmd in SLASH_COMMANDS {
-        if cmd.invoke == "/goal" {
+        // UI-only composer commands are handled by AgentPane before the turn loop.
+        if matches!(cmd.invoke, "/goal" | "/clear" | "/rename") {
             continue;
         }
         if t == cmd.invoke || t.starts_with(&format!("{} ", cmd.invoke)) {
