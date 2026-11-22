@@ -43,26 +43,6 @@ fn model_label_of(model_ref: &str) -> String {
     crate::composer_text::model_label_of(model_ref)
 }
 
-/// Quick filters over the chat transcript.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum MsgFilter {
-    #[default]
-    All,
-    User,
-    Tools,
-    Errors,
-}
-
-/// Whether a message is a failed tool call.
-///
-/// A failure is reported as a tool message whose body starts with something
-/// other than "已"; the keywords are a second signal. The role check must
-/// cover every keyword, or a user sentence mentioning "错误" would be listed
-/// under errors.
-fn is_error_message(m: &AgentMessage) -> bool {
-    m.is_tool_error()
-}
-
 fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {
     match event {
         StreamEvent::Text(piece) => {
@@ -91,11 +71,8 @@ pub struct AgentPane {
     input: Entity<TextareaState>,
     web_url_input: Entity<InputState>,
     ask_input: Entity<InputState>,
-    find: Entity<InputState>,
     /// Filters the thread list by title.
     thread_query: Entity<InputState>,
-    /// Quick filter over the message list (tools / errors / user only).
-    msg_filter: MsgFilter,
     /// Show only pinned threads in the list.
     pinned_only: bool,
     webview: Option<Entity<WebView>>,
@@ -161,7 +138,6 @@ impl AgentPane {
         });
         let web_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://… 新建网页会话"));
-        let find = cx.new(|cx| InputState::new(window, cx).placeholder("筛选消息…"));
         let thread_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话…"));
         let ask_input = cx.new(|cx| InputState::new(window, cx).placeholder("回答 Agent 的问题…"));
         let state_seed = state.with(|s| s.prefs.agent.prompt_history.clone());
@@ -170,9 +146,7 @@ impl AgentPane {
             input: input.clone(),
             web_url_input: web_url_input.clone(),
             ask_input: ask_input.clone(),
-            find: find.clone(),
             thread_query: thread_query.clone(),
-            msg_filter: MsgFilter::All,
             pinned_only: false,
             webview: None,
             loaded_web_url: None,
@@ -261,12 +235,6 @@ impl AgentPane {
                 _ => {}
             },
         ));
-        this._subs
-            .push(cx.subscribe_in(&find, window, |_this, _, event, _, cx| {
-                if let InputEvent::Change = event {
-                    cx.notify();
-                }
-            }));
         this._subs.push(
             cx.subscribe_in(&thread_query, window, |_this, _, event, _, cx| {
                 if let InputEvent::Change = event {
@@ -1463,26 +1431,6 @@ impl AgentPane {
         cx.notify();
     }
 
-    /// Copy the per-tool aggregate as a Markdown table.
-    fn copy_tool_usage(
-        &mut self,
-        usage: &[(String, usize, u64, u64, usize)],
-        cx: &mut Context<Self>,
-    ) {
-        let mut out =
-            String::from("| 工具 | 次数 | 合计 | 最慢 | 失败 |\n| --- | --- | --- | --- | --- |\n");
-        for (name, calls, total, max, failures) in usage {
-            out.push_str(&format!(
-                "| {name} | {calls} | {} | {} | {failures} |\n",
-                crate::thread_export::format_duration(*total),
-                crate::thread_export::format_duration(*max),
-            ));
-        }
-        self.pending_insert = Some(out);
-        self.status = "已把工具汇总插入输入框".into();
-        cx.notify();
-    }
-
     /// Write the active thread to `<workspace>/.wb/exports/` as Markdown.
     fn export_active_thread(&mut self, cx: &mut Context<Self>) {
         let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
@@ -2374,8 +2322,6 @@ impl AgentPane {
             })
             .collect();
 
-        let find_q = self.find.read(cx).value().trim().to_lowercase();
-        let msg_filter = self.msg_filter;
         let slash_hits = self.live_slash(cx);
         let mention_hits = self.live_file_mentions(cx);
         let mention_selected = self.mention_selected;
@@ -2535,57 +2481,9 @@ impl AgentPane {
             })
             .collect();
 
-        // The tool aggregate needs the full transcript, not just what the filter
-        // shows, so compute it before `messages` is consumed below.
-        let tool_usage = crate::tool_summary::tool_usage(
-            &messages
-                .iter()
-                .filter(|m| m.role == AgentRole::Tool)
-                .map(|m| {
-                    (
-                        m.tool_name.clone().unwrap_or_else(|| "tool".into()),
-                        m.duration_ms,
-                        m.is_tool_error(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
-        let visible_messages: Vec<AgentMessage> = messages
-            .into_iter()
-            .filter(|m| match msg_filter {
-                MsgFilter::All => true,
-                MsgFilter::Tools => matches!(m.role, AgentRole::Tool),
-                MsgFilter::Errors => is_error_message(m),
-                MsgFilter::User => matches!(m.role, AgentRole::User),
-            })
-            .filter(|m| {
-                find_q.is_empty()
-                    || m.content.to_lowercase().contains(&find_q)
-                    || m.tool_name
-                        .as_deref()
-                        .is_some_and(|n| n.to_lowercase().contains(&find_q))
-            })
-            .collect();
-        let visible_count = visible_messages.len();
-        let empty_chat =
-            visible_messages.is_empty() && find_q.is_empty() && msg_filter == MsgFilter::All;
-        let filter_miss =
-            visible_messages.is_empty() && (!find_q.is_empty() || msg_filter != MsgFilter::All);
+        let empty_chat = messages.is_empty();
         let draft_text = self.stream_draft_text();
         let draft_stage = self.stream_status_text();
-        // Snapshot the failure list before the rows consume `visible_messages`.
-        let error_summary: Vec<(String, String)> = if msg_filter == MsgFilter::Errors {
-            visible_messages
-                .iter()
-                .map(|m| {
-                    let tool = m.tool_name.clone().unwrap_or_else(|| "tool".into());
-                    let body: String = m.content.replace('\n', " ").chars().take(160).collect();
-                    (tool, body)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         let mut last_day = String::new();
         let mut tool_group: Vec<AgentMessage> = Vec::new();
         let mut tool_group_day = String::new();
@@ -2599,7 +2497,7 @@ impl AgentPane {
             danger: danger_theme,
             workspace_root: self.workspace_root(),
         };
-        for m in visible_messages {
+        for m in messages {
             let day = format_local_day(m.created_at);
             // Batch consecutive tool results into one collapsed row.
             if m.role == AgentRole::Tool {
@@ -2769,37 +2667,6 @@ impl AgentPane {
                                         })),
                                 )
                             })
-                            .when(
-                                msg_filter == MsgFilter::Errors && !error_summary.is_empty(),
-                                |row| {
-                                    let entity = entity.clone();
-                                    let rows: Vec<(String, String)> = error_summary.clone();
-                                    row.child(
-                                        Button::new("agent-errors-copy")
-                                            .xsmall()
-                                            .ghost()
-                                            .label(format!("复制 {} 条问题", rows.len()))
-                                            .on_click(move |_, _, cx| {
-                                                let mut out = String::from("失败的工具调用：\n");
-                                                for (tool, body) in &rows {
-                                                    out.push_str(&format!("- {tool}: {body}\n"));
-                                                }
-                                                cx.write_to_clipboard(
-                                                    gpui::ClipboardItem::new_string(out),
-                                                );
-                                                if let Some(e) = entity.upgrade() {
-                                                    e.update(cx, |this, cx| {
-                                                        this.status = format!(
-                                                            "已复制 {} 条失败调用",
-                                                            rows.len()
-                                                        );
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            }),
-                                    )
-                                },
-                            )
                             .child(
                                 Button::new("agent-export")
                                     .xsmall()
@@ -2929,41 +2796,6 @@ impl AgentPane {
                     .when(!approval_rows.is_empty(), |col| {
                         col.child(v_flex().gap_2().children(approval_rows))
                     })
-                    .when(!find_q.is_empty(), |col| {
-                        let hits = visible_count;
-                        let clearing = find_q.clone();
-                        col.child(
-                            h_flex()
-                                .w_full()
-                                .gap_2()
-                                .items_center()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(accent.opacity(0.5))
-                                .bg(secondary)
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(accent)
-                                        .child(format!("筛选「{clearing}」· {hits} 条")),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new("agent-find-clear-pill")
-                                        .xsmall()
-                                        .ghost()
-                                        .label("Esc 清除")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.find.update(cx, |i, cx| {
-                                                i.set_value("", window, cx);
-                                            });
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                    })
                     .child(if empty_chat {
                         v_flex()
                             .flex_1()
@@ -3020,31 +2852,6 @@ impl AgentPane {
                                             }))
                                         }),
                                 ),
-                            )
-                            .into_any_element()
-                    } else if filter_miss {
-                        v_flex()
-                            .flex_1()
-                            .gap_2()
-                            .justify_center()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child("没有匹配筛选条件的消息"),
-                            )
-                            .child(
-                                Button::new("agent-find-clear")
-                                    .xsmall()
-                                    .ghost()
-                                    .label("清空筛选")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.find.update(cx, |i, cx| {
-                                            i.set_value("", window, cx);
-                                        });
-                                        cx.notify();
-                                    })),
                             )
                             .into_any_element()
                     } else {
@@ -3300,200 +3107,6 @@ impl AgentPane {
                                         .child(div().text_xs().child(path.clone()))
                                         .into_any_element()
                                 })),
-                        )
-                    })
-                    .child(
-                        // Message filtering sits directly above the composer so the
-                        // chat transcript area stays unobstructed.
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(div().flex_1().child(Input::new(&self.find).cleanable(true)))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .children(
-                                        [
-                                            (MsgFilter::All, "全部"),
-                                            (MsgFilter::User, "我"),
-                                            (MsgFilter::Tools, "工具"),
-                                            (MsgFilter::Errors, "问题"),
-                                        ]
-                                        .into_iter()
-                                        .map(|(filter, label)| {
-                                            Button::new(SharedString::from(format!(
-                                                "msg-filter-{label}"
-                                            )))
-                                            .xsmall()
-                                            .ghost()
-                                            .label(label)
-                                            .selected(msg_filter == filter)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.msg_filter = filter;
-                                                cx.notify();
-                                            }))
-                                            .into_any_element()
-                                        }),
-                                    ),
-                            )
-                            .child({
-                                let ctx_frac = (ctx_pct / 100.0).min(1.0);
-                                let ctx_color = if ctx_pct >= 80.0 { danger_theme } else { accent };
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w(px(64.))
-                                            .h(px(4.))
-                                            .rounded_full()
-                                            .bg(cx.theme().border)
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .rounded_full()
-                                                    .bg(ctx_color)
-                                                    .w(relative(ctx_frac)),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(format!("{ctx_pct:.0}%")),
-                                    )
-                                    .when(ctx_pct >= 80.0, |row| {
-                                        row.child(
-                                            Button::new("agent-compact-now")
-                                                .xsmall()
-                                                .ghost()
-                                                .label("压缩")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.compact_history(cx);
-                                                })),
-                                        )
-                                    })
-                            }),
-                    )
-                    .when(msg_filter == MsgFilter::Tools && !tool_usage.is_empty(), |col| {
-                        let usage = tool_usage.clone();
-                        let total_sum: u64 = usage.iter().map(|row| row.2).sum();
-                        col.child(
-                            v_flex()
-                                .w_full()
-                                .gap_1()
-                                .p_2()
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(border)
-                                .bg(secondary)
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_bold()
-                                                .text_color(muted)
-                                                .child("按工具汇总（最慢在前）"),
-                                        )
-                                        .child(div().flex_1())
-                                        .child(
-                                            Button::new("agent-tool-usage-copy")
-                                                .xsmall()
-                                                .ghost()
-                                                .label("复制")
-                                                .on_click(cx.listener({
-                                                    let usage = usage.clone();
-                                                    move |this, _, _, cx| {
-                                                        this.copy_tool_usage(&usage, cx);
-                                                    }
-                                                })),
-                                        ),
-                                )
-                                .children(usage.iter().take(5).map(
-                                    |(name, calls, total, max, failures)| {
-                                        let color = if *failures > 0 { danger_theme } else { muted };
-                                        // Share of the whole session's tool time.
-                                        let share = if total_sum == 0 {
-                                            0.0_f32
-                                        } else {
-                                            (*total as f32 / total_sum as f32).min(1.0)
-                                        };
-                                        v_flex()
-                                            .w_full()
-                                            .gap_1()
-                                            .child(
-                                                h_flex()
-                                                    .w_full()
-                                                    .gap_2()
-                                                    .items_center()
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .text_xs()
-                                                            .child(name.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .child(format!("{calls} 次")),
-                                                    )
-                                                    .child(
-                                                        div().text_xs().text_color(muted).child(
-                                                            format!(
-                                                                "合计 {}",
-                                                                crate::thread_export::format_duration(
-                                                                    *total
-                                                                )
-                                                            ),
-                                                        ),
-                                                    )
-                                                    .child(
-                                                        div().text_xs().text_color(muted).child(
-                                                            format!(
-                                                                "最慢 {}",
-                                                                crate::thread_export::format_duration(
-                                                                    *max
-                                                                )
-                                                            ),
-                                                        ),
-                                                    )
-                                                    .when(*failures > 0, |row| {
-                                                        row.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(color)
-                                                                .child(format!("失败 {failures}")),
-                                                        )
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .h(px(3.))
-                                                    .rounded_full()
-                                                    .bg(border)
-                                                    .child(
-                                                        div()
-                                                            .h_full()
-                                                            .rounded_full()
-                                                            .bg(if *failures > 0 {
-                                                                danger_theme.opacity(0.7)
-                                                            } else {
-                                                                accent.opacity(0.7)
-                                                            })
-                                                            .w(relative(share)),
-                                                    ),
-                                            )
-                                            .into_any_element()
-                                    },
-                                )),
                         )
                     })
                     .child(
@@ -3810,7 +3423,7 @@ impl AgentPane {
                                             },
                                         ))
                                         .capture_action(cx.listener(
-                                            |this, _: &InputEscape, window, cx| {
+                                            |this, _: &InputEscape, _window, cx| {
                                                 if !this.live_slash(cx).is_empty() {
                                                     this.slash_dismissed = true;
                                                     this.slash_selected = 0;
@@ -3822,13 +3435,6 @@ impl AgentPane {
                                                     cx.stop_propagation();
                                                 } else if this.composer_preview {
                                                     this.composer_preview = false;
-                                                    cx.notify();
-                                                    cx.stop_propagation();
-                                                } else if !this.find.read(cx).value().is_empty() {
-                                                    let find = this.find.clone();
-                                                    find.update(cx, |i, cx| {
-                                                        i.set_value("", window, cx);
-                                                    });
                                                     cx.notify();
                                                     cx.stop_propagation();
                                                 } else if this.ghost_suffix.take().is_some() {
