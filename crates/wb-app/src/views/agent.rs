@@ -33,6 +33,23 @@ use wb_domain::{
 use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID};
 use wb_host::{cleanup_tool_spill, global_terminals};
 
+/// `@path` tokens in the draft, in order of appearance, deduplicated.
+fn draft_file_refs(draft: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in draft.split_whitespace() {
+        let Some(rest) = token.strip_prefix('@') else {
+            continue;
+        };
+        if rest.is_empty() || rest.contains('@') {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == rest) {
+            out.push(rest.to_string());
+        }
+    }
+    out
+}
+
 /// `provider/model` → `model` for compact chips and menus.
 fn model_label_of(model_ref: &str) -> String {
     model_ref
@@ -1222,6 +1239,17 @@ impl AgentPane {
             refs.push(BUILTIN_MODEL_REF.to_string());
         }
         refs
+    }
+
+    /// Remove one `@reference` from the draft (the little chip's ×).
+    fn drop_draft_reference(&mut self, reference: &str, cx: &mut Context<Self>) {
+        let current = self.input.read(cx).value().to_string();
+        let needle = format!("@{reference}");
+        let words: Vec<&str> = current.split_whitespace().collect();
+        let kept: Vec<&str> = words.into_iter().filter(|word| *word != needle).collect();
+        let next = kept.join(" ");
+        self.pending_edit = Some(next);
+        cx.notify();
     }
 
     /// Append `text` to the composer; the value lands on the next render.
@@ -3006,6 +3034,7 @@ impl AgentPane {
                             let draft_empty = draft.trim().is_empty();
                             let draft_chars = draft.chars().count();
                             let preview_on = self.composer_preview && !draft_empty;
+                            let draft_refs = draft_file_refs(&draft);
                             let branch = self.workspace_branch();
                             let active_ws = self.state.with(|s| {
                                 s.active_thread_id
@@ -3341,6 +3370,59 @@ impl AgentPane {
                                                 .appearance(false)
                                                 .bordered(false),
                                         )
+                                        .when(!draft_refs.is_empty(), |col| {
+                                            col.child(
+                                                h_flex()
+                                                    .w_full()
+                                                    .gap_1()
+                                                    .flex_wrap()
+                                                    .children(draft_refs.iter().enumerate().map(
+                                                        |(ix, reference)| {
+                                                            let entity = entity.clone();
+                                                            let target = reference.clone();
+                                                            h_flex()
+                                                                .id(SharedString::from(format!(
+                                                                    "draft-ref-{ix}"
+                                                                )))
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded(px(6.))
+                                                                .border_1()
+                                                                .border_color(border)
+                                                                .text_xs()
+                                                                .text_color(muted)
+                                                                .child(Icon::new(IconName::File).xsmall())
+                                                                .child(reference.clone())
+                                                                .child(
+                                                                    div()
+                                                                        .id(SharedString::from(
+                                                                            format!("draft-ref-x-{ix}"),
+                                                                        ))
+                                                                        .cursor_pointer()
+                                                                        .hover(|s| s.text_color(danger))
+                                                                        .child(
+                                                                            Icon::new(IconName::Close)
+                                                                                .xsmall(),
+                                                                        )
+                                                                        .on_click(move |_, _, app| {
+                                                                            if let Some(e) =
+                                                                                entity.upgrade()
+                                                                            {
+                                                                                let target =
+                                                                                    target.clone();
+                                                                                e.update(app, |this, cx| {
+                                                                                    this.drop_draft_reference(&target, cx);
+                                                                                });
+                                                                            }
+                                                                        }),
+                                                                )
+                                                                .into_any_element()
+                                                        },
+                                                    )),
+                                            )
+                                        })
                                         .when_some(ghost, |col, suffix| {
                                             col.child(
                                                 h_flex()
