@@ -5,6 +5,7 @@ use gpui_kit::component::input::{
     Escape as InputEscape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveRight,
     MoveUp, Textarea, TextareaState,
 };
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Selectable as _, *};
@@ -31,6 +32,15 @@ use wb_domain::{
 };
 use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID};
 use wb_host::{cleanup_tool_spill, global_terminals};
+
+/// `provider/model` → `model` for compact chips and menus.
+fn model_label_of(model_ref: &str) -> String {
+    model_ref
+        .split('/')
+        .next_back()
+        .unwrap_or(model_ref)
+        .to_string()
+}
 
 fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>) {
     match event {
@@ -1198,6 +1208,47 @@ impl AgentPane {
         refs
     }
 
+    fn set_thread_model(&mut self, model_ref: String, cx: &mut Context<Self>) {
+        let tid = self.ensure_thread();
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+            {
+                t.model_ref = model_ref;
+                t.updated_at = now_ms();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        self.status.clear();
+        cx.notify();
+    }
+
+    fn set_thread_permission(
+        &mut self,
+        mode: wb_domain::AgentPermissionMode,
+        cx: &mut Context<Self>,
+    ) {
+        let tid = self.ensure_thread();
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+            {
+                t.permission_mode = mode;
+                t.updated_at = now_ms();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn cycle_thread_model(&mut self, cx: &mut Context<Self>) {
         let tid = self.ensure_thread();
         let refs = Self::available_model_refs();
@@ -1703,6 +1754,7 @@ impl AgentPane {
             workspaces,
             approvals,
             perm_label,
+            thread_perm,
             model_label,
             active_web_url,
             queued,
@@ -1731,21 +1783,22 @@ impl AgentPane {
                 .as_ref()
                 .map(|t| permission_mode_label(t.permission_mode))
                 .unwrap_or("确认");
+            let thread_perm = thread
+                .as_ref()
+                .map(|t| t.permission_mode)
+                .unwrap_or_default();
             let model_ref = thread
                 .as_ref()
                 .map(|t| t.model_ref.clone())
                 .unwrap_or_else(|| BUILTIN_MODEL_REF.to_string());
-            let model = model_ref
-                .split('/')
-                .next_back()
-                .unwrap_or(model_ref.as_str())
-                .to_string();
+            let model = model_label_of(&model_ref);
             (
                 s.repo.list_agent_threads(),
                 messages,
                 s.repo.list_agent_workspaces(),
                 approvals,
                 perm,
+                thread_perm,
                 model,
                 web_url,
                 queued,
@@ -3160,30 +3213,38 @@ impl AgentPane {
                                                 .items_center()
                                                 .gap_1()
                                                 .flex_shrink_0()
-                                                .child(
-                                                    h_flex()
-                                                        .id("agent-model-picker")
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded(px(8.))
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .cursor_pointer()
-                                                        .hover(|s| {
-                                                            s.bg(border).text_color(accent)
-                                                        })
-                                                        .child(model_label.clone())
-                                                        .child(
-                                                            Icon::new(IconName::ChevronDown)
-                                                                .xsmall()
-                                                                .text_color(muted),
-                                                        )
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.cycle_thread_model(cx);
-                                                        })),
-                                                )
+                                                .child({
+                                                    let entity = entity.clone();
+                                                    let current = model_ref.clone();
+                                                    Button::new("agent-model-picker")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .label(model_label.clone())
+                                                        .icon(IconName::ChevronDown)
+                                                        .dropdown_menu_with_anchor(
+                                                        Anchor::TopRight,
+                                                        move |menu, _, _| {
+                                                            let mut menu = menu;
+                                                            for model in AgentPane::available_model_refs() {
+                                                                let entity = entity.clone();
+                                                                let pick = model.clone();
+                                                                menu = menu.item(
+                                                                    PopupMenuItem::new(model_label_of(&model))
+                                                                        .checked(current == model)
+                                                                        .on_click(move |_, _, app| {
+                                                                            if let Some(e) = entity.upgrade() {
+                                                                                let pick = pick.clone();
+                                                                                e.update(app, |this, cx| {
+                                                                                    this.set_thread_model(pick, cx);
+                                                                                });
+                                                                            }
+                                                                        }),
+                                                                );
+                                                            }
+                                                            menu
+                                                        },
+                                                    )
+                                                })
                                                 .child(
                                                     div()
                                                         .id("agent-mic")
@@ -3339,45 +3400,72 @@ impl AgentPane {
                                                                 .text_color(muted),
                                                         ),
                                                 )
-                                                .child(
-                                                    h_flex()
-                                                        .id("agent-perm-chip")
-
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_2()
-                                                        .py_0p5()
-                                                        .rounded(px(6.))
-                                                        .border_1()
-                                                        .border_color(border)
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.text_color(accent))
-                                                        .child(format!("权限 · {perm_label}"))
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.cycle_thread_permission(cx);
-                                                        })),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .id("agent-model-chip")
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_2()
-                                                        .py_0p5()
-                                                        .rounded(px(6.))
-                                                        .border_1()
-                                                        .border_color(border)
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.text_color(accent))
-                                                        .child(format!("模型 · {model_label}"))
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.cycle_thread_model(cx);
-                                                        })),
-                                                )
+                                                .child({
+                                                    let entity = entity.clone();
+                                                    let current = thread_perm;
+                                                    Button::new("agent-perm-chip")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .label(format!("权限 · {perm_label}"))
+                                                        .dropdown_menu_with_anchor(
+                                                            Anchor::TopLeft,
+                                                            move |menu, _, _| {
+                                                                let mut menu = menu;
+                                                                for mode in [
+                                                                    wb_domain::AgentPermissionMode::Confirm,
+                                                                    wb_domain::AgentPermissionMode::SessionAuto,
+                                                                    wb_domain::AgentPermissionMode::Readonly,
+                                                                ] {
+                                                                    let entity = entity.clone();
+                                                                    menu = menu.item(
+                                                                        PopupMenuItem::new(
+                                                                            permission_mode_label(mode),
+                                                                        )
+                                                                        .checked(current == mode)
+                                                                        .on_click(move |_, _, app| {
+                                                                            if let Some(e) = entity.upgrade() {
+                                                                                e.update(app, |this, cx| {
+                                                                                    this.set_thread_permission(mode, cx);
+                                                                                });
+                                                                            }
+                                                                        }),
+                                                                    );
+                                                                }
+                                                                menu
+                                                            },
+                                                        )
+                                                })
+                                                .child({
+                                                    let entity = entity.clone();
+                                                    let current = model_ref.clone();
+                                                    Button::new("agent-model-chip")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .label(format!("模型 · {model_label}"))
+                                                        .dropdown_menu_with_anchor(
+                                                            Anchor::TopLeft,
+                                                            move |menu, _, _| {
+                                                                let mut menu = menu;
+                                                                for model in AgentPane::available_model_refs() {
+                                                                    let entity = entity.clone();
+                                                                    let pick = model.clone();
+                                                                    menu = menu.item(
+                                                                        PopupMenuItem::new(model_label_of(&model))
+                                                                            .checked(current == model)
+                                                                            .on_click(move |_, _, app| {
+                                                                                if let Some(e) = entity.upgrade() {
+                                                                                    let pick = pick.clone();
+                                                                                    e.update(app, |this, cx| {
+                                                                                        this.set_thread_model(pick, cx);
+                                                                                    });
+                                                                                }
+                                                                            }),
+                                                                    );
+                                                                }
+                                                                menu
+                                                            },
+                                                        )
+                                                })
                                                 .child(
                                                     h_flex()
                                                         .id("agent-slash-chip")
