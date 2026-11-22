@@ -877,7 +877,8 @@ fn kb_preview_style(theme: &Theme, zoom: f32) -> TextViewStyle {
         .border_1()
         .border_color(palette.code_border)
         .bg(palette.code_bg)
-        .font_family(theme.mono_font_family.clone());
+        .font_family(theme.mono_font_family.clone())
+        .max_h(px(360.));
     code.overflow.y = Some(Overflow::Scroll);
     let mut style = TextViewStyle::default()
         .paragraph_gap(rems(0.85))
@@ -995,6 +996,7 @@ fn kb_markdown_extensions() -> MarkdownExtensions {
             "danger",
             kb_callout("Danger", IconName::CircleX, palette.caution),
         )
+        .block_surface("quote", kb_callout("Quote", IconName::Info, palette.italic))
 }
 
 /// Turn `[[note]]` / `[[note|别名]]` into Markdown links for the preview pane.
