@@ -81,6 +81,9 @@ pub struct AgentPane {
     mention_cache_key: Option<String>,
     mention_selected: usize,
     mention_dismissed: bool,
+    /// Show the draft as rendered Markdown above the input.
+    composer_preview: bool,
+    composer_preview_scroll: ScrollHandle,
     /// Ask approvals that already have an auto-answer timer running.
     ask_timers: HashSet<String>,
     status: String,
@@ -132,6 +135,8 @@ impl AgentPane {
             mention_cache_key: None,
             mention_selected: 0,
             mention_dismissed: false,
+            composer_preview: false,
+            composer_preview_scroll: ScrollHandle::new(),
             ask_timers: HashSet::new(),
             status: String::new(),
             prompt_history: Vec::new(),
@@ -159,6 +164,18 @@ impl AgentPane {
                     this.mention_dismissed = false;
                     this.mention_selected = 0;
                     this.recompute_ghost(cx);
+                    // Keep the live preview pinned to the newest line.
+                    if this.composer_preview {
+                        let handle = this.composer_preview_scroll.clone();
+                        cx.spawn(async move |_this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(16))
+                                .await;
+                            let max = handle.max_offset();
+                            handle.set_offset(point(px(0.), -max.y.abs()));
+                        })
+                        .detach();
+                    }
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift, secondary } => {
@@ -2764,133 +2781,392 @@ impl AgentPane {
                         )
                     })
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .items_end()
-                            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
-                                let hits = this.live_slash(cx);
-                                if !hits.is_empty() {
-                                    this.slash_selected = (this.slash_selected + 1) % hits.len();
-                                    cx.notify();
-                                    cx.stop_propagation();
+                        // Hadron-style composer: one rounded card that owns the
+                        // focus ring, the live preview, the input and a tool row.
+                        {
+                            let is_focused =
+                                self.input.read(cx).focus_handle(cx).is_focused(window);
+                            let draft = self.input.read(cx).value().to_string();
+                            let draft_empty = draft.trim().is_empty();
+                            let draft_chars = draft.chars().count();
+                            let preview_on = self.composer_preview && !draft_empty;
+                            v_flex()
+                                .id("agent-composer")
+                                .w_full()
+                                .gap_1p5()
+                                .p_2()
+                                .rounded(px(12.))
+                                .bg(secondary)
+                                .border_1()
+                                .border_color(if is_focused {
+                                    accent.opacity(0.65)
                                 } else {
-                                    let mentions = this.live_file_mentions(cx);
-                                    if !mentions.is_empty() {
-                                        this.mention_selected =
-                                            (this.mention_selected + 1) % mentions.len();
-                                        cx.notify();
-                                        cx.stop_propagation();
-                                    } else if this.history_index.is_some()
-                                        && this.composer_on_last_line(cx)
-                                        && this.navigate_prompt_history(1, window, cx)
-                                    {
-                                        cx.stop_propagation();
-                                    }
-                                }
-                            }))
-                            .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
-                                let hits = this.live_slash(cx);
-                                if !hits.is_empty() {
-                                    this.slash_selected = this
-                                        .slash_selected
-                                        .checked_sub(1)
-                                        .unwrap_or(hits.len() - 1);
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                } else {
-                                    let mentions = this.live_file_mentions(cx);
-                                    if !mentions.is_empty() {
-                                        this.mention_selected = this
-                                            .mention_selected
-                                            .checked_sub(1)
-                                            .unwrap_or(mentions.len() - 1);
-                                        cx.notify();
-                                        cx.stop_propagation();
-                                    } else if this.composer_on_first_line(cx)
-                                        && this.navigate_prompt_history(-1, window, cx)
-                                    {
-                                        cx.stop_propagation();
-                                    }
-                                }
-                            }))
-                            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                                let mentions = this.live_file_mentions(cx);
-                                let picked = mentions
-                                    .get(this.mention_selected)
-                                    .cloned()
-                                    .map(|pick| this.accept_file_mention(&pick, window, cx))
-                                    .unwrap_or(false);
-                                if picked
-                                    || this.accept_slash_if_open(window, cx)
-                                    || this.accept_ghost(window, cx)
-                                {
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
-                                let (cursor, len) = {
-                                    let state = this.input.read(cx);
-                                    (state.cursor(), state.value().len())
-                                };
-                                if cursor == len && this.accept_ghost(window, cx) {
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .capture_action(cx.listener(|this, _: &InputEscape, _, cx| {
-                                if !this.live_slash(cx).is_empty() {
-                                    this.slash_dismissed = true;
-                                    this.slash_selected = 0;
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                } else if !this.mention_cache.is_empty() {
-                                    this.mention_dismissed = true;
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                } else if this.ghost_suffix.take().is_some() {
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .gap_0p5()
-                                    .child(Textarea::new(&self.input))
-                                    .when_some(ghost, |col, suffix| {
-                                        col.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(format!("Tab 补全：…{suffix}")),
+                                    border
+                                })
+                                .when(preview_on, |col| {
+                                    col.child(
+                                        v_flex()
+                                            .w_full()
+                                            .gap_1()
+                                            .pb_1p5()
+                                            .border_b_1()
+                                            .border_color(border)
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .italic()
+                                                    .text_color(muted)
+                                                    .child("预览"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("agent-composer-preview")
+                                                    .w_full()
+                                                    .max_h(px(150.))
+                                                    .overflow_y_scroll()
+                                                    .track_scroll(&self.composer_preview_scroll)
+                                                    .child(TextView::markdown(
+                                                        "agent-composer-preview-md",
+                                                        draft.clone(),
+                                                    )),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_0p5()
+                                        .capture_action(cx.listener(
+                                            |this, _: &MoveDown, window, cx| {
+                                                let hits = this.live_slash(cx);
+                                                if !hits.is_empty() {
+                                                    this.slash_selected =
+                                                        (this.slash_selected + 1) % hits.len();
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                } else {
+                                                    let mentions = this.live_file_mentions(cx);
+                                                    if !mentions.is_empty() {
+                                                        this.mention_selected =
+                                                            (this.mention_selected + 1)
+                                                                % mentions.len();
+                                                        cx.notify();
+                                                        cx.stop_propagation();
+                                                    } else if this.history_index.is_some()
+                                                        && this.composer_on_last_line(cx)
+                                                        && this
+                                                            .navigate_prompt_history(1, window, cx)
+                                                    {
+                                                        cx.stop_propagation();
+                                                    }
+                                                }
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |this, _: &MoveUp, window, cx| {
+                                                let hits = this.live_slash(cx);
+                                                if !hits.is_empty() {
+                                                    this.slash_selected = this
+                                                        .slash_selected
+                                                        .checked_sub(1)
+                                                        .unwrap_or(hits.len() - 1);
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                } else {
+                                                    let mentions = this.live_file_mentions(cx);
+                                                    if !mentions.is_empty() {
+                                                        this.mention_selected = this
+                                                            .mention_selected
+                                                            .checked_sub(1)
+                                                            .unwrap_or(mentions.len() - 1);
+                                                        cx.notify();
+                                                        cx.stop_propagation();
+                                                    } else if this.composer_on_first_line(cx)
+                                                        && this
+                                                            .navigate_prompt_history(-1, window, cx)
+                                                    {
+                                                        cx.stop_propagation();
+                                                    }
+                                                }
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |this, _: &IndentInline, window, cx| {
+                                                let mentions = this.live_file_mentions(cx);
+                                                let picked = mentions
+                                                    .get(this.mention_selected)
+                                                    .cloned()
+                                                    .map(|pick| {
+                                                        this.accept_file_mention(&pick, window, cx)
+                                                    })
+                                                    .unwrap_or(false);
+                                                if picked
+                                                    || this.accept_slash_if_open(window, cx)
+                                                    || this.accept_ghost(window, cx)
+                                                {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |this, _: &MoveRight, window, cx| {
+                                                let (cursor, len) = {
+                                                    let state = this.input.read(cx);
+                                                    (state.cursor(), state.value().len())
+                                                };
+                                                if cursor == len && this.accept_ghost(window, cx) {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |this, _: &InputEscape, _, cx| {
+                                                if !this.live_slash(cx).is_empty() {
+                                                    this.slash_dismissed = true;
+                                                    this.slash_selected = 0;
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                } else if !this.mention_cache.is_empty() {
+                                                    this.mention_dismissed = true;
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                } else if this.composer_preview {
+                                                    this.composer_preview = false;
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                } else if this.ghost_suffix.take().is_some() {
+                                                    cx.notify();
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                        .child(
+                                            Textarea::new(&self.input)
+                                                .appearance(false)
+                                                .bordered(false),
                                         )
-                                    }),
-                            )
-                            .child(
-                                Button::new("send")
-                                    .primary()
-                                    .label(if self.busy { "排队" } else { "发送" })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if this.accept_slash_if_open(window, cx) {
-                                            return;
-                                        }
-                                        let text = this.input.read(cx).value().to_string();
-                                        if !text.trim().is_empty() {
-                                            this.input.update(cx, |i, cx| {
-                                                i.set_value("", window, cx);
-                                            });
-                                            this.send(text, cx);
-                                        }
-                                    })),
-                            )
-                            .when(self.busy, |row| {
-                                row.child(
-                                    Button::new("agent-stop").danger().label("中止").on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.stop_turn(cx);
+                                        .when_some(ghost, |col, suffix| {
+                                            col.child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .px_1()
+                                                            .rounded(px(3.))
+                                                            .bg(border)
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child("Tab"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(format!("补全 …{suffix}")),
+                                                    ),
+                                            )
                                         }),
-                                    ),
                                 )
-                            }),
+                                .child(
+                                    // Tool row: permission/model chips on the left,
+                                    // preview toggle + send on the right.
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            h_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    h_flex()
+                                                        .id("agent-perm-chip")
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded(px(6.))
+                                                        .border_1()
+                                                        .border_color(border)
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.text_color(accent))
+                                                        .child(format!("权限 · {perm_label}"))
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.cycle_thread_permission(cx);
+                                                        })),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .id("agent-model-chip")
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded(px(6.))
+                                                        .border_1()
+                                                        .border_color(border)
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.text_color(accent))
+                                                        .child(format!("模型 · {model_label}"))
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.cycle_thread_model(cx);
+                                                        })),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .id("agent-slash-chip")
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded(px(6.))
+                                                        .border_1()
+                                                        .border_color(border)
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.text_color(accent))
+                                                        .child("/命令")
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                let value = this
+                                                                    .input
+                                                                    .read(cx)
+                                                                    .value()
+                                                                    .to_string();
+                                                                let next =
+                                                                    if value.trim().is_empty() {
+                                                                        "/".to_string()
+                                                                    } else {
+                                                                        format!("{value} /")
+                                                                    };
+                                                                let len = next.len();
+                                                                this.input.update(
+                                                                    cx,
+                                                                    |state, cx| {
+                                                                        state.set_value(
+                                                                            &next, window, cx,
+                                                                        );
+                                                                        state.set_selected_range(
+                                                                            len..len,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                                window.focus(
+                                                                    &this.input.focus_handle(cx),
+                                                                    cx,
+                                                                );
+                                                                cx.notify();
+                                                            },
+                                                        )),
+                                                )
+                                                .when(draft_chars > 0, |row| {
+                                                    row.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(format!("{draft_chars} 字")),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    h_flex()
+                                                        .id("agent-preview-toggle")
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded(px(6.))
+                                                        .border_1()
+                                                        .border_color(if self.composer_preview {
+                                                            accent.opacity(0.65)
+                                                        } else {
+                                                            border
+                                                        })
+                                                        .text_xs()
+                                                        .text_color(if self.composer_preview {
+                                                            accent
+                                                        } else {
+                                                            muted
+                                                        })
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.text_color(accent))
+                                                        .child("预览")
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.composer_preview =
+                                                                    !this.composer_preview;
+                                                                window.focus(
+                                                                    &this.input.focus_handle(cx),
+                                                                    cx,
+                                                                );
+                                                                cx.notify();
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("send")
+                                                        .primary()
+                                                        .label(if self.busy {
+                                                            "排队"
+                                                        } else {
+                                                            "发送"
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                if this.accept_slash_if_open(
+                                                                    window, cx,
+                                                                ) {
+                                                                    return;
+                                                                }
+                                                                let text = this
+                                                                    .input
+                                                                    .read(cx)
+                                                                    .value()
+                                                                    .to_string();
+                                                                if !text.trim().is_empty() {
+                                                                    this.input.update(
+                                                                        cx,
+                                                                        |i, cx| {
+                                                                            i.set_value(
+                                                                                "", window, cx,
+                                                                            );
+                                                                        },
+                                                                    );
+                                                                    this.send(text, cx);
+                                                                }
+                                                            },
+                                                        )),
+                                                )
+                                                .when(self.busy, |row| {
+                                                    row.child(
+                                                        Button::new("agent-stop")
+                                                            .danger()
+                                                            .label("中止")
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    this.stop_turn(cx);
+                                                                },
+                                                            )),
+                                                    )
+                                                }),
+                                        ),
+                                )
+                                .into_any_element()
+                        },
                     ),
             )
             .into_any_element()
