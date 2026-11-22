@@ -415,12 +415,22 @@ fn dispatch_tool_calls(
 }
 
 /// Approve or deny a pending tool approval and optionally execute it.
+fn current_tool_round(history: &[AgentMessage]) -> usize {
+    history
+        .iter()
+        .filter(|m| {
+            m.role == AgentRole::Assistant
+                && m.tool_calls_json.as_ref().is_some_and(|s| !s.is_empty())
+        })
+        .count()
+}
+
 pub fn resolve_approval(
     repo: &mut MemoryWorkbenchRepository,
     approval_id: &str,
     approved: bool,
     workspace_root: Option<&str>,
-) -> Result<TurnOutcome> {
+) -> Result<TurnPhase> {
     let Some(mut approval) = repo
         .list_agent_approvals()
         .into_iter()
@@ -461,11 +471,39 @@ pub fn resolve_approval(
     let msg = tool_msg(&approval.thread_id, &approval.tool_name, None, &content);
     repo.upsert_agent_message(msg.clone());
 
-    Ok(TurnOutcome {
+    let thread = repo
+        .list_agent_threads()
+        .into_iter()
+        .find(|t| t.id == approval.thread_id)
+        .ok_or_else(|| anyhow::anyhow!("找不到会话"))?;
+
+    let outcome = TurnOutcome {
         assistant: msg.clone(),
         tool_messages: vec![msg],
         open_view,
-    })
+    };
+
+    // If more approvals are still pending, stop and wait.
+    if !pending_approvals_for_thread(repo, &approval.thread_id).is_empty() {
+        return Ok(TurnPhase::Done(outcome));
+    }
+
+    let round = current_tool_round(&repo.messages_for_thread(&approval.thread_id));
+    let can_continue = round < MAX_TOOL_ROUNDS && !thread.model_ref.starts_with("builtin:");
+    if can_continue {
+        let messages = history_to_openai(&repo.messages_for_thread(&approval.thread_id));
+        Ok(TurnPhase::Continue(
+            Box::new(ContinueTurn {
+                thread,
+                workspace_root: workspace_root.map(|s| s.to_string()),
+                messages,
+                round,
+            }),
+            outcome,
+        ))
+    } else {
+        Ok(TurnPhase::Done(outcome))
+    }
 }
 
 pub fn pending_approvals_for_thread(
@@ -1135,8 +1173,11 @@ mod tests {
         repo.upsert_agent_approval(approval.clone());
         assert_eq!(pending_approvals_for_thread(&repo, &thread.id).len(), 1);
 
-        let out = resolve_approval(&mut repo, &approval.id, true, None).unwrap();
-        assert!(out.tool_messages[0].content.contains("已批准"));
+        let phase = resolve_approval(&mut repo, &approval.id, true, None).unwrap();
+        let tool_content = match &phase {
+            TurnPhase::Done(out) | TurnPhase::Continue(_, out) => out.tool_messages[0].content.clone(),
+        };
+        assert!(tool_content.contains("已批准"));
         assert_eq!(repo.list_tasks().len(), 1);
         assert!(pending_approvals_for_thread(&repo, &thread.id).is_empty());
     }

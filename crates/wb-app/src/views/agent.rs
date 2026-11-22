@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wb_agent::{
-    SlashCommand, StreamEvent, TurnPhase, apply_slash_completion, begin_user_turn,
+    ContinueTurn, SlashCommand, StreamEvent, TurnPhase, apply_slash_completion, begin_user_turn,
     clear_goal_round_flag, continue_turn_reply_streaming, create_thread, cycle_permission_mode,
     dequeue_user_text, enqueue_user_text, finish_continue_turn, finish_user_turn, load_providers,
     model_context_window, pending_approvals_for_thread, permission_mode_label,
@@ -679,6 +679,105 @@ impl AgentPane {
         }
     }
 
+    fn start_continue_turn(&mut self, cont: ContinueTurn, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.turn_gen = self.turn_gen.wrapping_add(1);
+        let expected = self.turn_gen;
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.busy = true;
+        self.status.clear();
+        if let Ok(mut draft) = self.stream_draft.lock() {
+            draft.clear();
+        }
+        if let Ok(mut stage) = self.stream_status.lock() {
+            stage.clear();
+        }
+        cx.notify();
+        self.spawn_draft_poll(expected, cx);
+
+        let proxy = self.state.with(|s| s.prefs.http_proxy.clone());
+        let draft_buf = self.stream_draft.clone();
+        let status_buf = self.stream_status.clone();
+        let cancel_flag = self.cancel_flag.clone();
+        cx.spawn(async move |this, cx| {
+            let still_active = |this: &WeakEntity<AgentPane>, cx: &mut AsyncApp| -> bool {
+                this.update(cx, |pane, _| pane.turn_gen == expected && pane.busy)
+                    .unwrap_or(false)
+            };
+            let clear_draft = |draft: &Arc<Mutex<String>>, status: &Arc<Mutex<String>>| {
+                if let Ok(mut d) = draft.lock() {
+                    d.clear();
+                }
+                if let Ok(mut s) = status.lock() {
+                    s.clear();
+                }
+            };
+
+            let mut cont_opt: Option<ContinueTurn> = Some(cont);
+
+            while let Some(cont) = cont_opt {
+                if !still_active(&this, cx) {
+                    return;
+                }
+                clear_draft(&draft_buf, &status_buf);
+                let proxy3 = proxy.clone();
+                let cont2 = cont.clone();
+                let draft3 = draft_buf.clone();
+                let status3 = status_buf.clone();
+                let cancel3 = cancel_flag.clone();
+                let reply = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("tokio runtime");
+                        rt.block_on(continue_turn_reply_streaming(
+                            &cont2,
+                            proxy3.as_deref(),
+                            |event| apply_stream_event(event, &draft3, &status3),
+                            Some(&cancel3),
+                        ))
+                    })
+                    .await;
+                if !still_active(&this, cx) {
+                    return;
+                }
+                cont_opt = this
+                    .update(cx, |this, cx| {
+                        clear_draft(&this.stream_draft, &this.stream_status);
+                        let next = this
+                            .state
+                            .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
+                        this.apply_open_view(next.open_view());
+                        this.state.persist_if_dirty();
+                        this.scroll_chat_to_bottom(cx);
+                        cx.notify();
+                        match next {
+                            TurnPhase::Continue(c, _) => Some(*c),
+                            TurnPhase::Done(_) => None,
+                        }
+                    })
+                    .ok()
+                    .flatten();
+            }
+
+            this.update(cx, |this, cx| {
+                if this.turn_gen == expected {
+                    clear_draft(&this.stream_draft, &this.stream_status);
+                    this.status.clear();
+                    this.busy = false;
+                    this.scroll_chat_to_bottom(cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn resend_message(&mut self, msg_id: &str, cx: &mut Context<Self>) {
         let Some(msg) = self.state.with(|s| {
             s.repo
@@ -784,16 +883,21 @@ impl AgentPane {
                 .find(|w| w.id == thread.workspace_id)
                 .and_then(|w| w.root_path)
         });
-        let open_view = self.state.with_mut(|s| {
-            resolve_approval(&mut s.repo, &approval_id, approved, root.as_deref())
-                .map(|o| o.open_view)
-                .unwrap_or_else(|e| {
-                    log::warn!("审批失败: {e}");
-                    None
-                })
-        });
+        let phase = self
+            .state
+            .with_mut(|s| resolve_approval(&mut s.repo, &approval_id, approved, root.as_deref()));
+        let open_view = match &phase {
+            Ok(p) => p.open_view().map(|s| s.to_string()),
+            Err(e) => {
+                log::warn!("审批失败: {e}");
+                None
+            }
+        };
         self.apply_open_view(open_view.as_deref());
         self.state.persist_if_dirty();
+        if let Ok(TurnPhase::Continue(cont, _)) = phase {
+            self.start_continue_turn(*cont, cx);
+        }
         cx.notify();
     }
 

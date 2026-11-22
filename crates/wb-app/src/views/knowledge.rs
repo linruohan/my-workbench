@@ -12,6 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use wb_domain::{FindFlags, body_links_to, extract_wikilinks, find_spans, resolve_wikilink};
 use wb_host::{create_markdown, list_files_recursive, read_text, search_kb_content, write_text};
 
@@ -47,6 +48,8 @@ pub struct KnowledgePane {
     find_word: bool,
     find_case: bool,
     find_regex: bool,
+    last_editor_scroll_y: f32,
+    last_preview_item: f32,
     _subs: Vec<Subscription>,
 }
 
@@ -95,8 +98,11 @@ impl KnowledgePane {
             find_word: false,
             find_case: false,
             find_regex: false,
+            last_editor_scroll_y: 0.0,
+            last_preview_item: 0.0,
             _subs: Vec::new(),
         };
+        this.spawn_live_scroll_sync(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-f", FindNote, None),
             KeyBinding::new("escape", CloseFind, None),
@@ -200,6 +206,82 @@ impl KnowledgePane {
         self.preview.update(cx, |state, cx| {
             state.set_text(&rendered, cx);
         });
+    }
+
+    fn spawn_live_scroll_sync(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(32))
+                    .await;
+                if this
+                    .update(cx, |pane, cx| pane.tick_live_scroll(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn tick_live_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.mode != KbMode::Live || self.current.is_none() {
+            return;
+        }
+        let source = self.editor.read(cx).value().to_string();
+        if source.is_empty() {
+            return;
+        }
+        let Some(line_height) = self.editor.read(cx).line_height() else {
+            return;
+        };
+        let line_h = f32::from(line_height);
+        if line_h <= 0.0 {
+            return;
+        }
+        let editor_y = self.editor.read(cx).scroll_y_f64() as f32;
+        let editor_line = (-editor_y / line_h).max(0.0);
+        let preview_top = self.preview.read(cx).list_state().logical_scroll_top();
+        let preview_item =
+            preview_top.item_ix as f32 + f32::from(preview_top.offset_in_item) / line_h.max(1.0);
+        let de = (editor_y - self.last_editor_scroll_y).abs();
+        let dp = (preview_item - self.last_preview_item).abs();
+        if de < 1.0 && dp < 0.15 {
+            return;
+        }
+        let outline = markdown_scroll_outline(&source);
+        if de >= dp {
+            let item = outline.item_for_line(editor_line);
+            self.preview.update(cx, |state, cx| {
+                let list = state.list_state();
+                if list.item_count() == 0 {
+                    return;
+                }
+                let max_ix = list.item_count() - 1;
+                let ix = (item.floor() as usize).min(max_ix);
+                let frac = (item - ix as f32).clamp(0.0, 1.0);
+                let offset = list
+                    .bounds_for_item(ix)
+                    .map(|b| b.size.height * frac)
+                    .unwrap_or(px(0.));
+                list.scroll_to(ListOffset {
+                    item_ix: ix,
+                    offset_in_item: offset,
+                });
+                cx.notify();
+            });
+            self.last_editor_scroll_y = editor_y;
+            self.last_preview_item = item;
+        } else {
+            let line = outline.line_for_item(preview_item);
+            let y = -(line * line_h) as f64;
+            self.editor.update(cx, |editor, cx| {
+                editor.set_scroll_y_f64(y, cx);
+            });
+            self.last_preview_item = preview_item;
+            self.last_editor_scroll_y = y as f32;
+        }
     }
 
     fn preview_style(&self) -> TextViewStyle {
@@ -1391,9 +1473,163 @@ impl Render for KnowledgePane {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ScrollOutline {
+    /// Pairs of (source line, preview list item), including document start/end.
+    anchors: Vec<(f32, f32)>,
+}
+
+impl ScrollOutline {
+    fn item_for_line(&self, line: f32) -> f32 {
+        map_axis(line, &self.anchors)
+    }
+
+    fn line_for_item(&self, item: f32) -> f32 {
+        let swapped: Vec<(f32, f32)> = self.anchors.iter().map(|(l, i)| (*i, *l)).collect();
+        map_axis(item, &swapped)
+    }
+}
+
+fn map_axis(pos: f32, anchors: &[(f32, f32)]) -> f32 {
+    if anchors.is_empty() {
+        return 0.0;
+    }
+    if anchors.len() == 1 || pos <= anchors[0].0 {
+        return anchors[0].1;
+    }
+    for pair in anchors.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        if pos <= x1 {
+            if (x1 - x0).abs() < f32::EPSILON {
+                return y0;
+            }
+            let t = ((pos - x0) / (x1 - x0)).clamp(0.0, 1.0);
+            return y0 + t * (y1 - y0);
+        }
+    }
+    anchors[anchors.len() - 1].1
+}
+
+fn is_atx_heading(line: &str) -> bool {
+    let t = line.trim();
+    let hashes = t.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && (t.len() == hashes || t.as_bytes().get(hashes) == Some(&b' '))
+}
+
+fn is_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
+fn is_list_item(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") {
+        return true;
+    }
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && t.as_bytes().get(digits..digits + 2) == Some(b". ")
+}
+
+fn is_hr(line: &str) -> bool {
+    let t: String = line.trim().chars().filter(|c| !c.is_whitespace()).collect();
+    t.len() >= 3
+        && (t.bytes().all(|b| b == b'-')
+            || t.bytes().all(|b| b == b'*')
+            || t.bytes().all(|b| b == b'_'))
+}
+
+/// Approximate gpui-kit markdown list rows: each ATX heading, fence, rule,
+/// list, blockquote or paragraph is one top-level block.
+fn markdown_scroll_outline(source: &str) -> ScrollOutline {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let last_line = lines.len().saturating_sub(1);
+    let mut headings: Vec<(usize, usize)> = Vec::new();
+    let mut next_item = 0usize;
+    let mut in_fence = false;
+    let mut para_open = false;
+    let mut list_open = false;
+    let mut quote_open = false;
+
+    let close_flow = |para: &mut bool, list: &mut bool, quote: &mut bool| {
+        *para = false;
+        *list = false;
+        *quote = false;
+    };
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        if is_fence(line) {
+            if !in_fence {
+                close_flow(&mut para_open, &mut list_open, &mut quote_open);
+                next_item += 1;
+                in_fence = true;
+            } else {
+                in_fence = false;
+            }
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if line.trim().is_empty() {
+            close_flow(&mut para_open, &mut list_open, &mut quote_open);
+            continue;
+        }
+        if is_atx_heading(line) {
+            close_flow(&mut para_open, &mut list_open, &mut quote_open);
+            headings.push((line_idx, next_item));
+            next_item += 1;
+            continue;
+        }
+        if is_hr(line) {
+            close_flow(&mut para_open, &mut list_open, &mut quote_open);
+            next_item += 1;
+            continue;
+        }
+        if line.trim_start().starts_with('>') {
+            if !quote_open {
+                close_flow(&mut para_open, &mut list_open, &mut quote_open);
+                quote_open = true;
+                next_item += 1;
+            }
+            continue;
+        }
+        if is_list_item(line) {
+            if !list_open {
+                close_flow(&mut para_open, &mut list_open, &mut quote_open);
+                list_open = true;
+                next_item += 1;
+            }
+            continue;
+        }
+        if !para_open {
+            close_flow(&mut para_open, &mut list_open, &mut quote_open);
+            para_open = true;
+            next_item += 1;
+        }
+    }
+
+    let last_item = next_item.saturating_sub(1);
+    let mut anchors: Vec<(f32, f32)> = Vec::new();
+    if headings.first().is_none_or(|(line, _)| *line > 0) {
+        anchors.push((0.0, 0.0));
+    }
+    for (line, item) in headings {
+        let pair = (line as f32, item as f32);
+        if anchors.last() != Some(&pair) {
+            anchors.push(pair);
+        }
+    }
+    let end = (last_line as f32, last_item as f32);
+    if anchors.last() != Some(&end) {
+        anchors.push(end);
+    }
+    ScrollOutline { anchors }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_kb_tree, wikilinks_for_preview};
+    use super::{build_kb_tree, markdown_scroll_outline, wikilinks_for_preview};
 
     #[test]
     fn wikilinks_become_preview_links() {
@@ -1427,5 +1663,16 @@ mod tests {
             tree[0].children[0].children[0].snippet.as_deref(),
             Some("L2 · hello")
         );
+    }
+
+    #[test]
+    fn live_outline_maps_headings_to_blocks() {
+        let md = "# A\n\npara\n\n## B\n";
+        let outline = markdown_scroll_outline(md);
+        assert!((outline.item_for_line(0.0) - 0.0).abs() < 0.01);
+        assert!((outline.item_for_line(4.0) - 2.0).abs() < 0.01);
+        let mid = outline.item_for_line(2.0);
+        assert!(mid > 0.4 && mid < 1.6);
+        assert!((outline.line_for_item(2.0) - 4.0).abs() < 0.01);
     }
 }
