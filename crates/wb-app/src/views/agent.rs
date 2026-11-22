@@ -857,6 +857,7 @@ impl AgentPane {
                 tool_name: None,
                 tool_call_id: None,
                 tool_calls_json: None,
+                duration_ms: None,
                 created_at: now_ms(),
             };
             self.state.with_mut(|s| s.repo.upsert_agent_message(msg));
@@ -1500,6 +1501,10 @@ impl AgentPane {
         let stamp = wb_domain::format_local_stamp(now_ms());
         let name = crate::thread_export::export_file_name(&title, &stamp);
         let dir = std::path::Path::new(&root).join(".wb").join("exports");
+        // Never overwrite: a second export within the same second would
+        // otherwise silently replace the previous file.
+        let name =
+            crate::thread_export::unique_name(&name, |candidate| dir.join(candidate).exists());
         let path = dir.join(&name);
         match wb_host::write_text(&path, &markdown) {
             Ok(()) => {
@@ -4361,6 +4366,15 @@ fn render_chat_message(
                 .child(role.to_string()),
         )
         .child(div().text_xs().text_color(muted).child(clock))
+        .when_some(m.duration_ms, |row, ms| {
+            // Fast calls read better in ms; anything past a second in seconds.
+            let label = if ms < 1_000 {
+                format!("{ms} ms")
+            } else {
+                format!("{:.1} s", ms as f64 / 1000.0)
+            };
+            row.child(div().text_xs().text_color(muted).child(label))
+        })
         .when(
             is_assistant && !content.contains("模型请求失败"),
             |row| {

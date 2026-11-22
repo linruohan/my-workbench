@@ -679,6 +679,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now_ms(),
+            duration_ms: None,
         }
     }
 
@@ -752,6 +753,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now,
+            duration_ms: None,
         });
         repo.upsert_agent_approval(AgentApproval {
             id: "a1".into(),
@@ -788,6 +790,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now,
+            duration_ms: None,
         });
         repo.upsert_agent_message(AgentMessage {
             id: "m2".into(),
@@ -798,6 +801,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now + 1,
+            duration_ms: None,
         });
         repo.upsert_agent_message(AgentMessage {
             id: "m3".into(),
@@ -808,6 +812,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now + 2,
+            duration_ms: None,
         });
         repo.upsert_agent_message(AgentMessage {
             id: "m4".into(),
@@ -818,6 +823,7 @@ mod tests {
             tool_call_id: None,
             tool_calls_json: None,
             created_at: now + 3,
+            duration_ms: None,
         });
         repo.truncate_agent_messages_at("th1", now + 2);
         let left: Vec<_> = repo
