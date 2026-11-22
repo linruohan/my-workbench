@@ -1469,6 +1469,48 @@ impl AgentPane {
         cx.notify();
     }
 
+    /// Write the active thread to `<workspace>/.wb/exports/` as Markdown.
+    fn export_active_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
+            self.status = "没有可导出的会话".into();
+            cx.notify();
+            return;
+        };
+        let (title, messages) = self.state.with(|s| {
+            let title = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+                .map(|t| t.title)
+                .unwrap_or_else(|| "会话".into());
+            (title, s.repo.messages_for_thread(&tid))
+        });
+        if messages.is_empty() {
+            self.status = "会话还没有消息".into();
+            cx.notify();
+            return;
+        }
+        let Some(root) = self.workspace_root() else {
+            self.status = "当前会话没有工作区，无法导出".into();
+            cx.notify();
+            return;
+        };
+        let markdown = crate::thread_export::thread_to_markdown(&title, &messages);
+        let stamp = wb_domain::format_local_stamp(now_ms());
+        let name = crate::thread_export::export_file_name(&title, &stamp);
+        let dir = std::path::Path::new(&root).join(".wb").join("exports");
+        let path = dir.join(&name);
+        match wb_host::write_text(&path, &markdown) {
+            Ok(()) => {
+                self.status = format!("已导出到 {}", path.display());
+                let _ = wb_host::open_path(&dir);
+            }
+            Err(e) => self.status = format!("导出失败：{e}"),
+        }
+        cx.notify();
+    }
+
     /// `Alt+↑`: pull the newest user message back into the composer for editing.
     pub fn edit_last_user_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
@@ -2639,6 +2681,15 @@ impl AgentPane {
                             )
                             .when_some(goal_chip, |row, chip| row.child(chip))
                             .when_some(todo_chip, |row, chip| row.child(chip))
+                            .child(
+                                Button::new("agent-export")
+                                    .xsmall()
+                                    .ghost()
+                                    .label("导出")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.export_active_thread(cx);
+                                    })),
+                            )
                             .when(!todos_all.is_empty(), |row| {
                                 row.child(
                                     Button::new("agent-todo-toggle")
