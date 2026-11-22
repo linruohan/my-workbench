@@ -72,6 +72,8 @@ pub struct AgentPane {
     web_url_input: Entity<InputState>,
     ask_input: Entity<InputState>,
     find: Entity<InputState>,
+    /// Filters the thread list by title.
+    thread_query: Entity<InputState>,
     webview: Option<Entity<WebView>>,
     loaded_web_url: Option<String>,
     busy: bool,
@@ -134,6 +136,7 @@ impl AgentPane {
         let web_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://… 新建网页会话"));
         let find = cx.new(|cx| InputState::new(window, cx).placeholder("筛选消息…"));
+        let thread_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话…"));
         let ask_input = cx.new(|cx| InputState::new(window, cx).placeholder("回答 Agent 的问题…"));
         let state_seed = state.with(|s| s.prefs.agent.prompt_history.clone());
         let mut this = Self {
@@ -142,6 +145,7 @@ impl AgentPane {
             web_url_input: web_url_input.clone(),
             ask_input: ask_input.clone(),
             find: find.clone(),
+            thread_query: thread_query.clone(),
             webview: None,
             loaded_web_url: None,
             busy: false,
@@ -234,6 +238,13 @@ impl AgentPane {
                     cx.notify();
                 }
             }));
+        this._subs.push(
+            cx.subscribe_in(&thread_query, window, |_this, _, event, _, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            }),
+        );
         this._subs.push(cx.subscribe_in(
             &web_url_input,
             window,
@@ -2175,6 +2186,7 @@ impl AgentPane {
         let ctx_pct = ((ctx_used as f32 / ctx_cap as f32) * 100.0).min(999.0);
         let ws_filter = self.workspace_filter.clone();
         let show_archived = self.show_archived;
+        let thread_q = self.thread_query.read(cx).value().trim().to_lowercase();
         let mut threads = threads;
         threads.sort_by(|a, b| match (a.pinned_at, b.pinned_at) {
             (Some(x), Some(y)) => y.cmp(&x),
@@ -2191,6 +2203,7 @@ impl AgentPane {
                     .map(|id| &t.workspace_id == id)
                     .unwrap_or(true)
             })
+            .filter(|t| thread_q.is_empty() || t.title.to_lowercase().contains(&thread_q))
             .map(|t| {
                 let id = t.id.clone();
                 let selected = active.as_deref() == Some(id.as_str());
@@ -2450,6 +2463,15 @@ impl AgentPane {
                             })),
                         ),
                     )
+                    .child(Input::new(&self.thread_query).small().cleanable(true))
+                    .when(!thread_q.is_empty() && thread_rows.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("没有标题匹配的会话"),
+                        )
+                    })
                     .child(
                         v_flex()
                             .gap_1()
