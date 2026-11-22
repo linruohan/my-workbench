@@ -94,6 +94,8 @@ pub struct AgentPane {
     /// Show the draft as rendered Markdown above the input.
     composer_preview: bool,
     composer_preview_scroll: ScrollHandle,
+    /// Per-thread unsent composer text, so switching threads does not mix drafts.
+    drafts: std::collections::HashMap<String, String>,
     /// `(workspace root, branch)` cache so rendering never shells out to git.
     branch_cache: Option<(String, String)>,
     /// Ask approvals that already have an auto-answer timer running.
@@ -150,6 +152,7 @@ impl AgentPane {
             mention_dismissed: false,
             composer_preview: false,
             composer_preview_scroll: ScrollHandle::new(),
+            drafts: std::collections::HashMap::new(),
             branch_cache: None,
             ask_timers: HashSet::new(),
             status: String::new(),
@@ -1448,14 +1451,50 @@ impl AgentPane {
     }
 
     fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
-        if self
-            .state
-            .with(|s| s.active_thread_id.as_deref() != Some(id.as_str()))
-        {
-            self.stop_turn(cx);
+        let previous = self.state.with(|s| s.active_thread_id.clone());
+        let changed = previous.as_deref() != Some(id.as_str());
+        if changed {
+            // Stash the unsent text per thread before the composer is replaced.
+            let text = self.input.read(cx).value().to_string();
+            if let Some(prev) = previous.clone() {
+                if text.trim().is_empty() {
+                    self.drafts.remove(&prev);
+                } else {
+                    self.drafts.insert(prev, text);
+                }
+            }
+            // A thread switch abandons the in-flight turn, but the partial text
+            // belongs to the old thread and must not land in the new one.
+            self.abort_turn_quietly(cx);
+            // Per-thread caches are keyed by workspace and composer history.
+            self.branch_cache = None;
+            self.mention_cache.clear();
+            self.mention_cache_key = None;
+            self.history_index = None;
+            self.ghost_suffix = None;
+            self.slash_dismissed = false;
+            self.pending_edit = Some(self.drafts.get(&id).cloned().unwrap_or_default());
         }
         self.state.with_mut(|s| s.active_thread_id = Some(id));
         self.scroll_chat_to_bottom(cx);
+        cx.notify();
+    }
+
+    /// Drop the running turn without writing a partial assistant message.
+    fn abort_turn_quietly(&mut self, cx: &mut Context<Self>) {
+        if !self.busy {
+            return;
+        }
+        self.turn_gen = self.turn_gen.wrapping_add(1);
+        self.busy = false;
+        self.cancel_flag.store(true, Ordering::Relaxed);
+        if let Ok(mut draft) = self.stream_draft.lock() {
+            draft.clear();
+        }
+        if let Ok(mut stage) = self.stream_status.lock() {
+            stage.clear();
+        }
+        self.status.clear();
         cx.notify();
     }
 
