@@ -173,6 +173,87 @@ pub fn body_links_to(body: &str, target_abs: &str, files: &[(String, String)]) -
     false
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FindFlags {
+    pub whole_word: bool,
+    pub match_case: bool,
+    pub regex: bool,
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn is_word_bounded(text: &str, start: usize, end: usize) -> bool {
+    let before_ok = text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_word_char(ch));
+    let after_ok = text[end..]
+        .chars()
+        .next()
+        .is_none_or(|ch| !is_word_char(ch));
+    before_ok && after_ok
+}
+
+fn match_len_at(hay: &str, needle: &str, match_case: bool) -> Option<usize> {
+    if match_case {
+        return hay.starts_with(needle).then_some(needle.len());
+    }
+    let mut hay_chars = hay.chars();
+    let mut consumed = 0usize;
+    for needle_ch in needle.chars() {
+        let hay_ch = hay_chars.next()?;
+        if hay_ch.to_lowercase().ne(needle_ch.to_lowercase()) {
+            return None;
+        }
+        consumed += hay_ch.len_utf8();
+    }
+    Some(consumed)
+}
+
+/// Byte ranges of `needle` in `text`.
+pub fn find_spans(
+    text: &str,
+    needle: &str,
+    flags: FindFlags,
+) -> Result<Vec<(usize, usize)>, String> {
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    if flags.regex {
+        let re = regex::RegexBuilder::new(needle)
+            .case_insensitive(!flags.match_case)
+            .build()
+            .map_err(|err| format!("正则无效: {err}"))?;
+        let mut out = Vec::new();
+        for found in re.find_iter(text) {
+            if !flags.whole_word || is_word_bounded(text, found.start(), found.end()) {
+                out.push((found.start(), found.end()));
+            }
+        }
+        return Ok(out);
+    }
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < text.len() {
+        if let Some(len) = match_len_at(&text[i..], needle, flags.match_case) {
+            let end = i + len;
+            if !flags.whole_word || is_word_bounded(text, i, end) {
+                out.push((i, end));
+                i = end.max(i + 1);
+                continue;
+            }
+        }
+        i += text[i..]
+            .chars()
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(1);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +293,16 @@ mod tests {
         let files = vec![("C:/v/A.md".into(), "A.md".into())];
         assert!(body_links_to("link [[A]] here", "C:/v/A.md", &files));
         assert!(!body_links_to("no link", "C:/v/A.md", &files));
+    }
+
+    #[test]
+    fn find_spans_respects_word_and_case() {
+        let flags = FindFlags {
+            whole_word: true,
+            match_case: false,
+            regex: false,
+        };
+        let spans = find_spans("Note notes NOTE", "note", flags).unwrap();
+        assert_eq!(spans, vec![(0, 4), (11, 15)]);
     }
 }

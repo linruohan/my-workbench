@@ -300,6 +300,30 @@ impl Render for InspectorPane {
         if self.git_at.elapsed() > Duration::from_secs(5) {
             self.reload_git();
         }
+        let collapsed = self.state.with(|s| s.prefs.right_sidebar_collapsed);
+        let host = self.host.clone();
+        if collapsed {
+            return v_flex()
+                .size_full()
+                .bg(cx.theme().sidebar)
+                .border_l_1()
+                .border_color(cx.theme().sidebar_border)
+                .items_center()
+                .pt_2()
+                .child(
+                    Button::new("insp-expand")
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::ChevronLeft)
+                        .tooltip("展开右侧栏")
+                        .on_click(move |_, window, app| {
+                            if let Some(e) = host.upgrade() {
+                                e.update(app, |this, cx| this.toggle_right_collapsed(window, cx));
+                            }
+                        }),
+                )
+                .into_any_element();
+        }
         let root = self.root();
         let tab = self.tab;
         let muted = cx.theme().muted_foreground;
@@ -429,6 +453,21 @@ impl Render for InspectorPane {
                             .icon(IconName::RefreshCw)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     )
+                    .child({
+                        let host = self.host.clone();
+                        Button::new("insp-collapse")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::ChevronRight)
+                            .tooltip("收起右侧栏")
+                            .on_click(move |_, window, app| {
+                                if let Some(e) = host.upgrade() {
+                                    e.update(app, |this, cx| {
+                                        this.toggle_right_collapsed(window, cx)
+                                    });
+                                }
+                            })
+                    })
                     .when(root.is_none(), |row| {
                         row.child(
                             Button::new("insp-add")
@@ -483,6 +522,7 @@ impl Render for InspectorPane {
                     InspectorTab::Git => self.git_panel(git, muted, cx).into_any_element(),
                 }),
             )
+            .into_any_element()
     }
 }
 

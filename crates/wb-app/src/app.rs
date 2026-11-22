@@ -23,9 +23,12 @@ use wb_domain::{
 
 actions!(workbench, [OpenPalette, FocusCapture, Escape]);
 
+const RIGHT_SIDEBAR_COLLAPSED_WIDTH: f32 = 40.0;
+
 pub struct WorkbenchApp {
     state: AppState,
     collapsed: bool,
+    right_collapsed: bool,
     ptt_held: bool,
     sidebar_panels: Entity<ResizableState>,
     tasks: Entity<TasksPane>,
@@ -43,6 +46,7 @@ impl WorkbenchApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::load();
         let collapsed = state.with(|s| s.prefs.sidebar_collapsed);
+        let right_collapsed = state.with(|s| s.prefs.right_sidebar_collapsed);
         themes::apply_saved_appearance(Some(window), cx);
 
         let tasks = cx.new(|cx| TasksPane::new(state.clone(), window, cx));
@@ -135,6 +139,7 @@ impl WorkbenchApp {
         Self {
             state,
             collapsed,
+            right_collapsed,
             ptt_held: false,
             sidebar_panels,
             tasks,
@@ -322,6 +327,23 @@ impl WorkbenchApp {
         };
         self.sidebar_panels.update(cx, |state, cx| {
             state.resize_panel(0, px(width), window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_right_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.right_collapsed = !self.right_collapsed;
+        self.state
+            .with_mut(|s| s.prefs.right_sidebar_collapsed = self.right_collapsed);
+        self.state.persist_prefs();
+        let width = if self.right_collapsed {
+            RIGHT_SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            self.state
+                .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width))
+        };
+        self.sidebar_panels.update(cx, |state, cx| {
+            state.resize_panel(2, px(width), window, cx);
         });
         cx.notify();
     }
@@ -643,6 +665,7 @@ impl Render for WorkbenchApp {
 
                         let entity = entity.clone();
                         let inspector = self.inspector.clone();
+                        let right_collapsed = self.right_collapsed;
                         let left_width = if collapsed { 48.0 } else { width };
                         let left_range = if collapsed {
                             px(48.)..px(48.)
@@ -666,7 +689,9 @@ impl Render for WorkbenchApp {
                                                     }
                                                 }
                                                 if let Some(w) = right {
-                                                    this.set_right_sidebar_width(w, cx);
+                                                    if !this.right_collapsed {
+                                                        this.set_right_sidebar_width(w, cx);
+                                                    }
                                                 }
                                             });
                                         }
@@ -679,16 +704,24 @@ impl Render for WorkbenchApp {
                                             .child(sidebar),
                                     )
                                     .child(resizable_panel().child(main))
-                                    .child(
+                                    .child({
+                                        let right_size = if right_collapsed {
+                                            RIGHT_SIDEBAR_COLLAPSED_WIDTH
+                                        } else {
+                                            right_width
+                                        };
+                                        let right_range = if right_collapsed {
+                                            px(RIGHT_SIDEBAR_COLLAPSED_WIDTH)
+                                                ..px(RIGHT_SIDEBAR_COLLAPSED_WIDTH)
+                                        } else {
+                                            px(RIGHT_SIDEBAR_WIDTH_MIN)..px(RIGHT_SIDEBAR_WIDTH_MAX)
+                                        };
                                         resizable_panel()
-                                            .size(px(right_width))
-                                            .size_range(
-                                                px(RIGHT_SIDEBAR_WIDTH_MIN)
-                                                    ..px(RIGHT_SIDEBAR_WIDTH_MAX),
-                                            )
+                                            .size(px(right_size))
+                                            .size_range(right_range)
                                             .fixed()
-                                            .child(inspector),
-                                    ),
+                                            .child(inspector)
+                                    }),
                             )
                             .into_any_element()
                     })),

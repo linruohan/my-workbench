@@ -26,6 +26,8 @@ pub struct AppPrefs {
     #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default)]
+    pub right_sidebar_collapsed: bool,
+    #[serde(default)]
     pub theme_mode: ThemeModePref,
     /// Named theme from the theme registry, for example "Catppuccin Mocha".
     #[serde(default)]
@@ -173,6 +175,7 @@ impl Default for AppPrefs {
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
             right_sidebar_width: RIGHT_SIDEBAR_WIDTH_DEFAULT,
             sidebar_collapsed: false,
+            right_sidebar_collapsed: false,
             theme_mode: ThemeModePref::Light,
             theme_name: None,
             ui_radius: None,
