@@ -436,18 +436,6 @@ impl Render for WorkbenchApp {
                 })
                 .collect()
         });
-        let tag_items: Vec<(String, String, usize, bool)> = self.state.with(|s| {
-            s.repo
-                .list_tags()
-                .into_iter()
-                .map(|t| {
-                    let count = s.repo.count_tasks_for_tag(&t.id);
-                    let active =
-                        nav == AppNav::Tags && s.active_tag_id.as_deref() == Some(t.id.as_str());
-                    (t.id, t.title, count, active)
-                })
-                .collect()
-        });
         let palette_open = self.state.with(|s| s.palette_open);
         let notifications_open = self.state.with(|s| s.notifications_open);
         let entity = cx.weak_entity();
@@ -531,31 +519,6 @@ impl Render for WorkbenchApp {
                                     s.nav = AppNav::Projects;
                                     s.active_project_id = Some(id.clone());
                                     s.active_tag_id = None;
-                                });
-                                cx.notify();
-                            });
-                        }
-                    })
-            }));
-
-        let tag_menu =
-            SidebarMenu::new().children(tag_items.into_iter().map(|(id, title, count, active)| {
-                let entity = entity.clone();
-                let label = if count > 0 {
-                    format!("#{title} ({count})")
-                } else {
-                    format!("#{title}")
-                };
-                SidebarMenuItem::new(label)
-                    .icon(IconName::Star)
-                    .active(active)
-                    .on_click(move |_, _, app| {
-                        if let Some(e) = entity.upgrade() {
-                            e.update(app, |this, cx| {
-                                this.state.with_mut(|s| {
-                                    s.nav = AppNav::Tags;
-                                    s.active_tag_id = Some(id.clone());
-                                    s.active_project_id = None;
                                 });
                                 cx.notify();
                             });
@@ -678,7 +641,6 @@ impl Render for WorkbenchApp {
                                     })
                                     .child(project_menu),
                             )
-                            .child(SidebarGroup::new("标签").child(tag_menu))
                             .child(SidebarGroup::new("工具").child(tools_menu))
                             .footer({
                                 let account_footer = div()
@@ -727,14 +689,31 @@ impl Render for WorkbenchApp {
                                         .child(Icon::new(IconName::Settings).size_4())
                                 }
                             });
+                        let page_header = match nav {
+                            AppNav::Today
+                            | AppNav::Inbox
+                            | AppNav::Done
+                            | AppNav::Planner
+                            | AppNav::Projects
+                            | AppNav::Tags => {
+                                self.tasks.update(cx, |pane, cx| pane.chrome_header(cx))
+                            }
+                            AppNav::Timed => {
+                                self.timed.update(cx, |pane, cx| pane.chrome_header(cx))
+                            }
+                            AppNav::Knowledge | AppNav::Agent | AppNav::Settings => {
+                                div().flex_1().into_any_element()
+                            }
+                        };
                         let main = v_flex()
                             .flex_1()
                             .h_full()
                             .min_w_0()
                             .child(
                                 h_flex()
-                                    .h(px(44.))
+                                    .min_h(px(44.))
                                     .px_3()
+                                    .py_1()
                                     .items_center()
                                     .gap_2()
                                     .border_b_1()
@@ -746,8 +725,7 @@ impl Render for WorkbenchApp {
                                             }),
                                         ),
                                     )
-                                    .child(div().font_bold().child(nav.label()))
-                                    .child(div().flex_1())
+                                    .child(page_header)
                                     .when(ptt_held, |row| {
                                         row.child(
                                             div()

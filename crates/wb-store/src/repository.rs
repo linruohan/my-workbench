@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use wb_domain::{
     AgentApproval, AgentMessage, AgentThread, AgentWorkspace, AppNotification,
     DEFAULT_AGENT_WORKSPACE_TITLE, INBOX_PROJECT_ID, Note, NotificationKind, NotificationStatus,
-    Project, ProjectBucket, Tag, Task, TimedTask, create_id, create_inbox_project,
+    Project, ProjectBucket, Tag, Task, TimedRunRecord, TimedTask, create_id, create_inbox_project,
     create_task_draft, mark_task_complete, mark_task_incomplete, now_ms, try_advance_repeat,
 };
 
@@ -18,6 +18,7 @@ pub struct MemoryWorkbenchRepository {
     notes: HashMap<String, Note>,
     notifications: Vec<AppNotification>,
     timed_tasks: HashMap<String, TimedTask>,
+    timed_runs: Vec<TimedRunRecord>,
     agent_workspaces: HashMap<String, AgentWorkspace>,
     agent_threads: HashMap<String, AgentThread>,
     agent_messages: HashMap<String, AgentMessage>,
@@ -58,6 +59,7 @@ impl MemoryWorkbenchRepository {
             notes: HashMap::new(),
             notifications: Vec::new(),
             timed_tasks: HashMap::new(),
+            timed_runs: Vec::new(),
             agent_workspaces,
             agent_threads: HashMap::new(),
             agent_messages: HashMap::new(),
@@ -97,6 +99,7 @@ impl MemoryWorkbenchRepository {
             notes: self.list_notes(),
             notifications: self.notifications.clone(),
             timed_tasks: self.list_timed_tasks(),
+            timed_runs: self.timed_runs.clone(),
             agent_workspaces: self.list_agent_workspaces(),
             agent_threads: self.list_agent_threads(),
             agent_messages: self.list_agent_messages(),
@@ -130,6 +133,7 @@ impl MemoryWorkbenchRepository {
             .into_iter()
             .map(|t| (t.id.clone(), t))
             .collect();
+        self.timed_runs = snap.timed_runs;
         self.agent_workspaces = snap
             .agent_workspaces
             .into_iter()
@@ -526,11 +530,45 @@ impl MemoryWorkbenchRepository {
 
     pub fn delete_timed_task(&mut self, id: &str) {
         self.timed_tasks.remove(id);
+        self.timed_runs.retain(|run| run.task_id != id);
         self.dirty = true;
     }
 
     pub fn get_timed_task(&self, id: &str) -> Option<&TimedTask> {
         self.timed_tasks.get(id)
+    }
+
+    pub fn append_timed_run(&mut self, record: TimedRunRecord) {
+        let task_id = record.task_id.clone();
+        self.timed_runs.push(record);
+        let mut extra = self
+            .timed_runs
+            .iter()
+            .filter(|run| run.task_id == task_id)
+            .count()
+            .saturating_sub(200);
+        while extra > 0 {
+            if let Some(index) = self
+                .timed_runs
+                .iter()
+                .position(|run| run.task_id == task_id)
+            {
+                self.timed_runs.remove(index);
+            }
+            extra -= 1;
+        }
+        self.dirty = true;
+    }
+
+    pub fn list_timed_runs(&self, task_id: &str) -> Vec<TimedRunRecord> {
+        let mut runs: Vec<_> = self
+            .timed_runs
+            .iter()
+            .filter(|run| run.task_id == task_id)
+            .cloned()
+            .collect();
+        runs.sort_by_key(|run| std::cmp::Reverse(run.ran_at));
+        runs
     }
 
     pub fn list_agent_workspaces(&self) -> Vec<AgentWorkspace> {
@@ -689,6 +727,36 @@ mod tests {
         repo2.import_snapshot(parsed);
         assert_eq!(repo2.list_tasks().len(), 1);
         assert_eq!(repo2.list_tasks()[0].title, "hello");
+    }
+
+    #[test]
+    fn timed_runs_follow_the_task() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        let now = now_ms();
+        let task = wb_domain::create_timed_task_draft(Some("晨报"), None, None, Some(now));
+        let id = task.id.clone();
+        repo.upsert_timed_task(task);
+        repo.append_timed_run(TimedRunRecord {
+            id: "run-1".into(),
+            task_id: id.clone(),
+            ran_at: now,
+            status: wb_domain::TimedRunOutcome::Executed,
+        });
+        repo.append_timed_run(TimedRunRecord {
+            id: "run-2".into(),
+            task_id: id.clone(),
+            ran_at: now + 1,
+            status: wb_domain::TimedRunOutcome::Skipped,
+        });
+        let runs = repo.list_timed_runs(&id);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].status, wb_domain::TimedRunOutcome::Skipped);
+        let snap = repo.export_snapshot();
+        let mut restored = MemoryWorkbenchRepository::new();
+        restored.import_snapshot(snap);
+        assert_eq!(restored.list_timed_runs(&id).len(), 2);
+        restored.delete_timed_task(&id);
+        assert!(restored.list_timed_runs(&id).is_empty());
     }
 
     fn test_message(id: &str, thread: &str, content: &str) -> AgentMessage {

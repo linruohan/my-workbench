@@ -194,6 +194,9 @@ pub enum TimedSchedule {
         end_mode: EndMode,
         #[serde(rename = "endDate", default)]
         end_date: Option<String>,
+        /// Wall clock of `end_date`. Missing values keep the previous end-of-day cutoff.
+        #[serde(rename = "endTime", default)]
+        end_time: Option<String>,
     },
 }
 
@@ -222,6 +225,22 @@ pub struct TimedTask {
     pub next_run_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimedRunOutcome {
+    Executed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimedRunRecord {
+    pub id: String,
+    pub task_id: String,
+    pub ran_at: i64,
+    pub status: TimedRunOutcome,
 }
 
 fn default_true() -> bool {

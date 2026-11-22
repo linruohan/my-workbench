@@ -1,6 +1,8 @@
 use crate::date::{add_local_days, at_local_time, format_local_day, local_hour_minute, now_ms};
 use crate::id::create_id;
-use crate::types::{EndMode, TimedIntervalUnit, TimedSchedule, TimedSchedulePreset, TimedTask};
+use crate::types::{
+    EndMode, TimedIntervalUnit, TimedRunOutcome, TimedSchedule, TimedSchedulePreset, TimedTask,
+};
 use chrono::{Datelike, Local, TimeZone, Timelike, Weekday};
 
 pub const DEFAULT_AT_TIME: &str = "09:00";
@@ -38,12 +40,14 @@ pub fn normalize_timed_schedule(raw: TimedSchedule) -> TimedSchedule {
             at_time,
             end_mode,
             end_date,
+            end_time,
         } => TimedSchedule::Custom {
             every: every.max(1),
             unit,
             at_time: normalize_at_time(Some(&at_time)),
             end_mode,
             end_date,
+            end_time: end_time.map(|t| normalize_at_time(Some(&t))),
         },
     }
 }
@@ -197,6 +201,7 @@ pub fn timed_schedule_label(schedule: Option<&TimedSchedule>) -> String {
             at_time,
             end_mode,
             end_date,
+            end_time,
         } => {
             let unit_l = timed_interval_unit_label(unit);
             let base = format!("每 {every} {unit_l}");
@@ -207,7 +212,10 @@ pub fn timed_schedule_label(schedule: Option<&TimedSchedule>) -> String {
             };
             if matches!(end_mode, EndMode::OnDate) {
                 if let Some(d) = end_date {
-                    return format!("{with_time} · 至 {d}");
+                    return match end_time {
+                        Some(t) => format!("{with_time} · 至 {d} {t}"),
+                        None => format!("{with_time} · 至 {d}"),
+                    };
                 }
             }
             with_time
@@ -319,6 +327,7 @@ pub fn compute_next_run_at(schedule: &TimedSchedule, from_ms: i64) -> Option<i64
             at_time,
             end_mode,
             end_date,
+            end_time,
         } => {
             let mut d = from;
             match unit {
@@ -359,7 +368,11 @@ pub fn compute_next_run_at(schedule: &TimedSchedule, from_ms: i64) -> Option<i64
             }
             if matches!(end_mode, EndMode::OnDate) {
                 if let Some(ref end) = end_date {
-                    let end_ms = crate::date::at_local_time(end, 23, 59)?;
+                    let (hour, minute) = end_time
+                        .as_deref()
+                        .map(clock_hour_minute)
+                        .unwrap_or((23, 59));
+                    let end_ms = crate::date::at_local_time(end, hour, minute)?;
                     if d.timestamp_millis() > end_ms {
                         return None;
                     }
@@ -413,6 +426,13 @@ pub fn timed_run_state(task: &TimedTask, now: i64) -> TimedRunState {
         return TimedRunState::Soon;
     }
     TimedRunState::Scheduled
+}
+
+pub fn timed_run_outcome_label(status: TimedRunOutcome) -> &'static str {
+    match status {
+        TimedRunOutcome::Executed => "已执行",
+        TimedRunOutcome::Skipped => "已跳过",
+    }
 }
 
 pub fn timed_run_state_label(state: TimedRunState) -> &'static str {
@@ -494,6 +514,14 @@ pub fn make_once_from_clock(now: i64, at_time: &str) -> TimedSchedule {
     }
 }
 
+/// One shot at a chosen local date and clock. An unreadable date falls back to the next clock.
+pub fn make_once_on_day(day: &str, at_time: &str, now: i64) -> TimedSchedule {
+    let (hour, minute) = clock_hour_minute(at_time);
+    let at = crate::date::at_local_time(day.trim(), hour, minute)
+        .unwrap_or_else(|| once_at_from_clock(now, at_time));
+    TimedSchedule::Once { at }
+}
+
 pub fn make_preset_schedule(preset: TimedSchedulePreset, at_time: &str) -> TimedSchedule {
     TimedSchedule::Preset {
         preset,
@@ -502,7 +530,7 @@ pub fn make_preset_schedule(preset: TimedSchedulePreset, at_time: &str) -> Timed
 }
 
 pub fn make_custom_schedule(every: i64, unit: TimedIntervalUnit, at_time: &str) -> TimedSchedule {
-    make_custom_schedule_ending(every, unit, at_time, None)
+    make_custom_schedule_ending(every, unit, at_time, None, None)
 }
 
 pub fn make_custom_schedule_ending(
@@ -510,12 +538,19 @@ pub fn make_custom_schedule_ending(
     unit: TimedIntervalUnit,
     at_time: &str,
     end_date: Option<&str>,
+    end_time: Option<&str>,
 ) -> TimedSchedule {
     let end_date = end_date
         .map(str::trim)
         .filter(|day| !day.is_empty())
         .filter(|day| crate::date::parse_local_day(day).is_some())
         .map(str::to_string);
+    let end_time = end_date.as_ref().and_then(|_| {
+        end_time
+            .map(str::trim)
+            .filter(|clock| !clock.is_empty())
+            .map(|clock| normalize_at_time(Some(clock)))
+    });
     TimedSchedule::Custom {
         every: every.max(1),
         unit,
@@ -526,6 +561,7 @@ pub fn make_custom_schedule_ending(
             EndMode::Never
         },
         end_date,
+        end_time,
     }
 }
 
@@ -593,7 +629,8 @@ mod tests {
 
     #[test]
     fn custom_end_date_is_kept_only_when_valid() {
-        let open = make_custom_schedule_ending(1, TimedIntervalUnit::Day, "09:00", Some("nope"));
+        let open =
+            make_custom_schedule_ending(1, TimedIntervalUnit::Day, "09:00", Some("nope"), None);
         match open {
             TimedSchedule::Custom {
                 end_mode, end_date, ..
@@ -603,16 +640,58 @@ mod tests {
             }
             other => panic!("expected custom, got {other:?}"),
         }
-        let closed =
-            make_custom_schedule_ending(1, TimedIntervalUnit::Week, "08:30", Some("2026-12-31"));
+        let closed = make_custom_schedule_ending(
+            1,
+            TimedIntervalUnit::Week,
+            "08:30",
+            Some("2026-12-31"),
+            Some("18:00"),
+        );
         match closed {
             TimedSchedule::Custom {
-                end_mode, end_date, ..
+                end_mode,
+                end_date,
+                end_time,
+                ..
             } => {
                 assert_eq!(end_mode, EndMode::OnDate);
                 assert_eq!(end_date.as_deref(), Some("2026-12-31"));
+                assert_eq!(end_time.as_deref(), Some("18:00"));
             }
             other => panic!("expected custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_end_time_drops_a_later_slot() {
+        let schedule = make_custom_schedule_ending(
+            1,
+            TimedIntervalUnit::Day,
+            "09:00",
+            Some("2026-11-22"),
+            Some("10:00"),
+        );
+        let before = crate::date::at_local_time("2026-11-22", 8, 0).unwrap();
+        let next = compute_next_run_at(&schedule, before).unwrap();
+        assert_eq!(
+            next,
+            crate::date::at_local_time("2026-11-22", 9, 0).unwrap()
+        );
+        let after = crate::date::at_local_time("2026-11-22", 11, 0).unwrap();
+        assert_eq!(compute_next_run_at(&schedule, after), None);
+    }
+
+    #[test]
+    fn once_uses_the_chosen_day_and_clock() {
+        let schedule = make_once_on_day("2026-12-01", "15:30", 0);
+        match schedule {
+            TimedSchedule::Once { at } => {
+                assert_eq!(
+                    at,
+                    crate::date::at_local_time("2026-12-01", 15, 30).unwrap()
+                );
+            }
+            other => panic!("expected once, got {other:?}"),
         }
     }
 

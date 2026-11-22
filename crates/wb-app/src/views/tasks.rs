@@ -1305,6 +1305,81 @@ impl TasksPane {
             }))
     }
 
+    /// Title, count, and view switcher that used to sit under the page bar.
+    /// The shell draws this in the top bar so the name is not shown twice.
+    pub fn chrome_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let (title, tasks) = self.filtered_tasks();
+        let show_archive = self.state.with(|s| {
+            s.nav == AppNav::Projects
+                && s.active_project_id
+                    .as_deref()
+                    .is_some_and(|id| id != INBOX_PROJECT_ID)
+        });
+        if show_archive {
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(div().text_xl().font_bold().child(title))
+                .child(div().flex_1())
+                .child(
+                    Button::new("rename-project")
+                        .small()
+                        .label("重命名")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_rename_dialog(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("delete-project")
+                        .small()
+                        .danger()
+                        .label("删除")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.confirm_delete_project(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("archive-project")
+                        .small()
+                        .label("归档")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.archive_active_project(cx);
+                        })),
+                )
+                .into_any_element();
+        }
+
+        let visible_count = tasks.iter().filter(|(_, depth)| *depth == 0).count();
+        let today = self.state.today();
+        let overdue = self
+            .state
+            .with(|s| compute_task_stats(&s.repo.list_tasks(), &today).overdue);
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .flex_wrap()
+            .child(div().text_xl().font_bold().child(title))
+            .child(
+                Tag::secondary()
+                    .small()
+                    .child(format!("{visible_count} 项")),
+            )
+            .when(overdue > 0, |row| {
+                row.child(Tag::danger().small().child(format!("逾期 {overdue}")))
+            })
+            .child(div().flex_1())
+            .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
+            .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
+            .child(self.mode_button("mode-calendar", "日历", TasksMode::Calendar, cx))
+            .child(self.mode_button("mode-schedule", "时间表", TasksMode::Schedule, cx))
+            .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx))
+            .into_any_element()
+    }
+
     fn toggle_skip_weekends(&mut self, cx: &mut Context<Self>) {
         self.state.with_mut(|s| {
             s.prefs.planner_skip_weekends = !s.prefs.planner_skip_weekends;
@@ -1361,7 +1436,7 @@ impl TasksPane {
 
 impl Render for TasksPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (title, tasks) = self.filtered_tasks();
+        let (_, tasks) = self.filtered_tasks();
         let entity = cx.weak_entity();
         let today = self.state.today();
         let all_for_stats = self.state.with(|s| s.repo.list_tasks());
@@ -1418,7 +1493,6 @@ impl Render for TasksPane {
             self.mode = TasksMode::List;
         }
 
-        let visible_count = tasks.iter().filter(|(_, depth)| *depth == 0).count();
         let body = match self.mode {
             TasksMode::List => {
                 let is_planner = self.state.with(|s| s.nav == AppNav::Planner);
@@ -1935,103 +2009,30 @@ impl Render for TasksPane {
             .min_h_0()
             .gap_3()
             .p_4()
-            .when(!show_archive, |col| {
+            .when(show_archive, |col| {
                 col.child(
                     h_flex()
                         .items_center()
                         .gap_2()
-                        .flex_wrap()
-                        .child(div().text_xl().font_bold().child(title.clone()))
                         .child(
-                            Tag::secondary()
-                                .small()
-                                .child(format!("{visible_count} 项")),
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.task_query).cleanable(true)),
                         )
-                        .when(stats.overdue > 0, |row| {
-                            row.child(
-                                Tag::danger()
-                                    .small()
-                                    .child(format!("逾期 {}", stats.overdue)),
-                            )
-                        })
-                        .child(div().flex_1())
+                        .child(
+                            Button::new("project-new-task")
+                                .small()
+                                .icon(IconName::Plus)
+                                .tooltip("新建任务")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_task_dialog(None, window, cx);
+                                })),
+                        )
                         .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
                         .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
                         .child(self.mode_button("mode-calendar", "日历", TasksMode::Calendar, cx))
-                        .child(self.mode_button("mode-schedule", "时间表", TasksMode::Schedule, cx))
                         .child(self.mode_button("mode-stats", "统计", TasksMode::Stats, cx)),
-                )
-            })
-            .when(show_archive, |col| {
-                col.child(
-                    v_flex()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().text_xl().font_bold().child(title.clone()))
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new("rename-project")
-                                        .small()
-                                        .label("重命名")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_rename_dialog(window, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("delete-project")
-                                        .small()
-                                        .danger()
-                                        .label("删除")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.confirm_delete_project(window, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("archive-project")
-                                        .small()
-                                        .label("归档")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.archive_active_project(cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(Input::new(&self.task_query).cleanable(true)),
-                                )
-                                .child(
-                                    Button::new("project-new-task")
-                                        .small()
-                                        .icon(IconName::Plus)
-                                        .tooltip("新建任务")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_task_dialog(None, window, cx);
-                                        })),
-                                )
-                                .child(self.mode_button("mode-list", "列表", TasksMode::List, cx))
-                                .child(self.mode_button("mode-board", "看板", TasksMode::Board, cx))
-                                .child(self.mode_button(
-                                    "mode-calendar",
-                                    "日历",
-                                    TasksMode::Calendar,
-                                    cx,
-                                ))
-                                .child(self.mode_button(
-                                    "mode-stats",
-                                    "统计",
-                                    TasksMode::Stats,
-                                    cx,
-                                )),
-                        ),
                 )
             })
             .when(!show_archive, |col| {

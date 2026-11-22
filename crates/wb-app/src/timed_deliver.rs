@@ -4,7 +4,8 @@ use crate::state::AppState;
 use gpui_kit::*;
 use wb_agent::{begin_user_turn, create_thread, finish_user_turn, resolve_turn_reply};
 use wb_domain::{
-    NotificationKind, TimedTask, build_timed_task_prompt, mark_timed_task_ran, now_ms,
+    NotificationKind, TimedRunOutcome, TimedRunRecord, TimedTask, build_timed_task_prompt,
+    create_id, mark_timed_task_ran, now_ms,
 };
 
 /// Mark ran + notify, then enqueue an async Agent turn with the timed prompt.
@@ -21,9 +22,16 @@ pub fn fire_timed_task<T: 'static>(
         task.command.clone()
     };
 
-    let updated = mark_timed_task_ran(task, now_ms());
+    let now = now_ms();
+    let updated = mark_timed_task_ran(task, now);
     state.with_mut(|s| {
         s.repo.upsert_timed_task(updated);
+        s.repo.append_timed_run(TimedRunRecord {
+            id: create_id(now),
+            task_id: task.id.clone(),
+            ran_at: now,
+            status: TimedRunOutcome::Executed,
+        });
     });
     state.push_notification(
         NotificationKind::System,
@@ -96,9 +104,16 @@ pub fn fire_timed_task<T: 'static>(
 
 /// Advance schedule without delivering to Agent.
 pub fn skip_timed_task(state: &AppState, task: &TimedTask) {
-    let updated = mark_timed_task_ran(task, now_ms());
+    let now = now_ms();
+    let updated = mark_timed_task_ran(task, now);
     state.with_mut(|s| {
         s.repo.upsert_timed_task(updated);
+        s.repo.append_timed_run(TimedRunRecord {
+            id: create_id(now),
+            task_id: task.id.clone(),
+            ran_at: now,
+            status: TimedRunOutcome::Skipped,
+        });
     });
     state.push_notification(
         NotificationKind::System,
