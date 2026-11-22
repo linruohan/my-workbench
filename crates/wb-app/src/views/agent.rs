@@ -2392,6 +2392,19 @@ impl AgentPane {
             visible_messages.is_empty() && (!find_q.is_empty() || msg_filter != MsgFilter::All);
         let draft_text = self.stream_draft_text();
         let draft_stage = self.stream_status_text();
+        // Snapshot the failure list before the rows consume `visible_messages`.
+        let error_summary: Vec<(String, String)> = if msg_filter == MsgFilter::Errors {
+            visible_messages
+                .iter()
+                .map(|m| {
+                    let tool = m.tool_name.clone().unwrap_or_else(|| "tool".into());
+                    let body: String = m.content.replace('\n', " ").chars().take(160).collect();
+                    (tool, body)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut last_day = String::new();
         let mut tool_group: Vec<AgentMessage> = Vec::new();
         let mut tool_group_day = String::new();
@@ -2761,6 +2774,32 @@ impl AgentPane {
                                         }),
                                     ),
                             )
+                            .when(msg_filter == MsgFilter::Errors && !error_summary.is_empty(), |row| {
+                                let entity = entity.clone();
+                                let rows: Vec<(String, String)> = error_summary.clone();
+                                row.child(
+                                    Button::new("agent-errors-copy")
+                                        .xsmall()
+                                        .ghost()
+                                        .label("复制小结")
+                                        .on_click(move |_, _, cx| {
+                                            let mut out = String::from("失败的工具调用：\n");
+                                            for (tool, body) in &rows {
+                                                out.push_str(&format!("- {tool}: {body}\n"));
+                                            }
+                                            cx.write_to_clipboard(
+                                                gpui::ClipboardItem::new_string(out),
+                                            );
+                                            if let Some(e) = entity.upgrade() {
+                                                e.update(cx, |this, cx| {
+                                                    this.status =
+                                                        format!("已复制 {} 条失败调用", rows.len());
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                )
+                            })
                             .child({
                                 let ctx_frac = (ctx_pct / 100.0).min(1.0);
                                 let ctx_color = if ctx_pct >= 80.0 { danger } else { accent };
