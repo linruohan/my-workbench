@@ -1208,6 +1208,27 @@ impl AgentPane {
         refs
     }
 
+    fn set_thread_workspace(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        let tid = self.ensure_thread();
+        self.state.with_mut(|s| {
+            if let Some(mut t) = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)
+            {
+                t.workspace_id = workspace_id;
+                t.updated_at = now_ms();
+                s.repo.upsert_agent_thread(t);
+            }
+        });
+        self.branch_cache = None;
+        self.mention_cache.clear();
+        self.mention_cache_key = None;
+        self.state.persist_if_dirty();
+        cx.notify();
+    }
+
     fn set_thread_model(&mut self, model_ref: String, cx: &mut Context<Self>) {
         let tid = self.ensure_thread();
         self.state.with_mut(|s| {
@@ -2922,6 +2943,17 @@ impl AgentPane {
                             let draft_chars = draft.chars().count();
                             let preview_on = self.composer_preview && !draft_empty;
                             let branch = self.workspace_branch();
+                            let active_ws = self.state.with(|s| {
+                                s.active_thread_id
+                                    .as_ref()
+                                    .and_then(|id| {
+                                        s.repo
+                                            .list_agent_threads()
+                                            .into_iter()
+                                            .find(|t| &t.id == id)
+                                    })
+                                    .map(|t| t.workspace_id)
+                            });
                             let root_name = self
                                 .workspace_root()
                                 .and_then(|root| {
@@ -3375,31 +3407,53 @@ impl AgentPane {
                                                             ),
                                                     )
                                                 })
-                                                .child(
-                                                    h_flex()
-                                                        .id("agent-env-chip")
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded(px(6.))
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .hover(|s| s.text_color(accent))
-                                                        .child(
-                                                            Icon::new(
-                                                                gpui_kit::assets::IconName::Computer,
-                                                            )
-                                                            .xsmall()
-                                                            .text_color(muted),
+                                                .child({
+                                                    let entity = entity.clone();
+                                                    let workspaces = workspaces.clone();
+                                                    let active_ws = active_ws.clone();
+                                                    Button::new("agent-env-chip")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .label(root_name.clone())
+                                                        .icon(IconName::ChevronDown)
+                                                        .dropdown_menu_with_anchor(
+                                                            Anchor::TopLeft,
+                                                            move |menu, _, _| {
+                                                                let mut menu = menu;
+                                                                for ws in &workspaces {
+                                                                    let entity = entity.clone();
+                                                                    let pick = ws.id.clone();
+                                                                    menu = menu.item(
+                                                                        PopupMenuItem::new(ws.title.clone())
+                                                                            .checked(
+                                                                                active_ws.as_deref()
+                                                                                    == Some(pick.as_str()),
+                                                                            )
+                                                                            .on_click(move |_, _, app| {
+                                                                                if let Some(e) = entity.upgrade() {
+                                                                                    let pick = pick.clone();
+                                                                                    e.update(app, |this, cx| {
+                                                                                        this.set_thread_workspace(pick, cx);
+                                                                                    });
+                                                                                }
+                                                                            }),
+                                                                    );
+                                                                }
+                                                                let entity = entity.clone();
+                                                                menu.separator().item(
+                                                                    PopupMenuItem::new("添加工作区…").on_click(
+                                                                        move |_, _, app| {
+                                                                            if let Some(e) = entity.upgrade() {
+                                                                                e.update(app, |this, cx| {
+                                                                                    this.add_workspace(cx);
+                                                                                });
+                                                                            }
+                                                                        },
+                                                                    ),
+                                                                )
+                                                            },
                                                         )
-                                                        .child(root_name.clone())
-                                                        .child(
-                                                            Icon::new(IconName::ChevronDown)
-                                                                .xsmall()
-                                                                .text_color(muted),
-                                                        ),
-                                                )
+                                                })
                                                 .child({
                                                     let entity = entity.clone();
                                                     let current = thread_perm;
