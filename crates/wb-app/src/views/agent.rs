@@ -2976,6 +2976,7 @@ impl AgentPane {
                                                 .justify_center()
                                                 .size(px(28.))
                                                 .flex_shrink_0()
+                                                .mb(px(1.))
                                                 .rounded_full()
                                                 .border_1()
                                                 .border_color(border)
