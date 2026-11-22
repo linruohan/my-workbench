@@ -11,14 +11,16 @@ mod tool_summary;
 mod tray;
 mod views;
 
-use gpui_kit::assets::Assets;
+// `Assets` only embeds gpui-kit's default icon subset; the app also paints
+// icons outside it (Wrench, GitBranch, X), which log "could not find asset".
+use gpui_kit::assets::AllAssets;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let app = gpui_kit::application().with_assets(Assets);
+    let app = gpui_kit::application().with_assets(AllAssets);
     app.run(move |cx| {
         gpui_kit::init(cx);
         themes::init(cx);

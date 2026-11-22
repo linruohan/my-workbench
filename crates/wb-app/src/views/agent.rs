@@ -386,36 +386,6 @@ impl AgentPane {
         cx.notify();
     }
 
-    fn apply_web_url_to_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = self.web_url_input.read(cx).value().to_string();
-        let Some(url) = normalize_agent_web_url(&raw) else {
-            self.status = "网址无效".into();
-            cx.notify();
-            return;
-        };
-        let updated = self.state.with_mut(|s| {
-            let Some(id) = s.active_thread_id.clone() else {
-                return false;
-            };
-            let Some(mut t) = s.repo.list_agent_threads().into_iter().find(|t| t.id == id) else {
-                return false;
-            };
-            t.web_url = Some(url.clone());
-            if t.title == "新会话" || t.title.is_empty() {
-                t.title = WEB_AGENT_THREAD_TITLE.into();
-            }
-            t.updated_at = now_ms();
-            s.repo.upsert_agent_thread(t);
-            true
-        });
-        if updated {
-            self.sync_webview(Some(&url), window, cx);
-            self.status.clear();
-            self.state.persist_if_dirty();
-        }
-        cx.notify();
-    }
-
     fn ensure_thread(&mut self) -> String {
         self.state.with_mut(|s| {
             if let Some(id) = s.active_thread_id.clone() {
@@ -2561,15 +2531,6 @@ impl AgentPane {
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.cycle_thread_model(cx)),
                                     ),
-                            )
-                            .child(
-                                Button::new("agent-web-new")
-                                    .small()
-                                    .label("网页会话")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let url = this.web_url_input.read(cx).value().to_string();
-                                        this.create_web_thread(&url, window, cx);
-                                    })),
                             ),
                     )
                     .child(
@@ -2666,8 +2627,9 @@ impl AgentPane {
                     .gap_2()
                     .child(
                         h_flex()
-                            .gap_2()
+                            .w_full()
                             .items_center()
+                            .gap_2()
                             .child(
                                 div()
                                     .flex_1()
@@ -2678,14 +2640,51 @@ impl AgentPane {
                                     .text_ellipsis()
                                     .child(thread_title),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child("可用 /rename 改标题"),
-                            )
                             .when_some(goal_chip, |row, chip| row.child(chip))
                             .when_some(todo_chip, |row, chip| row.child(chip))
+                            .when(!todos_all.is_empty(), |row| {
+                                row.child(
+                                    Button::new("agent-todo-toggle")
+                                        .xsmall()
+                                        .ghost()
+                                        .label(if self.show_todos { "收起待办" } else { "待办" })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_todos = !this.show_todos;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .when(
+                                msg_filter == MsgFilter::Errors && !error_summary.is_empty(),
+                                |row| {
+                                    let entity = entity.clone();
+                                    let rows: Vec<(String, String)> = error_summary.clone();
+                                    row.child(
+                                        Button::new("agent-errors-copy")
+                                            .xsmall()
+                                            .ghost()
+                                            .label(format!("复制 {} 条问题", rows.len()))
+                                            .on_click(move |_, _, cx| {
+                                                let mut out = String::from("失败的工具调用：\n");
+                                                for (tool, body) in &rows {
+                                                    out.push_str(&format!("- {tool}: {body}\n"));
+                                                }
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(out),
+                                                );
+                                                if let Some(e) = entity.upgrade() {
+                                                    e.update(cx, |this, cx| {
+                                                        this.status = format!(
+                                                            "已复制 {} 条失败调用",
+                                                            rows.len()
+                                                        );
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                },
+                            )
                             .child(
                                 Button::new("agent-export")
                                     .xsmall()
@@ -2693,59 +2692,6 @@ impl AgentPane {
                                     .label("导出")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.export_active_thread(cx);
-                                    })),
-                            )
-                            .when(!todos_all.is_empty(), |row| {
-                                row.child(
-                                    Button::new("agent-todo-toggle")
-                                        .xsmall()
-                                        .ghost()
-                                        .label(if self.show_todos {
-                                            "收起待办"
-                                        } else {
-                                            "待办详情"
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_todos = !this.show_todos;
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Input::new(&self.web_url_input))
-                            .child(
-                                Button::new("agent-web-go")
-                                    .small()
-                                    .primary()
-                                    .label(if has_web {
-                                        "打开/刷新"
-                                    } else {
-                                        "打开网页"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let has = this.state.with(|s| {
-                                            s.active_thread_id
-                                                .as_ref()
-                                                .and_then(|id| {
-                                                    s.repo
-                                                        .list_agent_threads()
-                                                        .into_iter()
-                                                        .find(|t| &t.id == id)
-                                                })
-                                                .and_then(|t| t.web_url)
-                                                .is_some()
-                                        });
-                                        if has {
-                                            this.apply_web_url_to_active(window, cx);
-                                        } else {
-                                            let url =
-                                                this.web_url_input.read(cx).value().to_string();
-                                            this.create_web_thread(&url, window, cx);
-                                        }
                                     })),
                             ),
                     )
@@ -2798,118 +2744,6 @@ impl AgentPane {
                                 .child(webview_el.expect("webview when has_web")),
                         )
                     })
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().flex_1().child(Input::new(&self.find).cleanable(true)))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .children(
-                                        [
-                                            (MsgFilter::All, "全部"),
-                                            (MsgFilter::User, "我"),
-                                            (MsgFilter::Tools, "工具"),
-                                            (MsgFilter::Errors, "问题"),
-                                        ]
-                                        .into_iter()
-                                        .map(|(filter, label)| {
-                                            Button::new(SharedString::from(format!(
-                                                "msg-filter-{label}"
-                                            )))
-                                            .xsmall()
-                                            .ghost()
-                                            .label(label)
-                                            .selected(msg_filter == filter)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.msg_filter = filter;
-                                                cx.notify();
-                                            }))
-                                            .into_any_element()
-                                        }),
-                                    ),
-                            )
-                            .when(msg_filter == MsgFilter::Errors && !error_summary.is_empty(), |row| {
-                                let entity = entity.clone();
-                                let rows: Vec<(String, String)> = error_summary.clone();
-                                row.child(
-                                    Button::new("agent-errors-copy")
-                                        .xsmall()
-                                        .ghost()
-                                        .label("复制小结")
-                                        .on_click(move |_, _, cx| {
-                                            let mut out = String::from("失败的工具调用：\n");
-                                            for (tool, body) in &rows {
-                                                out.push_str(&format!("- {tool}: {body}\n"));
-                                            }
-                                            cx.write_to_clipboard(
-                                                gpui::ClipboardItem::new_string(out),
-                                            );
-                                            if let Some(e) = entity.upgrade() {
-                                                e.update(cx, |this, cx| {
-                                                    this.status =
-                                                        format!("已复制 {} 条失败调用", rows.len());
-                                                    cx.notify();
-                                                });
-                                            }
-                                        }),
-                                )
-                            })
-                            .child({
-                                let ctx_frac = (ctx_pct / 100.0).min(1.0);
-                                let ctx_color = if ctx_pct >= 80.0 { danger } else { accent };
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w(px(64.))
-                                            .h(px(4.))
-                                            .rounded_full()
-                                            .bg(cx.theme().border)
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .rounded_full()
-                                                    .bg(ctx_color)
-                                                    .w(relative(ctx_frac)),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(format!("{ctx_pct:.0}%")),
-                                    )
-                                    .when(ctx_pct >= 80.0, |row| {
-                                        row.child(
-                                            Button::new("agent-compact-now")
-                                                .xsmall()
-                                                .ghost()
-                                                .label("压缩")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.compact_history(cx);
-                                                })),
-                                        )
-                                    })
-                            })
-                            .child(
-                                Button::new("agent-term-toggle")
-                                    .xsmall()
-                                    .ghost()
-                                    .label(if self.show_terminal {
-                                        "收起终端"
-                                    } else {
-                                        "终端"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_terminal = !this.show_terminal;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
                     .when(self.show_terminal, |col| {
                         let terms = global_terminals().list();
                         let output = self
@@ -3353,6 +3187,81 @@ impl AgentPane {
                                 })),
                         )
                     })
+                    .child(
+                        // Message filtering sits directly above the composer so the
+                        // chat transcript area stays unobstructed.
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().child(Input::new(&self.find).cleanable(true)))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .children(
+                                        [
+                                            (MsgFilter::All, "全部"),
+                                            (MsgFilter::User, "我"),
+                                            (MsgFilter::Tools, "工具"),
+                                            (MsgFilter::Errors, "问题"),
+                                        ]
+                                        .into_iter()
+                                        .map(|(filter, label)| {
+                                            Button::new(SharedString::from(format!(
+                                                "msg-filter-{label}"
+                                            )))
+                                            .xsmall()
+                                            .ghost()
+                                            .label(label)
+                                            .selected(msg_filter == filter)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.msg_filter = filter;
+                                                cx.notify();
+                                            }))
+                                            .into_any_element()
+                                        }),
+                                    ),
+                            )
+                            .child({
+                                let ctx_frac = (ctx_pct / 100.0).min(1.0);
+                                let ctx_color = if ctx_pct >= 80.0 { danger_theme } else { accent };
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(64.))
+                                            .h(px(4.))
+                                            .rounded_full()
+                                            .bg(cx.theme().border)
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .rounded_full()
+                                                    .bg(ctx_color)
+                                                    .w(relative(ctx_frac)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format!("{ctx_pct:.0}%")),
+                                    )
+                                    .when(ctx_pct >= 80.0, |row| {
+                                        row.child(
+                                            Button::new("agent-compact-now")
+                                                .xsmall()
+                                                .ghost()
+                                                .label("压缩")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.compact_history(cx);
+                                                })),
+                                        )
+                                    })
+                            }),
+                    )
                     .child(
                         // Hadron-style composer: one rounded card that owns the
                         // focus ring, the live preview, the input and a tool row.
@@ -4248,6 +4157,79 @@ impl AgentPane {
                                                                 cx.notify();
                                                             },
                                                         )),
+                                                )
+                                                // Thread tools live here so the chat
+                                                // area above needs no toolbar row.
+                                                .child({
+                                                    // Context usage: a thin bar plus the
+                                                    // percentage, warning past 80%.
+                                                    let ctx_frac =
+                                                        (ctx_pct / 100.0).min(1.0);
+                                                    let ctx_color = if ctx_pct >= 80.0 {
+                                                        danger
+                                                    } else {
+                                                        accent
+                                                    };
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(
+                                                            div()
+                                                                .w(px(48.))
+                                                                .h(px(4.))
+                                                                .rounded_full()
+                                                                .bg(border)
+                                                                .child(
+                                                                    div()
+                                                                        .h_full()
+                                                                        .rounded_full()
+                                                                        .bg(ctx_color)
+                                                                        .w(relative(ctx_frac)),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(muted)
+                                                                .child(format!("{ctx_pct:.0}%")),
+                                                        )
+                                                        .when(ctx_pct >= 80.0, |row| {
+                                                            row.child(
+                                                                Button::new("agent-compact-now")
+                                                                    .xsmall()
+                                                                    .ghost()
+                                                                    .label("压缩")
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, _, cx| {
+                                                                            this.compact_history(cx);
+                                                                        },
+                                                                    )),
+                                                            )
+                                                        })
+                                                })
+                                                .child(
+                                                    Button::new("agent-export")
+                                                        .xsmall()
+                                                        .ghost()
+                                                        .label("导出")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.export_active_thread(cx);
+                                                        })),
+                                                )
+                                                .child(
+                                                    Button::new("agent-term-toggle")
+                                                        .xsmall()
+                                                        .ghost()
+                                                        .label(if self.show_terminal {
+                                                            "收起终端"
+                                                        } else {
+                                                            "终端"
+                                                        })
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.show_terminal =
+                                                                !this.show_terminal;
+                                                            cx.notify();
+                                                        })),
                                                 ),
                                         ),
                                 )
