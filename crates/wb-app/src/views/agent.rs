@@ -76,6 +76,11 @@ pub struct AgentPane {
     pending_edit: Option<String>,
     /// Whether the session todo list is expanded under the chat header.
     show_todos: bool,
+    /// Cached `@` file suggestions for the current token.
+    mention_cache: Vec<String>,
+    mention_cache_key: Option<String>,
+    mention_selected: usize,
+    mention_dismissed: bool,
     /// Ask approvals that already have an auto-answer timer running.
     ask_timers: HashSet<String>,
     status: String,
@@ -123,6 +128,10 @@ impl AgentPane {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pending_edit: None,
             show_todos: false,
+            mention_cache: Vec::new(),
+            mention_cache_key: None,
+            mention_selected: 0,
+            mention_dismissed: false,
             ask_timers: HashSet::new(),
             status: String::new(),
             prompt_history: Vec::new(),
@@ -147,6 +156,8 @@ impl AgentPane {
                 InputEvent::Change => {
                     this.slash_selected = 0;
                     this.slash_dismissed = false;
+                    this.mention_dismissed = false;
+                    this.mention_selected = 0;
                     this.recompute_ghost(cx);
                     cx.notify();
                 }
@@ -156,6 +167,12 @@ impl AgentPane {
                     }
                     if this.accept_slash_if_open(window, cx) {
                         return;
+                    }
+                    let mentions = this.live_file_mentions(cx);
+                    if let Some(pick) = mentions.get(this.mention_selected).cloned() {
+                        if this.accept_file_mention(&pick, window, cx) {
+                            return;
+                        }
                     }
                     let text = input.read(cx).value().to_string();
                     if text.trim().is_empty() {
@@ -715,13 +732,39 @@ impl AgentPane {
         self.turn_gen = self.turn_gen.wrapping_add(1);
         self.busy = false;
         self.cancel_flag.store(true, Ordering::Relaxed);
+
+        // Keep what the model already produced instead of throwing it away.
+        let partial = self
+            .stream_draft
+            .lock()
+            .map(|d| d.trim().to_string())
+            .unwrap_or_default();
+        if !partial.is_empty() {
+            let tid = self.ensure_thread();
+            let msg = AgentMessage {
+                id: create_id(now_ms()),
+                thread_id: tid,
+                role: AgentRole::Assistant,
+                content: format!("{partial}\n\n（已中止）"),
+                tool_name: None,
+                tool_call_id: None,
+                tool_calls_json: None,
+                created_at: now_ms(),
+            };
+            self.state.with_mut(|s| s.repo.upsert_agent_message(msg));
+            self.state.persist_if_dirty();
+        }
         if let Ok(mut draft) = self.stream_draft.lock() {
             draft.clear();
         }
         if let Ok(mut stage) = self.stream_status.lock() {
             stage.clear();
         }
-        self.status = "已中止当前回合".into();
+        self.status = if partial.is_empty() {
+            "已中止当前回合".into()
+        } else {
+            "已中止当前回合，保留已生成的内容".into()
+        };
         cx.notify();
     }
 
@@ -1306,6 +1349,92 @@ impl AgentPane {
         slash_suggestions(&self.input.read(cx).value())
     }
 
+    /// Files under the active workspace whose path matches the `@` token at the caret.
+    fn live_file_mentions(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+        if self.mention_dismissed {
+            return Vec::new();
+        }
+        let value = self.input.read(cx).value().to_string();
+        let cursor = self.input.read(cx).cursor().min(value.len());
+        let head = &value[..cursor];
+        let Some(at) = head.rfind('@') else {
+            return Vec::new();
+        };
+        if at > 0 {
+            let prev = head[..at].chars().next_back();
+            if !prev.is_some_and(char::is_whitespace) {
+                return Vec::new();
+            }
+        }
+        let token = &head[at + 1..];
+        if token.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let needle = token.to_lowercase();
+        let root = self.workspace_root();
+        let Some(root) = root else {
+            return Vec::new();
+        };
+        let cache_key = format!("{root}|{needle}");
+        if self.mention_cache_key.as_deref() != Some(cache_key.as_str()) {
+            let files =
+                wb_host::list_files_recursive(std::path::Path::new(&root), 800).unwrap_or_default();
+            let mut matched: Vec<String> = files
+                .into_iter()
+                .filter(|e| needle.is_empty() || e.relative.to_lowercase().contains(&needle))
+                .map(|e| e.relative)
+                .collect();
+            matched.sort_by_key(|p| p.len());
+            matched.truncate(8);
+            self.mention_cache = matched;
+            self.mention_cache_key = Some(cache_key);
+            self.mention_selected = 0;
+        }
+        self.mention_cache.clone()
+    }
+
+    fn accept_file_mention(
+        &mut self,
+        pick: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let value = self.input.read(cx).value().to_string();
+        let cursor = self.input.read(cx).cursor().min(value.len());
+        let head = &value[..cursor];
+        let Some(at) = head.rfind('@') else {
+            return false;
+        };
+        let tail = &value[cursor..];
+        let next = format!("{}@{} {}", &value[..at], pick, tail.trim_start());
+        let caret = at + 1 + pick.len() + 1;
+        self.input.update(cx, |state, cx| {
+            state.set_value(next.trim_end().to_string(), window, cx);
+            state.set_selected_range(caret..caret, cx);
+        });
+        self.mention_cache.clear();
+        self.mention_cache_key = None;
+        self.mention_dismissed = false;
+        cx.notify();
+        true
+    }
+
+    fn workspace_root(&self) -> Option<String> {
+        self.state.with(|s| {
+            let tid = s.active_thread_id.clone()?;
+            let thread = s
+                .repo
+                .list_agent_threads()
+                .into_iter()
+                .find(|t| t.id == tid)?;
+            s.repo
+                .list_agent_workspaces()
+                .into_iter()
+                .find(|w| w.id == thread.workspace_id)
+                .and_then(|w| w.root_path)
+        })
+    }
+
     fn accept_slash_if_open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let hits = self.live_slash(cx);
         if hits.is_empty() {
@@ -1745,6 +1874,8 @@ impl AgentPane {
 
         let find_q = self.find.read(cx).value().trim().to_lowercase();
         let slash_hits = self.live_slash(cx);
+        let mention_hits = self.live_file_mentions(cx);
+        let mention_selected = self.mention_selected;
         let ctx_used = prompt_char_count(&messages);
         let ctx_cap = model_context_window(&model_ref).max(1);
         let ctx_pct = ((ctx_used as f32 / ctx_cap as f32) * 100.0).min(999.0);
@@ -2536,6 +2667,36 @@ impl AgentPane {
                                 })),
                         )
                     })
+                    .when(!mention_hits.is_empty(), |col| {
+                        col.child(
+                            v_flex()
+                                .gap_0p5()
+                                .p_2()
+                                .rounded(radius)
+                                .border_1()
+                                .border_color(border)
+                                .bg(secondary)
+                                .children(mention_hits.iter().enumerate().map(|(i, path)| {
+                                    let pick = path.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!("mention-hit-{i}")))
+                                        .gap_2()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(radius)
+                                        .cursor_pointer()
+                                        .when(i == mention_selected, |row| {
+                                            row.bg(accent.opacity(0.35))
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.mention_selected = i;
+                                            this.accept_file_mention(&pick, window, cx);
+                                        }))
+                                        .child(div().text_xs().child(path.clone()))
+                                        .into_any_element()
+                                })),
+                        )
+                    })
                     .child(
                         h_flex()
                             .gap_2()
@@ -2546,11 +2707,19 @@ impl AgentPane {
                                     this.slash_selected = (this.slash_selected + 1) % hits.len();
                                     cx.notify();
                                     cx.stop_propagation();
-                                } else if this.history_index.is_some()
-                                    && this.composer_on_last_line(cx)
-                                    && this.navigate_prompt_history(1, window, cx)
-                                {
-                                    cx.stop_propagation();
+                                } else {
+                                    let mentions = this.live_file_mentions(cx);
+                                    if !mentions.is_empty() {
+                                        this.mention_selected =
+                                            (this.mention_selected + 1) % mentions.len();
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                    } else if this.history_index.is_some()
+                                        && this.composer_on_last_line(cx)
+                                        && this.navigate_prompt_history(1, window, cx)
+                                    {
+                                        cx.stop_propagation();
+                                    }
                                 }
                             }))
                             .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
@@ -2562,14 +2731,31 @@ impl AgentPane {
                                         .unwrap_or(hits.len() - 1);
                                     cx.notify();
                                     cx.stop_propagation();
-                                } else if this.composer_on_first_line(cx)
-                                    && this.navigate_prompt_history(-1, window, cx)
-                                {
-                                    cx.stop_propagation();
+                                } else {
+                                    let mentions = this.live_file_mentions(cx);
+                                    if !mentions.is_empty() {
+                                        this.mention_selected = this
+                                            .mention_selected
+                                            .checked_sub(1)
+                                            .unwrap_or(mentions.len() - 1);
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                    } else if this.composer_on_first_line(cx)
+                                        && this.navigate_prompt_history(-1, window, cx)
+                                    {
+                                        cx.stop_propagation();
+                                    }
                                 }
                             }))
                             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                                if this.accept_slash_if_open(window, cx)
+                                let mentions = this.live_file_mentions(cx);
+                                let picked = mentions
+                                    .get(this.mention_selected)
+                                    .cloned()
+                                    .map(|pick| this.accept_file_mention(&pick, window, cx))
+                                    .unwrap_or(false);
+                                if picked
+                                    || this.accept_slash_if_open(window, cx)
                                     || this.accept_ghost(window, cx)
                                 {
                                     cx.stop_propagation();
@@ -2588,6 +2774,10 @@ impl AgentPane {
                                 if !this.live_slash(cx).is_empty() {
                                     this.slash_dismissed = true;
                                     this.slash_selected = 0;
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                } else if !this.mention_cache.is_empty() {
+                                    this.mention_dismissed = true;
                                     cx.notify();
                                     cx.stop_propagation();
                                 } else if this.ghost_suffix.take().is_some() {
@@ -2702,6 +2892,23 @@ fn render_chat_message(
                 .child(role.to_string()),
         )
         .child(div().text_xs().text_color(muted).child(clock))
+        .when(
+            matches!(m.role, AgentRole::Assistant) && content.contains("模型请求失败"),
+            |row| {
+                let entity = entity.clone();
+                row.child(
+                    Button::new(SharedString::from(format!("msg-retry-{msg_id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("重试")
+                        .on_click(move |_, _, app| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(app, |this, cx| this.retry_last_user(cx));
+                            }
+                        }),
+                )
+            },
+        )
         .when(is_tool, |row| {
             let tid = msg_id.clone();
             let entity = entity.clone();
