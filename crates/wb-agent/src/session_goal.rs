@@ -155,12 +155,23 @@ pub fn prepare_goal_idle_round() -> Option<String> {
     ))
 }
 
+/// Serialises tests that mutate the process-global goal store.
+///
+/// `session_goal` and `execute` both drive the same statics, so two tests
+/// running concurrently would observe each other's goal and fail spuriously.
+#[cfg(test)]
+pub(crate) fn goal_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn blocked_threshold_in_goal_round() {
+        let _guard = goal_test_lock();
         clear_goal();
         create_goal("测阈值", None);
         assert!(prepare_goal_idle_round().is_some());

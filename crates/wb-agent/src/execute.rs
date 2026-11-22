@@ -3191,6 +3191,8 @@ mod tests {
     #[test]
     fn goal_and_session_trace() {
         use wb_domain::{AgentMessage, AgentRole, AgentThread, now_ms};
+        // Shares the process-global goal store with `session_goal` tests.
+        let _guard = crate::session_goal::goal_test_lock();
         let mut repo = MemoryWorkbenchRepository::default();
         let now = now_ms();
         let thread = AgentThread {
