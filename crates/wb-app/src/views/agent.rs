@@ -2505,6 +2505,7 @@ impl AgentPane {
                     } else if filter_miss {
                         v_flex()
                             .flex_1()
+                            .gap_2()
                             .justify_center()
                             .items_center()
                             .child(
@@ -2512,6 +2513,18 @@ impl AgentPane {
                                     .text_sm()
                                     .text_color(muted)
                                     .child("没有匹配筛选条件的消息"),
+                            )
+                            .child(
+                                Button::new("agent-find-clear")
+                                    .xsmall()
+                                    .ghost()
+                                    .label("清空筛选")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.find.update(cx, |i, cx| {
+                                            i.set_value("", window, cx);
+                                        });
+                                        cx.notify();
+                                    })),
                             )
                             .into_any_element()
                     } else {
