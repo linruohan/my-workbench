@@ -3576,6 +3576,28 @@ impl AgentPane {
                                                             .text_color(muted)
                                                             .child(format!("{draft_chars} 字")),
                                                     )
+                                                })
+                                                .when(draft_chars == 0, |row| {
+                                                    row.child(
+                                                        h_flex()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .px_1()
+                                                                    .rounded(px(3.))
+                                                                    .bg(border)
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child("Enter"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child("发送"),
+                                                            ),
+                                                    )
                                                 }),
                                         )
                                         .child(
@@ -3583,14 +3605,6 @@ impl AgentPane {
                                                 .items_center()
                                                 .gap_1()
                                                 .flex_shrink_0()
-                                                .when(draft_chars > 0, |row| {
-                                                    row.child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .child(format!("{draft_chars} 字")),
-                                                    )
-                                                })
                                                 .child(
                                                     h_flex()
                                                         .id("agent-preview-toggle")
