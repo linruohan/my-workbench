@@ -1,10 +1,15 @@
 use crate::state::AppState;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{
+    Button, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+};
+use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState, TabSize};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, *};
+use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::text::{TextView, TextViewState, TextViewStyle};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -38,6 +43,8 @@ pub struct KnowledgePane {
     filter: Entity<InputState>,
     mode: KbMode,
     replace_status: String,
+    preview_zoom: f32,
+    table_wrap: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -79,6 +86,8 @@ impl KnowledgePane {
             filter,
             mode: KbMode::Live,
             replace_status: String::new(),
+            preview_zoom: 1.0,
+            table_wrap: false,
             _subs: Vec::new(),
         };
         this.reload_files();
@@ -113,11 +122,53 @@ impl KnowledgePane {
         });
     }
 
+    fn preview_style(&self) -> TextViewStyle {
+        if self.table_wrap {
+            return TextViewStyle::default();
+        }
+        let mut table = StyleRefinement::default();
+        table.overflow.x = Some(Overflow::Scroll);
+        TextViewStyle::default().table(table)
+    }
+
+    fn cycle_preview_zoom(&mut self, cx: &mut Context<Self>) {
+        self.preview_zoom = if self.preview_zoom >= 1.35 {
+            0.9
+        } else {
+            (self.preview_zoom + 0.1).min(1.35)
+        };
+        self.preview
+            .update(cx, |state, cx| state.invalidate_inline_layout(cx));
+        cx.notify();
+    }
+
+    fn current_relative(&self) -> Option<String> {
+        let current = self.current.as_ref()?;
+        self.files
+            .iter()
+            .find(|(abs, _)| abs == current)
+            .map(|(_, rel)| rel.clone())
+            .or_else(|| {
+                Path::new(current)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
+    }
+
     fn kb_preview(&self, entity: &WeakEntity<KnowledgePane>) -> TextView {
         let entity = entity.clone();
         TextView::new(&self.preview)
             .scrollable(true)
             .selectable(true)
+            .style(self.preview_style())
+            .text_size(rems(self.preview_zoom))
+            .px_5()
+            .py_4()
+            .code_block_actions(|code_block, _window, _cx| {
+                h_flex()
+                    .gap_1()
+                    .child(Clipboard::new("kb-copy-block").value(code_block.code()))
+            })
             .on_link_click(move |url, event, window, cx| {
                 if event.is_right_click() {
                     return;
@@ -350,6 +401,47 @@ impl KnowledgePane {
         }
         out
     }
+}
+
+fn kb_surface(
+    cx: &Context<KnowledgePane>,
+    title: &str,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    let border = cx.theme().border;
+    let radius = cx.theme().radius;
+    let muted = cx.theme().muted_foreground;
+    let secondary = cx.theme().secondary;
+    v_flex()
+        .size_full()
+        .rounded(radius)
+        .border_1()
+        .border_color(border)
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .px_3()
+                .py_1p5()
+                .gap_2()
+                .items_center()
+                .bg(secondary)
+                .border_b_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(muted)
+                        .child(title.to_string()),
+                ),
+        )
+        .child(div().flex_1().overflow_hidden().child(body))
+}
+
+fn doc_stats(text: &str) -> (usize, usize) {
+    let lines = text.lines().count().max(1);
+    let chars = text.chars().count();
+    (lines, chars)
 }
 
 /// Turn `[[note]]` / `[[note|别名]]` into Markdown links for the preview pane.
@@ -613,11 +705,17 @@ impl Render for KnowledgePane {
             })
             .unwrap_or_else(|| "未选择知识库".into());
         let preview_text = self.editor.read(cx).value().to_string();
+        let (line_count, char_count) = doc_stats(&preview_text);
         let mode = self.mode;
         let replace_status = self.replace_status.clone();
+        let preview_zoom = self.preview_zoom;
+        let table_wrap = self.table_wrap;
+        let note_title = self
+            .current_relative()
+            .unwrap_or_else(|| "未打开笔记".into());
         let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
-        let radius = cx.theme().radius;
+        let accent = cx.theme().accent;
 
         h_flex()
             .size_full()
@@ -627,6 +725,7 @@ impl Render for KnowledgePane {
                     .h_full()
                     .border_r_1()
                     .border_color(border)
+                    .bg(cx.theme().sidebar)
                     .p_3()
                     .gap_2()
                     .child(
@@ -635,6 +734,8 @@ impl Render for KnowledgePane {
                             .child(
                                 Button::new("kb-add")
                                     .small()
+                                    .outline()
+                                    .icon(IconName::Folder)
                                     .label("添加库")
                                     .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
                             )
@@ -642,13 +743,20 @@ impl Render for KnowledgePane {
                                 Button::new("kb-new")
                                     .small()
                                     .primary()
-                                    .label("新建 MD")
+                                    .icon(IconName::Plus)
+                                    .label("新建")
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.new_md(window, cx)),
                                     ),
                             ),
                     )
-                    .child(div().text_xs().text_color(muted).child(root_label))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .line_height(relative(1.35))
+                            .child(root_label),
+                    )
                     .child(Input::new(&self.filter).cleanable(true))
                     .child({
                         let mut list = v_flex().gap_0p5().flex_1().overflow_y_scrollbar();
@@ -673,131 +781,288 @@ impl Render for KnowledgePane {
                     .gap_2()
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_3()
+                            .items_center()
+                            .flex_wrap()
                             .child(
-                                Button::new("kb-live")
-                                    .small()
-                                    .label("实时")
-                                    .selected(mode == KbMode::Live)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.mode = KbMode::Live;
-                                        cx.notify();
-                                    })),
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .min_w_0()
+                                    .child(
+                                        Icon::new(IconName::BookOpen)
+                                            .size(px(16.))
+                                            .text_color(accent),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .min_w_0()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_semibold()
+                                                    .overflow_x_hidden()
+                                                    .text_ellipsis()
+                                                    .child(note_title),
+                                            )
+                                            .when(current.is_some(), |col| {
+                                                col.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("失焦时自动保存"),
+                                                )
+                                            }),
+                                    ),
                             )
-                            .child(
-                                Button::new("kb-source")
-                                    .small()
-                                    .label("源码")
-                                    .selected(mode == KbMode::Source)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.mode = KbMode::Source;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("kb-preview")
-                                    .small()
-                                    .label("预览")
-                                    .selected(mode == KbMode::Preview)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let text = this.editor.read(cx).value().to_string();
-                                        this.save_current(&text);
-                                        this.mode = KbMode::Preview;
-                                        cx.notify();
-                                    })),
-                            )
+                            .child({
+                                let pane = cx.weak_entity();
+                                ToggleGroup::new("kb-mode")
+                                    .single()
+                                    .segmented()
+                                    .outline()
+                                    .with_size(gpui_kit::component::Size::Small)
+                                    .child(
+                                        Toggle::new(0)
+                                            .icon(
+                                                Icon::new(IconName::GalleryVerticalEnd).size(px(14.)),
+                                            )
+                                            .label("实时")
+                                            .tooltip("源码与预览并排")
+                                            .checked(mode == KbMode::Live),
+                                    )
+                                    .child(
+                                        Toggle::new(1)
+                                            .icon(Icon::new(IconName::SquareTerminal).size(px(14.)))
+                                            .label("源码")
+                                            .checked(mode == KbMode::Source),
+                                    )
+                                    .child(
+                                        Toggle::new(2)
+                                            .icon(Icon::new(IconName::Eye).size(px(14.)))
+                                            .label("预览")
+                                            .checked(mode == KbMode::Preview),
+                                    )
+                                    .on_click(move |values: &Vec<bool>, window, app| {
+                                        let Some(view) = pane.upgrade() else {
+                                            return;
+                                        };
+                                        view.update(app, |this, cx| {
+                                            if values.first() == Some(&true) {
+                                                this.mode = KbMode::Live;
+                                            } else if values.get(1) == Some(&true) {
+                                                this.mode = KbMode::Source;
+                                            } else if values.get(2) == Some(&true) {
+                                                let text =
+                                                    this.editor.read(cx).value().to_string();
+                                                this.save_current(&text);
+                                                this.mode = KbMode::Preview;
+                                            }
+                                            let _ = window;
+                                            cx.notify();
+                                        });
+                                    })
+                            })
                             .when(current.is_some(), |row| {
                                 let path = current.clone().unwrap();
                                 row.child(
                                     Button::new("kb-reveal")
                                         .small()
                                         .ghost()
-                                        .label("打开位置")
+                                        .icon(IconName::Folder)
+                                        .label("在资源管理器中显示")
                                         .on_click(move |_, _, cx| {
                                             cx.reveal_path(std::path::Path::new(&path));
                                         }),
                                 )
                             }),
                     )
-                    .when(
-                        matches!(mode, KbMode::Live | KbMode::Source) && current.is_some(),
-                        |col| {
-                            col.child(
-                                h_flex()
-                                    .gap_2()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .child(Input::new(&self.find).cleanable(true))
-                                    .child(Input::new(&self.replace).cleanable(true))
-                                    .child(Button::new("kb-find").xsmall().label("查找").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.find_next(window, cx);
-                                        }),
-                                    ))
-                                    .child(Button::new("kb-repl").xsmall().label("替换").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.replace_once(window, cx);
-                                        }),
-                                    ))
-                                    .child(
-                                        Button::new("kb-repl-all")
-                                            .xsmall()
-                                            .primary()
-                                            .label("全部替换")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.replace_all(window, cx);
-                                            })),
-                                    )
-                                    .when(!replace_status.is_empty(), |row| {
-                                        row.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(replace_status.clone()),
+                    .when(current.is_none(), |col| {
+                        col.child(
+                            div()
+                                .flex_1()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    v_flex()
+                                        .gap_3()
+                                        .items_center()
+                                        .max_w(px(320.))
+                                        .child(
+                                            Icon::new(IconName::BookOpen)
+                                                .size(px(40.))
+                                                .text_color(muted),
                                         )
-                                    }),
-                            )
-                        },
-                    )
-                    .child({
-                        let entity = entity.clone();
-                        match mode {
-                            KbMode::Live => {
-                                self.sync_preview(cx);
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .font_semibold()
+                                                .child("选择或新建一篇笔记"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(muted)
+                                                .text_center()
+                                                .child(
+                                                    "左侧支持目录折叠与正文检索；正文中的 [[笔记名]] 会出现在下方链接区。",
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new("kb-empty-new")
+                                                .primary()
+                                                .icon(IconName::Plus)
+                                                .label("新建 Markdown")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.new_md(window, cx);
+                                                })),
+                                        ),
+                                ),
+                        )
+                    })
+                    .when(current.is_some(), |col| {
+                        col.when(matches!(mode, KbMode::Live | KbMode::Source), |col| {
+                            col.child(
+                                GroupBox::new()
+                                    .id("kb-find")
+                                    .outline()
+                                    .title("查找与替换")
                                     .child(
-                                        h_resizable("kb-live")
+                                        h_flex()
+                                            .gap_2()
+                                            .flex_wrap()
+                                            .items_center()
                                             .child(
-                                                resizable_panel().child(self.kb_source_editor(cx)),
+                                                Input::new(&self.find)
+                                                    .cleanable(true)
+                                                    .w(px(168.)),
                                             )
                                             .child(
-                                                resizable_panel().child(
+                                                Input::new(&self.replace)
+                                                    .cleanable(true)
+                                                    .w(px(168.)),
+                                            )
+                                            .child(
+                                                Button::new("kb-find")
+                                                    .xsmall()
+                                                    .outline()
+                                                    .label("查找")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.find_next(window, cx);
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("kb-repl")
+                                                    .xsmall()
+                                                    .outline()
+                                                    .label("替换")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.replace_once(window, cx);
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("kb-repl-all")
+                                                    .xsmall()
+                                                    .primary()
+                                                    .label("全部替换")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.replace_all(window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .when(!replace_status.is_empty(), |row| {
+                                                row.child(
                                                     div()
-                                                        .size_full()
-                                                        .overflow_hidden()
-                                                        .child(self.kb_preview(&entity)),
-                                                ),
-                                            ),
-                                    )
-                                    .into_any_element()
-                            }
-                            KbMode::Source => div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .child(self.kb_source_editor(cx))
-                                .into_any_element(),
-                            KbMode::Preview => {
-                                self.sync_preview(cx);
-                                div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child(replace_status.clone()),
+                                                )
+                                            }),
+                                    ),
+                            )
+                        })
+                        .child({
+                            let entity = entity.clone();
+                            match mode {
+                                KbMode::Live => {
+                                    self.sync_preview(cx);
+                                    div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .child(
+                                            h_resizable("kb-live")
+                                                .child(resizable_panel().child(kb_surface(
+                                                    cx,
+                                                    "Markdown 源码",
+                                                    self.kb_source_editor(cx),
+                                                )))
+                                                .child(resizable_panel().child(kb_surface(
+                                                    cx,
+                                                    "渲染预览",
+                                                    self.kb_preview(&entity),
+                                                ))),
+                                        )
+                                        .into_any_element()
+                                }
+                                KbMode::Source => div()
                                     .flex_1()
-                                    .w_full()
                                     .overflow_hidden()
-                                    .child(self.kb_preview(&entity))
-                                    .into_any_element()
+                                    .child(kb_surface(
+                                        cx,
+                                        "Markdown 源码",
+                                        self.kb_source_editor(cx),
+                                    ))
+                                    .into_any_element(),
+                                KbMode::Preview => {
+                                    self.sync_preview(cx);
+                                    div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .child(kb_surface(
+                                            cx,
+                                            "渲染预览",
+                                            self.kb_preview(&entity),
+                                        ))
+                                        .into_any_element()
+                                }
                             }
-                        }
+                        })
+                        .child(
+                            StatusBar::new()
+                                .left(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("{line_count} 行 · {char_count} 字")),
+                                )
+                                .when(matches!(mode, KbMode::Live | KbMode::Preview), |bar| {
+                                    bar.right(
+                                        Button::new("kb-zoom")
+                                            .ghost()
+                                            .xsmall()
+                                            .label(format!("预览 {:.0}%", preview_zoom * 100.))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cycle_preview_zoom(cx);
+                                            })),
+                                    )
+                                    .right(
+                                        Button::new("kb-table")
+                                            .ghost()
+                                            .xsmall()
+                                            .label(if table_wrap {
+                                                "表格：换行"
+                                            } else {
+                                                "表格：横滚"
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.table_wrap = !this.table_wrap;
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        )
                     })
                     .when_some(current.clone(), |col, cur| {
                         let outgoing = self.outgoing_links(&preview_text);
@@ -806,22 +1071,16 @@ impl Render for KnowledgePane {
                         let back_n = backs.len();
                         let entity = entity.clone();
                         col.child(
-                            v_flex()
-                                .gap_1()
-                                .p_2()
-                                .rounded(radius)
-                                .border_1()
-                                .border_color(border)
-                                .max_h(px(160.))
-                                .overflow_y_scrollbar()
+                            GroupBox::new()
+                                .id("kb-wikilinks")
+                                .outline()
+                                .title(format!("双向链接 · 出链 {out_n} · 反向 {back_n}"))
                                 .child(
-                                    div()
-                                        .text_xs()
-                                        .font_bold()
-                                        .text_color(muted)
-                                        .child(format!("双向链接 · 出链 {out_n} · 反向 {back_n}")),
-                                )
-                                .when(out_n > 0, |box_| {
+                                    v_flex()
+                                        .gap_1()
+                                        .max_h(px(132.))
+                                        .overflow_y_scrollbar()
+                                        .when(out_n > 0, |box_| {
                                     box_.child(h_flex().gap_1().flex_wrap().children(
                                         outgoing.into_iter().enumerate().map(
                                             |(i, (label, path))| {
@@ -874,14 +1133,15 @@ impl Render for KnowledgePane {
                                         }),
                                     ))
                                 })
-                                .when(out_n == 0 && back_n == 0, |box_| {
-                                    box_.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child("在正文写 [[笔记名]] 即可建立链接"),
-                                    )
-                                }),
+                                        .when(out_n == 0 && back_n == 0, |box_| {
+                                            box_.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child("在正文写 [[笔记名]] 即可建立链接"),
+                                            )
+                                        }),
+                                ),
                         )
                     }),
             )
