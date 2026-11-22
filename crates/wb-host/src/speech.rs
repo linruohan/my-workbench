@@ -579,7 +579,10 @@ pub fn speech_ensure_models_with(
         .and_then(|p| p.http_proxy)
         .filter(|p| !p.trim().is_empty());
     let mut builder = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
+        // No total deadline: a 240 MB model on a slow link legitimately takes
+        // many minutes, and aborting it would waste the whole download. Stalls
+        // are surfaced by the read loop instead; `connect_timeout` still bounds
+        // how long an unreachable host can hang.
         .connect_timeout(std::time::Duration::from_secs(30));
     if let Some(proxy) = proxy.as_deref() {
         if let Ok(proxy) = reqwest::Proxy::all(proxy) {
@@ -615,19 +618,20 @@ pub fn speech_ensure_models_with(
             total: expected,
         });
         let result = download_file(&client, &spec.mirror_url, &path, |done, _| {
-            // Throttle: a 240 MB file would otherwise emit thousands of events.
-            if done.saturating_sub(reported) >= 2 * 1024 * 1024 || done == expected {
-                reported = done;
-                on_progress(DownloadProgress {
-                    file: spec.name.clone(),
-                    done,
-                    total: expected,
-                });
-            }
+            report_progress(&mut on_progress, &spec.name, done, expected, &mut reported);
         })
         .or_else(|e| {
             log::warn!("镜像下载失败 {}：{e}", spec.name);
-            download_file(&client, &spec.url, &path, |_, _| {})
+            // Restart the bar from zero so the fallback does not look stalled.
+            reported = 0;
+            on_progress(DownloadProgress {
+                file: spec.name.clone(),
+                done: 0,
+                total: expected,
+            });
+            download_file(&client, &spec.url, &path, |done, _| {
+                report_progress(&mut on_progress, &spec.name, done, expected, &mut reported);
+            })
         })
         .and_then(|_| {
             let checked = check_file(&dir, &spec);
@@ -686,7 +690,17 @@ fn download_file(
         let mut copied = 0u64;
         let mut buf = vec![0u8; 1 << 20];
         loop {
-            let read = resp.read(&mut buf).context("读取下载内容失败")?;
+            let read = match resp.read(&mut buf) {
+                Ok(read) => read,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    // The client has no per-read timeout of its own, so a
+                    // stalled transfer surfaces here as an I/O error.
+                    return Err(e).with_context(|| {
+                        format!("下载中断（已收到 {} 字节）", human_bytes(copied))
+                    });
+                }
+            };
             if read == 0 {
                 break;
             }
@@ -702,6 +716,15 @@ fn download_file(
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    }
 }
 
 /// Remove every file of an engine so it can be downloaded again.
