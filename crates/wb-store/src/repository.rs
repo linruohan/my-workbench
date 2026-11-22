@@ -286,6 +286,28 @@ impl MemoryWorkbenchRepository {
         Some(p.clone())
     }
 
+    /// Removes a project and every task that belongs to it. The inbox cannot be deleted.
+    pub fn delete_project(&mut self, id: &str) -> bool {
+        if id == INBOX_PROJECT_ID || !self.projects.contains_key(id) {
+            return false;
+        }
+        self.projects.remove(id);
+        self.buckets.remove(id);
+        let task_ids: Vec<String> = self
+            .tasks
+            .values()
+            .filter(|task| task.project_id == id)
+            .map(|task| task.id.clone())
+            .collect();
+        for task_id in task_ids {
+            if self.tasks.contains_key(&task_id) {
+                self.delete_task(&task_id);
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
     pub fn today_order(&self) -> &[String] {
         &self.today_order
     }

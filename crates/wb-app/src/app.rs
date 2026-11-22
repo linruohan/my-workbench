@@ -643,7 +643,32 @@ impl Render for WorkbenchApp {
                             .collapsible(SidebarCollapsible::Icon)
                             .collapsed(collapsed)
                             .child(SidebarGroup::new("任务").child(task_menu))
-                            .child(SidebarGroup::new("项目").child(project_menu))
+                            .child(
+                                SidebarGroup::new("项目")
+                                    .suffix({
+                                        let entity = entity.clone();
+                                        move |_, _| {
+                                            let entity = entity.clone();
+                                            Button::new("sidebar-add-project")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(IconName::Plus)
+                                                .tooltip("新建项目")
+                                                .on_click(move |_, window, app| {
+                                                    if let Some(e) = entity.upgrade() {
+                                                        e.update(app, |this, cx| {
+                                                            this.tasks.update(cx, |tasks, cx| {
+                                                                tasks.open_project_dialog(
+                                                                    window, cx,
+                                                                );
+                                                            });
+                                                        });
+                                                    }
+                                                })
+                                        }
+                                    })
+                                    .child(project_menu),
+                            )
                             .child(SidebarGroup::new("标签").child(tag_menu))
                             .child(SidebarGroup::new("更多").child(more_menu))
                             .footer({

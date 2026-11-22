@@ -3,6 +3,7 @@ pub mod inspector;
 pub mod knowledge;
 mod model_settings;
 pub mod settings;
+mod task_form;
 pub mod tasks;
 pub mod timed;
 

@@ -21,6 +21,7 @@ reqwest_client.workspace = true
 wry.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+jiff = "1.0"
 env_logger.workspace = true
 log.workspace = true
 serde.workspace = true

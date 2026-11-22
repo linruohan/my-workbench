@@ -9938,6 +9938,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre-reqwest-client",
  "gpui-webview",
+ "jiff 1.0.1",
  "lb-wry",
  "log",
  "resvg 0.46.0",

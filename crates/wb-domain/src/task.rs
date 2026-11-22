@@ -1,5 +1,5 @@
 use crate::DomainError;
-use crate::date::{format_local_day, local_hour_minute, now_ms};
+use crate::date::{add_local_days, format_local_day, local_hour_minute, now_ms};
 use crate::id::create_id;
 use crate::timed::{compute_next_run_at, make_preset_schedule, timed_schedule_label};
 use crate::types::{
@@ -125,9 +125,28 @@ pub fn set_task_repeat_preset(
     if preset.is_some() && task.parent_id.is_some() {
         return Err(DomainError::new("子任务不能设置重复"));
     }
-    task.repeat_cfg_id = preset.map(|p| encode_repeat_schedule(&make_preset_schedule(p, "09:00")));
+    let at_time = task
+        .due_with_time
+        .map(|ms| {
+            let (hour, minute) = local_hour_minute(ms);
+            format!("{hour:02}:{minute:02}")
+        })
+        .unwrap_or_else(|| "09:00".to_string());
+    task.repeat_cfg_id =
+        preset.map(|preset| encode_repeat_schedule(&make_preset_schedule(preset, &at_time)));
     task.updated_at = now_ms();
     Ok(())
+}
+
+pub fn task_repeat_preset(task: &Task) -> Option<TimedSchedulePreset> {
+    match task
+        .repeat_cfg_id
+        .as_deref()
+        .and_then(parse_repeat_schedule)?
+    {
+        TimedSchedule::Preset { preset, .. } => Some(preset),
+        _ => None,
+    }
 }
 
 pub fn task_repeat_label(task: &Task) -> String {
@@ -191,6 +210,99 @@ pub fn task_plan_day(task: &Task) -> Option<String> {
         return Some(format_local_day(ms));
     }
     task.due_day.clone()
+}
+
+pub fn task_is_overdue(task: &Task, today: &str) -> bool {
+    !task.is_done && task_plan_day(task).is_some_and(|day| day.as_str() < today)
+}
+
+/// `(done, total)` for direct children only.
+pub fn task_child_counts(tasks: &[Task], parent_id: &str) -> (usize, usize) {
+    let mut done = 0usize;
+    let mut total = 0usize;
+    for task in tasks {
+        if task.parent_id.as_deref() == Some(parent_id) {
+            total += 1;
+            if task.is_done {
+                done += 1;
+            }
+        }
+    }
+    (done, total)
+}
+
+pub fn task_has_children(tasks: &[Task], parent_id: &str) -> bool {
+    tasks
+        .iter()
+        .any(|task| task.parent_id.as_deref() == Some(parent_id))
+}
+
+/// `今天` / `明天` / `逾期 11-20` / `11-22`, plus `HH:MM` when the moment has a clock.
+pub fn format_moment_label(ms: i64, today: &str) -> String {
+    let day = format_local_day(ms);
+    let (hour, minute) = local_hour_minute(ms);
+    format!("{} {hour:02}:{minute:02}", relative_day_label(&day, today))
+}
+
+pub fn relative_day_label(day: &str, today: &str) -> String {
+    if day == today {
+        return "今天".into();
+    }
+    if add_local_days(today, 1).as_deref() == Some(day) {
+        return "明天".into();
+    }
+    if add_local_days(today, -1).as_deref() == Some(day) {
+        return "昨天".into();
+    }
+    if day < today {
+        return format!("逾期 {}", short_month_day(day));
+    }
+    short_month_day(day)
+}
+
+fn short_month_day(day: &str) -> String {
+    day.get(5..).unwrap_or(day).to_string()
+}
+
+pub fn format_plan_chip(task: &Task, today: &str) -> Option<String> {
+    let day = task_plan_day(task)?;
+    if let Some(ms) = task.due_with_time {
+        return Some(format_moment_label(ms, today));
+    }
+    Some(relative_day_label(&day, today))
+}
+
+pub fn format_deadline_chip(task: &Task, today: &str) -> Option<String> {
+    if let Some(ms) = task.deadline_with_time {
+        return Some(format!("截止 {}", format_moment_label(ms, today)));
+    }
+    let day = task.deadline_day.as_deref()?;
+    Some(format!("截止 {}", relative_day_label(day, today)))
+}
+
+pub fn format_remind_chip(task: &Task, today: &str) -> Option<String> {
+    task.remind_at
+        .map(|ms| format!("提醒 {}", format_moment_label(ms, today)))
+}
+
+pub fn format_spent_label(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    let mins = ms / 60_000;
+    if mins < 1 {
+        return "不足 1 分钟".into();
+    }
+    if mins < 60 {
+        return format!("{mins} 分钟");
+    }
+    let hours = mins / 60;
+    let remain = mins % 60;
+    if remain == 0 {
+        format!("{hours} 小时")
+    } else {
+        format!("{hours} 小时 {remain} 分")
+    }
 }
 
 pub fn is_today_member(task: &Task, today: &str) -> bool {
@@ -456,6 +568,56 @@ mod tests {
         assert!(buckets[1].is_empty());
         assert_eq!(buckets[2].len(), 1);
         assert_eq!(buckets[2][0].title, "后");
+    }
+
+    #[test]
+    fn plan_chip_and_overdue_use_plan_day() {
+        let mut task = create_task_draft("写报告", None, None, Some(1));
+        task.due_day = Some("2026-11-22".into());
+        assert_eq!(
+            format_plan_chip(&task, "2026-11-22").as_deref(),
+            Some("今天")
+        );
+        assert_eq!(
+            format_plan_chip(&task, "2026-11-21").as_deref(),
+            Some("明天")
+        );
+        assert!(task_is_overdue(&task, "2026-11-23"));
+        assert!(!task_is_overdue(&task, "2026-11-22"));
+        task.deadline_day = Some("2026-11-23".into());
+        assert_eq!(
+            format_deadline_chip(&task, "2026-11-22").as_deref(),
+            Some("截止 明天")
+        );
+    }
+
+    #[test]
+    fn child_counts_and_spent_label() {
+        let parent = create_task_draft("父", None, None, Some(1));
+        let mut done = create_task_draft("甲", None, Some(&parent.id), Some(2));
+        done.is_done = true;
+        let open = create_task_draft("乙", None, Some(&parent.id), Some(3));
+        let open_id = open.id.clone();
+        let tasks = [parent.clone(), done, open];
+        assert_eq!(task_child_counts(&tasks, &parent.id), (1, 2));
+        assert!(task_has_children(&tasks, &parent.id));
+        assert!(!task_has_children(&tasks, &open_id));
+        assert_eq!(format_spent_label(0), "");
+        assert_eq!(format_spent_label(5 * 60_000), "5 分钟");
+        assert_eq!(format_spent_label(65 * 60_000), "1 小时 5 分");
+    }
+
+    #[test]
+    fn repeat_preset_keeps_existing_clock() {
+        let mut task = create_task_draft("日报", None, None, Some(1));
+        task.due_with_time = crate::date::at_local_time("2026-11-22", 18, 30);
+        set_task_repeat_preset(&mut task, Some(TimedSchedulePreset::Daily)).unwrap();
+        let schedule = parse_repeat_schedule(task.repeat_cfg_id.as_deref().unwrap()).unwrap();
+        match schedule {
+            TimedSchedule::Preset { at_time, .. } => assert_eq!(at_time, "18:30"),
+            other => panic!("expected preset, got {other:?}"),
+        }
+        assert_eq!(task_repeat_preset(&task), Some(TimedSchedulePreset::Daily));
     }
 
     #[test]

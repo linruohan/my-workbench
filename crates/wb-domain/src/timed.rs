@@ -1,4 +1,4 @@
-use crate::date::now_ms;
+use crate::date::{add_local_days, at_local_time, format_local_day, local_hour_minute, now_ms};
 use crate::id::create_id;
 use crate::types::{EndMode, TimedIntervalUnit, TimedSchedule, TimedSchedulePreset, TimedTask};
 use chrono::{Datelike, Local, TimeZone, Timelike, Weekday};
@@ -130,6 +130,24 @@ pub fn patch_timed_task(
 
 pub fn mark_timed_task_ran(task: &TimedTask, now: i64) -> TimedTask {
     patch_timed_task(task, None, None, None, None, Some(Some(now)), now)
+}
+
+/// Toggle enabled. Turning a stale task back on schedules the next future slot
+/// from `now` and keeps the previous run timestamp.
+pub fn set_timed_task_enabled(task: &TimedTask, enabled: bool, now: i64) -> TimedTask {
+    let mut next = task.next_run_at;
+    if enabled && next.map(|at| at <= now).unwrap_or(true) {
+        next = task
+            .schedule
+            .as_ref()
+            .and_then(|schedule| compute_next_run_at(schedule, now));
+    }
+    TimedTask {
+        enabled,
+        next_run_at: next,
+        updated_at: now,
+        ..task.clone()
+    }
 }
 
 pub fn timed_preset_label(preset: TimedSchedulePreset) -> &'static str {
@@ -277,8 +295,12 @@ pub fn compute_next_run_at(schedule: &TimedSchedule, from_ms: i64) -> Option<i64
                 Some(d.timestamp_millis())
             }
             TimedSchedulePreset::Weekly => {
-                let mut d = from + chrono::Duration::weeks(1);
+                let mut d = from;
                 apply_at_time(&mut d, &at_time);
+                if d.timestamp_millis() <= from_ms {
+                    d += chrono::Duration::weeks(1);
+                    apply_at_time(&mut d, &at_time);
+                }
                 Some(d.timestamp_millis())
             }
             TimedSchedulePreset::Monthly => {
@@ -364,6 +386,114 @@ pub fn is_timed_task_auto_due(task: &TimedTask, now: i64) -> bool {
     is_timed_task_due(task, now) && !is_timed_task_missed(task, now, TIMED_TASK_MISS_GRACE_MS)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimedRunState {
+    Disabled,
+    Unscheduled,
+    Missed,
+    Due,
+    Soon,
+    Scheduled,
+}
+
+pub fn timed_run_state(task: &TimedTask, now: i64) -> TimedRunState {
+    if !task.enabled {
+        return TimedRunState::Disabled;
+    }
+    let Some(next) = task.next_run_at else {
+        return TimedRunState::Unscheduled;
+    };
+    if is_timed_task_missed(task, now, TIMED_TASK_MISS_GRACE_MS) {
+        return TimedRunState::Missed;
+    }
+    if next <= now {
+        return TimedRunState::Due;
+    }
+    if next - now <= 24 * 60 * 60 * 1000 {
+        return TimedRunState::Soon;
+    }
+    TimedRunState::Scheduled
+}
+
+pub fn timed_run_state_label(state: TimedRunState) -> &'static str {
+    match state {
+        TimedRunState::Disabled => "已停用",
+        TimedRunState::Unscheduled => "未排期",
+        TimedRunState::Missed => "已错过",
+        TimedRunState::Due => "待执行",
+        TimedRunState::Soon => "即将到期",
+        TimedRunState::Scheduled => "已排期",
+    }
+}
+
+pub fn format_timed_instant(ms: i64, now: i64) -> String {
+    let day = format_local_day(ms);
+    let today = format_local_day(now);
+    let (hour, minute) = local_hour_minute(ms);
+    let clock = format!("{hour:02}:{minute:02}");
+    let day_label = if day == today {
+        "今天".to_string()
+    } else if add_local_days(&today, 1).as_deref() == Some(day.as_str()) {
+        "明天".to_string()
+    } else if add_local_days(&today, -1).as_deref() == Some(day.as_str()) {
+        "昨天".to_string()
+    } else {
+        day.get(5..).unwrap_or(day.as_str()).to_string()
+    };
+    format!("{day_label} {clock}")
+}
+
+/// Missed and due tasks first, then upcoming, disabled last.
+pub fn timed_tasks_in_display_order(tasks: &[TimedTask], now: i64) -> Vec<TimedTask> {
+    let mut out = tasks.to_vec();
+    out.sort_by(|a, b| {
+        let rank = |task: &TimedTask| match timed_run_state(task, now) {
+            TimedRunState::Missed => 0,
+            TimedRunState::Due => 1,
+            TimedRunState::Soon => 2,
+            TimedRunState::Scheduled => 3,
+            TimedRunState::Unscheduled => 4,
+            TimedRunState::Disabled => 5,
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| {
+                a.next_run_at
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.next_run_at.unwrap_or(i64::MAX))
+            })
+            .then_with(|| a.created_at.cmp(&b.created_at))
+    });
+    out
+}
+
+fn clock_hour_minute(at_time: &str) -> (u32, u32) {
+    let normalized = normalize_at_time(Some(at_time));
+    let mut parts = normalized.split(':');
+    let hour = parts.next().and_then(|p| p.parse().ok()).unwrap_or(9);
+    let minute = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (hour.min(23), minute.min(59))
+}
+
+/// Next clock occurrence: later today, otherwise the same clock tomorrow.
+pub fn once_at_from_clock(now: i64, at_time: &str) -> i64 {
+    let today = format_local_day(now);
+    let (hour, minute) = clock_hour_minute(at_time);
+    let today_at = at_local_time(&today, hour, minute).unwrap_or(now);
+    if today_at > now {
+        return today_at;
+    }
+    add_local_days(&today, 1)
+        .and_then(|day| at_local_time(&day, hour, minute))
+        .unwrap_or(today_at)
+}
+
+pub fn make_once_from_clock(now: i64, at_time: &str) -> TimedSchedule {
+    TimedSchedule::Once {
+        at: once_at_from_clock(now, at_time),
+    }
+}
+
 pub fn make_preset_schedule(preset: TimedSchedulePreset, at_time: &str) -> TimedSchedule {
     TimedSchedule::Preset {
         preset,
@@ -372,12 +502,30 @@ pub fn make_preset_schedule(preset: TimedSchedulePreset, at_time: &str) -> Timed
 }
 
 pub fn make_custom_schedule(every: i64, unit: TimedIntervalUnit, at_time: &str) -> TimedSchedule {
+    make_custom_schedule_ending(every, unit, at_time, None)
+}
+
+pub fn make_custom_schedule_ending(
+    every: i64,
+    unit: TimedIntervalUnit,
+    at_time: &str,
+    end_date: Option<&str>,
+) -> TimedSchedule {
+    let end_date = end_date
+        .map(str::trim)
+        .filter(|day| !day.is_empty())
+        .filter(|day| crate::date::parse_local_day(day).is_some())
+        .map(str::to_string);
     TimedSchedule::Custom {
         every: every.max(1),
         unit,
         at_time: normalize_at_time(Some(at_time)),
-        end_mode: EndMode::Never,
-        end_date: None,
+        end_mode: if end_date.is_some() {
+            EndMode::OnDate
+        } else {
+            EndMode::Never
+        },
+        end_date,
     }
 }
 
@@ -410,5 +558,93 @@ mod tests {
         let next = compute_next_run_at(&s, 1_700_000_000_000);
         assert!(next.is_some());
         assert!(next.unwrap() > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn weekly_keeps_a_later_slot_today() {
+        let now = Local::now();
+        if now.hour() >= 22 {
+            return;
+        }
+        let at = format!("{:02}:00", now.hour() + 1);
+        let schedule = make_preset_schedule(TimedSchedulePreset::Weekly, &at);
+        let next = compute_next_run_at(&schedule, now.timestamp_millis()).unwrap();
+        let delta = next - now.timestamp_millis();
+        assert!(delta > 0);
+        assert!(delta < 3 * 60 * 60 * 1000, "delta={delta}");
+    }
+
+    #[test]
+    fn once_clock_rolls_to_tomorrow_after_the_slot() {
+        let morning = Local::now()
+            .with_hour(8)
+            .and_then(|d| d.with_minute(0))
+            .and_then(|d| d.with_second(0))
+            .and_then(|d| d.with_nanosecond(0))
+            .unwrap();
+        let later_today = once_at_from_clock(morning.timestamp_millis(), "09:00");
+        assert!(later_today > morning.timestamp_millis());
+        assert!(later_today - morning.timestamp_millis() < 2 * 60 * 60 * 1000);
+
+        let evening = morning.with_hour(18).unwrap();
+        let tomorrow = once_at_from_clock(evening.timestamp_millis(), "09:00");
+        assert!(tomorrow - evening.timestamp_millis() > 12 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn custom_end_date_is_kept_only_when_valid() {
+        let open = make_custom_schedule_ending(1, TimedIntervalUnit::Day, "09:00", Some("nope"));
+        match open {
+            TimedSchedule::Custom {
+                end_mode, end_date, ..
+            } => {
+                assert_eq!(end_mode, EndMode::Never);
+                assert!(end_date.is_none());
+            }
+            other => panic!("expected custom, got {other:?}"),
+        }
+        let closed =
+            make_custom_schedule_ending(1, TimedIntervalUnit::Week, "08:30", Some("2026-12-31"));
+        match closed {
+            TimedSchedule::Custom {
+                end_mode, end_date, ..
+            } => {
+                assert_eq!(end_mode, EndMode::OnDate);
+                assert_eq!(end_date.as_deref(), Some("2026-12-31"));
+            }
+            other => panic!("expected custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabling_stale_task_schedules_a_future_slot() {
+        let now = Local::now().timestamp_millis();
+        let mut task = create_timed_task_draft(
+            Some("日报"),
+            Some("hi"),
+            Some(make_preset_schedule(TimedSchedulePreset::Daily, "09:00")),
+            Some(now - 86_400_000),
+        );
+        task.enabled = false;
+        task.next_run_at = Some(now - 3_600_000);
+        let on = set_timed_task_enabled(&task, true, now);
+        assert!(on.enabled);
+        assert!(on.next_run_at.is_some_and(|next| next > now));
+        assert_eq!(on.last_run_at, task.last_run_at);
+    }
+
+    #[test]
+    fn display_order_puts_missed_before_disabled() {
+        let now = 1_700_000_000_000;
+        let mut missed = create_timed_task_draft(Some("错过"), None, None, Some(1));
+        missed.enabled = true;
+        missed.next_run_at = Some(now - 10 * 60 * 1000);
+        let mut disabled = create_timed_task_draft(Some("停用"), None, None, Some(2));
+        disabled.enabled = false;
+        disabled.next_run_at = Some(now - 10 * 60 * 1000);
+        let ordered = timed_tasks_in_display_order(&[disabled, missed], now);
+        assert_eq!(ordered[0].title, "错过");
+        assert_eq!(timed_run_state(&ordered[0], now), TimedRunState::Missed);
+        assert_eq!(timed_run_state_label(TimedRunState::Soon), "即将到期");
     }
 }
