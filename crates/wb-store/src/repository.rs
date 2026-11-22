@@ -545,6 +545,41 @@ impl MemoryWorkbenchRepository {
         v
     }
 
+    /// Threads whose message bodies contain `query`.
+    ///
+    /// Searching by walking this map avoids cloning every message, which for a
+    /// large history costs far more than the search itself. Matching ignores
+    /// case, so callers may pass the raw query.
+    pub fn agent_thread_ids_matching(&self, query: &str) -> std::collections::HashSet<String> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return std::collections::HashSet::new();
+        }
+        self.agent_messages
+            .values()
+            .filter(|m| !m.content.is_empty() && m.content.to_lowercase().contains(&needle))
+            .map(|m| m.thread_id.clone())
+            .collect()
+    }
+
+    /// A short excerpt around `query` in `thread_id`'s first matching message.
+    pub fn agent_message_excerpt(&self, thread_id: &str, query: &str) -> Option<String> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return None;
+        }
+        let hit = self.agent_messages.values().find(|m| {
+            m.thread_id == thread_id
+                && !m.content.is_empty()
+                && m.content.to_lowercase().contains(&needle)
+        })?;
+        let body = hit.content.replace('\n', " ");
+        let at = body.to_lowercase().find(&needle).unwrap_or(0);
+        let start = at.saturating_sub(12);
+        let text: String = body.chars().skip(start).take(48).collect();
+        Some(format!("…{text}"))
+    }
+
     pub fn messages_for_thread(&self, thread_id: &str) -> Vec<AgentMessage> {
         let mut v: Vec<_> = self
             .agent_messages
@@ -632,6 +667,53 @@ mod tests {
         repo2.import_snapshot(parsed);
         assert_eq!(repo2.list_tasks().len(), 1);
         assert_eq!(repo2.list_tasks()[0].title, "hello");
+    }
+
+    fn test_message(id: &str, thread: &str, content: &str) -> AgentMessage {
+        AgentMessage {
+            id: id.into(),
+            thread_id: thread.into(),
+            role: wb_domain::AgentRole::User,
+            content: content.into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: now_ms(),
+        }
+    }
+
+    #[test]
+    fn body_search_finds_threads_and_excerpts() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        repo.upsert_agent_message(test_message("m1", "t1", "今天讨论语音识别方案"));
+        repo.upsert_agent_message(test_message("m2", "t1", "另一条不相关的内容"));
+        repo.upsert_agent_message(test_message("m3", "t2", "完全不同的主题"));
+        repo.upsert_agent_message(test_message("m4", "t3", ""));
+
+        let hits = repo.agent_thread_ids_matching("语音");
+        assert!(hits.contains("t1"), "matching thread must be reported");
+        assert!(!hits.contains("t2"));
+        // Empty messages must not panic or match everything.
+        assert!(!hits.contains("t3"));
+
+        let excerpt = repo.agent_message_excerpt("t1", "语音").unwrap();
+        assert!(
+            excerpt.contains("语音"),
+            "excerpt should show the hit: {excerpt}"
+        );
+        assert!(repo.agent_message_excerpt("t2", "语音").is_none());
+
+        // An empty query must stay cheap and match nothing.
+        assert!(repo.agent_thread_ids_matching("").is_empty());
+        assert!(repo.agent_message_excerpt("t1", "").is_none());
+    }
+
+    #[test]
+    fn body_search_is_case_insensitive() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        repo.upsert_agent_message(test_message("m1", "t1", "Refactor The Parser"));
+        assert!(repo.agent_thread_ids_matching("the parser").contains("t1"));
+        assert!(repo.agent_thread_ids_matching("THE PARSER").contains("t1"));
     }
 
     #[test]

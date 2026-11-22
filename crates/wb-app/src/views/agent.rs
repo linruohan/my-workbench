@@ -74,6 +74,8 @@ pub struct AgentPane {
     find: Entity<InputState>,
     /// Filters the thread list by title.
     thread_query: Entity<InputState>,
+    /// Show only pinned threads in the list.
+    pinned_only: bool,
     webview: Option<Entity<WebView>>,
     loaded_web_url: Option<String>,
     busy: bool,
@@ -146,6 +148,7 @@ impl AgentPane {
             ask_input: ask_input.clone(),
             find: find.clone(),
             thread_query: thread_query.clone(),
+            pinned_only: false,
             webview: None,
             loaded_web_url: None,
             busy: false,
@@ -1932,11 +1935,13 @@ impl AgentPane {
                 handle.set_offset(point(px(0.), -max.y.abs()));
             });
         }
+        // Message-body search is handled by the store, so the query is all the
+        // render needs here; no message list is cloned.
+        let thread_q = self.thread_query.read(cx).value().trim().to_lowercase();
         let (
             threads,
             messages,
             workspaces,
-            all_messages,
             approvals,
             perm_label,
             thread_perm,
@@ -1981,7 +1986,6 @@ impl AgentPane {
                 s.repo.list_agent_threads(),
                 messages,
                 s.repo.list_agent_workspaces(),
-                s.repo.list_agent_messages(),
                 approvals,
                 perm,
                 thread_perm,
@@ -2188,7 +2192,6 @@ impl AgentPane {
         let ctx_pct = ((ctx_used as f32 / ctx_cap as f32) * 100.0).min(999.0);
         let ws_filter = self.workspace_filter.clone();
         let show_archived = self.show_archived;
-        let thread_q = self.thread_query.read(cx).value().trim().to_lowercase();
         let mut threads = threads;
         threads.sort_by(|a, b| match (a.pinned_at, b.pinned_at) {
             (Some(x), Some(y)) => y.cmp(&x),
@@ -2196,9 +2199,18 @@ impl AgentPane {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => b.updated_at.cmp(&a.updated_at),
         });
+        // Searching message bodies walks the whole store, so ask the store once
+        // for the matching thread ids instead of cloning every message here.
+        let body_hits = if thread_q.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            self.state
+                .with(|s| s.repo.agent_thread_ids_matching(&thread_q))
+        };
         let thread_rows: Vec<_> = threads
             .into_iter()
             .filter(|t| show_archived || t.archived_at.is_none())
+            .filter(|t| !self.pinned_only || t.pinned_at.is_some())
             .filter(|t| {
                 ws_filter
                     .as_ref()
@@ -2208,11 +2220,7 @@ impl AgentPane {
             .filter(|t| {
                 thread_q.is_empty()
                     || t.title.to_lowercase().contains(&thread_q)
-                    || all_messages.iter().any(|m| {
-                        m.thread_id == t.id
-                            && !m.content.is_empty()
-                            && m.content.to_lowercase().contains(&thread_q)
-                    })
+                    || body_hits.contains(&t.id)
             })
             .map(|t| {
                 let id = t.id.clone();
@@ -2234,21 +2242,9 @@ impl AgentPane {
                 // show a short snippet so the row is identifiable.
                 let snippet = if !thread_q.is_empty() && !t.title.to_lowercase().contains(&thread_q)
                 {
-                    all_messages
-                        .iter()
-                        .find(|m| {
-                            m.thread_id == t.id
-                                && !m.content.is_empty()
-                                && m.content.to_lowercase().contains(&thread_q)
-                        })
-                        .map(|m| {
-                            let body = m.content.replace('\n', " ");
-                            let lower = body.to_lowercase();
-                            let at = lower.find(&thread_q).unwrap_or(0);
-                            let start = at.saturating_sub(12);
-                            let text: String = body.chars().skip(start).take(48).collect();
-                            format!("…{text}")
-                        })
+                    let tid = t.id.clone();
+                    self.state
+                        .with(|s| s.repo.agent_message_excerpt(&tid, &thread_q))
                 } else {
                     None
                 };
@@ -2513,6 +2509,31 @@ impl AgentPane {
                         ),
                     )
                     .child(Input::new(&self.thread_query).small().cleanable(true))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                Button::new("thread-pinned-only")
+                                    .xsmall()
+                                    .ghost()
+                                    .label("仅置顶")
+                                    .selected(self.pinned_only)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.pinned_only = !this.pinned_only;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(!thread_q.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("{} 个匹配", thread_rows.len())),
+                                )
+                            }),
+                    )
                     .when(!thread_q.is_empty() && thread_rows.is_empty(), |col| {
                         col.child(
                             div()
