@@ -85,6 +85,8 @@ pub struct AgentPane {
     cancel_flag: Arc<AtomicBool>,
     /// Message text to load into the composer on next render.
     pending_edit: Option<String>,
+    /// Text to insert at the caret on next render (keeps the cursor position).
+    pending_insert: Option<String>,
     /// Whether the session todo list is expanded under the chat header.
     show_todos: bool,
     /// Cached `@` file suggestions for the current token.
@@ -148,6 +150,7 @@ impl AgentPane {
             stream_status: Arc::new(Mutex::new(String::new())),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pending_edit: None,
+            pending_insert: None,
             show_todos: false,
             mention_cache: Vec::new(),
             mention_cache_key: None,
@@ -1236,15 +1239,10 @@ impl AgentPane {
         cx.notify();
     }
 
-    /// Append `text` to the composer; the value lands on the next render.
+    /// Insert `text` at the caret; the edit lands on the next render so the
+    /// caller does not need a `Window`.
     fn insert_composer_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let current = self.input.read(cx).value().to_string();
-        let next = if current.trim().is_empty() {
-            text.to_string()
-        } else {
-            format!("{} {text}", current.trim_end())
-        };
-        self.pending_edit = Some(next);
+        self.pending_insert = Some(text.to_string());
         cx.notify();
     }
 
@@ -1868,8 +1866,24 @@ impl AgentPane {
     #[allow(clippy::large_unopt_stack_frames)]
     fn render_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(text) = self.pending_edit.take() {
+            let caret = text.len();
             self.input.update(cx, |input, cx| {
-                input.set_value(text, window, cx);
+                input.set_value(&text, window, cx);
+                input.set_selected_range(caret..caret, cx);
+            });
+        }
+        if let Some(text) = self.pending_insert.take() {
+            self.input.update(cx, |input, cx| {
+                input.insert(text, window, cx);
+            });
+        }
+        // Growing or shrinking the composer changes the chat viewport; stay pinned
+        // to the newest message while the reader has not scrolled away.
+        if self.chat_follow {
+            let handle = self.chat_scroll.clone();
+            cx.on_next_frame(window, move |_this, _window, _cx| {
+                let max = handle.max_offset();
+                handle.set_offset(point(px(0.), -max.y.abs()));
             });
         }
         let (
@@ -2976,6 +2990,10 @@ impl AgentPane {
                                 .border_1()
                                 .border_color(border)
                                 .bg(secondary)
+                                // Cap the list so a long catalogue scrolls instead of
+                                // pushing the composer off screen.
+                                .max_h(px(220.))
+                                .overflow_y_scrollbar()
                                 .children(slash_hits.iter().enumerate().map(|(i, cmd)| {
                                     let invoke = cmd.invoke;
                                     h_flex()
@@ -3015,6 +3033,8 @@ impl AgentPane {
                                 .border_1()
                                 .border_color(border)
                                 .bg(secondary)
+                                .max_h(px(220.))
+                                .overflow_y_scrollbar()
                                 .children(mention_hits.iter().enumerate().map(|(i, path)| {
                                     let pick = path.clone();
                                     h_flex()
