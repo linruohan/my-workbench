@@ -4203,11 +4203,7 @@ fn render_chat_message(
     let is_tool = matches!(m.role, AgentRole::Tool);
     let expanded = expanded_tools.contains(&msg_id);
     let patch_card = is_tool
-        .then(|| {
-            render_patch_card(
-                &content, expanded, &msg_id, muted, accent, secondary, &entity,
-            )
-        })
+        .then(|| render_patch_card(&content, expanded, &msg_id, palette, &entity))
         .flatten();
     let body = if let Some(card) = patch_card {
         card
@@ -4494,19 +4490,30 @@ fn flush_tool_group(
     rows
 }
 
+/// Read the integer that follows `label` in a summary string, e.g. `修改 3（2 处）`.
+fn count_before(text: &str, label: &str) -> usize {
+    crate::tool_summary::count_after(text, label)
+}
+
 /// Summary line + per-file list for an `apply_patch` tool result.
 fn render_patch_card(
     content: &str,
     expanded: bool,
     msg_id: &str,
-    muted: Hsla,
-    accent: Hsla,
-    secondary: Hsla,
+    palette: ChatPalette,
     entity: &WeakEntity<AgentPane>,
 ) -> Option<AnyElement> {
+    let muted = palette.muted;
+    let accent = palette.accent;
+    let secondary = palette.secondary;
+    let danger_color = palette.danger;
     let rest = content.strip_prefix("已应用补丁：")?;
     let mut lines = rest.lines();
     let head = lines.next().unwrap_or("").trim().to_string();
+    // `新增 2 · 修改 1（3 处）· 删除 1` → per-file counts for the badge row.
+    let added_count = count_before(&head, "新增");
+    let updated_count = count_before(&head, "修改");
+    let removed_count = count_before(&head, "删除");
     let files: Vec<String> = lines
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -4539,6 +4546,30 @@ fn render_patch_card(
                             .child("补丁已应用"),
                     )
                     .child(div().text_xs().text_color(muted).child(head))
+                    .when(added_count > 0, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(accent)
+                                .child(format!("+{added_count} 文件")),
+                        )
+                    })
+                    .when(updated_count > 0, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("~{updated_count} 文件")),
+                        )
+                    })
+                    .when(removed_count > 0, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger_color)
+                                .child(format!("−{removed_count} 文件")),
+                        )
+                    })
                     .when(files.len() > 4, |row| {
                         row.child(
                             Button::new(SharedString::from(format!("patch-exp-{tid}")))

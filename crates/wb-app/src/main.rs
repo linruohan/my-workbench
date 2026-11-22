@@ -6,6 +6,7 @@ mod state;
 mod themes;
 mod timed_deliver;
 mod title_bar;
+mod tool_summary;
 mod tray;
 mod views;
 
