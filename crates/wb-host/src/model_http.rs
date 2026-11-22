@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,4 +71,144 @@ pub async fn chat_completions(
         anyhow::bail!("HTTP {}: {}", resp.status, resp.body);
     }
     Ok(serde_json::from_str(&resp.body).unwrap_or(Value::String(resp.body)))
+}
+
+/// One OpenAI-style streaming delta from `/chat/completions`.
+#[derive(Debug, Clone, Default)]
+pub struct ChatStreamDelta {
+    pub content: String,
+    /// `(index, id?, name?, arguments_fragment)`
+    pub tool_call_parts: Vec<(usize, Option<String>, Option<String>, String)>,
+}
+
+/// Stream chat completions (SSE). Calls `on_delta` for each content/tool fragment.
+pub async fn chat_completions_stream(
+    base_url: &str,
+    api_key: Option<&str>,
+    body: &Value,
+    proxy: Option<&str>,
+    mut on_delta: impl FnMut(ChatStreamDelta) + Send,
+) -> Result<Value> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut stream_body = body.clone();
+    if let Some(obj) = stream_body.as_object_mut() {
+        obj.insert("stream".into(), Value::Bool(true));
+    }
+
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(180));
+    if let Some(proxy) = proxy.filter(|s| !s.is_empty()) {
+        builder = builder.proxy(reqwest::Proxy::all(proxy).context("无效代理地址")?);
+    }
+    let client = builder.build()?;
+    let mut request = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream");
+    if let Some(key) = api_key.filter(|s| !s.is_empty()) {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
+    let resp = request
+        .body(stream_body.to_string())
+        .send()
+        .await
+        .context("模型流式请求失败")?;
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("HTTP {status}: {body}");
+    }
+
+    use futures_util::StreamExt;
+    let mut bytes = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut content = String::new();
+    // index -> (id, name, arguments)
+    let mut tools: std::collections::BTreeMap<usize, (String, String, String)> =
+        std::collections::BTreeMap::new();
+
+    while let Some(chunk) = bytes.next().await {
+        let chunk = chunk.context("读取流失败")?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buf.find('\n') {
+            let mut line = buf[..pos].to_string();
+            buf.drain(..=pos);
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data == "[DONE]" {
+                continue;
+            }
+            let Ok(json) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            let Some(delta) = json.pointer("/choices/0/delta") else {
+                continue;
+            };
+            let mut out = ChatStreamDelta::default();
+            if let Some(piece) = delta.get("content").and_then(|v| v.as_str()) {
+                if !piece.is_empty() {
+                    content.push_str(piece);
+                    out.content = piece.to_string();
+                }
+            }
+            if let Some(arr) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                for item in arr {
+                    let idx = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let entry = tools
+                        .entry(idx)
+                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        entry.0 = id.to_string();
+                    }
+                    if let Some(name) = item.pointer("/function/name").and_then(|v| v.as_str()) {
+                        entry.1.push_str(name);
+                    }
+                    let args = item
+                        .pointer("/function/arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !args.is_empty() {
+                        entry.2.push_str(args);
+                    }
+                    out.tool_call_parts.push((
+                        idx,
+                        (!entry.0.is_empty()).then(|| entry.0.clone()),
+                        (!entry.1.is_empty()).then(|| entry.1.clone()),
+                        args.to_string(),
+                    ));
+                }
+            }
+            if !out.content.is_empty() || !out.tool_call_parts.is_empty() {
+                on_delta(out);
+            }
+        }
+    }
+
+    let tool_calls: Vec<Value> = tools
+        .into_iter()
+        .map(|(i, (id, name, arguments))| {
+            json!({
+                "id": if id.is_empty() { format!("call_{i}") } else { id },
+                "type": "function",
+                "function": { "name": name, "arguments": arguments }
+            })
+        })
+        .collect();
+    Ok(json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": if content.is_empty() { Value::Null } else { Value::String(content) },
+                "tool_calls": if tool_calls.is_empty() { Value::Null } else { Value::Array(tool_calls) }
+            }
+        }]
+    }))
 }

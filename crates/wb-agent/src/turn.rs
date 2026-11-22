@@ -6,7 +6,7 @@ use wb_domain::{
     AgentApproval, AgentMessage, AgentPermissionMode, AgentRole, AgentThread, ApprovalStatus,
     BUILTIN_MODEL_REF, PlannedCall, ToolGate, create_id, now_ms,
 };
-use wb_host::chat_completions;
+use wb_host::chat_completions_stream;
 use wb_store::MemoryWorkbenchRepository;
 
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -86,7 +86,19 @@ pub fn begin_user_turn(
 
 /// Resolve the assistant text / tool calls without holding the repository lock.
 pub async fn resolve_turn_reply(pending: &PendingTurn, proxy: Option<&str>) -> ModelReply {
+    resolve_turn_reply_streaming(pending, proxy, |_| {}).await
+}
+
+/// Like [`resolve_turn_reply`], but invokes `on_delta` with each content fragment.
+pub async fn resolve_turn_reply_streaming(
+    pending: &PendingTurn,
+    proxy: Option<&str>,
+    mut on_delta: impl FnMut(&str) + Send,
+) -> ModelReply {
     if let Some(ref text) = pending.builtin_reply {
+        if !text.is_empty() {
+            on_delta(text);
+        }
         return ModelReply {
             content: text.clone(),
             tool_calls: Vec::new(),
@@ -97,6 +109,7 @@ pub async fn resolve_turn_reply(pending: &PendingTurn, proxy: Option<&str>) -> M
         &history_to_openai(&pending.history),
         proxy,
         true,
+        &mut on_delta,
     )
     .await
     .unwrap_or_else(|e| ModelReply {
@@ -106,7 +119,16 @@ pub async fn resolve_turn_reply(pending: &PendingTurn, proxy: Option<&str>) -> M
 }
 
 pub async fn continue_turn_reply(cont: &ContinueTurn, proxy: Option<&str>) -> ModelReply {
-    call_remote_model(&cont.thread, &cont.messages, proxy, true)
+    continue_turn_reply_streaming(cont, proxy, |_| {}).await
+}
+
+/// Like [`continue_turn_reply`], but invokes `on_delta` with each content fragment.
+pub async fn continue_turn_reply_streaming(
+    cont: &ContinueTurn,
+    proxy: Option<&str>,
+    mut on_delta: impl FnMut(&str) + Send,
+) -> ModelReply {
+    call_remote_model(&cont.thread, &cont.messages, proxy, true, &mut on_delta)
         .await
         .unwrap_or_else(|e| ModelReply {
             content: format!("模型请求失败：{e}"),
@@ -912,6 +934,7 @@ async fn call_remote_model(
     messages: &[Value],
     proxy: Option<&str>,
     with_tools: bool,
+    on_delta: &mut (impl FnMut(&str) + Send),
 ) -> Result<ModelReply> {
     let providers = load_providers();
     let (provider_id, model_id) = split_model_ref(&thread.model_ref);
@@ -955,7 +978,12 @@ async fn call_remote_model(
         }
     }
 
-    let resp = chat_completions(&provider.base_url, key, &body, proxy).await?;
+    let resp = chat_completions_stream(&provider.base_url, key, &body, proxy, |delta| {
+        if !delta.content.is_empty() {
+            on_delta(&delta.content);
+        }
+    })
+    .await?;
     Ok(parse_model_reply(&resp))
 }
 

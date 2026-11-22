@@ -116,8 +116,10 @@ impl KnowledgePane {
             .push(cx.subscribe(&editor, |_, _, _: &InputEvent, cx| cx.notify()));
         this._subs.push(
             cx.subscribe_in(&this.find, window, |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.find_next(window, cx);
+                match event {
+                    InputEvent::PressEnter { .. } => this.find_next(window, cx),
+                    InputEvent::Change => this.sync_editor_search(cx),
+                    _ => {}
                 }
             }),
         );
@@ -134,6 +136,7 @@ impl KnowledgePane {
 
     fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find_open = true;
+        self.sync_editor_search(cx);
         let handle = self.find.read(cx).focus_handle(cx).clone();
         handle.focus(window, cx);
         cx.notify();
@@ -142,8 +145,23 @@ impl KnowledgePane {
     fn close_find(&mut self, cx: &mut Context<Self>) {
         if self.find_open {
             self.find_open = false;
-            cx.notify();
         }
+        self.editor.update(cx, |editor, cx| editor.close_search(cx));
+        cx.notify();
+    }
+
+    /// Highlight plain-text matches in the editor. Word and regex searches stay
+    /// on the custom matcher, which the built-in highlighter does not cover.
+    fn sync_editor_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.find.read(cx).value().to_string();
+        let plain = self.find_open && !query.is_empty() && !self.find_word && !self.find_regex;
+        if !plain {
+            self.editor.update(cx, |editor, cx| editor.close_search(cx));
+            return;
+        }
+        let case_insensitive = !self.find_case;
+        self.editor
+            .update(cx, |editor, cx| editor.set_search_query(query, case_insensitive, cx));
     }
 
     fn find_flags(&self) -> FindFlags {
@@ -265,6 +283,31 @@ impl KnowledgePane {
         }
     }
 
+    fn library_roots(&self) -> Vec<String> {
+        self.state.with(|s| s.prefs.knowledge_roots.clone())
+    }
+
+    fn switch_root(&mut self, path: String, cx: &mut Context<Self>) {
+        let changed = self.state.with_mut(|s| {
+            if s.prefs.knowledge_current.as_deref() == Some(path.as_str()) {
+                return false;
+            }
+            s.prefs.knowledge_current = Some(path.clone());
+            s.prefs.knowledge_recent.retain(|p| p != &path);
+            s.prefs.knowledge_recent.insert(0, path);
+            s.prefs.knowledge_recent.truncate(10);
+            true
+        });
+        if !changed {
+            return;
+        }
+        self.current = None;
+        self.state.with_mut(|s| s.kb_current_file = None);
+        self.state.persist_prefs();
+        self.reload_files();
+        cx.notify();
+    }
+
     fn add_root(&mut self, cx: &mut Context<Self>) {
         super::prompt_directory(cx, |this, dir, cx| {
             let Some(dir) = dir else {
@@ -280,6 +323,8 @@ impl KnowledgePane {
                 s.prefs.knowledge_recent.insert(0, path);
                 s.prefs.knowledge_recent.truncate(10);
             });
+            this.current = None;
+            this.state.with_mut(|s| s.kb_current_file = None);
             this.state.persist_prefs();
             this.reload_files();
             cx.notify();
@@ -343,10 +388,21 @@ impl KnowledgePane {
             return;
         }
         let text = self.editor.read(cx).value().to_string();
+        let cursor = self.editor.read(cx).selected_range().end;
         match find_spans(&text, &needle, self.find_flags()) {
             Err(err) => self.replace_status = err,
             Ok(spans) if spans.is_empty() => self.replace_status = "未找到".into(),
-            Ok(spans) => self.replace_status = format!("共 {} 处", spans.len()),
+            Ok(spans) => {
+                let ix = spans
+                    .iter()
+                    .position(|(start, _)| *start >= cursor)
+                    .unwrap_or(0);
+                let (start, end) = spans[ix];
+                self.editor.update(cx, |input, cx| {
+                    input.set_selected_range(start..end, cx);
+                });
+                self.replace_status = format!("第 {}/{} 处", ix + 1, spans.len());
+            }
         }
         let _ = window;
         cx.notify();
@@ -361,13 +417,26 @@ impl KnowledgePane {
             return;
         }
         let text = self.editor.read(cx).value().to_string();
+        let selected = self.editor.read(cx).selected_range();
         match find_spans(&text, &needle, self.find_flags()) {
             Err(err) => {
                 self.replace_status = err;
                 cx.notify();
             }
             Ok(spans) => {
-                let Some((start, end)) = spans.first().copied() else {
+                let hit = spans
+                    .iter()
+                    .copied()
+                    .find(|(start, end)| *start == selected.start && *end == selected.end)
+                    .or_else(|| {
+                        let cursor = selected.end;
+                        spans
+                            .iter()
+                            .copied()
+                            .find(|(start, _)| *start >= cursor)
+                            .or_else(|| spans.first().copied())
+                    });
+                let Some((start, end)) = hit else {
                     self.replace_status = "未找到".into();
                     cx.notify();
                     return;
@@ -376,8 +445,10 @@ impl KnowledgePane {
                 next.push_str(&text[..start]);
                 next.push_str(&replacement);
                 next.push_str(&text[end..]);
+                let caret = start + replacement.len();
                 self.editor.update(cx, |input, cx| {
                     input.set_value(&next, window, cx);
+                    input.set_selected_range(caret..caret, cx);
                 });
                 self.save_current(&next);
                 self.replace_status = "已替换 1 处".into();
@@ -775,6 +846,8 @@ impl Render for KnowledgePane {
             cx,
         );
         let library_label = self.library_label();
+        let library_roots = self.library_roots();
+        let current_root = self.root().map(|p| p.to_string_lossy().into_owned());
         let preview_text = self.editor.read(cx).value().to_string();
         let (line_count, char_count) = doc_stats(&preview_text);
         let mode = self.mode;
@@ -810,15 +883,55 @@ impl Render for KnowledgePane {
                     .bg(cx.theme().sidebar)
                     .p_3()
                     .gap_2()
-                    .child(
-                        Button::new("kb-lib")
+                    .child({
+                        let lib = Button::new("kb-lib")
                             .small()
                             .outline()
                             .w_full()
                             .icon(IconName::Folder)
-                            .label(library_label)
-                            .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
-                    )
+                            .label(library_label);
+                        if library_roots.is_empty() {
+                            lib.on_click(cx.listener(|this, _, _, cx| this.add_root(cx)))
+                                .into_any_element()
+                        } else {
+                            let pane = entity.clone();
+                            let roots = library_roots.clone();
+                            let active = current_root.clone();
+                            lib.dropdown_menu(move |menu, _, _| {
+                                let mut menu = menu;
+                                for root in roots.iter() {
+                                    let pane = pane.clone();
+                                    let path = root.clone();
+                                    let name = Path::new(root)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .filter(|n| !n.is_empty())
+                                        .unwrap_or_else(|| root.clone());
+                                    menu = menu.item(
+                                        PopupMenuItem::new(name)
+                                            .checked(active.as_deref() == Some(path.as_str()))
+                                            .on_click(move |_, _, app| {
+                                                if let Some(view) = pane.upgrade() {
+                                                    let path = path.clone();
+                                                    view.update(app, |this, cx| {
+                                                        this.switch_root(path, cx);
+                                                    });
+                                                }
+                                            }),
+                                    );
+                                }
+                                let pane_add = pane.clone();
+                                menu.separator().item(
+                                    PopupMenuItem::new("添加库…").on_click(move |_, _, app| {
+                                        if let Some(view) = pane_add.upgrade() {
+                                            view.update(app, |this, cx| this.add_root(cx));
+                                        }
+                                    }),
+                                )
+                            })
+                            .into_any_element()
+                        }
+                    })
                     .child(Input::new(&self.filter).cleanable(true))
                     .child({
                         let mut list = v_flex().gap_0p5().flex_1().overflow_y_scrollbar();
@@ -968,7 +1081,7 @@ impl Render for KnowledgePane {
                                                 .text_color(muted)
                                                 .text_center()
                                                 .child(
-                                                    "左侧支持目录折叠与正文检索；正文中的 [[笔记名]] 会出现在下方链接区。",
+                                                    "左侧可折叠目录并检索正文；Ctrl+F 查找替换；[[笔记名]] 会出现在底栏。",
                                                 ),
                                         )
                                         .child(
@@ -1059,7 +1172,7 @@ impl Render for KnowledgePane {
                                                                 if let Some(view) = pane.upgrade() {
                                                                     view.update(app, |this, cx| {
                                                                         this.find_word = *checked;
-                                                                        cx.notify();
+                                                                        this.sync_editor_search(cx);
                                                                     });
                                                                 }
                                                             })
@@ -1076,7 +1189,7 @@ impl Render for KnowledgePane {
                                                                 if let Some(view) = pane.upgrade() {
                                                                     view.update(app, |this, cx| {
                                                                         this.find_case = *checked;
-                                                                        cx.notify();
+                                                                        this.sync_editor_search(cx);
                                                                     });
                                                                 }
                                                             })
@@ -1093,7 +1206,7 @@ impl Render for KnowledgePane {
                                                                 if let Some(view) = pane.upgrade() {
                                                                     view.update(app, |this, cx| {
                                                                         this.find_regex = *checked;
-                                                                        cx.notify();
+                                                                        this.sync_editor_search(cx);
                                                                     });
                                                                 }
                                                             })

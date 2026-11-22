@@ -9804,6 +9804,7 @@ dependencies = [
  "cpal",
  "dirs 6.0.0",
  "font-kit",
+ "futures-util",
  "hound",
  "log",
  "ort",

@@ -13,6 +13,7 @@ anyhow.workspace = true
 base64.workspace = true
 dirs.workspace = true
 font-kit.workspace = true
+futures-util = "0.3"
 log.workspace = true
 reqwest.workspace = true
 rfd.workspace = true

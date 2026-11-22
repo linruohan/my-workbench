@@ -12,13 +12,15 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_webview::WebView;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use wb_agent::{
     SlashCommand, TurnPhase, apply_slash_completion, begin_user_turn, clear_goal_round_flag,
-    continue_turn_reply, create_thread, cycle_permission_mode, dequeue_user_text,
+    continue_turn_reply_streaming, create_thread, cycle_permission_mode, dequeue_user_text,
     enqueue_user_text, finish_continue_turn, finish_user_turn, load_providers,
     model_context_window, pending_approvals_for_thread, permission_mode_label,
     prepare_goal_idle_round, prompt_char_count, queued_user_texts, resolve_approval,
-    resolve_turn_reply, slash_suggestions,
+    resolve_turn_reply_streaming, slash_suggestions,
 };
 use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{
@@ -38,6 +40,8 @@ pub struct AgentPane {
     busy: bool,
     /// Bumped to cancel the in-flight turn spawn.
     turn_gen: u64,
+    /// Live assistant text while the model streams (plain text, not markdown).
+    stream_draft: Arc<Mutex<String>>,
     status: String,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
@@ -74,6 +78,7 @@ impl AgentPane {
             loaded_web_url: None,
             busy: false,
             turn_gen: 0,
+            stream_draft: Arc::new(Mutex::new(String::new())),
             status: String::new(),
             prompt_history: Vec::new(),
             history_index: None,
@@ -336,18 +341,29 @@ impl AgentPane {
         let expected = self.turn_gen;
         self.busy = true;
         self.status.clear();
+        if let Ok(mut draft) = self.stream_draft.lock() {
+            draft.clear();
+        }
         self.scroll_chat_to_bottom(cx);
         cx.notify();
+        self.spawn_draft_poll(expected, cx);
 
         let drain_tid = thread_id.clone();
+        let draft_buf = self.stream_draft.clone();
         cx.spawn(async move |this, cx| {
             let still_active = |this: &WeakEntity<AgentPane>, cx: &mut AsyncApp| -> bool {
                 this.update(cx, |pane, _| pane.turn_gen == expected && pane.busy)
                     .unwrap_or(false)
             };
+            let clear_draft = |buf: &Arc<Mutex<String>>| {
+                if let Ok(mut d) = buf.lock() {
+                    d.clear();
+                }
+            };
 
             let pending2 = pending.clone();
             let proxy2 = proxy.clone();
+            let draft2 = draft_buf.clone();
             let reply = cx
                 .background_executor()
                 .spawn(async move {
@@ -355,7 +371,15 @@ impl AgentPane {
                         .enable_all()
                         .build()
                         .expect("tokio runtime");
-                    rt.block_on(resolve_turn_reply(&pending2, proxy2.as_deref()))
+                    rt.block_on(resolve_turn_reply_streaming(
+                        &pending2,
+                        proxy2.as_deref(),
+                        |piece| {
+                            if let Ok(mut d) = draft2.lock() {
+                                d.push_str(piece);
+                            }
+                        },
+                    ))
                 })
                 .await;
 
@@ -365,6 +389,7 @@ impl AgentPane {
 
             let mut phase = this
                 .update(cx, |this, cx| {
+                    clear_draft(&this.stream_draft);
                     let phase = this
                         .state
                         .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply));
@@ -385,8 +410,10 @@ impl AgentPane {
                     if !still_active(&this, cx) {
                         return;
                     }
+                    clear_draft(&draft_buf);
                     let proxy3 = proxy.clone();
                     let cont2 = (*cont).clone();
+                    let draft3 = draft_buf.clone();
                     let reply = cx
                         .background_executor()
                         .spawn(async move {
@@ -394,7 +421,15 @@ impl AgentPane {
                                 .enable_all()
                                 .build()
                                 .expect("tokio runtime");
-                            rt.block_on(continue_turn_reply(&cont2, proxy3.as_deref()))
+                            rt.block_on(continue_turn_reply_streaming(
+                                &cont2,
+                                proxy3.as_deref(),
+                                |piece| {
+                                    if let Ok(mut d) = draft3.lock() {
+                                        d.push_str(piece);
+                                    }
+                                },
+                            ))
                         })
                         .await;
                     if !still_active(&this, cx) {
@@ -402,6 +437,7 @@ impl AgentPane {
                     }
                     phase = this
                         .update(cx, |this, cx| {
+                            clear_draft(&this.stream_draft);
                             let next = this
                                 .state
                                 .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
@@ -440,8 +476,10 @@ impl AgentPane {
                     Ok(Some(p)) => p,
                     _ => break,
                 };
+                clear_draft(&draft_buf);
                 let pending2 = pending_goal.clone();
                 let proxy2 = proxy.clone();
+                let draft2 = draft_buf.clone();
                 let reply = cx
                     .background_executor()
                     .spawn(async move {
@@ -449,7 +487,15 @@ impl AgentPane {
                             .enable_all()
                             .build()
                             .expect("tokio runtime");
-                        rt.block_on(resolve_turn_reply(&pending2, proxy2.as_deref()))
+                        rt.block_on(resolve_turn_reply_streaming(
+                            &pending2,
+                            proxy2.as_deref(),
+                            |piece| {
+                                if let Ok(mut d) = draft2.lock() {
+                                    d.push_str(piece);
+                                }
+                            },
+                        ))
                     })
                     .await;
                 if !still_active(&this, cx) {
@@ -457,6 +503,7 @@ impl AgentPane {
                 }
                 phase = this
                     .update(cx, |this, cx| {
+                        clear_draft(&this.stream_draft);
                         let next = this
                             .state
                             .with_mut(|s| finish_user_turn(&mut s.repo, &pending_goal, reply));
@@ -471,6 +518,7 @@ impl AgentPane {
 
             this.update(cx, |this, cx| {
                 if this.turn_gen == expected {
+                    clear_draft(&this.stream_draft);
                     this.status.clear();
                     this.busy = false;
                     this.scroll_chat_to_bottom(cx);
@@ -481,6 +529,36 @@ impl AgentPane {
             .ok();
         })
         .detach();
+    }
+
+    fn spawn_draft_poll(&self, expected: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let cont = this
+                    .update(cx, |pane, cx| {
+                        if pane.turn_gen != expected || !pane.busy {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn stream_draft_text(&self) -> String {
+        self.stream_draft
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     fn drain_queue_for(&mut self, thread_id: &str, cx: &mut Context<Self>) {
@@ -506,6 +584,9 @@ impl AgentPane {
         }
         self.turn_gen = self.turn_gen.wrapping_add(1);
         self.busy = false;
+        if let Ok(mut draft) = self.stream_draft.lock() {
+            draft.clear();
+        }
         self.status = "已中止当前回合（进行中的模型请求可能仍会完成，但结果会被丢弃）".into();
         cx.notify();
     }
@@ -1163,6 +1244,7 @@ impl AgentPane {
             .collect();
         let empty_chat = visible_messages.is_empty() && find_q.is_empty();
         let filter_miss = visible_messages.is_empty() && !find_q.is_empty();
+        let draft_text = self.stream_draft_text();
         let mut last_day = String::new();
         let message_rows: Vec<_> = visible_messages
             .into_iter()
@@ -1541,8 +1623,51 @@ impl AgentPane {
                             .vertical_scrollbar(&self.chat_scroll)
                             .children(message_rows)
                             .when(self.busy, |col| {
+                                let draft = draft_text.clone();
                                 col.child(
-                                    div().text_xs().text_color(muted).child("Agent 正在回复…"),
+                                    v_flex()
+                                        .gap_1()
+                                        .p_2()
+                                        .rounded(radius)
+                                        .max_w(relative(0.86))
+                                        .bg(secondary)
+                                        .border_1()
+                                        .border_color(accent.opacity(0.45))
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_bold()
+                                                        .text_color(muted)
+                                                        .child("Agent"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("正在回复…"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("agent-stream-draft")
+                                                .text_sm()
+                                                .text_color(if draft.trim().is_empty() {
+                                                    muted
+                                                } else {
+                                                    cx.theme().foreground
+                                                })
+                                                .max_h(px(100.))
+                                                .overflow_y_scroll()
+                                                .child(if draft.trim().is_empty() {
+                                                    "…".to_string()
+                                                } else {
+                                                    draft
+                                                }),
+                                        ),
                                 )
                             })
                             .into_any_element()
