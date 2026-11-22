@@ -12,6 +12,7 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_webview::WebView;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,7 +70,10 @@ fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &A
 pub struct AgentPane {
     state: AppState,
     input: Entity<TextareaState>,
-    web_url_input: Entity<InputState>,
+    /// Title typed in the new web-session dialog. Empty falls back to the default title.
+    web_title_input: Entity<InputState>,
+    /// Link typed in the new web-session dialog.
+    web_link_input: Entity<InputState>,
     ask_input: Entity<InputState>,
     /// Filters the thread list by title.
     thread_query: Entity<InputState>,
@@ -117,8 +121,10 @@ pub struct AgentPane {
     expanded_tools: HashSet<String>,
     show_archived: bool,
     workspace_filter: Option<String>,
-    /// Workspace picked in the web-session dialog, used once a URL is entered.
-    pending_web_workspace: Option<String>,
+    /// Workspace highlighted in the new web-session dialog. Empty means the default.
+    web_dialog_workspace: Option<String>,
+    /// Validation message shown inside the new web-session dialog.
+    web_dialog_error: String,
     show_terminal: bool,
     term_id: Option<String>,
     chat_scroll: ScrollHandle,
@@ -136,15 +142,18 @@ impl AgentPane {
                 .submit_on_enter(true)
                 .placeholder("给 Agent 发消息。Enter 发送，Shift+Enter 换行，↑ 历史，/ 斜杠命令")
         });
-        let web_url_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("https://… 新建网页会话"));
+        let web_title_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(WEB_AGENT_THREAD_TITLE));
+        let web_link_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://example.com"));
         let thread_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话…"));
         let ask_input = cx.new(|cx| InputState::new(window, cx).placeholder("回答 Agent 的问题…"));
         let state_seed = state.with(|s| s.prefs.agent.prompt_history.clone());
         let mut this = Self {
             state,
             input: input.clone(),
-            web_url_input: web_url_input.clone(),
+            web_title_input: web_title_input.clone(),
+            web_link_input: web_link_input.clone(),
             ask_input: ask_input.clone(),
             thread_query: thread_query.clone(),
             pinned_only: false,
@@ -177,7 +186,8 @@ impl AgentPane {
             expanded_tools: HashSet::new(),
             show_archived: false,
             workspace_filter: None,
-            pending_web_workspace: None,
+            web_dialog_workspace: None,
+            web_dialog_error: String::new(),
             show_terminal: false,
             term_id: None,
             chat_scroll: ScrollHandle::new(),
@@ -242,21 +252,16 @@ impl AgentPane {
                 }
             }),
         );
-        this._subs.push(cx.subscribe_in(
-            &web_url_input,
-            window,
-            |this, input, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    let url = input.read(cx).value().to_string();
-                    // A workspace picked in the dialog wins; otherwise the
-                    // default workspace is used.
-                    match this.pending_web_workspace.clone() {
-                        Some(ws) => this.create_web_thread_in(&ws, &url, window, cx),
-                        None => this.create_web_thread(&url, window, cx),
-                    }
-                }
-            },
-        ));
+        this._subs.push(
+            cx.subscribe_in(&web_title_input, window, |this, _, event, window, cx| {
+                this.on_web_dialog_input(event, window, cx)
+            }),
+        );
+        this._subs.push(
+            cx.subscribe_in(&web_link_input, window, |this, _, event, window, cx| {
+                this.on_web_dialog_input(event, window, cx)
+            }),
+        );
         this._subs.push(
             cx.subscribe_in(&ask_input, window, |this, input, event, window, cx| {
                 if let InputEvent::PressEnter { shift, .. } = event {
@@ -324,61 +329,93 @@ impl AgentPane {
         }
     }
 
-    fn create_web_thread(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let default_ws = self
-            .state
-            .with(|s| s.repo.list_agent_workspaces())
-            .into_iter()
-            .min_by_key(|w| w.created_at)
-            .map(|w| w.id);
-        let Some(ws) = default_ws else {
-            self.status = "还没有可用的工作区".into();
-            cx.notify();
-            return;
-        };
-        self.create_web_thread_in(&ws, raw, window, cx);
-    }
-
-    /// Open a web session in the workspace picked from the dialog.
-    fn open_web_session_in(
+    fn on_web_dialog_input(
         &mut self,
-        workspace_id: &str,
+        event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let url = self.web_url_input.read(cx).value().to_string();
-        if url.trim().is_empty() {
-            let ws = workspace_id.to_string();
-            let entity = cx.weak_entity();
-            // No URL typed yet: remember the target and let the user enter one.
-            self.pending_web_workspace = Some(ws);
-            self.status = "请输入网址，回车即在该工作区新建网页会话".into();
-            window.focus(&self.web_url_input.focus_handle(cx), cx);
-            let _ = entity;
-            cx.notify();
-            return;
+        match event {
+            InputEvent::Change => {
+                if !self.web_dialog_error.is_empty() {
+                    self.web_dialog_error.clear();
+                    cx.notify();
+                }
+            }
+            InputEvent::PressEnter { .. } => {
+                if self.submit_web_dialog(window, cx) {
+                    window.close_dialog(cx);
+                }
+            }
+            _ => {}
         }
-        self.create_web_thread_in(workspace_id, &url, window, cx);
+    }
+
+    /// Create the web session from the dialog fields.
+    ///
+    /// An empty title becomes 「网页会话」. An empty workspace choice becomes
+    /// the default workspace. Returns false when the link is missing or the
+    /// web view cannot be created, leaving the dialog open.
+    fn submit_web_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let raw = self.web_link_input.read(cx).value().to_string();
+        if normalize_agent_web_url(&raw).is_none() {
+            self.web_dialog_error = "请输入有效网址（例如 https://example.com）".into();
+            cx.notify();
+            return false;
+        }
+        let title = self.web_title_input.read(cx).value().to_string();
+        let Some(ws) = self
+            .web_dialog_workspace
+            .clone()
+            .or_else(|| self.default_agent_workspace_id())
+        else {
+            self.web_dialog_error = "还没有可用的工作区".into();
+            cx.notify();
+            return false;
+        };
+        self.create_web_thread_in(&ws, &title, &raw, window, cx)
+    }
+
+    fn default_agent_workspace_id(&self) -> Option<String> {
+        self.state
+            .with(|s| s.repo.list_agent_workspaces())
+            .into_iter()
+            .min_by_key(|w| w.created_at)
+            .map(|w| w.id)
     }
 
     fn create_web_thread_in(
         &mut self,
         workspace_id: &str,
+        title: &str,
         raw: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(url) = normalize_agent_web_url(raw) else {
-            self.status = "请输入有效网址（例如 https://example.com）".into();
+            self.web_dialog_error = "请输入有效网址（例如 https://example.com）".into();
             cx.notify();
-            return;
+            return false;
         };
         if !self.ensure_webview(window, cx) {
+            self.web_dialog_error = if self.status.is_empty() {
+                "无法创建网页视图".into()
+            } else {
+                self.status.clone()
+            };
             cx.notify();
-            return;
+            return false;
         }
+        let thread_title = {
+            let trimmed = title.trim();
+            if trimmed.is_empty() {
+                WEB_AGENT_THREAD_TITLE.to_string()
+            } else {
+                trimmed.chars().take(48).collect()
+            }
+        };
         let ws_id = workspace_id.to_string();
-        let thread_id = self.state.with_mut(|s| {
+        self.state.with_mut(|s| {
             // Fall back to the default workspace if the picked one vanished.
             let ws_id = if s.repo.list_agent_workspaces().iter().any(|w| w.id == ws_id) {
                 ws_id
@@ -392,24 +429,23 @@ impl AgentPane {
             };
             let mut thread = create_thread(
                 &ws_id,
-                WEB_AGENT_THREAD_TITLE,
+                &thread_title,
                 s.prefs.agent.default_model_ref.as_deref(),
             );
             thread.web_url = Some(url.clone());
             let id = thread.id.clone();
             s.repo.upsert_agent_thread(thread);
-            s.active_thread_id = Some(id.clone());
-            id
+            s.active_thread_id = Some(id);
         });
-        let _ = thread_id;
-        self.pending_web_workspace = None;
-        self.web_url_input.update(cx, |i, cx| {
-            i.set_value(&url, window, cx);
-        });
+        // A filter would hide the session that was just created.
+        self.workspace_filter = None;
+        self.web_dialog_workspace = None;
+        self.web_dialog_error.clear();
         self.sync_webview(Some(&url), window, cx);
         self.status.clear();
         self.state.persist_if_dirty();
         cx.notify();
+        true
     }
 
     fn ensure_thread(&mut self) -> String {
@@ -1546,10 +1582,7 @@ impl AgentPane {
         cx.notify();
     }
 
-    /// Let the user pick which workspace a web session belongs to.
-    ///
-    /// Creating a web session is rare and needs a target, so the choice lives
-    /// in a dialog instead of a permanent row of workspace buttons.
+    /// Ask for a title, a link, and which workspace the web session belongs to.
     fn open_web_thread_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut workspaces = self.state.with(|s| s.repo.list_agent_workspaces());
         if workspaces.is_empty() {
@@ -1559,66 +1592,137 @@ impl AgentPane {
         }
         // The default workspace is the first one created.
         workspaces.sort_by_key(|w| w.created_at);
+        self.web_title_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.web_link_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.web_dialog_workspace = None;
+        self.web_dialog_error.clear();
+
+        let title_input = self.web_title_input.clone();
+        let link_input = self.web_link_input.clone();
+        let focus_link = Cell::new(true);
         let entity = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if focus_link.replace(false) {
+                window.focus(&link_input.focus_handle(cx), cx);
+            }
             let muted = cx.theme().muted_foreground;
             let accent = cx.theme().accent;
+            let danger = cx.theme().danger;
+            let pane = entity.upgrade();
+            let picked = pane
+                .as_ref()
+                .and_then(|pane| pane.read(cx).web_dialog_workspace.clone());
+            let error = pane
+                .as_ref()
+                .map(|pane| pane.read(cx).web_dialog_error.clone())
+                .unwrap_or_default();
             let rows = workspaces.iter().map(|ws| {
                 let is_default = ws.title == wb_domain::DEFAULT_AGENT_WORKSPACE_TITLE;
                 let id = ws.id.clone();
-                let close_entity = entity.clone();
+                let selected = picked.as_deref() == Some(id.as_str());
+                let select_entity = entity.clone();
                 Button::new(SharedString::from(format!("web-ws-{id}")))
                     .small()
                     .w_full()
                     .justify_start()
                     .label(ws.title.clone())
+                    .selected(selected)
                     .when(is_default, |b| b.icon(IconName::CircleCheck))
-                    .on_click(move |_, window, cx| {
-                        close_entity
+                    .on_click(move |_, _, cx| {
+                        select_entity
                             .update(cx, |this, cx| {
-                                this.open_web_session_in(&id, window, cx);
+                                this.web_dialog_workspace = Some(id.clone());
+                                this.web_dialog_error.clear();
+                                cx.notify();
                             })
                             .ok();
-                        window.close_dialog(cx);
                     })
                     .into_any_element()
             });
+            let submit_entity = entity.clone();
             dialog
                 .title("新建网页会话")
                 .w(px(420.))
                 .child(
                     v_flex()
                         .w_full()
-                        .gap_2()
+                        .gap_3()
                         .px_4()
                         .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("选择会话所属工作区；带勾的是默认工作区。"),
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(div().text_sm().text_color(muted).child("标题"))
+                                .child(Input::new(&title_input).w_full()),
                         )
-                        .child(v_flex().w_full().gap_1().children(rows))
-                        .when(
-                            workspaces
-                                .iter()
-                                .any(|w| w.title == wb_domain::DEFAULT_AGENT_WORKSPACE_TITLE),
-                            |col| {
-                                col.child(
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(div().text_sm().text_color(muted).child("链接"))
+                                .child(Input::new(&link_input).w_full()),
+                        )
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
                                     div()
-                                        .text_xs()
-                                        .text_color(accent)
-                                        .child("未选择时默认落到「默认工作区」。"),
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child("选择会话所属工作区；带勾的是默认工作区。"),
                                 )
-                            },
+                                .child(v_flex().w_full().gap_1().children(rows))
+                                .when(
+                                    workspaces.iter().any(|w| {
+                                        w.title == wb_domain::DEFAULT_AGENT_WORKSPACE_TITLE
+                                    }),
+                                    |col| {
+                                        col.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(accent)
+                                                .child("未选择时默认落到「默认工作区」。"),
+                                        )
+                                    },
+                                )
+                                .when(!error.is_empty(), {
+                                    let error = error.clone();
+                                    move |col| {
+                                        col.child(div().text_xs().text_color(danger).child(error))
+                                    }
+                                }),
                         ),
                 )
                 .footer(
-                    h_flex().w_full().justify_end().gap_2().px_4().pb_2().child(
-                        Button::new("web-dialog-cancel")
-                            .small()
-                            .label("取消")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    ),
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .px_4()
+                        .pb_2()
+                        .child(
+                            Button::new("web-dialog-cancel")
+                                .small()
+                                .label("取消")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("web-dialog-create")
+                                .small()
+                                .primary()
+                                .label("创建")
+                                .on_click(move |_, window, cx| {
+                                    let created = submit_entity
+                                        .update(cx, |this, cx| this.submit_web_dialog(window, cx))
+                                        .unwrap_or(false);
+                                    if created {
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        ),
                 )
         });
     }
