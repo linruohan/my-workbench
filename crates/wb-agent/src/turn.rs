@@ -1331,6 +1331,11 @@ fn agent_system_content(prefs: &wb_domain::AppPrefs) -> Option<String> {
             "已启用技能（下面是短描述；需要完整说明时调用 skill_load，name 为技能名）：\n{lines}{extra}"
         ));
     }
+    parts.push(wb_host::managed_tools_brief());
+    parts.push(
+        "调用本机工具前先看上面的可用名单。未安装、获取失败或已关闭的工具不要调用。shell、bash、pwsh、job_start、terminal_send 和 host_tool_run 都会拒绝它们。"
+            .into(),
+    );
     if parts.is_empty() {
         None
     } else {

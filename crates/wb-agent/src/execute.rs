@@ -1,4 +1,4 @@
-﻿use crate::fs_observe::{observe_path, require_observed_for_existing};
+use crate::fs_observe::{observe_path, require_observed_for_existing};
 use crate::managed_agents::{
     finish_managed_agent, get_managed_agent, interrupt_managed_agent, list_managed_agents,
     register_managed_agent, send_managed_agent_message, take_managed_agent_inbox,
@@ -21,10 +21,11 @@ use wb_domain::{
 };
 use wb_host::{
     active_skills, cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive,
-    list_plugins, list_skills, load_skill, maybe_spill, mcp_http_call, mcp_stdio_call,
-    path_is_within, paths_equal, present_path, probe_workspace_dependencies, read_image_info,
-    read_text, resolve_agent_cwd, run_shell_in, run_shell_kind, set_agent_cwd, web_fetch,
-    web_search, which_bin, write_text,
+    list_plugins, list_skills, load_skill, managed_tool_block_reason, managed_tool_location,
+    managed_tools_brief, maybe_spill, mcp_http_call, mcp_stdio_call, path_is_within, paths_equal,
+    present_path, probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd,
+    run_shell_in, run_shell_kind, set_agent_cwd, shell_command_block_reason, web_fetch, web_search,
+    which_bin, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, update_prefs};
 
@@ -1019,7 +1020,11 @@ pub fn execute_tool(
                     )
                 })
                 .collect();
-            Ok(ToolResult::ok_text(lines.join("\n")))
+            Ok(ToolResult::ok_text(format!(
+                "{}\n\n{}",
+                lines.join("\n"),
+                managed_tools_brief()
+            )))
         }
         "host_tool_run" => match run_host_tool(args, workspace_root) {
             Ok(text) => Ok(ToolResult::ok_text(text)),
@@ -1835,6 +1840,9 @@ pub fn execute_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            if let Some(reason) = shell_command_block_reason(command) {
+                return Ok(ToolResult::err_text(reason));
+            }
             let root = effective_root(workspace_root).ok();
             let result = run_shell_in(command, root.as_deref(), workspace_root, 120)?;
             let raw = format!("exit {}\n{}\n{}", result.code, result.stdout, result.stderr);
@@ -1850,6 +1858,9 @@ pub fn execute_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            if let Some(reason) = shell_command_block_reason(command) {
+                return Ok(ToolResult::err_text(reason));
+            }
             let root = effective_root(workspace_root).ok();
             let kind = if name == "bash" { "bash" } else { "pwsh" };
             let result = match run_shell_kind(kind, command, root.as_deref(), workspace_root, 120) {
@@ -1930,6 +1941,9 @@ pub fn execute_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            if let Some(reason) = shell_command_block_reason(command) {
+                return Ok(ToolResult::err_text(reason));
+            }
             let root = effective_root(workspace_root).ok();
             let id = global_jobs().start(command, root.as_deref(), workspace_root)?;
             Ok(ToolResult::ok_text(format!("已启动后台任务 {id}")))
@@ -2359,6 +2373,9 @@ pub fn execute_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 command"))?;
+            if let Some(reason) = shell_command_block_reason(command) {
+                return Ok(ToolResult::err_text(reason));
+            }
             let buf = global_terminals().send(id, command)?;
             let tail = if buf.len() > 8_000 {
                 format!("…\n{}", &buf[buf.len() - 8_000..])
@@ -2655,6 +2672,9 @@ fn run_host_tool(args: &Value, workspace_root: Option<&str>) -> Result<String, S
         return Err("缺少 toolId".into());
     }
     let tool_key = tool_id.to_ascii_lowercase();
+    if let Some(reason) = managed_tool_block_reason(&tool_key) {
+        return Err(reason);
+    }
     let bin = match tool_key.as_str() {
         "git" => "git",
         "node" | "nodejs" => "node",
@@ -2675,6 +2695,11 @@ fn run_host_tool(args: &Value, workspace_root: Option<&str>) -> Result<String, S
         other => other,
     };
     if which_bin(bin).is_none() {
+        if let Some(place) = managed_tool_location(&tool_key) {
+            return Err(format!(
+                "工具已安装在 {place}，但没有可直接运行的 {bin} 命令"
+            ));
+        }
         return Err(format!("本机未找到工具：{tool_id}（{bin}）"));
     }
     let extra = arg_str(args, &["args", "command"]).unwrap_or("");
@@ -3598,7 +3623,34 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(host.ok, "{}", host.content);
+        if managed_tool_block_reason("git").is_some() {
+            assert!(!host.ok);
+            assert!(host.content.contains("不能调用"), "{}", host.content);
+        } else {
+            assert!(host.ok, "{}", host.content);
+        }
+
+        let echoed = execute_tool(
+            &mut repo,
+            "shell",
+            &json!({ "command": "echo wb-tool-gate" }),
+            None,
+        )
+        .unwrap();
+        assert!(echoed.ok, "{}", echoed.content);
+        assert!(echoed.content.contains("wb-tool-gate"));
+
+        if managed_tool_block_reason("php").is_some() {
+            let blocked = execute_tool(
+                &mut repo,
+                "shell",
+                &json!({ "command": "echo keep && php -v" }),
+                None,
+            )
+            .unwrap();
+            assert!(!blocked.ok, "{}", blocked.content);
+            assert!(blocked.content.contains("不能调用"), "{}", blocked.content);
+        }
 
         let save = execute_tool(
             &mut repo,

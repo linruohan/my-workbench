@@ -798,7 +798,7 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
         tool(
             "host_tool_run",
             ToolEffect::Write,
-            "运行本机白名单工具（如 git/node/python）",
+            "运行设置里已安装且已启用的本机工具。未安装、获取失败或已关闭的不能调用",
             serde_json::json!({
                 "toolId": { "type": "string" },
                 "args": { "type": "string" },

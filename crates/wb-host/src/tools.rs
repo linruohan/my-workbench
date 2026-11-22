@@ -327,15 +327,175 @@ pub fn acquire_tools(ids: &[String], finish_bootstrap: bool, on_update: impl Fn(
 
 pub fn managed_tool_block_reason(tool_key: &str) -> Option<String> {
     let id = catalog_alias(tool_key)?;
-    let row = read_tool_catalog()
-        .rows
-        .into_iter()
-        .find(|row| row.id == id)?;
-    if row.enabled {
-        None
-    } else {
-        Some(format!("工具「{}」已在设置里关闭", row.name))
+    let catalog = read_tool_catalog();
+    let row = catalog.rows.iter().find(|row| row.id == id)?;
+    tool_unavailable_reason(row.name, row.enabled, row.availability)
+}
+
+/// Refuse a shell line when any program maps to a settings tool that is not installed and enabled.
+pub fn shell_command_block_reason(command: &str) -> Option<String> {
+    let catalog = read_tool_catalog();
+    for name in command_program_names(command) {
+        let Some(id) = catalog_alias(&name) else {
+            continue;
+        };
+        let Some(row) = catalog.rows.iter().find(|row| row.id == id) else {
+            continue;
+        };
+        if let Some(reason) = tool_unavailable_reason(row.name, row.enabled, row.availability) {
+            return Some(reason);
+        }
     }
+    None
+}
+
+pub fn managed_tool_location(tool_key: &str) -> Option<String> {
+    let id = catalog_alias(tool_key)?;
+    let catalog = read_tool_catalog();
+    let row = catalog.rows.iter().find(|row| row.id == id)?;
+    if row.enabled && row.availability == ToolAvailability::Installed {
+        row.location.clone()
+    } else {
+        None
+    }
+}
+
+pub fn managed_tools_brief() -> String {
+    let catalog = read_tool_catalog();
+    let mut ready = Vec::new();
+    let mut blocked = Vec::new();
+    for row in &catalog.rows {
+        if row.enabled && row.availability == ToolAvailability::Installed {
+            ready.push(row.name.to_string());
+        } else {
+            let state = if !row.enabled {
+                "已关闭"
+            } else if row.availability == ToolAvailability::Failed {
+                "获取失败"
+            } else {
+                "未安装"
+            };
+            blocked.push(format!("{}（{state}）", row.name));
+        }
+    }
+    let ready = if ready.is_empty() {
+        "没有".to_string()
+    } else {
+        ready.join("、")
+    };
+    let blocked = if blocked.is_empty() {
+        "没有".to_string()
+    } else {
+        blocked.join("、")
+    };
+    format!("可调用的本机工具：{ready}。不能调用：{blocked}。")
+}
+
+fn tool_unavailable_reason(
+    name: &str,
+    enabled: bool,
+    availability: ToolAvailability,
+) -> Option<String> {
+    if !enabled {
+        return Some(format!("工具「{name}」已在设置里关闭，不能调用"));
+    }
+    match availability {
+        ToolAvailability::Installed => None,
+        ToolAvailability::Missing => Some(format!(
+            "工具「{name}」未安装，不能调用。请到设置的工具页扫描或获取。"
+        )),
+        ToolAvailability::Failed => Some(format!(
+            "工具「{name}」获取失败，不能调用。请到设置的工具页查看详情后再获取。"
+        )),
+    }
+}
+
+fn command_program_names(command: &str) -> Vec<String> {
+    split_shell_segments(command)
+        .into_iter()
+        .filter_map(|segment| program_name(&segment))
+        .collect()
+}
+
+fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        if let Some(open) = quote {
+            current.push(ch);
+            if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            current.push(ch);
+            continue;
+        }
+        if ch == '\n' || ch == ';' || ch == '|' || ch == '&' {
+            if ch == '|' {
+                while chars.peek() == Some(&'|') {
+                    chars.next();
+                }
+            }
+            if ch == '&' {
+                while chars.peek() == Some(&'&') {
+                    chars.next();
+                }
+            }
+            let segment = current.trim().to_string();
+            if !segment.is_empty() {
+                out.push(segment);
+            }
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+    }
+    let segment = current.trim().to_string();
+    if !segment.is_empty() {
+        out.push(segment);
+    }
+    out
+}
+
+fn program_name(segment: &str) -> Option<String> {
+    let mut rest = segment.trim();
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let token_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let token = &trimmed[..token_end];
+        if let Some(eq) = token.find('=') {
+            let name = &token[..eq];
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                rest = trimmed[token_end..].trim_start();
+                continue;
+            }
+        }
+        return Some(normalize_program(token));
+    }
+}
+
+fn normalize_program(token: &str) -> String {
+    let token = token.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`');
+    let file = token.rsplit(['\\', '/']).next().unwrap_or(token);
+    let lower = file.to_ascii_lowercase();
+    lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".cmd"))
+        .or_else(|| lower.strip_suffix(".bat"))
+        .unwrap_or(&lower)
+        .to_string()
 }
 
 fn catalog_alias(tool_key: &str) -> Option<&'static str> {
@@ -356,6 +516,16 @@ fn catalog_alias(tool_key: &str) -> Option<&'static str> {
         "ssh" | "scp" | "sftp" | "openssh" => "openssh",
         "redis" | "redis-server" | "redis-cli" => "redis",
         "chromium" => "chromium",
+        "makensis" => "nsis",
+        "iscc" => "inno",
+        "mmdc" | "mermaid" => "mermaid",
+        "sshfs" => "sshfs",
+        "readelf" | "llvm-readelf" => "readelf",
+        "playwright-mcp" => "browser-mcp",
+        "matplotlib" => "matplotlib",
+        "plotly" => "plotly",
+        "altair" => "altair",
+        "bokeh" => "bokeh",
         _ => return None,
     })
 }
@@ -1576,6 +1746,34 @@ mod tests {
         assert!(max.load(Ordering::SeqCst) <= 2);
         assert!(python_max.load(Ordering::SeqCst) <= 1);
         assert!(max.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn unavailable_tools_cannot_be_called() {
+        assert!(tool_unavailable_reason("Git", true, ToolAvailability::Installed).is_none());
+        let closed = tool_unavailable_reason("Git", false, ToolAvailability::Installed).unwrap();
+        assert!(closed.contains("已在设置里关闭"));
+        let missing = tool_unavailable_reason("PHP", true, ToolAvailability::Missing).unwrap();
+        assert!(missing.contains("未安装"));
+        let failed = tool_unavailable_reason("PHP", true, ToolAvailability::Failed).unwrap();
+        assert!(failed.contains("获取失败"));
+    }
+
+    #[test]
+    fn shell_segments_name_each_program() {
+        assert_eq!(command_program_names("git status"), vec!["git"]);
+        assert_eq!(
+            command_program_names("echo hi && git status"),
+            vec!["echo", "git"]
+        );
+        assert_eq!(
+            command_program_names(r#""C:\Git\cmd\git.exe" status"#),
+            vec!["git"]
+        );
+        assert_eq!(command_program_names("FOO=1 rg -n x"), vec!["rg"]);
+        assert_eq!(command_program_names("npm.cmd -v"), vec!["npm"]);
+        assert!(catalog_alias("php").is_some());
+        assert!(catalog_alias("echo").is_none());
     }
 
     #[test]

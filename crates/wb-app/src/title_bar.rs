@@ -10,7 +10,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::*;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{NotificationStatus, ThemeModePref};
 
@@ -19,7 +18,6 @@ pub fn workbench_title_bar(
     host: WeakEntity<WorkbenchApp>,
     cx: &mut App,
 ) -> impl IntoElement {
-    let display_name = state.with(|inner| inner.prefs.general.display_name.trim().to_string());
     let pending = state.with(|inner| {
         inner
             .repo
@@ -46,15 +44,7 @@ pub fn workbench_title_bar(
                 .items_center()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .child("个人工作台")
-                .when(!display_name.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .ml_2()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(display_name),
-                    )
-                }),
+                .child("个人工作台"),
         )
         .child(
             div()
