@@ -8,14 +8,12 @@ SemVer `MAJOR.MINOR.PATCH`：
 - `MINOR`：新视图、新工具、新设置项、新材料化能力；快照 / 设置键可向后兼容。
 - `MAJOR`：破坏性数据迁移、存储格式不兼容、平台要求提升。
 
-当前版本 `0.1.14`。发版时同步以下位置：
+当前版本 `0.1.15`。发版时同步以下位置：
 
-1. `package.json` → `version`
-2. `apps/desktop/package.json` → `version`
-3. `apps/desktop/src-tauri/tauri.conf.json` → `version`
-4. `apps/desktop/src-tauri/Cargo.toml` → `version`
-5. `开发报告.md` 追加修订记录
-6. `README.md` / `docs/design.md` 中的「当前版本」表述
+1. `Cargo.toml` workspace `version`，以及随之更新的 `Cargo.lock`
+2. `crates/wb-host/src/mcp.rs` 的 clientInfo `version`
+3. `开发报告.md` 追加修订记录
+4. `README.md` / `docs/design.md` 中的「当前版本」表述
 
 ## 2. 发版门禁
 

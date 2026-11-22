@@ -9911,7 +9911,7 @@ dependencies = [
 
 [[package]]
 name = "wb-agent"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "log",
@@ -9929,7 +9929,7 @@ dependencies = [
 
 [[package]]
 name = "wb-app"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9955,7 +9955,7 @@ dependencies = [
 
 [[package]]
 name = "wb-asr"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "sherpa-onnx",
@@ -9963,7 +9963,7 @@ dependencies = [
 
 [[package]]
 name = "wb-domain"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "regex",
@@ -9975,7 +9975,7 @@ dependencies = [
 
 [[package]]
 name = "wb-host"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -10007,7 +10007,7 @@ dependencies = [
 
 [[package]]
 name = "wb-store"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",

@@ -34,7 +34,7 @@ pub fn mcp_http_call(
         json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": { "name": "my-workbench", "version": "0.1.14" }
+            "clientInfo": { "name": "my-workbench", "version": "0.1.15" }
         }),
     )?;
     if let Some(err) = init.get("error") {
@@ -211,7 +211,7 @@ pub fn mcp_stdio_call(
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": { "name": "my-workbench", "version": "0.1.14" }
+                "clientInfo": { "name": "my-workbench", "version": "0.1.15" }
             }
         }),
     )?;
