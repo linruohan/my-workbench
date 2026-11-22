@@ -1418,6 +1418,20 @@ impl AgentPane {
         });
     }
 
+    /// Insert a quoted snippet (e.g. a tool result) at the caret.
+    fn quote_into_composer(&mut self, body: &str, cx: &mut Context<Self>) {
+        let clipped: String = body.chars().take(1_500).collect();
+        let suffix = if body.chars().count() > 1_500 {
+            "…"
+        } else {
+            ""
+        };
+        let quote = format!("\n> {}{suffix}\n", clipped.replace('\n', "\n> "));
+        self.pending_insert = Some(quote);
+        self.status = "已把内容引用到输入框".into();
+        cx.notify();
+    }
+
     /// `Alt+↑`: pull the newest user message back into the composer for editing.
     pub fn edit_last_user_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
@@ -4039,7 +4053,14 @@ fn render_chat_message(
             })
             .into_any_element()
     } else if use_md {
+        let block_id = msg_id.clone();
         TextView::markdown(SharedString::from(format!("msg-{msg_id}")), content.clone())
+            .code_block_actions(move |code_block, _window, _cx| {
+                h_flex().gap_1().child(
+                    Clipboard::new(SharedString::from(format!("copy-block-{block_id}")))
+                        .value(code_block.code()),
+                )
+            })
             .into_any_element()
     } else {
         div().text_sm().child(content.clone()).into_any_element()
@@ -4097,18 +4118,36 @@ fn render_chat_message(
         )
         .when(is_tool, |row| {
             let tid = msg_id.clone();
-            let entity = entity.clone();
+            let exp_entity = entity.clone();
+            let quote_entity = entity.clone();
+            let quote_tid = msg_id.clone();
             row.child(
                 Button::new(SharedString::from(format!("tool-exp-{tid}")))
                     .xsmall()
                     .ghost()
                     .label(if expanded { "收起" } else { "展开" })
                     .on_click(move |_, _, app| {
-                        if let Some(e) = entity.upgrade() {
+                        if let Some(e) = exp_entity.upgrade() {
                             e.update(app, |this, cx| this.toggle_tool_expand(tid.clone(), cx));
                         }
                     }),
             )
+            .child({
+                // Pull a tool result into the composer instead of retyping it.
+                let body = content.clone();
+                Button::new(SharedString::from(format!("tool-quote-{quote_tid}")))
+                    .xsmall()
+                    .ghost()
+                    .label("引用")
+                    .on_click(move |_, _, app| {
+                        if let Some(e) = quote_entity.upgrade() {
+                            let body = body.clone();
+                            e.update(app, |this, cx| {
+                                this.quote_into_composer(&body, cx);
+                            });
+                        }
+                    })
+            })
         })
         .when(is_user, |row| {
             let edit_mid = msg_id.clone();
