@@ -933,20 +933,28 @@ fn kb_heading_accent(level: u8) -> Hsla {
     }
 }
 
-fn kb_heading_style(level: u8) -> StyleRefinement {
+fn kb_heading_style(level: u8, base: Pixels) -> StyleRefinement {
     let accent = kb_heading_accent(level);
-    let weight = if level <= 2 {
-        FontWeight::EXTRA_BOLD
-    } else {
-        FontWeight::BOLD
+    let size = kb_heading_size(level, base);
+    let weight = match level {
+        1 | 2 => FontWeight::EXTRA_BOLD,
+        3 => FontWeight::BOLD,
+        _ => FontWeight::SEMIBOLD,
+    };
+    let pad_y = match level {
+        1 => px(8.),
+        2 => px(6.),
+        3 => px(4.),
+        _ => px(2.),
     };
     StyleRefinement::default()
+        .text_size(size)
         .font_weight(weight)
         .text_color(accent)
         .border_l(px(4.))
         .border_color(accent)
         .pl_3()
-        .py_1()
+        .py(pad_y)
         .rounded_l(px(10.))
         .bg(accent.opacity(0.16))
 }
@@ -954,11 +962,11 @@ fn kb_heading_style(level: u8) -> StyleRefinement {
 fn kb_heading_size(level: u8, base: Pixels) -> Pixels {
     let scale = match level {
         1 => 2.0,
-        2 => 1.8,
-        3 => 1.6,
-        4 => 1.4,
-        5 => 1.3,
-        _ => 1.2,
+        2 => 1.6,
+        3 => 1.3,
+        4 => 1.12,
+        5 => 1.0,
+        _ => 0.88,
     };
     base * scale
 }
@@ -974,10 +982,11 @@ fn kb_preview_style(theme: &Theme, zoom: f32) -> TextViewStyle {
         .font_family(theme.mono_font_family.clone())
         .max_h(px(360.));
     code.overflow.y = Some(Overflow::Scroll);
+    let heading_base = theme.font_size * zoom;
     let mut style = TextViewStyle::default()
         .paragraph_gap(rems(0.85))
         .heading_font_size(kb_heading_size)
-        .heading(kb_heading_style)
+        .heading(move |level| kb_heading_style(level, heading_base))
         .link(palette.internal_link)
         .unresolved_link(palette.caution)
         .list(
@@ -2722,7 +2731,15 @@ mod tests {
         assert_eq!(kb_heading_accent(2), super::hsl_css(330., 85., 47.2));
         assert_eq!(kb_heading_accent(3), super::hsl_css(37., 100., 50.));
         assert_eq!(kb_heading_size(1, px(16.)), px(32.));
-        assert_eq!(kb_heading_size(6, px(16.)), px(19.2));
+        assert_eq!(kb_heading_size(2, px(16.)), px(25.6));
+        assert_eq!(kb_heading_size(3, px(16.)), px(20.8));
+        assert_eq!(kb_heading_size(4, px(16.)), px(17.92));
+        assert_eq!(kb_heading_size(5, px(16.)), px(16.));
+        assert_eq!(kb_heading_size(6, px(16.)), px(14.08));
+        let sizes: Vec<_> = (1..=6)
+            .map(|level| kb_heading_size(level, px(16.)))
+            .collect();
+        assert!(sizes.windows(2).all(|pair| pair[0] > pair[1]));
     }
 
     #[test]
