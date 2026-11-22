@@ -209,7 +209,7 @@ impl KnowledgePane {
 
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
         let source = self.editor.read(cx).value();
-        let rendered = preview_markdown(source.as_str());
+        let rendered = self.preview_source(source.as_str());
         self.preview.update(cx, |state, cx| {
             state.set_text(&rendered, cx);
         });
@@ -513,6 +513,10 @@ impl KnowledgePane {
         });
     }
 
+    fn preview_source(&self, body: &str) -> String {
+        preview_markdown_in(body, &self.files)
+    }
+
     fn open_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_file_at(path, None, window, cx);
     }
@@ -566,7 +570,7 @@ impl KnowledgePane {
                     input.set_value(text.clone(), window, cx);
                 });
                 self.preview.update(cx, |state, cx| {
-                    state.set_text(&preview_markdown(&text), cx);
+                    state.set_text(&self.preview_source(&text), cx);
                 });
                 self.replace_status.clear();
                 if let Some(heading) = heading {
@@ -587,7 +591,7 @@ impl KnowledgePane {
                     .await;
                 let shown = this
                     .update(cx, |this, cx| {
-                        let text = preview_markdown(&this.editor.read(cx).value());
+                        let text = this.preview_source(&this.editor.read(cx).value());
                         let Some(range) = markdown_heading_range(&text, &heading) else {
                             return true;
                         };
@@ -1127,7 +1131,7 @@ fn kb_markdown_extensions() -> MarkdownExtensions {
 }
 
 /// Turn `[[note]]` / `[[note|别名]]` into Markdown links for the preview pane.
-fn wikilinks_for_preview(body: &str) -> String {
+fn wikilinks_for_preview_in(body: &str, files: &[(String, String)]) -> String {
     let mut out = String::with_capacity(body.len());
     let bytes = body.as_bytes();
     let mut i = 0usize;
@@ -1138,11 +1142,12 @@ fn wikilinks_for_preview(body: &str) -> String {
                 let target = inner.split('|').next().unwrap_or(inner).trim();
                 let label = inner.split('|').nth(1).unwrap_or(target).trim();
                 if !target.is_empty() {
+                    let bang = i > 0 && bytes[i - 1] == b'!';
                     let is_image = Path::new(target)
                         .extension()
                         .and_then(|e| e.to_str())
                         .is_some_and(is_image_extension);
-                    if is_image && i > 0 && bytes[i - 1] == b'!' {
+                    if is_image && bang {
                         out.pop();
                         out.push_str("![");
                         out.push_str(label);
@@ -1150,11 +1155,16 @@ fn wikilinks_for_preview(body: &str) -> String {
                         out.push_str(target);
                         out.push(')');
                     } else {
-                        out.push('[');
-                        out.push_str(label);
-                        out.push_str("](");
-                        out.push_str(&wiki_href(target));
-                        out.push(')');
+                        if bang {
+                            out.pop();
+                            out.push_str(&wiki_embed_for_preview(target, label, files));
+                        } else {
+                            out.push('[');
+                            out.push_str(label);
+                            out.push_str("](");
+                            out.push_str(&wiki_href(target));
+                            out.push(')');
+                        }
                     }
                     i = i + 2 + rel + 2;
                     continue;
@@ -1169,8 +1179,105 @@ fn wikilinks_for_preview(body: &str) -> String {
     out
 }
 
-fn preview_markdown(body: &str) -> String {
-    highlights_for_preview(&wikilinks_for_preview(body))
+fn wiki_embed_for_preview(target: &str, label: &str, files: &[(String, String)]) -> String {
+    let href = wiki_href(target);
+    let header = format!("[{label}]({href})");
+    let (note, heading) = split_wikilink_target(target);
+    let Some(path) = resolve_wikilink(note, files) else {
+        return header;
+    };
+    let Ok(text) = read_text(Path::new(path)) else {
+        return header;
+    };
+    let excerpt = note_excerpt(&text, heading);
+    let mut out = String::from("\n\n> [!quote] ");
+    out.push_str(&header);
+    out.push('\n');
+    if excerpt.is_empty() {
+        out.push_str(">\n\n");
+        return out;
+    }
+    for line in excerpt.lines() {
+        out.push_str("> ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
+fn note_excerpt(body: &str, heading: Option<&str>) -> String {
+    let body = skip_yaml_frontmatter(body);
+    let mut lines = body.lines();
+    if let Some(heading) = heading {
+        let want = heading_slug(heading);
+        let mut found = false;
+        for line in lines.by_ref() {
+            if let Some(text) = atx_heading_text(line) {
+                if text.eq_ignore_ascii_case(heading) || heading_slug(text) == want {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return String::new();
+        }
+    }
+    let mut out = String::new();
+    let mut kept = 0usize;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("![[") {
+            continue;
+        }
+        if kept >= 8 {
+            break;
+        }
+        let line = strip_task_marker(line);
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+        kept += 1;
+    }
+    out
+}
+
+fn skip_yaml_frontmatter(body: &str) -> &str {
+    let rest = match body.strip_prefix("---\n") {
+        Some(rest) => rest,
+        None => match body.strip_prefix("---\r\n") {
+            Some(rest) => rest,
+            None => return body,
+        },
+    };
+    if let Some(end) = rest.find("\n---") {
+        let after = &rest[end + 4..];
+        return after
+            .strip_prefix('\n')
+            .or_else(|| after.strip_prefix("\r\n"))
+            .unwrap_or(after);
+    }
+    body
+}
+
+fn strip_task_marker(line: &str) -> String {
+    let mut s = line.to_string();
+    for marker in ["- [ ] ", "- [x] ", "- [X] "] {
+        if let Some(i) = s.find(marker) {
+            s.replace_range(i..i + marker.len(), "- ");
+            break;
+        }
+    }
+    s
+}
+
+fn preview_markdown_in(body: &str, files: &[(String, String)]) -> String {
+    highlights_for_preview(&wikilinks_for_preview_in(body, files))
 }
 
 fn wiki_href(target: &str) -> String {
@@ -1458,7 +1565,7 @@ fn kb_toggle_task(
     };
     view.update(cx, |this, cx| {
         let source = this.editor.read(cx).value().to_string();
-        let preview = preview_markdown(&source);
+        let preview = this.preview_source(&source);
         let Some(next) =
             apply_preview_task_toggle(&source, &preview, event.marker_range(), event.checked())
         else {
@@ -2466,8 +2573,8 @@ mod tests {
     use super::{
         apply_preview_task_toggle, build_kb_tree, file_uri_to_path, highlights_for_preview,
         kb_heading_accent, kb_heading_size, kb_preview_palette, markdown_heading_range,
-        markdown_scroll_outline, parse_wiki_href, preview_markdown, resolve_preview_image_path,
-        wikilinks_for_preview,
+        markdown_scroll_outline, parse_wiki_href, preview_markdown_in, resolve_preview_image_path,
+        wikilinks_for_preview_in,
     };
     use gpui_kit::px;
     use std::path::PathBuf;
@@ -2476,11 +2583,11 @@ mod tests {
     fn wikilinks_become_preview_links() {
         let md = "见 [[note]] 与 [[other|其它]]。";
         assert_eq!(
-            wikilinks_for_preview(md),
+            wikilinks_for_preview_in(md, &[]),
             "见 [note](wiki:///note) 与 [其它](wiki:///other)。"
         );
         assert_eq!(
-            wikilinks_for_preview("[[note#A section]] 与 [[#Here]] 与 [[a b]]"),
+            wikilinks_for_preview_in("[[note#A section]] 与 [[#Here]] 与 [[a b]]", &[]),
             "[note#A section](wiki:///note#A%20section) 与 [#Here](wiki:///#Here) 与 [a b](wiki:///a%20b)"
         );
         assert_eq!(
@@ -2508,13 +2615,37 @@ mod tests {
     #[test]
     fn image_wikilinks_become_markdown_images() {
         assert_eq!(
-            wikilinks_for_preview("见 ![[photo.png]] 与 [[note]]。"),
+            wikilinks_for_preview_in("见 ![[photo.png]] 与 [[note]]。", &[]),
             "见 ![photo.png](photo.png) 与 [note](wiki:///note)。"
         );
         assert_eq!(
-            wikilinks_for_preview("![[assets/a.jpg|图]]"),
+            wikilinks_for_preview_in("![[assets/a.jpg|图]]", &[]),
             "![图](assets/a.jpg)"
         );
+        assert_eq!(
+            wikilinks_for_preview_in("见 ![[note]]。", &[]),
+            "见 [note](wiki:///note)。"
+        );
+    }
+
+    #[test]
+    fn note_embeds_quote_an_excerpt() {
+        let tmp = std::env::temp_dir().join(format!("wb-kb-embed-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("note.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: x\n---\n# Hello\n\nfirst para\n\n- [ ] task\n",
+        )
+        .unwrap();
+        let files = vec![(path.to_string_lossy().into(), "note.md".into())];
+        let preview = super::preview_markdown_in("见 ![[note]]", &files);
+        assert!(preview.contains("[note](wiki:///note)"));
+        assert!(preview.contains("first para"));
+        assert!(preview.contains("- task"));
+        assert!(!preview.contains("[ ]"));
+        assert!(!preview.contains("title: x"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2606,7 +2737,7 @@ mod tests {
             "```\n==code==\n```"
         );
         assert_eq!(
-            preview_markdown("[[n]] 与 ==x=="),
+            preview_markdown_in("[[n]] 与 ==x==", &[]),
             "[n](wiki:///n) 与 <mark color=\"#ffa000\">x</mark>"
         );
     }
@@ -2614,7 +2745,7 @@ mod tests {
     #[test]
     fn toggling_a_task_maps_through_wikilinks() {
         let source = "见 [[note]]\n- [ ] 待办\n";
-        let preview = preview_markdown(source);
+        let preview = preview_markdown_in(source, &[]);
         let marker = preview.find("[ ]").map(|i| i..i + 3).unwrap();
         let next = apply_preview_task_toggle(source, &preview, marker, true).unwrap();
         assert_eq!(next, "见 [[note]]\n- [x] 待办\n");
