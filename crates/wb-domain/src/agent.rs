@@ -23,6 +23,22 @@ pub enum AgentRole {
     System,
 }
 
+impl AgentMessage {
+    /// Whether this message is a failed tool call.
+    ///
+    /// A failure is a tool message whose body does not start with "已", or one
+    /// whose body mentions a failure keyword. The role check must cover every
+    /// keyword too: otherwise a user sentence containing "错误" would be
+    /// classified as an error and show up in the errors-only filter.
+    pub fn is_tool_error(&self) -> bool {
+        if self.role != AgentRole::Tool {
+            return false;
+        }
+        let flagged = ["失败", "错误", "禁止"];
+        flagged.iter().any(|k| self.content.contains(k)) || !self.content.starts_with("已")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffect {
@@ -1142,5 +1158,39 @@ mod tests {
             gate_tool(ToolEffect::Write, AgentPermissionMode::Readonly),
             ToolGate::Block
         );
+    }
+
+    fn msg(role: AgentRole, content: &str) -> AgentMessage {
+        AgentMessage {
+            id: "m".into(),
+            thread_id: "t".into(),
+            role,
+            content: content.into(),
+            tool_name: None,
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: 0,
+        }
+    }
+
+    /// A user sentence mentioning a failure must never be filed under errors.
+    #[test]
+    fn tool_error_ignores_non_tool_roles() {
+        assert!(!msg(AgentRole::User, "这里有个错误需要修复").is_tool_error());
+        assert!(!msg(AgentRole::Assistant, "操作失败，路径不存在").is_tool_error());
+        assert!(!msg(AgentRole::System, "错误：配置缺失").is_tool_error());
+    }
+
+    #[test]
+    fn tool_error_keeps_failed_tool_results() {
+        assert!(msg(AgentRole::Tool, "失败：文件不存在").is_tool_error());
+        assert!(msg(AgentRole::Tool, "读取被禁止").is_tool_error());
+        // A tool body that does not start with "已" counts as a failure.
+        assert!(msg(AgentRole::Tool, "exit 1\nboom").is_tool_error());
+    }
+
+    #[test]
+    fn tool_error_skips_successful_tool_results() {
+        assert!(!msg(AgentRole::Tool, "已写入 3 个文件").is_tool_error());
     }
 }
