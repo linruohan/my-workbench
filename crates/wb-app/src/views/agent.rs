@@ -3426,29 +3426,78 @@ impl AgentPane {
                                                 .items_center()
                                                 .gap_1()
                                                 .when_some(branch, |row, branch| {
+                                                    let entity = entity.clone();
+                                                    let root = self.workspace_root();
                                                     row.child(
-                                                        h_flex()
-                                                            .id("agent-branch-chip")
-                                                            .items_center()
-                                                            .gap_1()
-                                                            .px_1p5()
-                                                            .py_0p5()
-                                                            .rounded(px(6.))
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .hover(|s| s.text_color(accent))
-                                                            .child(
-                                                                Icon::new(
-                                                                    gpui_kit::assets::IconName::GitBranch,
-                                                                )
-                                                                .xsmall()
-                                                                .text_color(muted),
+                                                        Button::new("agent-branch-chip")
+                                                            .ghost()
+                                                            .xsmall()
+                                                            .label(branch.clone())
+                                                            .icon(
+                                                                gpui_kit::assets::IconName::GitBranch,
                                                             )
-                                                            .child(branch)
-                                                            .child(
-                                                                Icon::new(IconName::ChevronDown)
-                                                                    .xsmall()
-                                                                    .text_color(muted),
+                                                            .dropdown_menu_with_anchor(
+                                                                Anchor::TopLeft,
+                                                                move |menu, _, _| {
+                                                                    let root_copy = root.clone();
+                                                                    let entity_copy = entity.clone();
+                                                                    let entity_term = entity.clone();
+                                                                    let branch_copy = branch.clone();
+                                                                    menu.item(
+                                                                        PopupMenuItem::new(
+                                                                            "复制分支名",
+                                                                        )
+                                                                        .on_click(
+                                                                            move |_, _, app| {
+                                                                                app.write_to_clipboard(
+                                                                                    gpui::ClipboardItem::new_string(
+                                                                                        branch_copy.clone(),
+                                                                                    ),
+                                                                                );
+                                                                            },
+                                                                        ),
+                                                                    )
+                                                                    .item(
+                                                                        PopupMenuItem::new(
+                                                                            "打开仓库目录",
+                                                                        )
+                                                                        .on_click(
+                                                                            move |_, _, app| {
+                                                                                if let Some(root) =
+                                                                                    root_copy.as_deref()
+                                                                                {
+                                                                                    let _ =
+                                                                                        wb_host::open_ext::open_path(
+                                                                                            std::path::Path::new(root),
+                                                                                        );
+                                                                                }
+                                                                                let _ = &entity_copy;
+                                                                                let _ = app;
+                                                                            },
+                                                                        ),
+                                                                    )
+                                                                    .item(
+                                                                        PopupMenuItem::new(
+                                                                            "新建终端",
+                                                                        )
+                                                                        .on_click(
+                                                                            move |_, _, app| {
+                                                                                if let Some(e) =
+                                                                                    entity_term.upgrade()
+                                                                                {
+                                                                                    e.update(
+                                                                                        app,
+                                                                                        |this, cx| {
+                                                                                            this.open_terminal(
+                                                                                                cx,
+                                                                                            );
+                                                                                        },
+                                                                                    );
+                                                                                }
+                                                                            },
+                                                                        ),
+                                                                    )
+                                                                },
                                                             ),
                                                     )
                                                 })
