@@ -3355,6 +3355,13 @@ impl AgentPane {
                                                 .child({
                                                     let busy = self.busy;
                                                     let enabled = !draft_empty;
+                                                    let tooltip = if busy {
+                                                        "停止当前回合"
+                                                    } else if enabled {
+                                                        "发送（Enter）"
+                                                    } else {
+                                                        "输入内容后可发送"
+                                                    };
                                                     div()
                                                         .id("agent-send")
                                                         .flex()
@@ -3370,7 +3377,14 @@ impl AgentPane {
                                                         } else {
                                                             border
                                                         })
-                                                        .cursor_pointer()
+                                                        .when(!busy && !enabled, |s| s.cursor_default())
+                                                        .when(busy || enabled, |s| s.cursor_pointer())
+                                                        .tooltip(move |window, cx| {
+                                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                                tooltip,
+                                                            )
+                                                            .build(window, cx)
+                                                        })
                                                         .hover(|s| s.opacity(0.85))
                                                         .child(
                                                             Icon::new(if busy {
