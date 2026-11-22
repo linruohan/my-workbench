@@ -213,7 +213,29 @@ pub fn probe_workspace_dependencies() -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+type WhichCache = std::sync::Mutex<std::collections::HashMap<String, Option<String>>>;
+
+fn which_bin_cache() -> &'static WhichCache {
+    static CACHE: std::sync::OnceLock<WhichCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub fn which_bin(name: &str) -> Option<String> {
+    // Each probe spawns `where`/`which`, which costs ~70 ms on Windows. Status
+    // checks call this several times per refresh, so results are memoised.
+    if let Ok(cache) = which_bin_cache().lock()
+        && let Some(hit) = cache.get(name)
+    {
+        return hit.clone();
+    }
+    let found = which_bin_uncached(name);
+    if let Ok(mut cache) = which_bin_cache().lock() {
+        cache.insert(name.to_string(), found.clone());
+    }
+    found
+}
+
+fn which_bin_uncached(name: &str) -> Option<String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -227,11 +249,12 @@ pub fn which_bin(name: &str) -> Option<String> {
         if !out.status.success() {
             return None;
         }
-        String::from_utf8_lossy(&out.stdout)
+        let lines = String::from_utf8_lossy(&out.stdout)
             .lines()
-            .next()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        pick_windows_command(lines)
     }
     #[cfg(not(windows))]
     {
@@ -250,6 +273,34 @@ pub fn which_bin(name: &str) -> Option<String> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
+}
+
+/// Drop memoised lookups, so a tool installed after startup is found again.
+pub fn which_bin_cache_clear() {
+    if let Ok(mut cache) = which_bin_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// `where` lists extensionless shell scripts ahead of `npm.cmd` / `scoop.cmd`.
+/// Those scripts are not Win32 images and fail with os error 193.
+pub(crate) fn pick_windows_command(candidates: Vec<String>) -> Option<String> {
+    fn rank(path: &str) -> u8 {
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".exe") {
+            0
+        } else if lower.ends_with(".cmd") || lower.ends_with(".bat") || lower.ends_with(".com") {
+            1
+        } else {
+            2
+        }
+    }
+    candidates
+        .iter()
+        .filter(|path| rank(path) < 2)
+        .min_by_key(|path| rank(path))
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,5 +494,27 @@ mod env_tests {
         assert!(!is_allowed_env_key("WB_HOME"));
         assert!(!is_allowed_env_key("OPENAI_API_KEY"));
         assert!(!is_allowed_env_key("MY_SECRET"));
+    }
+
+    #[test]
+    fn windows_command_prefers_cmd_over_shell_script() {
+        let picked = pick_windows_command(vec![
+            r"C:\software\nodejs\npm".into(),
+            r"C:\software\nodejs\npm.cmd".into(),
+        ]);
+        assert_eq!(picked.as_deref(), Some(r"C:\software\nodejs\npm.cmd"));
+        let scooped = pick_windows_command(vec![
+            r"C:\software\scoop\shims\scoop".into(),
+            r"C:\software\scoop\shims\scoop.cmd".into(),
+        ]);
+        assert_eq!(
+            scooped.as_deref(),
+            Some(r"C:\software\scoop\shims\scoop.cmd")
+        );
+        let exe = pick_windows_command(vec![
+            r"C:\software\git\cmd\git.exe".into(),
+            r"C:\software\git\cmd\git.cmd".into(),
+        ]);
+        assert_eq!(exe.as_deref(), Some(r"C:\software\git\cmd\git.exe"));
     }
 }

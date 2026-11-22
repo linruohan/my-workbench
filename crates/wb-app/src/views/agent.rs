@@ -3433,6 +3433,10 @@ impl AgentPane {
                                                         |(ix, reference)| {
                                                             let entity = entity.clone();
                                                             let target = reference.clone();
+                                                            let is_image =
+                                                                crate::composer_text::is_image_path(
+                                                                    reference,
+                                                                );
                                                             h_flex()
                                                                 .id(SharedString::from(format!(
                                                                     "draft-ref-{ix}"
@@ -3443,10 +3447,17 @@ impl AgentPane {
                                                                 .py_0p5()
                                                                 .rounded(px(6.))
                                                                 .border_1()
-                                                                .border_color(border)
+                                                                .border_color(if is_image {
+                                                                    accent.opacity(0.5)
+                                                                } else {
+                                                                    border
+                                                                })
                                                                 .text_xs()
                                                                 .text_color(muted)
-                                                                .child(Icon::new(IconName::File).xsmall())
+                                                                .child(
+                                                                    Icon::new(IconName::File)
+                                                                        .xsmall(),
+                                                                )
                                                                 .child(reference.clone())
                                                                 .child(
                                                                     div()

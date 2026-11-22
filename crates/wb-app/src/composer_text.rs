@@ -29,6 +29,14 @@ pub fn model_label_of(model_ref: &str) -> String {
         .to_string()
 }
 
+/// Whether a referenced path looks like an image the agent can `read_image`.
+pub fn is_image_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +58,13 @@ mod tests {
     fn model_label_strips_provider() {
         assert_eq!(model_label_of("openai/gpt-4o"), "gpt-4o");
         assert_eq!(model_label_of("builtin"), "builtin");
+    }
+
+    #[test]
+    fn image_paths_are_detected_case_insensitively() {
+        assert!(is_image_path("assets/Logo.PNG"));
+        assert!(is_image_path("a/b/photo.jpeg"));
+        assert!(!is_image_path("src/main.rs"));
+        assert!(!is_image_path("docs/design.md"));
     }
 }
