@@ -29,6 +29,28 @@ pub fn format_local_stamp(ms: i64) -> String {
     )
 }
 
+/// Chat clock label: `14:05`.
+pub fn format_local_clock(ms: i64) -> String {
+    let dt = Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(Local::now);
+    format!("{:02}:{:02}", dt.hour(), dt.minute())
+}
+
+/// Chat day divider relative to today: `今天` / `昨天` / `2026-11-20`.
+pub fn format_chat_day_label(ms: i64) -> String {
+    let day = format_local_day(ms);
+    let today = format_local_day(now_ms());
+    if day == today {
+        return "今天".into();
+    }
+    if add_local_days(&today, -1).as_deref() == Some(day.as_str()) {
+        return "昨天".into();
+    }
+    day
+}
+
 pub fn parse_local_day(day: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()
 }
@@ -127,6 +149,8 @@ mod tests {
         let day = format_local_day(1_700_000_000_000);
         assert_eq!(day.len(), 10);
         assert!(parse_local_day(&day).is_some());
+        assert_eq!(format_local_clock(1_700_000_000_000).len(), 5);
+        assert_eq!(format_chat_day_label(now_ms()), "今天");
     }
 
     #[test]

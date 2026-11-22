@@ -2,8 +2,8 @@ use crate::state::{AppNav, AppState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{
-    Escape as InputEscape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea,
-    TextareaState,
+    Escape as InputEscape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveRight,
+    MoveUp, Textarea, TextareaState,
 };
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
@@ -23,7 +23,8 @@ use wb_agent::{
 use wb_domain::BUILTIN_MODEL_REF;
 use wb_domain::{
     AgentMessage, AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE,
-    agent_workspace_title_from_path, create_id, normalize_agent_web_url, now_ms,
+    agent_workspace_title_from_path, create_id, format_chat_day_label, format_local_clock,
+    format_local_day, normalize_agent_web_url, now_ms,
 };
 use wb_host::{cleanup_tool_spill, global_terminals};
 
@@ -48,6 +49,8 @@ pub struct AgentPane {
     workspace_filter: Option<String>,
     show_terminal: bool,
     term_id: Option<String>,
+    chat_scroll: ScrollHandle,
+    ghost_suffix: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -82,6 +85,8 @@ impl AgentPane {
             workspace_filter: None,
             show_terminal: false,
             term_id: None,
+            chat_scroll: ScrollHandle::new(),
+            ghost_suffix: None,
             _subs: Vec::new(),
         };
         this._subs.push(cx.subscribe_in(
@@ -91,6 +96,7 @@ impl AgentPane {
                 InputEvent::Change => {
                     this.slash_selected = 0;
                     this.slash_dismissed = false;
+                    this.recompute_ghost(cx);
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift, secondary } => {
@@ -278,6 +284,7 @@ impl AgentPane {
         }
         self.history_index = None;
         self.history_draft.clear();
+        self.ghost_suffix = None;
 
         if text == "/clear" || text.starts_with("/clear ") {
             self.clear_active_thread(cx);
@@ -329,6 +336,7 @@ impl AgentPane {
         let expected = self.turn_gen;
         self.busy = true;
         self.status.clear();
+        self.scroll_chat_to_bottom(cx);
         cx.notify();
 
         let drain_tid = thread_id.clone();
@@ -362,6 +370,7 @@ impl AgentPane {
                         .with_mut(|s| finish_user_turn(&mut s.repo, &pending, reply));
                     this.apply_open_view(phase.open_view());
                     this.state.persist_if_dirty();
+                    this.scroll_chat_to_bottom(cx);
                     cx.notify();
                     phase
                 })
@@ -398,6 +407,7 @@ impl AgentPane {
                                 .with_mut(|s| finish_continue_turn(&mut s.repo, &cont, reply));
                             this.apply_open_view(next.open_view());
                             this.state.persist_if_dirty();
+                            this.scroll_chat_to_bottom(cx);
                             cx.notify();
                             next
                         })
@@ -452,6 +462,7 @@ impl AgentPane {
                             .with_mut(|s| finish_user_turn(&mut s.repo, &pending_goal, reply));
                         this.apply_open_view(next.open_view());
                         this.state.persist_if_dirty();
+                        this.scroll_chat_to_bottom(cx);
                         cx.notify();
                         next
                     })
@@ -462,6 +473,7 @@ impl AgentPane {
                 if this.turn_gen == expected {
                     this.status.clear();
                     this.busy = false;
+                    this.scroll_chat_to_bottom(cx);
                     cx.notify();
                     this.drain_queue_for(&drain_tid, cx);
                 }
@@ -690,6 +702,7 @@ impl AgentPane {
             self.stop_turn(cx);
         }
         self.state.with_mut(|s| s.active_thread_id = Some(id));
+        self.scroll_chat_to_bottom(cx);
         cx.notify();
     }
 
@@ -853,6 +866,51 @@ impl AgentPane {
         }
         cx.notify();
     }
+
+    fn scroll_chat_to_bottom(&mut self, cx: &mut Context<Self>) {
+        let handle = self.chat_scroll.clone();
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+            let max = handle.max_offset();
+            handle.set_offset(point(px(0.), -max.y.abs()));
+        })
+        .detach();
+    }
+
+    fn recompute_ghost(&mut self, cx: &App) {
+        self.ghost_suffix = None;
+        if !self.live_slash(cx).is_empty() {
+            return;
+        }
+        let value = self.input.read(cx).value().to_string();
+        let cursor = self.input.read(cx).cursor().min(value.len());
+        if cursor != value.len() || value.trim().is_empty() {
+            return;
+        }
+        let needle = value.as_str();
+        for prev in self.prompt_history.iter().rev() {
+            if prev.starts_with(needle) && prev.len() > needle.len() {
+                self.ghost_suffix = Some(prev[needle.len()..].to_string());
+                return;
+            }
+        }
+    }
+
+    fn accept_ghost(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(suffix) = self.ghost_suffix.take() else {
+            return false;
+        };
+        let next = format!("{}{suffix}", self.input.read(cx).value());
+        let len = next.len();
+        self.input.update(cx, |state, cx| {
+            state.set_value(&next, window, cx);
+            state.set_selected_range(len..len, cx);
+        });
+        cx.notify();
+        true
+    }
 }
 
 impl Render for AgentPane {
@@ -874,6 +932,7 @@ impl AgentPane {
             active_web_url,
             queued,
             model_ref,
+            thread_title,
         ) = self.state.with(|s| {
             let tid = s.active_thread_id.clone();
             let messages = tid
@@ -889,6 +948,10 @@ impl AgentPane {
                 .and_then(|id| s.repo.list_agent_threads().into_iter().find(|t| t.id == id));
             let web_url = thread.as_ref().and_then(|t| t.web_url.clone());
             let queued = thread.as_ref().map(queued_user_texts).unwrap_or_default();
+            let title = thread
+                .as_ref()
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| "新会话".into());
             let perm = thread
                 .as_ref()
                 .map(|t| permission_mode_label(t.permission_mode))
@@ -912,6 +975,7 @@ impl AgentPane {
                 web_url,
                 queued,
                 model_ref,
+                title,
             )
         });
         self.sync_webview(active_web_url.as_deref(), window, cx);
@@ -1099,10 +1163,31 @@ impl AgentPane {
             .collect();
         let empty_chat = visible_messages.is_empty() && find_q.is_empty();
         let filter_miss = visible_messages.is_empty() && !find_q.is_empty();
+        let mut last_day = String::new();
         let message_rows: Vec<_> = visible_messages
             .into_iter()
-            .map(|m| {
-                render_chat_message(
+            .flat_map(|m| {
+                let day = format_local_day(m.created_at);
+                let mut rows = Vec::new();
+                if day != last_day {
+                    last_day = day;
+                    rows.push(
+                        div()
+                            .w_full()
+                            .py_2()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_bold()
+                                    .text_color(muted)
+                                    .child(format_chat_day_label(m.created_at)),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                rows.push(render_chat_message(
                     &m,
                     &self.expanded_tools,
                     radius,
@@ -1110,9 +1195,11 @@ impl AgentPane {
                     accent,
                     secondary,
                     entity.clone(),
-                )
+                ));
+                rows
             })
             .collect();
+        let ghost = self.ghost_suffix.clone();
 
         h_flex()
             .size_full()
@@ -1236,6 +1323,27 @@ impl AgentPane {
                     .h_full()
                     .p_3()
                     .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .overflow_x_hidden()
+                                    .text_ellipsis()
+                                    .child(thread_title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("可用 /rename 改标题"),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -1425,9 +1533,12 @@ impl AgentPane {
                             .into_any_element()
                     } else {
                         v_flex()
+                            .id("agent-chat-scroll")
                             .flex_1()
                             .gap_2()
-                            .overflow_y_scrollbar()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.chat_scroll)
+                            .vertical_scrollbar(&self.chat_scroll)
                             .children(message_rows)
                             .when(self.busy, |col| {
                                 col.child(
@@ -1519,7 +1630,18 @@ impl AgentPane {
                                 }
                             }))
                             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                                if this.accept_slash_if_open(window, cx) {
+                                if this.accept_slash_if_open(window, cx)
+                                    || this.accept_ghost(window, cx)
+                                {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                                let (cursor, len) = {
+                                    let state = this.input.read(cx);
+                                    (state.cursor(), state.value().len())
+                                };
+                                if cursor == len && this.accept_ghost(window, cx) {
                                     cx.stop_propagation();
                                 }
                             }))
@@ -1529,9 +1651,25 @@ impl AgentPane {
                                     this.slash_selected = 0;
                                     cx.notify();
                                     cx.stop_propagation();
+                                } else if this.ghost_suffix.take().is_some() {
+                                    cx.notify();
+                                    cx.stop_propagation();
                                 }
                             }))
-                            .child(div().flex_1().child(Textarea::new(&self.input)))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(Textarea::new(&self.input))
+                                    .when_some(ghost, |col, suffix| {
+                                        col.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(format!("Tab 补全：…{suffix}")),
+                                        )
+                                    }),
+                            )
                             .child(
                                 Button::new("send")
                                     .primary()
@@ -1603,6 +1741,7 @@ fn render_chat_message(
         div().text_sm().child(content.clone()).into_any_element()
     };
     let copy_id = format!("copy-{msg_id}");
+    let clock = format_local_clock(m.created_at);
     let header = h_flex()
         .w_full()
         .items_center()
@@ -1614,6 +1753,7 @@ fn render_chat_message(
                 .text_color(muted)
                 .child(role.to_string()),
         )
+        .child(div().text_xs().text_color(muted).child(clock))
         .when(is_tool, |row| {
             let tid = msg_id.clone();
             let entity = entity.clone();
