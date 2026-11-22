@@ -7,7 +7,7 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::text::{
-    FrontmatterPlugin, MarkdownExtensions, TextView, TextViewState, TextViewStyle,
+    FrontmatterPlugin, MarkdownExtensions, TaskToggleEvent, TextView, TextViewState, TextViewStyle,
 };
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -206,7 +206,7 @@ impl KnowledgePane {
 
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
         let source = self.editor.read(cx).value();
-        let rendered = wikilinks_for_preview(source.as_str());
+        let rendered = preview_markdown(source.as_str());
         self.preview.update(cx, |state, cx| {
             state.set_text(&rendered, cx);
         });
@@ -385,6 +385,10 @@ impl KnowledgePane {
                     .gap_1()
                     .child(Clipboard::new("kb-copy-block").value(code_block.code()))
             })
+            .on_task_toggle({
+                let entity = entity.clone();
+                move |event, window, cx| kb_toggle_task(&entity, event, window, cx)
+            })
             .on_link_click(move |url, event, window, cx| {
                 if event.is_right_click() {
                     return;
@@ -505,7 +509,7 @@ impl KnowledgePane {
                     input.set_value(text.clone(), window, cx);
                 });
                 self.preview.update(cx, |state, cx| {
-                    state.set_text(&wikilinks_for_preview(&text), cx);
+                    state.set_text(&preview_markdown(&text), cx);
                 });
                 self.replace_status.clear();
                 cx.notify();
@@ -1076,6 +1080,166 @@ fn wikilinks_for_preview(body: &str) -> String {
         i += len;
     }
     out
+}
+
+fn preview_markdown(body: &str) -> String {
+    highlights_for_preview(&wikilinks_for_preview(body))
+}
+
+/// Obsidian `==highlight==` is not CommonMark; render it as `<mark>`.
+fn highlights_for_preview(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    let mut in_fence = false;
+    while i < bytes.len() {
+        if (i == 0 || bytes[i - 1] == b'\n') && body[i..].starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str("```");
+            i += 3;
+            continue;
+        }
+        if in_fence {
+            let ch = body[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if bytes[i] == b'`' {
+            out.push('`');
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'`' && bytes[i] != b'\n' {
+                let ch = body[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            if i < bytes.len() && bytes[i] == b'`' {
+                out.push('`');
+                i += 1;
+            }
+            continue;
+        }
+        if body[i..].starts_with("==")
+            && let Some(rel) = body[i + 2..].find("==")
+        {
+            let inner = &body[i + 2..i + 2 + rel];
+            if !inner.is_empty() && !inner.contains('\n') {
+                out.push_str("<mark color=\"#ffa000\">");
+                out.push_str(&escape_html(inner));
+                out.push_str("</mark>");
+                i += 4 + rel;
+                continue;
+            }
+        }
+        let ch = body[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn task_checkbox_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let indent = content.len() - content.trim_start().len();
+        let trimmed = &content[indent..];
+        let rest = trimmed.as_bytes();
+        let mut j = 0usize;
+        let listed = if !rest.is_empty() && matches!(rest[0], b'*' | b'-' | b'+') {
+            j = 1;
+            true
+        } else if rest.first().is_some_and(u8::is_ascii_digit) {
+            while j < rest.len() && rest[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < rest.len() && matches!(rest[j], b'.' | b')') {
+                j += 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if listed {
+            while j < rest.len() && (rest[j] == b' ' || rest[j] == b'\t') {
+                j += 1;
+            }
+            if j + 2 < rest.len()
+                && rest[j] == b'['
+                && matches!(rest[j + 1], b' ' | b'x' | b'X')
+                && rest[j + 2] == b']'
+            {
+                let start = offset + indent + j;
+                ranges.push(start..start + 3);
+            }
+        }
+        offset += line.len();
+    }
+    ranges
+}
+
+fn apply_preview_task_toggle(
+    source: &str,
+    preview: &str,
+    marker: std::ops::Range<usize>,
+    checked: bool,
+) -> Option<String> {
+    let replacement = if checked { "[x]" } else { "[ ]" };
+    let preview_ranges = task_checkbox_ranges(preview);
+    let index = preview_ranges.iter().position(|range| range == &marker)?;
+    let source_range = task_checkbox_ranges(source).into_iter().nth(index)?;
+    let old = source.get(source_range.clone())?;
+    if old != "[ ]" && !old.eq_ignore_ascii_case("[x]") {
+        return None;
+    }
+    let mut next = String::with_capacity(source.len());
+    next.push_str(&source[..source_range.start]);
+    next.push_str(replacement);
+    next.push_str(&source[source_range.end..]);
+    Some(next)
+}
+
+fn kb_toggle_task(
+    entity: &WeakEntity<KnowledgePane>,
+    event: &TaskToggleEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(view) = entity.upgrade() else {
+        return;
+    };
+    view.update(cx, |this, cx| {
+        let source = this.editor.read(cx).value().to_string();
+        let preview = preview_markdown(&source);
+        let Some(next) =
+            apply_preview_task_toggle(&source, &preview, event.marker_range(), event.checked())
+        else {
+            return;
+        };
+        this.editor.update(cx, |input, cx| {
+            input.set_value(&next, window, cx);
+        });
+        this.save_current(&next);
+        this.sync_preview(cx);
+        cx.notify();
+    });
 }
 
 fn kb_preview_image_source(
@@ -2069,8 +2233,9 @@ fn markdown_scroll_outline(source: &str) -> ScrollOutline {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_kb_tree, file_uri_to_path, kb_heading_accent, kb_heading_size, kb_preview_palette,
-        markdown_scroll_outline, resolve_preview_image_path, wikilinks_for_preview,
+        apply_preview_task_toggle, build_kb_tree, file_uri_to_path, highlights_for_preview,
+        kb_heading_accent, kb_heading_size, kb_preview_palette, markdown_scroll_outline,
+        preview_markdown, resolve_preview_image_path, wikilinks_for_preview,
     };
     use gpui_kit::px;
     use std::path::PathBuf;
@@ -2171,6 +2336,32 @@ mod tests {
         assert_eq!(kb_heading_accent(3), super::hsl_css(37., 100., 50.));
         assert_eq!(kb_heading_size(1, px(16.)), px(32.));
         assert_eq!(kb_heading_size(6, px(16.)), px(19.2));
+    }
+
+    #[test]
+    fn highlights_become_mark_tags() {
+        assert_eq!(
+            highlights_for_preview("见 ==重点== 即可。"),
+            "见 <mark color=\"#ffa000\">重点</mark> 即可。"
+        );
+        assert_eq!(highlights_for_preview("`==raw==`"), "`==raw==`");
+        assert_eq!(
+            highlights_for_preview("```\n==code==\n```"),
+            "```\n==code==\n```"
+        );
+        assert_eq!(
+            preview_markdown("[[n]] 与 ==x=="),
+            "[n](wiki:///n) 与 <mark color=\"#ffa000\">x</mark>"
+        );
+    }
+
+    #[test]
+    fn toggling_a_task_maps_through_wikilinks() {
+        let source = "见 [[note]]\n- [ ] 待办\n";
+        let preview = preview_markdown(source);
+        let marker = preview.find("[ ]").map(|i| i..i + 3).unwrap();
+        let next = apply_preview_task_toggle(source, &preview, marker, true).unwrap();
+        assert_eq!(next, "见 [[note]]\n- [x] 待办\n");
     }
 
     #[test]
