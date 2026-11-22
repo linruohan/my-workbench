@@ -114,15 +114,15 @@ impl KnowledgePane {
         }
         this._subs
             .push(cx.subscribe(&editor, |_, _, _: &InputEvent, cx| cx.notify()));
-        this._subs.push(
-            cx.subscribe_in(&this.find, window, |this, _, event, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => this.find_next(window, cx),
-                    InputEvent::Change => this.sync_editor_search(cx),
-                    _ => {}
-                }
-            }),
-        );
+        this._subs.push(cx.subscribe_in(
+            &this.find,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.find_next(window, cx),
+                InputEvent::Change => this.sync_editor_search(cx),
+                _ => {}
+            },
+        ));
         this._subs.push(
             cx.subscribe_in(&editor, window, |this, input, event, _window, cx| {
                 if matches!(event, InputEvent::Blur) {
@@ -160,8 +160,9 @@ impl KnowledgePane {
             return;
         }
         let case_insensitive = !self.find_case;
-        self.editor
-            .update(cx, |editor, cx| editor.set_search_query(query, case_insensitive, cx));
+        self.editor.update(cx, |editor, cx| {
+            editor.set_search_query(query, case_insensitive, cx)
+        });
     }
 
     fn find_flags(&self) -> FindFlags {
