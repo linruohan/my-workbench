@@ -3378,6 +3378,7 @@ impl AgentPane {
                     )
                     .when(msg_filter == MsgFilter::Tools && !tool_usage.is_empty(), |col| {
                         let usage = tool_usage.clone();
+                        let total_sum: u64 = usage.iter().map(|row| row.2).sum();
                         col.child(
                             v_flex()
                                 .w_full()
@@ -3415,49 +3416,80 @@ impl AgentPane {
                                 .children(usage.iter().take(5).map(
                                     |(name, calls, total, max, failures)| {
                                         let color = if *failures > 0 { danger_theme } else { muted };
-                                        h_flex()
+                                        // Share of the whole session's tool time.
+                                        let share = if total_sum == 0 {
+                                            0.0_f32
+                                        } else {
+                                            (*total as f32 / total_sum as f32).min(1.0)
+                                        };
+                                        v_flex()
                                             .w_full()
-                                            .gap_2()
-                                            .items_center()
+                                            .gap_1()
                                             .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_xs()
-                                                    .child(name.clone()),
+                                                h_flex()
+                                                    .w_full()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .text_xs()
+                                                            .child(name.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(format!("{calls} 次")),
+                                                    )
+                                                    .child(
+                                                        div().text_xs().text_color(muted).child(
+                                                            format!(
+                                                                "合计 {}",
+                                                                crate::thread_export::format_duration(
+                                                                    *total
+                                                                )
+                                                            ),
+                                                        ),
+                                                    )
+                                                    .child(
+                                                        div().text_xs().text_color(muted).child(
+                                                            format!(
+                                                                "最慢 {}",
+                                                                crate::thread_export::format_duration(
+                                                                    *max
+                                                                )
+                                                            ),
+                                                        ),
+                                                    )
+                                                    .when(*failures > 0, |row| {
+                                                        row.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(color)
+                                                                .child(format!("失败 {failures}")),
+                                                        )
+                                                    }),
                                             )
                                             .child(
                                                 div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(format!("{calls} 次")),
+                                                    .w_full()
+                                                    .h(px(3.))
+                                                    .rounded_full()
+                                                    .bg(border)
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .rounded_full()
+                                                            .bg(if *failures > 0 {
+                                                                danger_theme.opacity(0.7)
+                                                            } else {
+                                                                accent.opacity(0.7)
+                                                            })
+                                                            .w(relative(share)),
+                                                    ),
                                             )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(format!(
-                                                        "合计 {}",
-                                                        crate::thread_export::format_duration(*total)
-                                                    )),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(format!(
-                                                        "最慢 {}",
-                                                        crate::thread_export::format_duration(*max)
-                                                    )),
-                                            )
-                                            .when(*failures > 0, |row| {
-                                                row.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(color)
-                                                        .child(format!("失败 {failures}")),
-                                                )
-                                            })
                                             .into_any_element()
                                     },
                                 )),
