@@ -1029,6 +1029,41 @@ impl AgentPane {
         cx.notify();
     }
 
+    /// Re-run the turn from an assistant message: drop it and everything after it,
+    /// then resend the most recent user message.
+    fn regenerate_from(&mut self, assistant_id: String, cx: &mut Context<Self>) {
+        if self.busy {
+            self.status = "请先停止当前回合再重新生成".into();
+            cx.notify();
+            return;
+        }
+        let target = self.state.with(|s| {
+            s.repo
+                .list_agent_messages()
+                .into_iter()
+                .find(|m| m.id == assistant_id)
+        });
+        let Some(target) = target else {
+            return;
+        };
+        let tid = target.thread_id.clone();
+        let messages = self.state.with(|s| s.repo.messages_for_thread(&tid));
+        let Some(user) = messages
+            .iter()
+            .rfind(|m| m.role == AgentRole::User && m.created_at <= target.created_at)
+            .cloned()
+        else {
+            self.status = "找不到对应的用户消息".into();
+            cx.notify();
+            return;
+        };
+        self.state
+            .with_mut(|s| s.repo.truncate_agent_messages_at(&tid, user.created_at));
+        self.state.persist_if_dirty();
+        cx.notify();
+        self.send(user.content, cx);
+    }
+
     fn submit_ask_answer(&mut self, answer: String, cx: &mut Context<Self>) {
         let Some(tid) = self.state.with(|s| s.active_thread_id.clone()) else {
             return;
@@ -2006,31 +2041,24 @@ impl AgentPane {
         let draft_text = self.stream_draft_text();
         let draft_stage = self.stream_status_text();
         let mut last_day = String::new();
-        let message_rows: Vec<_> = visible_messages
-            .into_iter()
-            .flat_map(|m| {
-                let day = format_local_day(m.created_at);
-                let mut rows = Vec::new();
-                if day != last_day {
-                    last_day = day;
-                    rows.push(
-                        div()
-                            .w_full()
-                            .py_2()
-                            .flex()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_bold()
-                                    .text_color(muted)
-                                    .child(format_chat_day_label(m.created_at)),
-                            )
-                            .into_any_element(),
-                    );
+        let mut tool_group: Vec<AgentMessage> = Vec::new();
+        let mut tool_group_day = String::new();
+        let mut message_rows: Vec<AnyElement> = Vec::new();
+        for m in visible_messages {
+            let day = format_local_day(m.created_at);
+            // Batch consecutive tool results into one collapsed row.
+            if m.role == AgentRole::Tool {
+                if tool_group.is_empty() {
+                    tool_group_day = day.clone();
                 }
-                rows.push(render_chat_message(
-                    &m,
+                tool_group.push(m);
+                continue;
+            }
+            if !tool_group.is_empty() {
+                message_rows.extend(flush_tool_group(
+                    std::mem::take(&mut tool_group),
+                    &tool_group_day,
+                    &mut last_day,
                     &self.expanded_tools,
                     radius,
                     muted,
@@ -2038,9 +2066,34 @@ impl AgentPane {
                     secondary,
                     entity.clone(),
                 ));
-                rows
-            })
-            .collect();
+            }
+            if day != last_day {
+                last_day = day.clone();
+                message_rows.push(day_marker(&day, muted, m.created_at));
+            }
+            message_rows.push(render_chat_message(
+                &m,
+                &self.expanded_tools,
+                radius,
+                muted,
+                accent,
+                secondary,
+                entity.clone(),
+            ));
+        }
+        if !tool_group.is_empty() {
+            message_rows.extend(flush_tool_group(
+                tool_group,
+                &tool_group_day,
+                &mut last_day,
+                &self.expanded_tools,
+                radius,
+                muted,
+                accent,
+                secondary,
+                entity.clone(),
+            ));
+        }
         let ghost = self.ghost_suffix.clone();
 
         h_flex()
@@ -2850,6 +2903,7 @@ fn render_chat_message(
     let use_md = matches!(m.role, AgentRole::Assistant | AgentRole::System);
     let msg_id = m.id.clone();
     let is_user = matches!(m.role, AgentRole::User);
+    let is_assistant = matches!(m.role, AgentRole::Assistant);
     let is_tool = matches!(m.role, AgentRole::Tool);
     let expanded = expanded_tools.contains(&msg_id);
     let patch_card = is_tool
@@ -2892,6 +2946,26 @@ fn render_chat_message(
                 .child(role.to_string()),
         )
         .child(div().text_xs().text_color(muted).child(clock))
+        .when(
+            is_assistant && !content.contains("模型请求失败"),
+            |row| {
+                let entity = entity.clone();
+                let regen_id = msg_id.clone();
+                row.child(
+                    Button::new(SharedString::from(format!("msg-regen-{regen_id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("重新生成")
+                        .on_click(move |_, _, app| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(app, |this, cx| {
+                                    this.regenerate_from(regen_id.clone(), cx)
+                                });
+                            }
+                        }),
+                )
+            },
+        )
         .when(
             matches!(m.role, AgentRole::Assistant) && content.contains("模型请求失败"),
             |row| {
@@ -2979,6 +3053,120 @@ fn render_chat_message(
                 .child(body),
         )
         .into_any_element()
+}
+
+fn day_marker(day: &str, muted: Hsla, created_at: i64) -> AnyElement {
+    let _ = day;
+    div()
+        .w_full()
+        .py_2()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .text_xs()
+                .font_bold()
+                .text_color(muted)
+                .child(format_chat_day_label(created_at)),
+        )
+        .into_any_element()
+}
+
+/// Consecutive tool results collapse into one row; expanding shows each result.
+#[allow(clippy::too_many_arguments)]
+fn flush_tool_group(
+    group: Vec<AgentMessage>,
+    day: &str,
+    last_day: &mut String,
+    expanded_tools: &HashSet<String>,
+    radius: Pixels,
+    muted: Hsla,
+    accent: Hsla,
+    secondary: Hsla,
+    entity: WeakEntity<AgentPane>,
+) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+    if day != last_day {
+        *last_day = day.to_string();
+        rows.push(day_marker(day, muted, group[0].created_at));
+    }
+    if group.len() == 1 {
+        rows.push(render_chat_message(
+            &group[0],
+            expanded_tools,
+            radius,
+            muted,
+            accent,
+            secondary,
+            entity,
+        ));
+        return rows;
+    }
+
+    let names: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for m in &group {
+            let name = m.tool_name.clone().unwrap_or_else(|| "tool".into());
+            if !seen.contains(&name) {
+                seen.push(name);
+            }
+        }
+        seen
+    };
+    let group_id = format!("tool-group-{}", group[0].id);
+    let expanded = expanded_tools.contains(&group_id);
+    let body: Vec<AnyElement> = if expanded {
+        group
+            .iter()
+            .map(|m| {
+                render_chat_message(
+                    m,
+                    expanded_tools,
+                    radius,
+                    muted,
+                    accent,
+                    secondary,
+                    entity.clone(),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let toggle_id = group_id.clone();
+    let toggle_entity = entity;
+    let summary = format!("{} 次工具调用 · {}", group.len(), names.join(" · "));
+    rows.push(
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .p_2()
+                    .rounded(radius)
+                    .bg(secondary)
+                    .child(div().flex_1().text_xs().text_color(muted).child(summary))
+                    .child(
+                        Button::new(SharedString::from(format!("tool-group-exp-{group_id}")))
+                            .xsmall()
+                            .ghost()
+                            .label(if expanded { "收起" } else { "展开" })
+                            .on_click(move |_, _, app| {
+                                if let Some(e) = toggle_entity.upgrade() {
+                                    e.update(app, |this, cx| {
+                                        this.toggle_tool_expand(toggle_id.clone(), cx)
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .children(body)
+            .into_any_element(),
+    );
+    rows
 }
 
 /// Summary line + per-file list for an `apply_patch` tool result.
