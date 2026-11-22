@@ -727,6 +727,24 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Emit a progress tick, throttled so a large file does not flood the UI.
+fn report_progress(
+    on_progress: &mut impl FnMut(DownloadProgress),
+    file: &str,
+    done: u64,
+    expected: u64,
+    reported: &mut u64,
+) {
+    if done.saturating_sub(*reported) >= 2 * 1024 * 1024 || done == expected {
+        *reported = done;
+        on_progress(DownloadProgress {
+            file: file.to_string(),
+            done,
+            total: expected,
+        });
+    }
+}
+
 /// Remove every file of an engine so it can be downloaded again.
 pub fn speech_remove_models(engine: &str) -> Result<SpeechStatus> {
     let engine = normalize_engine(engine);
@@ -1092,5 +1110,35 @@ mod tests {
         assert_eq!(unknown_total.percent(), 0);
         let overshoot = DownloadProgress { done: 500, ..p };
         assert_eq!(overshoot.percent(), 100);
+    }
+
+    /// Throttling must not drop the final tick, or the bar would stop short
+    /// of 100%; it must also avoid emitting on every read.
+    #[test]
+    fn throttled_progress_emits_sparsely_but_always_finishes() {
+        let total = 64 * 1024 * 1024; // 64 MB
+        let mut ticks = Vec::new();
+        let mut reported = 0u64;
+        let mut emit = |p: DownloadProgress| ticks.push(p.done);
+
+        // Simulate 1 MB reads: only every 2 MB boundary should report.
+        let mut done = 0u64;
+        while done < total {
+            done = (done + 1024 * 1024).min(total);
+            report_progress(&mut emit, "f", done, total, &mut reported);
+        }
+
+        assert!(
+            ticks.len() < total as usize / (1024 * 1024),
+            "expected far fewer ticks than reads, got {}",
+            ticks.len()
+        );
+        assert_eq!(
+            ticks.last().copied(),
+            Some(total),
+            "the final byte must always be reported"
+        );
+        // Ticks must be strictly increasing.
+        assert!(ticks.windows(2).all(|w| w[0] < w[1]));
     }
 }
