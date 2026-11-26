@@ -35,6 +35,25 @@ use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID};
 use wb_host::{cleanup_tool_spill, global_terminals};
 
 /// `@path` tokens in the draft, in order of appearance, deduplicated.
+/// CSS injected into every document of an Agent web session.
+fn web_font_init_script(family: Option<&str>) -> String {
+    let Some(family) = family.map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    let mut escaped = String::new();
+    for ch in family.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' | '\r' => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+    format!(
+        r#"(function(){{var s=document.createElement("style");s.textContent="html,body,input,textarea,button,select{{font-family:\"{escaped}\",sans-serif !important}}";(document.head||document.documentElement).appendChild(s);}})();"#
+    )
+}
+
 fn draft_file_refs(draft: &str) -> Vec<String> {
     crate::composer_text::draft_file_refs(draft)
 }
@@ -80,6 +99,8 @@ pub struct AgentPane {
     /// Show only pinned threads in the list.
     pinned_only: bool,
     webview: Option<Entity<WebView>>,
+    /// Font family baked into the current webview's init script.
+    webview_font: Option<String>,
     loaded_web_url: Option<String>,
     busy: bool,
     /// Bumped to cancel the in-flight turn spawn.
@@ -175,6 +196,7 @@ impl AgentPane {
             thread_query: thread_query.clone(),
             pinned_only: false,
             webview: None,
+            webview_font: None,
             loaded_web_url: None,
             busy: false,
             turn_gen: 0,
@@ -307,15 +329,34 @@ impl AgentPane {
         self.loaded_web_url = None;
     }
 
+    fn preferred_web_font(&self) -> Option<String> {
+        self.state.with(|s| {
+            s.prefs
+                .web_font
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+    }
+
     fn ensure_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.webview.is_some() {
+        let font = self.preferred_web_font();
+        if self.webview.is_some() && self.webview_font == font {
             return true;
         }
-        match WebView::build(wry::WebViewBuilder::new(), window, cx) {
+        if self.webview.is_some() {
+            self.hide_webview(cx);
+            self.webview = None;
+        }
+        let builder = wry::WebViewBuilder::new()
+            .with_initialization_script(web_font_init_script(font.as_deref()));
+        match WebView::build(builder, window, cx) {
             Ok(view) => {
                 let entity = cx.new(|_cx| view);
                 entity.update(cx, |v, _| v.hide());
                 self.webview = Some(entity);
+                self.webview_font = font;
                 true
             }
             Err(e) => {
@@ -4686,4 +4727,18 @@ fn render_patch_card(
             .p_2()
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_font_init_script;
+
+    #[test]
+    fn web_font_script_escapes_and_skips_blank() {
+        assert!(web_font_init_script(None).is_empty());
+        assert!(web_font_init_script(Some("  ")).is_empty());
+        let js = web_font_init_script(Some("Source Han Sans \"SC\""));
+        assert!(js.contains("Source Han Sans \\\"SC\\\""));
+        assert!(!js.contains('\n'));
+    }
 }

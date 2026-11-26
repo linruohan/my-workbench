@@ -1097,6 +1097,9 @@ fn appearance_page(
     let font_state = state.clone();
     let font_write = state.clone();
     let font_entity = entity.clone();
+    let web_font_state = state.clone();
+    let web_font_write = state.clone();
+    let web_font_entity = entity.clone();
     let size_state = state.clone();
     let size_entity = entity.clone();
     let radius_state = state.clone();
@@ -1165,6 +1168,30 @@ fn appearance_page(
                     .description(format!(
                         "留空使用系统界面字体。已扫描系统字体 {font_count} 个。"
                     )),
+                )
+                .item(
+                    SettingItem::new(
+                        "网页字体",
+                        SettingField::input(
+                            move |_| {
+                                web_font_state
+                                    .with(|s| s.prefs.web_font.clone().unwrap_or_default())
+                                    .into()
+                            },
+                            move |value: SharedString, cx: &mut App| {
+                                web_font_write.with_mut(|s| {
+                                    s.prefs.web_font = if value.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(value.trim().to_string())
+                                    };
+                                });
+                                web_font_write.persist_prefs();
+                                poke(&web_font_entity, cx);
+                            },
+                        ),
+                    )
+                    .description("只作用于 Agent 网页会话。留空则使用网页自身字体。"),
                 ),
         )
         .group(

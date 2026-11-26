@@ -22,10 +22,10 @@ use wb_domain::{
 use wb_host::{
     active_skills, cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive,
     list_plugins, list_skills, load_skill, managed_tool_block_reason, managed_tool_location,
-    managed_tools_brief, maybe_spill, mcp_http_call, mcp_stdio_call, path_is_within, paths_equal,
-    present_path, probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd,
-    run_shell_in, run_shell_kind, set_agent_cwd, shell_command_block_reason, web_fetch, web_search,
-    which_bin, write_text,
+    managed_tools_brief, maybe_spill, mcp_http_call, mcp_stdio_call, ocr_image, ocr_status,
+    path_is_within, paths_equal, present_path, probe_workspace_dependencies, read_image_info,
+    read_text, resolve_agent_cwd, run_shell_in, run_shell_kind, set_agent_cwd,
+    shell_command_block_reason, web_fetch, web_search, which_bin, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, update_prefs};
 
@@ -1935,7 +1935,7 @@ pub fn execute_tool(
             let path = safe_join(&root, rel)?;
             let info = read_image_info(&path)?;
             observe_path(&path);
-            Ok(ToolResult::ok_text(format!(
+            let mut text = format!(
                 "{} · {} · {} bytes · {}x{} · {}",
                 info.path,
                 info.format,
@@ -1943,7 +1943,25 @@ pub fn execute_tool(
                 info.width.unwrap_or(0),
                 info.height.unwrap_or(0),
                 info.note
-            )))
+            );
+            let oversized = info.note.contains("image_offload");
+            let ocr_ready = ocr_status().map(|s| s.ready).unwrap_or(false);
+            if oversized {
+                text.push_str("\n图片超出识别预算，未做 OCR。");
+            } else if ocr_ready {
+                match ocr_image(&path) {
+                    Ok(ocr) => {
+                        text.push_str("\n\n文字：\n");
+                        text.push_str(ocr.trim());
+                    }
+                    Err(err) => text.push_str(&format!("\nOCR 失败：{err}")),
+                }
+            } else {
+                text.push_str(
+                    "\n未附带文字。可在设置中下载 PaddleOCR 后再次 read_image，或直接调用 ocr。",
+                );
+            }
+            Ok(ToolResult::ok_text(text))
         }
         "ocr" => {
             let rel = args
@@ -3193,6 +3211,12 @@ mod tests {
         .unwrap();
         assert!(img.ok);
         assert!(img.content.contains("png"));
+        assert!(
+            img.content.contains("未附带文字")
+                || img.content.contains("文字：")
+                || img.content.contains("OCR 失败")
+                || img.content.contains("未做 OCR")
+        );
 
         let job = execute_tool(
             &mut repo,
