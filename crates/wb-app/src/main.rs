@@ -38,7 +38,7 @@ fn main() {
         let window_bounds = if restore == "maximized" {
             WindowBounds::Maximized(Bounds::centered(None, default_size, cx))
         } else {
-            WindowBounds::centered(default_size, cx)
+            WindowBounds::centered(None, default_size, cx)
         };
         let window_options = WindowOptions {
             window_bounds: Some(window_bounds),

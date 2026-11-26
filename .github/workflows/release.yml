@@ -23,15 +23,9 @@ jobs:
         working-directory: my-workbench
     steps:
       - name: Checkout workbench
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: my-workbench
-
-      - name: Checkout gpui-kit
-        uses: actions/checkout@v4
-        with:
-          repository: longbridge/gpui-kit
-          path: gpui-kit
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -53,15 +47,9 @@ jobs:
         working-directory: my-workbench
     steps:
       - name: Checkout workbench
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: my-workbench
-
-      - name: Checkout gpui-kit
-        uses: actions/checkout@v4
-        with:
-          repository: longbridge/gpui-kit
-          path: gpui-kit
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

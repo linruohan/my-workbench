@@ -22,10 +22,10 @@ wb-store = { path = "crates/wb-store" }
 wb-host = { path = "crates/wb-host" }
 wb-agent = { path = "crates/wb-agent" }
 
-gpui-kit = { path = "../gpui-kit/crates/kit" }
-gpui-webview = { path = "../gpui-kit/crates/webview" }
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.12" }
-wry = { version = "0.53.3", package = "lb-wry" }
+gpui-kit = { git = "https://github.com/linruohan/gpui-kit.git" }
+gpui-webview = { git = "https://github.com/linruohan/gpui-kit.git" }
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.14" }
+wry = "0.57.4"
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
@@ -54,7 +54,7 @@ hound = "3.5"
 # sherpa-onnx 官方 Windows 预编译为 MT CRT，与 clipper-sys(MD) 无法同链 → 语音走独立 crate wb-asr 子进程
 paddle-ocr-rs = { version = "0.6.1", default-features = false, features = ["download-binaries"] }
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries", "load-dynamic"] }
-sherpa-onnx = { version = "2.0.2", default-features = false, features = ["shared"] }
+sherpa-onnx = { version = "=2.0.2", default-features = false, features = ["shared"] }
 
 [profile.dev]
 debug = "limited"
