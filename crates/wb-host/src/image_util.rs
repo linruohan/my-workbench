@@ -1,6 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,13 +130,24 @@ fn webp_size(data: &[u8]) -> Option<(u32, u32)> {
 
 const VISION_MAX_BYTES: usize = 4 * 1024 * 1024;
 const VISION_MAX_EDGE: u32 = 2048;
+/// Enough for PNG/GIF/BMP/WebP headers and typical JPEG SOF markers.
+const HEADER_READ: usize = 512 * 1024;
 
-/// Inspect an image file (magic + size). No full vision / OCR pipeline yet.
+/// Inspect an image file (magic + size). Reads a header window, not the whole file.
 pub fn read_image_info(path: &Path) -> Result<ImageInfo> {
-    if !path.exists() {
-        bail!("文件不存在");
+    let meta =
+        std::fs::metadata(path).with_context(|| format!("文件不存在: {}", path.display()))?;
+    if !meta.is_file() {
+        bail!("不是文件");
     }
-    let data = fs::read(path)?;
+    let bytes = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+    if bytes == 0 {
+        bail!("空文件");
+    }
+    let mut file = File::open(path).with_context(|| format!("打开失败: {}", path.display()))?;
+    let mut data = vec![0u8; HEADER_READ.min(bytes)];
+    let n = file.read(&mut data)?;
+    data.truncate(n);
     if data.is_empty() {
         bail!("空文件");
     }
@@ -151,11 +163,11 @@ pub fn read_image_info(path: &Path) -> Result<ImageInfo> {
     let (width, height) = (dims.map(|(w, _)| w), dims.map(|(_, h)| h));
     let long_edge = width.zip(height).map(|(w, h)| w.max(h)).unwrap_or(0);
     let mut note = String::from("已读取图片元数据");
-    if data.len() > VISION_MAX_BYTES || long_edge > VISION_MAX_EDGE {
+    if bytes > VISION_MAX_BYTES || long_edge > VISION_MAX_EDGE {
         note.push_str(&format!(
             "\n<image_offload path=\"{}\" bytes={} edge={} limitBytes={} limitEdge={}/> — 体积或边长超 vision 预算，请按需再次 read_image",
             path.display(),
-            data.len(),
+            bytes,
             long_edge,
             VISION_MAX_BYTES,
             VISION_MAX_EDGE
@@ -164,7 +176,7 @@ pub fn read_image_info(path: &Path) -> Result<ImageInfo> {
     Ok(ImageInfo {
         path: path.display().to_string(),
         format,
-        bytes: data.len(),
+        bytes,
         width,
         height,
         note,

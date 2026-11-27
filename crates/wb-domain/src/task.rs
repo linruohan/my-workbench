@@ -190,6 +190,8 @@ pub fn try_advance_repeat(task: &mut Task, now: i64) -> bool {
         return false;
     };
 
+    let previous_due = task.due_with_time;
+    let previous_remind = task.remind_at;
     mark_task_incomplete(task, now);
     let (h, m) = local_hour_minute(next);
     if h == 0 && m == 0 {
@@ -199,7 +201,13 @@ pub fn try_advance_repeat(task: &mut Task, now: i64) -> bool {
         task.due_with_time = Some(next);
         task.due_day = None;
     }
-    task.remind_at = None;
+    task.remind_at = match (previous_due, previous_remind, task.due_with_time) {
+        (Some(old_due), Some(old_at), Some(new_due)) if old_due >= old_at => {
+            let option = crate::reminder::milliseconds_diff_to_remind_option(old_due - old_at);
+            crate::reminder::shift_remind_at(new_due, option)
+        }
+        _ => None,
+    };
     task.updated_at = now;
     true
 }
@@ -281,8 +289,18 @@ pub fn format_deadline_chip(task: &Task, today: &str) -> Option<String> {
 }
 
 pub fn format_remind_chip(task: &Task, today: &str) -> Option<String> {
-    task.remind_at
-        .map(|ms| format!("提醒 {}", format_moment_label(ms, today)))
+    let plan = task
+        .remind_at
+        .map(|ms| format!("提醒 {}", format_moment_label(ms, today)));
+    let deadline = task
+        .deadline_remind_at
+        .map(|ms| format!("截止提醒 {}", format_moment_label(ms, today)));
+    match (plan, deadline) {
+        (Some(plan), Some(deadline)) => Some(format!("{plan} · {deadline}")),
+        (Some(plan), None) => Some(plan),
+        (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    }
 }
 
 pub fn format_spent_label(ms: i64) -> String {
@@ -539,10 +557,12 @@ mod tests {
         let mut t = create_task_draft("日报", None, None, Some(1_700_000_000_000));
         set_task_repeat_preset(&mut t, Some(TimedSchedulePreset::Daily)).unwrap();
         t.due_with_time = Some(1_700_000_000_000);
+        t.remind_at = Some(1_700_000_000_000 - 10 * 60_000);
         assert!(try_advance_repeat(&mut t, 1_700_000_000_000));
         assert!(!t.is_done);
-        assert!(t.due_with_time.is_some());
-        assert!(t.due_with_time.unwrap() > 1_700_000_000_000);
+        let next = t.due_with_time.unwrap();
+        assert!(next > 1_700_000_000_000);
+        assert_eq!(t.remind_at, Some(next - 10 * 60_000));
     }
 
     #[test]
@@ -585,6 +605,11 @@ mod tests {
         assert!(task_is_overdue(&task, "2026-11-23"));
         assert!(!task_is_overdue(&task, "2026-11-22"));
         task.deadline_day = Some("2026-11-23".into());
+        task.remind_at = Some(1);
+        task.deadline_remind_at = Some(2);
+        let remind = format_remind_chip(&task, "2026-11-22").unwrap_or_default();
+        assert!(remind.contains("提醒 "));
+        assert!(remind.contains("截止提醒 "));
         assert_eq!(
             format_deadline_chip(&task, "2026-11-22").as_deref(),
             Some("截止 明天")

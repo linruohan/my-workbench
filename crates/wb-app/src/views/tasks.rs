@@ -16,9 +16,10 @@ use wb_domain::{
     add_local_days, apply_schedule_patch, at_local_time, bucket_tasks_for_calendar,
     bucket_tasks_for_day_schedule, clear_plan_fields, compute_task_stats, create_task_draft,
     filter_tasks, format_deadline_chip, format_plan_chip, format_remind_chip, format_spent_label,
-    group_tasks_by_plan_day, is_today_member, now_ms, parse_quick_capture, planner_day_columns,
-    select_planner_tasks, select_today_tasks, settle_timer_segment, shift_remind_at, start_of_week,
-    task_child_counts, task_is_overdue, task_repeat_label, weekday_cn_short,
+    group_tasks_by_plan_day, is_today_member, milliseconds_diff_to_remind_option, now_ms,
+    parse_quick_capture, planner_day_columns, select_planner_tasks, select_today_tasks,
+    settle_timer_segment, shift_remind_at, start_of_week, task_child_counts, task_is_overdue,
+    task_repeat_label, weekday_cn_short,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,8 @@ pub struct TasksPane {
     pending_delete_id: Option<String>,
     editing_tag_id: Option<String>,
     pending_delete_tag_id: Option<String>,
+    task_cache_rev: u64,
+    task_cache: Vec<Task>,
     _subs: Vec<Subscription>,
 }
 
@@ -97,6 +100,36 @@ fn filter_task_rows(tasks: Vec<(Task, usize)>, query: &str) -> Vec<(Task, usize)
     out
 }
 
+/// Keep an existing lead time when the clock moves. A task that already had a
+/// time and no reminder stays quiet. A task with no clock yet uses the default.
+fn remind_for_moved_clock(task: &Task, due_ms: i64, fallback: Option<i64>) -> Option<i64> {
+    match (task.due_with_time, task.remind_at) {
+        (Some(old_due), Some(old_at)) if old_due >= old_at => {
+            let option = milliseconds_diff_to_remind_option(old_due - old_at);
+            shift_remind_at(due_ms, option)
+        }
+        (Some(_), None) => None,
+        _ => fallback,
+    }
+}
+
+fn fill_capture_reminders(
+    parsed: &mut wb_domain::QuickCaptureResult,
+    default_at: impl Fn(i64) -> Option<i64>,
+) {
+    if parsed.remind_at.is_none()
+        && let Some(due) = parsed.due_with_time
+    {
+        parsed.remind_at = default_at(due);
+    }
+    if parsed.deadline_remind_at.is_none()
+        && parsed.remind_option == ReminderOptionId::None
+        && let Some(due) = parsed.deadline_with_time
+    {
+        parsed.deadline_remind_at = default_at(due);
+    }
+}
+
 fn default_remind_at(state: &AppState, due_ms: i64) -> Option<i64> {
     let raw = state.with(|s| s.prefs.general.default_remind.clone());
     ReminderOptionId::parse(&raw).and_then(|option| shift_remind_at(due_ms, option))
@@ -128,6 +161,8 @@ impl TasksPane {
             pending_delete_id: None,
             editing_tag_id: None,
             pending_delete_tag_id: None,
+            task_cache_rev: u64::MAX,
+            task_cache: Vec::new(),
             _subs: Vec::new(),
         };
         this._subs.push(
@@ -178,11 +213,8 @@ impl TasksPane {
     fn submit_capture(&mut self, text: &str, cx: &mut Context<Self>) {
         let now = wb_domain::now_ms();
         let mut parsed = parse_quick_capture(text, now, None);
-        if parsed.remind_at.is_none()
-            && let Some(due) = parsed.due_with_time
-        {
-            parsed.remind_at = default_remind_at(&self.state, due);
-        }
+        let state = self.state.clone();
+        fill_capture_reminders(&mut parsed, |due| default_remind_at(&state, due));
         self.state.with_mut(|s| {
             let mut project_id = parsed
                 .project_id
@@ -209,7 +241,7 @@ impl TasksPane {
                     deadline_day: Some(parsed.deadline_day),
                     deadline_with_time: Some(parsed.deadline_with_time),
                     remind_at: Some(parsed.remind_at),
-                    deadline_remind_at: None,
+                    deadline_remind_at: Some(parsed.deadline_remind_at),
                 },
             );
             s.repo.upsert_task(task);
@@ -622,7 +654,7 @@ impl TasksPane {
                             due_with_time: Some(None),
                             deadline_day: None,
                             deadline_with_time: None,
-                            remind_at: None,
+                            remind_at: Some(None),
                             deadline_remind_at: None,
                         },
                     );
@@ -641,9 +673,10 @@ impl TasksPane {
         let Some(ms) = at_local_time(day, hour, 0) else {
             return;
         };
-        let remind_at = default_remind_at(&self.state, ms);
+        let fallback = default_remind_at(&self.state, ms);
         self.state.with_mut(|s| {
             if let Some(mut task) = s.repo.get_task(&id).cloned() {
+                let remind_at = remind_for_moved_clock(&task, ms, fallback);
                 apply_schedule_patch(
                     &mut task,
                     &SchedulePatch {
@@ -694,13 +727,11 @@ impl TasksPane {
         {
             roots
         } else {
-            self.state.with(|s| {
-                select_planner_tasks(&s.repo.list_tasks())
-                    .into_iter()
-                    .filter(|t| t.parent_id.is_none())
-                    .cloned()
-                    .collect()
-            })
+            select_planner_tasks(&self.task_cache)
+                .into_iter()
+                .filter(|t| t.parent_id.is_none())
+                .cloned()
+                .collect()
         };
         let (all_day, hours) = bucket_tasks_for_day_schedule(&pool, &day);
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -957,9 +988,10 @@ impl TasksPane {
     fn toggle_timer(&mut self, id: &str, cx: &mut Context<Self>) {
         let today = self.state.today();
         let now = now_ms();
+        self.ensure_task_cache();
         let blocked = self.state.with(|s| {
             let timing_this = s.active_timer.as_ref().is_some_and(|(tid, _)| tid == id);
-            !timing_this && task_child_counts(&s.repo.list_tasks(), id).1 > 0
+            !timing_this && task_child_counts(&self.task_cache, id).1 > 0
         });
         if blocked {
             return;
@@ -1010,11 +1042,20 @@ impl TasksPane {
         cx.notify();
     }
 
-    fn filtered_tasks(&self) -> (String, Vec<(Task, usize)>) {
+    fn ensure_task_cache(&mut self) {
+        let rev = self.state.with(|s| s.repo.data_revision());
+        if self.task_cache_rev != rev {
+            self.task_cache = self.state.with(|s| s.repo.list_tasks());
+            self.task_cache_rev = rev;
+        }
+    }
+
+    fn filtered_tasks(&mut self) -> (String, Vec<(Task, usize)>) {
+        self.ensure_task_cache();
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
+        let all = self.task_cache.clone();
         self.state.with(|s| {
-            let all = s.repo.list_tasks();
             let roots: Vec<Task> = match nav {
                 AppNav::Today => select_today_tasks(&all, &today, s.repo.today_order())
                     .into_iter()
@@ -1587,10 +1628,7 @@ impl TasksPane {
         }
 
         let visible_count = tasks.iter().filter(|(_, depth)| *depth == 0).count();
-        let today = self.state.today();
-        let overdue = self
-            .state
-            .with(|s| compute_task_stats(&s.repo.list_tasks(), &today).overdue);
+        let overdue = compute_task_stats(&self.task_cache, &self.state.today()).overdue;
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1673,8 +1711,7 @@ impl Render for TasksPane {
         let (_, tasks) = self.filtered_tasks();
         let entity = cx.weak_entity();
         let today = self.state.today();
-        let all_for_stats = self.state.with(|s| s.repo.list_tasks());
-        let stats = compute_task_stats(&all_for_stats, &today);
+        let stats = compute_task_stats(&self.task_cache, &today);
         let projects = self.state.with(|s| s.repo.list_projects());
         let radius = cx.theme().radius;
         let border = cx.theme().border;
@@ -1688,7 +1725,7 @@ impl Render for TasksPane {
             )
         });
         let suggestions: Vec<Task> = if proactive && nav == AppNav::Today {
-            all_for_stats
+            self.task_cache
                 .iter()
                 .filter(|t| {
                     t.parent_id.is_none()
@@ -1780,7 +1817,7 @@ impl Render for TasksPane {
                                                 == Some(task.id.as_str());
                                             Self::render_task_row(
                                                 task,
-                                                &all_for_stats,
+                                                &self.task_cache,
                                                 entity.clone(),
                                                 radius,
                                                 muted,
@@ -1852,7 +1889,7 @@ impl Render for TasksPane {
                                     self.pending_delete_id.as_deref() == Some(task.id.as_str());
                                 Self::render_task_row(
                                     task,
-                                    &all_for_stats,
+                                    &self.task_cache,
                                     entity.clone(),
                                     radius,
                                     muted,
@@ -1920,7 +1957,7 @@ impl Render for TasksPane {
                                     self.pending_delete_id.as_deref() == Some(task.id.as_str());
                                 Self::render_task_row(
                                     task,
-                                    &all_for_stats,
+                                    &self.task_cache,
                                     entity.clone(),
                                     radius,
                                     muted,
@@ -2300,5 +2337,41 @@ impl Render for TasksPane {
             .when(show_archive, |col| {
                 col.child(Input::new(&self.capture).cleanable(true))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remind_for_moved_clock;
+    use wb_domain::create_task_draft;
+
+    #[test]
+    fn moved_clock_keeps_the_previous_lead() {
+        let mut task = create_task_draft("写报告", None, None, Some(1));
+        task.due_with_time = Some(1_000_000);
+        task.remind_at = Some(1_000_000 - 5 * 60_000);
+        assert_eq!(
+            remind_for_moved_clock(&task, 2_000_000, Some(2_000_000)),
+            Some(2_000_000 - 5 * 60_000)
+        );
+        task.remind_at = None;
+        assert_eq!(remind_for_moved_clock(&task, 2_000_000, Some(1)), None);
+        task.due_with_time = None;
+        assert_eq!(remind_for_moved_clock(&task, 2_000_000, Some(9)), Some(9));
+    }
+
+    #[test]
+    fn capture_fills_a_default_deadline_reminder() {
+        use super::fill_capture_reminders;
+        use wb_domain::parse_quick_capture;
+        let mut parsed = parse_quick_capture("截止明天 15:00 交报告", 1_700_000_000_000, None);
+        let due = parsed.deadline_with_time.unwrap();
+        fill_capture_reminders(&mut parsed, |at| Some(at - 15 * 60_000));
+        assert_eq!(parsed.deadline_remind_at, Some(due - 15 * 60_000));
+
+        let mut explicit =
+            parse_quick_capture("截止明天 15:00 交报告 提前10分钟", 1_700_000_000_000, None);
+        fill_capture_reminders(&mut explicit, |at| Some(at - 15 * 60_000));
+        assert_eq!(explicit.deadline_remind_at, Some(due - 10 * 60_000));
     }
 }

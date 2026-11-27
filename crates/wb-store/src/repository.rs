@@ -24,6 +24,8 @@ pub struct MemoryWorkbenchRepository {
     agent_messages: HashMap<String, AgentMessage>,
     agent_approvals: HashMap<String, AgentApproval>,
     dirty: bool,
+    /// Bumps on every mutation so views can reuse a sorted task list.
+    revision: u64,
 }
 
 impl Default for MemoryWorkbenchRepository {
@@ -65,7 +67,17 @@ impl MemoryWorkbenchRepository {
             agent_messages: HashMap::new(),
             agent_approvals: HashMap::new(),
             dirty: false,
+            revision: 0,
         }
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn data_revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -77,7 +89,7 @@ impl MemoryWorkbenchRepository {
     }
 
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn export_snapshot(&self) -> WorkbenchSnapshot {
@@ -169,6 +181,7 @@ impl MemoryWorkbenchRepository {
             .map(|a| (a.id.clone(), a))
             .collect();
         self.dirty = false;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn list_tasks(&self) -> Vec<Task> {
@@ -183,7 +196,7 @@ impl MemoryWorkbenchRepository {
 
     pub fn upsert_task(&mut self, task: Task) {
         self.tasks.insert(task.id.clone(), task);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn create_task(&mut self, title: &str, project_id: Option<&str>) -> Task {
@@ -197,12 +210,12 @@ impl MemoryWorkbenchRepository {
         let task = self.tasks.get_mut(id)?;
         if try_advance_repeat(task, now) {
             let out = task.clone();
-            self.dirty = true;
+            self.touch();
             return Some(out);
         }
         mark_task_complete(task, now);
         let out = task.clone();
-        self.dirty = true;
+        self.touch();
         Some(out)
     }
 
@@ -211,7 +224,7 @@ impl MemoryWorkbenchRepository {
         let task = self.tasks.get_mut(id)?;
         mark_task_incomplete(task, now);
         let out = task.clone();
-        self.dirty = true;
+        self.touch();
         Some(out)
     }
 
@@ -229,7 +242,7 @@ impl MemoryWorkbenchRepository {
         for cid in children {
             self.delete_task(&cid);
         }
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn list_projects(&self) -> Vec<Project> {
@@ -259,25 +272,29 @@ impl MemoryWorkbenchRepository {
         };
         self.projects.insert(p.id.clone(), p.clone());
         self.buckets.insert(p.id.clone(), ProjectBucket::Active);
-        self.dirty = true;
+        self.touch();
         p
     }
 
     pub fn rename_project(&mut self, id: &str, title: &str) -> Option<Project> {
-        let p = self.projects.get_mut(id)?;
-        p.title = title.trim().to_string();
-        p.updated_at = now_ms();
-        self.dirty = true;
-        Some(p.clone())
+        {
+            let p = self.projects.get_mut(id)?;
+            p.title = title.trim().to_string();
+            p.updated_at = now_ms();
+        }
+        self.touch();
+        self.projects.get(id).cloned()
     }
 
     pub fn set_project_archived(&mut self, id: &str, archived: bool) -> Option<Project> {
         if id == INBOX_PROJECT_ID {
             return None;
         }
-        let p = self.projects.get_mut(id)?;
-        p.is_archived = archived;
-        p.updated_at = now_ms();
+        {
+            let p = self.projects.get_mut(id)?;
+            p.is_archived = archived;
+            p.updated_at = now_ms();
+        }
         self.buckets.insert(
             id.to_string(),
             if archived {
@@ -286,8 +303,8 @@ impl MemoryWorkbenchRepository {
                 ProjectBucket::Active
             },
         );
-        self.dirty = true;
-        Some(p.clone())
+        self.touch();
+        self.projects.get(id).cloned()
     }
 
     /// Removes a project and every task that belongs to it. The inbox cannot be deleted.
@@ -308,7 +325,7 @@ impl MemoryWorkbenchRepository {
                 self.delete_task(&task_id);
             }
         }
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -318,7 +335,7 @@ impl MemoryWorkbenchRepository {
 
     pub fn set_today_order(&mut self, order: Vec<String>) {
         self.today_order = order;
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn bucket_of(&self, project_id: &str) -> ProjectBucket {
@@ -330,7 +347,7 @@ impl MemoryWorkbenchRepository {
 
     pub fn set_bucket(&mut self, project_id: &str, bucket: ProjectBucket) {
         self.buckets.insert(project_id.to_string(), bucket);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn list_tags(&self) -> Vec<Tag> {
@@ -351,7 +368,7 @@ impl MemoryWorkbenchRepository {
             color: None,
         };
         self.tags.insert(tag.id.clone(), tag.clone());
-        self.dirty = true;
+        self.touch();
         tag
     }
 
@@ -372,13 +389,13 @@ impl MemoryWorkbenchRepository {
             .entry(task_id.to_string())
             .or_default()
             .insert(tag_id.to_string());
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn remove_tag_from_task(&mut self, task_id: &str, tag_id: &str) {
         if let Some(set) = self.task_tags.get_mut(task_id) {
             set.remove(tag_id);
-            self.dirty = true;
+            self.touch();
         }
     }
 
@@ -411,7 +428,7 @@ impl MemoryWorkbenchRepository {
         }
         if let Some(tag) = self.tags.get_mut(id) {
             tag.title = title.to_string();
-            self.dirty = true;
+            self.touch();
             return true;
         }
         false
@@ -424,7 +441,7 @@ impl MemoryWorkbenchRepository {
         for tags in self.task_tags.values_mut() {
             tags.remove(id);
         }
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -436,7 +453,7 @@ impl MemoryWorkbenchRepository {
 
     pub fn upsert_note(&mut self, note: Note) {
         self.notes.insert(note.id.clone(), note);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn get_note(&self, id: &str) -> Option<&Note> {
@@ -446,7 +463,7 @@ impl MemoryWorkbenchRepository {
     pub fn delete_note(&mut self, id: &str) -> bool {
         let removed = self.notes.remove(id).is_some();
         if removed {
-            self.dirty = true;
+            self.touch();
         }
         removed
     }
@@ -491,7 +508,7 @@ impl MemoryWorkbenchRepository {
             updated_at: now,
         };
         self.notifications.insert(0, n.clone());
-        self.dirty = true;
+        self.touch();
         n
     }
 
@@ -500,7 +517,7 @@ impl MemoryWorkbenchRepository {
             n.status = NotificationStatus::Dismissed;
             n.snooze_until = None;
             n.updated_at = now_ms();
-            self.dirty = true;
+            self.touch();
         }
     }
 
@@ -510,7 +527,7 @@ impl MemoryWorkbenchRepository {
             n.snooze_until = Some(until_ms);
             n.fire_at = until_ms;
             n.updated_at = now_ms();
-            self.dirty = true;
+            self.touch();
         }
     }
 
@@ -528,7 +545,7 @@ impl MemoryWorkbenchRepository {
             }
         }
         if woken > 0 {
-            self.dirty = true;
+            self.touch();
         }
         woken
     }
@@ -544,7 +561,7 @@ impl MemoryWorkbenchRepository {
             }
         }
         if changed {
-            self.dirty = true;
+            self.touch();
         }
     }
 
@@ -556,13 +573,13 @@ impl MemoryWorkbenchRepository {
 
     pub fn upsert_timed_task(&mut self, task: TimedTask) {
         self.timed_tasks.insert(task.id.clone(), task);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn delete_timed_task(&mut self, id: &str) {
         self.timed_tasks.remove(id);
         self.timed_runs.retain(|run| run.task_id != id);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn get_timed_task(&self, id: &str) -> Option<&TimedTask> {
@@ -588,7 +605,7 @@ impl MemoryWorkbenchRepository {
             }
             extra -= 1;
         }
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn list_timed_runs(&self, task_id: &str) -> Vec<TimedRunRecord> {
@@ -627,7 +644,7 @@ impl MemoryWorkbenchRepository {
         }
         thread.session_todos = todos;
         thread.updated_at = now_ms();
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -644,7 +661,7 @@ impl MemoryWorkbenchRepository {
         }
         thread.session_goal = goal;
         thread.updated_at = now_ms();
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -661,7 +678,7 @@ impl MemoryWorkbenchRepository {
         }
         thread.cwd = cwd;
         thread.updated_at = now_ms();
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -679,24 +696,28 @@ impl MemoryWorkbenchRepository {
         }
         thread.draft = draft;
         thread.updated_at = now_ms();
-        self.dirty = true;
+        self.touch();
         true
     }
 
     pub fn upsert_agent_thread(&mut self, thread: AgentThread) {
         self.agent_threads.insert(thread.id.clone(), thread);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn delete_agent_thread(&mut self, id: &str) {
         self.agent_threads.remove(id);
         self.agent_messages.retain(|_, m| m.thread_id != id);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn upsert_agent_workspace(&mut self, ws: AgentWorkspace) {
         self.agent_workspaces.insert(ws.id.clone(), ws);
-        self.dirty = true;
+        self.touch();
+    }
+
+    pub fn get_agent_message(&self, id: &str) -> Option<AgentMessage> {
+        self.agent_messages.get(id).cloned()
     }
 
     pub fn list_agent_messages(&self) -> Vec<AgentMessage> {
@@ -753,7 +774,7 @@ impl MemoryWorkbenchRepository {
 
     pub fn upsert_agent_message(&mut self, msg: AgentMessage) {
         self.agent_messages.insert(msg.id.clone(), msg);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn clear_agent_messages(&mut self, thread_id: &str) {
@@ -763,7 +784,7 @@ impl MemoryWorkbenchRepository {
             thread.queue_json = None;
             thread.updated_at = now_ms();
         }
-        self.dirty = true;
+        self.touch();
     }
 
     /// Insert `summary` and drop the messages whose ids are listed in `replaced`.
@@ -785,7 +806,7 @@ impl MemoryWorkbenchRepository {
         if let Some(thread) = self.agent_threads.get_mut(thread_id) {
             thread.updated_at = now_ms();
         }
-        self.dirty = true;
+        self.touch();
     }
 
     /// Drop messages in `thread_id` created at or after `created_at` (inclusive).
@@ -797,7 +818,7 @@ impl MemoryWorkbenchRepository {
         if let Some(thread) = self.agent_threads.get_mut(thread_id) {
             thread.updated_at = now_ms();
         }
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn list_agent_approvals(&self) -> Vec<AgentApproval> {
@@ -808,7 +829,7 @@ impl MemoryWorkbenchRepository {
 
     pub fn upsert_agent_approval(&mut self, a: AgentApproval) {
         self.agent_approvals.insert(a.id.clone(), a);
-        self.dirty = true;
+        self.touch();
     }
 }
 

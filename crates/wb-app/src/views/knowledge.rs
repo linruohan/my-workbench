@@ -47,6 +47,12 @@ pub struct KnowledgePane {
     replace: Entity<InputState>,
     current: Option<String>,
     filter: Entity<InputState>,
+    /// Last background content search, keyed by the trimmed query.
+    filter_query: String,
+    filter_hits: Vec<(String, String, Option<String>)>,
+    /// Current note whose backlinks were last computed.
+    backlink_for: Option<String>,
+    backlink_hits: Vec<(String, String)>,
     mode: KbMode,
     replace_status: String,
     preview_zoom: f32,
@@ -97,6 +103,10 @@ impl KnowledgePane {
             replace,
             current: None,
             filter,
+            filter_query: String::new(),
+            filter_hits: Vec::new(),
+            backlink_for: None,
+            backlink_hits: Vec::new(),
             mode: KbMode::Live,
             replace_status: String::new(),
             preview_zoom: 1.0,
@@ -114,7 +124,7 @@ impl KnowledgePane {
             KeyBinding::new("ctrl-f", FindNote, None),
             KeyBinding::new("escape", CloseFind, None),
         ]);
-        this.reload_files();
+        this.reload_files(cx);
         let last_note = this.state.with(|s| {
             if s.prefs.general.remember_last_note {
                 s.prefs.general.last_note_path.clone()
@@ -127,6 +137,13 @@ impl KnowledgePane {
         }
         this._subs
             .push(cx.subscribe(&editor, |_, _, _: &InputEvent, cx| cx.notify()));
+        this._subs.push(
+            cx.subscribe(&this.filter, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_filter_search(cx);
+                }
+            }),
+        );
         this._subs.push(cx.subscribe_in(
             &this.find,
             window,
@@ -151,6 +168,52 @@ impl KnowledgePane {
             }),
         );
         this
+    }
+
+    fn schedule_filter_search(&mut self, cx: &mut Context<Self>) {
+        let raw = self.filter.read(cx).value().to_string();
+        let query = raw.trim().to_string();
+        if query.chars().count() < 2 {
+            self.filter_query = query;
+            self.filter_hits.clear();
+            cx.notify();
+            return;
+        }
+        let Some(root) = self.root() else {
+            self.filter_hits.clear();
+            cx.notify();
+            return;
+        };
+        let query_for_search = query.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    search_kb_content(&root, &query_for_search, 800, 80).unwrap_or_default()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let current = this.filter.read(cx).value().trim().to_string();
+                if current != query {
+                    return;
+                }
+                this.filter_query = query;
+                this.filter_hits = found
+                    .into_iter()
+                    .map(|hit| {
+                        let snippet = if hit.line > 0 {
+                            Some(format!("L{} · {}", hit.line, hit.snippet))
+                        } else {
+                            None
+                        };
+                        (hit.path, hit.relative, snippet)
+                    })
+                    .collect();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -228,10 +291,6 @@ impl KnowledgePane {
         if self.mode != KbMode::Live || self.current.is_none() {
             return;
         }
-        let source = self.editor.read(cx).value().to_string();
-        if source.is_empty() {
-            return;
-        }
         let Some(line_height) = self.editor.read(cx).line_height() else {
             return;
         };
@@ -258,6 +317,10 @@ impl KnowledgePane {
         let de = (editor_y - self.last_editor_scroll_y).abs();
         let dp = (preview_px - self.last_preview_px).abs();
         if de < 1.0 && dp < 1.0 {
+            return;
+        }
+        let source = self.editor.read(cx).value().to_string();
+        if source.is_empty() {
             return;
         }
 
@@ -442,19 +505,36 @@ impl KnowledgePane {
         })
     }
 
-    fn reload_files(&mut self) {
+    fn reload_files(&mut self, cx: &mut Context<Self>) {
         let root_key = self.root().map(|p| p.to_string_lossy().to_string());
         let root_changed = self.loaded_root.as_deref() != root_key.as_deref();
         if root_changed {
             self.expanded.clear();
-            self.loaded_root = root_key;
+            self.loaded_root = root_key.clone();
         }
-        self.files.clear();
-        if let Some(root) = self.root() {
-            if let Ok(entries) = list_files_recursive(&root, 2000) {
-                self.files = entries.into_iter().map(|e| (e.path, e.relative)).collect();
-            }
-        }
+        self.backlink_for = None;
+        self.backlink_hits.clear();
+        let Some(root_key) = root_key else {
+            self.files.clear();
+            return;
+        };
+        let root = PathBuf::from(&root_key);
+        cx.spawn(async move |this, cx| {
+            let entries = cx
+                .background_executor()
+                .spawn(async move { list_files_recursive(&root, 2000).unwrap_or_default() })
+                .await;
+            this.update(cx, |this, cx| {
+                let current = this.root().map(|p| p.to_string_lossy().to_string());
+                if current.as_deref() != Some(root_key.as_str()) {
+                    return;
+                }
+                this.files = entries.into_iter().map(|e| (e.path, e.relative)).collect();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn library_roots(&self) -> Vec<String> {
@@ -478,7 +558,7 @@ impl KnowledgePane {
         self.current = None;
         self.state.with_mut(|s| s.kb_current_file = None);
         self.state.persist_prefs();
-        self.reload_files();
+        self.reload_files(cx);
         cx.notify();
     }
 
@@ -500,7 +580,7 @@ impl KnowledgePane {
             this.current = None;
             this.state.with_mut(|s| s.kb_current_file = None);
             this.state.persist_prefs();
-            this.reload_files();
+            this.reload_files(cx);
             cx.notify();
         });
     }
@@ -615,7 +695,7 @@ impl KnowledgePane {
         };
         match create_markdown(&root, "未命名") {
             Ok(path) => {
-                self.reload_files();
+                self.reload_files(cx);
                 self.open_file(&path.to_string_lossy(), window, cx);
             }
             Err(e) => log::warn!("{e}"),
@@ -777,36 +857,61 @@ impl KnowledgePane {
             .collect()
     }
 
-    /// Files that `[[link]]` to the current note (scan markdown only, cap reads).
-    fn backlinks(&self, current_abs: &str) -> Vec<(String, String)> {
-        let files = &self.files;
-        let mut out = Vec::new();
-        for (abs, rel) in files {
-            if abs == current_abs {
-                continue;
-            }
-            let is_md = Path::new(abs)
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| {
-                    let e = e.to_ascii_lowercase();
-                    e == "md" || e == "markdown"
-                });
-            if !is_md {
-                continue;
-            }
-            if out.len() >= 40 {
-                break;
-            }
-            let Ok(text) = read_text(Path::new(abs)) else {
-                continue;
-            };
-            if body_links_to(&text, current_abs, files) {
-                out.push((abs.clone(), rel.clone()));
-            }
+    /// Kick a background scan for notes that `[[link]]` to `current_abs`.
+    fn ensure_backlinks(&mut self, current_abs: &str, cx: &mut Context<Self>) {
+        if self.backlink_for.as_deref() == Some(current_abs) {
+            return;
         }
-        out
+        self.backlink_for = Some(current_abs.to_string());
+        self.backlink_hits.clear();
+        let current = current_abs.to_string();
+        let files = self.files.clone();
+        let current_for_scan = current.clone();
+        cx.spawn(async move |this, cx| {
+            let hits = cx
+                .background_executor()
+                .spawn(async move { scan_backlinks(&current_for_scan, &files) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.backlink_for.as_deref() != Some(current.as_str()) {
+                    return;
+                }
+                this.backlink_hits = hits;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
+}
+
+fn scan_backlinks(current_abs: &str, files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (abs, rel) in files {
+        if abs == current_abs {
+            continue;
+        }
+        let is_md = Path::new(abs)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| {
+                let e = e.to_ascii_lowercase();
+                e == "md" || e == "markdown"
+            });
+        if !is_md {
+            continue;
+        }
+        if out.len() >= 40 {
+            break;
+        }
+        let Ok(text) = read_text(Path::new(abs)) else {
+            continue;
+        };
+        if body_links_to(&text, current_abs, files) {
+            out.push((abs.clone(), rel.clone()));
+        }
+    }
+    out
 }
 
 fn kb_surface(
@@ -1754,13 +1859,19 @@ fn sort_kb_tree(nodes: &mut [KbTreeNode]) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct KbTreeCtx<'a> {
+    force_open: bool,
+    expanded: &'a HashSet<String>,
+    current: Option<&'a str>,
+    find_query: Option<&'a str>,
+    entity: &'a WeakEntity<KnowledgePane>,
+}
+
 fn kb_tree_rows(
     nodes: &[KbTreeNode],
     depth: usize,
-    force_open: bool,
-    expanded: &HashSet<String>,
-    current: Option<&str>,
-    entity: &WeakEntity<KnowledgePane>,
+    ctx: &KbTreeCtx<'_>,
     cx: &mut Context<KnowledgePane>,
 ) -> Vec<AnyElement> {
     let mut rows = Vec::new();
@@ -1769,8 +1880,8 @@ fn kb_tree_rows(
     let radius = cx.theme().radius;
     for node in nodes {
         let is_dir = node.file_path.is_none();
-        let open = is_dir && (force_open || expanded.contains(&node.key));
-        let active = node.file_path.as_deref() == current;
+        let open = is_dir && (ctx.force_open || ctx.expanded.contains(&node.key));
+        let active = node.file_path.as_deref() == ctx.current;
         let label = if is_dir {
             format!("{} {}", if open { "▾" } else { "▸" }, node.name)
         } else {
@@ -1778,7 +1889,9 @@ fn kb_tree_rows(
         };
         let key = node.key.clone();
         let file_path = node.file_path.clone();
-        let row_entity = entity.clone();
+        let row_entity = ctx.entity.clone();
+        let find_query = ctx.find_query.map(str::to_string);
+        let query_for_click = find_query.clone();
         let row = v_flex()
             .id(SharedString::from(format!("kb-tree-{key}")))
             .gap_0p5()
@@ -1817,7 +1930,16 @@ fn kb_tree_rows(
                     return;
                 };
                 if let Some(path) = file_path.clone() {
-                    view.update(app, |this, cx| this.open_file(&path, window, cx));
+                    let query = query_for_click.clone();
+                    view.update(app, |this, cx| {
+                        this.open_file(&path, window, cx);
+                        if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
+                            this.find.update(cx, |input, cx| {
+                                input.set_value(query, window, cx);
+                            });
+                            this.find_next(window, cx);
+                        }
+                    });
                 } else {
                     let key = key.clone();
                     view.update(app, |this, cx| {
@@ -1830,15 +1952,14 @@ fn kb_tree_rows(
             });
         rows.push(row.into_any_element());
         if open {
-            rows.extend(kb_tree_rows(
-                &node.children,
-                depth + 1,
-                force_open,
-                expanded,
-                current,
-                entity,
-                cx,
-            ));
+            let child = KbTreeCtx {
+                force_open: ctx.force_open,
+                expanded: ctx.expanded,
+                current: ctx.current,
+                find_query: find_query.as_deref(),
+                entity: ctx.entity,
+            };
+            rows.extend(kb_tree_rows(&node.children, depth + 1, &child, cx));
         }
     }
     rows
@@ -1852,6 +1973,13 @@ impl Render for KnowledgePane {
                 self.open_file(&path, window, cx);
             }
         }
+        let pending_query = self.state.with_mut(|s| s.kb_pending_query.take());
+        if let Some(query) = pending_query {
+            self.find.update(cx, |input, cx| {
+                input.set_value(query, window, cx);
+            });
+            self.find_next(window, cx);
+        }
         let filter_raw = self.filter.read(cx).value().to_string();
         let filter = filter_raw.trim().to_lowercase();
         let filtering = !filter.is_empty();
@@ -1861,30 +1989,22 @@ impl Render for KnowledgePane {
                 .iter()
                 .map(|(p, r)| (p.clone(), r.clone(), None))
                 .collect()
-        } else if filter.chars().count() >= 2 {
-            if let Some(root) = self.root() {
-                match search_kb_content(&root, &filter_raw, 800, 80) {
-                    Ok(hits) if !hits.is_empty() => hits
-                        .into_iter()
-                        .map(|h| {
-                            let snip = if h.line > 0 {
-                                Some(format!("L{} · {}", h.line, h.snippet))
-                            } else {
-                                None
-                            };
-                            (h.path, h.relative, snip)
-                        })
-                        .collect(),
-                    _ => self
-                        .files
-                        .iter()
-                        .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
-                        .map(|(p, r)| (p.clone(), r.clone(), None))
-                        .collect(),
-                }
+        } else if filter.chars().count() >= 2 && self.filter_query == filter_raw.trim() {
+            if self.filter_hits.is_empty() {
+                self.files
+                    .iter()
+                    .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
+                    .map(|(p, r)| (p.clone(), r.clone(), None))
+                    .collect()
             } else {
-                Vec::new()
+                self.filter_hits.clone()
             }
+        } else if filter.chars().count() >= 2 {
+            self.files
+                .iter()
+                .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
+                .map(|(p, r)| (p.clone(), r.clone(), None))
+                .collect()
         } else {
             self.files
                 .iter()
@@ -1895,15 +2015,16 @@ impl Render for KnowledgePane {
         let tree = build_kb_tree(&entries);
         let entity = cx.weak_entity();
         let current = self.current.clone();
-        let tree_rows = kb_tree_rows(
-            &tree,
-            0,
-            filtering,
-            &self.expanded,
-            current.as_deref(),
-            &entity,
-            cx,
-        );
+        let tree_ctx = KbTreeCtx {
+            force_open: filtering,
+            expanded: &self.expanded,
+            current: current.as_deref(),
+            find_query: filtering
+                .then_some(filter_raw.trim())
+                .filter(|q| !q.is_empty()),
+            entity: &entity,
+        };
+        let tree_rows = kb_tree_rows(&tree, 0, &tree_ctx, cx);
         let library_label = self.library_label();
         let library_roots = self.library_roots();
         let current_root = self.root().map(|p| p.to_string_lossy().into_owned());
@@ -2322,8 +2443,9 @@ impl Render for KnowledgePane {
                         })
                         .child({
                             let cur = current.clone().unwrap();
+                            self.ensure_backlinks(&cur, cx);
                             let outgoing = self.outgoing_links(&preview_text);
-                            let backs = self.backlinks(&cur);
+                            let backs = self.backlink_hits.clone();
                             let out_n = outgoing.len();
                             let back_n = backs.len();
                             let entity = entity.clone();

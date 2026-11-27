@@ -13,8 +13,10 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wb_domain::{
-    INBOX_PROJECT_ID, Task, TimedSchedulePreset, at_local_time, create_task_draft,
-    mark_task_complete, mark_task_incomplete, now_ms, set_task_repeat_preset, task_repeat_preset,
+    INBOX_PROJECT_ID, ReminderOptionId, Task, TimedSchedulePreset, at_local_time,
+    create_task_draft, mark_task_complete, mark_task_incomplete,
+    milliseconds_diff_to_remind_option, now_ms, remind_option_label, set_task_repeat_preset,
+    shift_remind_at, task_repeat_preset,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,8 @@ pub struct TaskForm {
     tag_input: Entity<InputState>,
     start: Entity<DatePickerState>,
     deadline: Entity<DatePickerState>,
+    plan_remind: ReminderOptionId,
+    deadline_remind: ReminderOptionId,
     _subs: Vec<Subscription>,
 }
 
@@ -93,6 +97,8 @@ impl TaskForm {
             tag_input: tag_input.clone(),
             start: start.clone(),
             deadline,
+            plan_remind: ReminderOptionId::None,
+            deadline_remind: ReminderOptionId::None,
             _subs: Vec::new(),
         };
         this._subs.push(
@@ -184,7 +190,15 @@ impl TaskForm {
             .update(cx, |input, cx| input.set_value("", window, cx));
         write_picker(&self.start, None, window, cx);
         write_picker(&self.deadline, None, window, cx);
+        let default_remind = self.default_remind();
+        self.plan_remind = default_remind;
+        self.deadline_remind = default_remind;
         cx.notify();
+    }
+
+    fn default_remind(&self) -> ReminderOptionId {
+        let raw = self.state.with(|s| s.prefs.general.default_remind.clone());
+        ReminderOptionId::parse(&raw).unwrap_or(ReminderOptionId::M15)
     }
 
     pub fn load_existing(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -217,6 +231,8 @@ impl TaskForm {
         self.status = TaskStatus::from_task(&task);
         self.repeat = task_repeat_preset(&task);
         self.repeat_open = self.repeat.is_some();
+        self.plan_remind = remind_option_of(start_ms, task.remind_at);
+        self.deadline_remind = remind_option_of(deadline_ms, task.deadline_remind_at);
         self.tag_ids = tags;
         self.pending_subtasks.clear();
         self.title.update(cx, |input, cx| {
@@ -257,6 +273,16 @@ impl TaskForm {
         cx.notify();
     }
 
+    pub fn set_plan_remind(&mut self, option: ReminderOptionId, cx: &mut Context<Self>) {
+        self.plan_remind = option;
+        cx.notify();
+    }
+
+    pub fn set_deadline_remind(&mut self, option: ReminderOptionId, cx: &mut Context<Self>) {
+        self.deadline_remind = option;
+        cx.notify();
+    }
+
     pub fn toggle_repeat(&mut self, cx: &mut Context<Self>) {
         self.repeat_open = !self.repeat_open;
         cx.notify();
@@ -277,15 +303,16 @@ impl TaskForm {
         }
         let notes = self.notes.read(cx).value().to_string();
         let start_ms = match self.status {
-            TaskStatus::Todo => None,
             TaskStatus::Doing => picker_ms(&self.start, cx).or_else(|| Some(now_ms())),
-            TaskStatus::Done => picker_ms(&self.start, cx),
+            TaskStatus::Todo | TaskStatus::Done => picker_ms(&self.start, cx),
         };
         let deadline_ms = picker_ms(&self.deadline, cx);
         let project_id = self.project_id.clone();
         let status = self.status;
         let repeat = self.repeat;
         let tag_ids = self.tag_ids.clone();
+        let plan_remind = self.plan_remind;
+        let deadline_remind = self.deadline_remind;
         let pending = self.pending_subtasks.clone();
         let existing_id = self.task_id.clone();
 
@@ -315,6 +342,9 @@ impl TaskForm {
                 task.deadline_with_time = None;
                 task.deadline_day = None;
             }
+            task.remind_at = start_ms.and_then(|due| shift_remind_at(due, plan_remind));
+            task.deadline_remind_at =
+                deadline_ms.and_then(|due| shift_remind_at(due, deadline_remind));
             let now = now_ms();
             match status {
                 TaskStatus::Done if !task.is_done => mark_task_complete(&mut task, now),
@@ -518,6 +548,8 @@ impl Render for TaskForm {
         let tag_label = self.tag_label();
         let repeat_label = self.repeat_label();
         let status = self.status;
+        let plan_remind = self.plan_remind;
+        let deadline_remind = self.deadline_remind;
         let repeat = self.repeat;
         let project_id = self.project_id.clone();
         let tag_ids = self.tag_ids.clone();
@@ -601,6 +633,22 @@ impl Render for TaskForm {
                             .w_full()
                             .cleanable(true)
                             .placeholder("选择截止时间"),
+                    )),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_end()
+                    .child(field(
+                        "计划提醒",
+                        muted,
+                        remind_menu(form.clone(), "task-plan-remind", plan_remind, true),
+                    ))
+                    .child(field(
+                        "截止提醒",
+                        muted,
+                        remind_menu(form.clone(), "task-deadline-remind", deadline_remind, false),
                     )),
             )
             .child(
@@ -696,6 +744,56 @@ fn tag_chip(
                     }),
             ),
     )
+}
+
+fn remind_option_of(due: Option<i64>, remind_at: Option<i64>) -> ReminderOptionId {
+    match (due, remind_at) {
+        (Some(due), Some(at)) => milliseconds_diff_to_remind_option(due.saturating_sub(at)),
+        _ => ReminderOptionId::None,
+    }
+}
+
+const REMIND_OPTIONS: [ReminderOptionId; 7] = [
+    ReminderOptionId::None,
+    ReminderOptionId::AtStart,
+    ReminderOptionId::M5,
+    ReminderOptionId::M10,
+    ReminderOptionId::M15,
+    ReminderOptionId::M30,
+    ReminderOptionId::H1,
+];
+
+fn remind_menu(
+    form: WeakEntity<TaskForm>,
+    id: &'static str,
+    current: ReminderOptionId,
+    plan: bool,
+) -> impl IntoElement {
+    Button::new(id)
+        .small()
+        .outline()
+        .w_full()
+        .dropdown_caret(true)
+        .label(remind_option_label(current))
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+            REMIND_OPTIONS.into_iter().fold(menu, |menu, option| {
+                let form = form.clone();
+                menu.item(
+                    PopupMenuItem::new(remind_option_label(option))
+                        .checked(option == current)
+                        .on_click(move |_, _, cx| {
+                            form.update(cx, |form, cx| {
+                                if plan {
+                                    form.set_plan_remind(option, cx);
+                                } else {
+                                    form.set_deadline_remind(option, cx);
+                                }
+                            })
+                            .ok();
+                        }),
+                )
+            })
+        })
 }
 
 fn field(label: &'static str, muted: Hsla, control: impl IntoElement) -> impl IntoElement {

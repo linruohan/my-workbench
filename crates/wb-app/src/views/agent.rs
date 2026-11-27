@@ -109,6 +109,9 @@ pub struct AgentPane {
     stream_draft: Arc<Mutex<String>>,
     /// Live status line above the draft (tool name, stage, etc.).
     stream_status: Arc<Mutex<String>>,
+    /// Last draft/status already painted, so identical polls do not rebuild the chat.
+    painted_draft: String,
+    painted_status: String,
     /// Flipped by [`Self::stop_turn`] so the HTTP read loop can exit.
     cancel_flag: Arc<AtomicBool>,
     /// Message text to load into the composer on next render.
@@ -120,6 +123,10 @@ pub struct AgentPane {
     /// Cached `@` file suggestions for the current token.
     mention_cache: Vec<String>,
     mention_cache_key: Option<String>,
+    /// Workspace file paths, loaded once per root instead of per keystroke.
+    mention_files_root: Option<String>,
+    mention_files: Vec<String>,
+    mention_loading: Option<String>,
     mention_selected: usize,
     mention_dismissed: bool,
     /// Show the draft as rendered Markdown above the input.
@@ -202,12 +209,17 @@ impl AgentPane {
             turn_gen: 0,
             stream_draft: Arc::new(Mutex::new(String::new())),
             stream_status: Arc::new(Mutex::new(String::new())),
+            painted_draft: String::new(),
+            painted_status: String::new(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pending_edit: pending_draft,
             pending_insert: None,
             show_todos: false,
             mention_cache: Vec::new(),
             mention_cache_key: None,
+            mention_files_root: None,
+            mention_files: Vec::new(),
+            mention_loading: None,
             mention_selected: 0,
             mention_dismissed: false,
             composer_preview: false,
@@ -959,7 +971,13 @@ impl AgentPane {
                         if pane.turn_gen != expected || !pane.busy {
                             return false;
                         }
-                        // Streaming text grows the draft; follow unless the reader scrolled up.
+                        let draft = pane.stream_draft_text();
+                        let status = pane.stream_status_text();
+                        if draft == pane.painted_draft && status == pane.painted_status {
+                            return true;
+                        }
+                        pane.painted_draft = draft;
+                        pane.painted_status = status;
                         if pane.chat_follow {
                             pane.scroll_chat_to_bottom(cx);
                         }
@@ -1077,13 +1095,9 @@ impl AgentPane {
     }
 
     fn edit_message(&mut self, msg_id: &str, cx: &mut Context<Self>) {
-        let content = self.state.with(|s| {
-            s.repo
-                .list_agent_messages()
-                .into_iter()
-                .find(|m| m.id == msg_id)
-                .map(|m| m.content)
-        });
+        let content = self
+            .state
+            .with(|s| s.repo.get_agent_message(msg_id).map(|m| m.content));
         if let Some(content) = content {
             self.pending_edit = Some(content);
             cx.notify();
@@ -1319,12 +1333,7 @@ impl AgentPane {
             cx.notify();
             return;
         }
-        let target = self.state.with(|s| {
-            s.repo
-                .list_agent_messages()
-                .into_iter()
-                .find(|m| m.id == assistant_id)
-        });
+        let target = self.state.with(|s| s.repo.get_agent_message(&assistant_id));
         let Some(target) = target else {
             return;
         };
@@ -1391,12 +1400,7 @@ impl AgentPane {
     }
 
     fn resend_message(&mut self, msg_id: &str, cx: &mut Context<Self>) {
-        let Some(msg) = self.state.with(|s| {
-            s.repo
-                .list_agent_messages()
-                .into_iter()
-                .find(|m| m.id == msg_id)
-        }) else {
+        let Some(msg) = self.state.with(|s| s.repo.get_agent_message(msg_id)) else {
             return;
         };
         if msg.role != AgentRole::User {
@@ -1478,6 +1482,9 @@ impl AgentPane {
         self.branch_cache = None;
         self.mention_cache.clear();
         self.mention_cache_key = None;
+        self.mention_files.clear();
+        self.mention_files_root = None;
+        self.mention_loading = None;
         self.state.persist_if_dirty();
         cx.notify();
     }
@@ -2024,14 +2031,43 @@ impl AgentPane {
         let Some(root) = root else {
             return Vec::new();
         };
+        if self.mention_files_root.as_deref() != Some(root.as_str()) {
+            if self.mention_loading.as_deref() != Some(root.as_str()) {
+                self.mention_loading = Some(root.clone());
+                let root_for_list = root.clone();
+                cx.spawn(async move |this, cx| {
+                    let files = cx
+                        .background_executor()
+                        .spawn(async move {
+                            wb_host::list_files_recursive(std::path::Path::new(&root_for_list), 800)
+                                .unwrap_or_default()
+                        })
+                        .await;
+                    let root_done = root.clone();
+                    this.update(cx, |this, cx| {
+                        if this.workspace_root().as_deref() != Some(root_done.as_str()) {
+                            return;
+                        }
+                        this.mention_files =
+                            files.into_iter().map(|entry| entry.relative).collect();
+                        this.mention_files_root = Some(root_done);
+                        this.mention_loading = None;
+                        this.mention_cache_key = None;
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            return Vec::new();
+        }
         let cache_key = format!("{root}|{needle}");
         if self.mention_cache_key.as_deref() != Some(cache_key.as_str()) {
-            let files =
-                wb_host::list_files_recursive(std::path::Path::new(&root), 800).unwrap_or_default();
-            let mut matched: Vec<String> = files
-                .into_iter()
-                .filter(|e| needle.is_empty() || e.relative.to_lowercase().contains(&needle))
-                .map(|e| e.relative)
+            let mut matched: Vec<String> = self
+                .mention_files
+                .iter()
+                .filter(|relative| needle.is_empty() || relative.to_lowercase().contains(&needle))
+                .cloned()
                 .collect();
             matched.sort_by_key(|p| p.len());
             matched.truncate(8);
@@ -2332,11 +2368,12 @@ impl AgentPane {
                 .as_deref()
                 .map(|id| pending_approvals_for_thread(&s.repo, id))
                 .unwrap_or_default();
+            let threads = s.repo.list_agent_threads();
             let thread = tid
                 .as_deref()
-                .and_then(|id| s.repo.list_agent_threads().into_iter().find(|t| t.id == id));
+                .and_then(|id| threads.iter().find(|t| t.id == id));
             let web_url = thread.as_ref().and_then(|t| t.web_url.clone());
-            let queued = thread.as_ref().map(queued_user_texts).unwrap_or_default();
+            let queued = thread.map(queued_user_texts).unwrap_or_default();
             let perm = thread
                 .as_ref()
                 .map(|t| permission_mode_label(t.permission_mode))
@@ -2351,7 +2388,7 @@ impl AgentPane {
                 .unwrap_or_else(|| BUILTIN_MODEL_REF.to_string());
             let model = model_label_of(&model_ref);
             (
-                s.repo.list_agent_threads(),
+                threads,
                 messages,
                 s.repo.list_agent_workspaces(),
                 approvals,

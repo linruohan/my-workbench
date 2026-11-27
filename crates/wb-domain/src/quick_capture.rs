@@ -14,6 +14,7 @@ pub struct QuickCaptureResult {
     pub due_with_time: Option<i64>,
     pub deadline_day: Option<String>,
     pub deadline_with_time: Option<i64>,
+    pub deadline_remind_at: Option<i64>,
     pub remind_option: ReminderOptionId,
     pub remind_at: Option<i64>,
     pub summary: Vec<String>,
@@ -155,6 +156,7 @@ pub fn parse_quick_capture(
     }
 
     let mut deadline_day = None;
+    let mut deadline_with_time = None;
     if let Some(idx) = text.find("截止") {
         let rest = text[idx + "截止".len()..].to_string();
         let rest_trim = rest.trim_start();
@@ -186,9 +188,29 @@ pub fn parse_quick_capture(
             deadline_day = Some(day);
             consumed_deadline.push_str(&c);
         }
-        if let Some(ref day) = deadline_day {
+        if let Some(day) = deadline_day.clone() {
             text = text.replacen(&consumed_deadline, " ", 1);
-            summary.push(format!("截止 {day}"));
+            let label = &consumed_deadline["截止".len()..];
+            let after = rest_trim.strip_prefix(label).unwrap_or("").trim_start();
+            if let Some((ms, consumed)) = parse_time_token(after, &day)
+                && after.starts_with(consumed.as_str())
+            {
+                deadline_with_time = Some(ms);
+                deadline_day = None;
+                text = text.replacen(&consumed, " ", 1);
+                summary.push("截止时刻".into());
+            } else if let Some((hour, word)) = after
+                .strip_prefix("上午")
+                .map(|_| (9, "上午"))
+                .or_else(|| after.strip_prefix("下午").map(|_| (14, "下午")))
+            {
+                deadline_with_time = at_local_time(&day, hour, 0);
+                deadline_day = None;
+                text = text.replacen(word, " ", 1);
+                summary.push("截止时刻".into());
+            } else {
+                summary.push(format!("截止 {day}"));
+            }
         }
     }
 
@@ -250,6 +272,7 @@ pub fn parse_quick_capture(
 
     let mut remind_option = ReminderOptionId::None;
     let mut remind_at = None;
+    let mut deadline_remind_at = None;
     if let Some(caps) = REMIND_RE.captures(&text) {
         let mins: i64 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
         remind_option = match mins {
@@ -263,6 +286,8 @@ pub fn parse_quick_capture(
         text = REMIND_RE.replace(&text, " ").to_string();
         if let Some(due) = due_with_time {
             remind_at = shift_remind_at(due, remind_option);
+        } else if let Some(due) = deadline_with_time {
+            deadline_remind_at = shift_remind_at(due, remind_option);
         }
         if remind_option != ReminderOptionId::None {
             summary.push(format!("提前{mins}分钟"));
@@ -289,7 +314,8 @@ pub fn parse_quick_capture(
         due_day,
         due_with_time,
         deadline_day,
-        deadline_with_time: None,
+        deadline_with_time,
+        deadline_remind_at,
         remind_option,
         remind_at,
         summary,
@@ -305,5 +331,24 @@ mod tests {
         let r = parse_quick_capture("今天 写报告", 1_700_000_000_000, None);
         assert!(r.due_day.is_some());
         assert!(r.title.contains("写报告"));
+    }
+
+    #[test]
+    fn deadline_clock_stays_on_the_deadline() {
+        let r = parse_quick_capture("截止明天 15:00 交报告 提前10分钟", 1_700_000_000_000, None);
+        assert!(r.deadline_day.is_none());
+        assert!(r.due_with_time.is_none());
+        let due = r.deadline_with_time.expect("deadline clock");
+        assert_eq!(r.deadline_remind_at, Some(due - 10 * 60_000));
+        assert!(r.title.contains("交报告"));
+        assert!(!r.title.contains("15:00"));
+
+        let day_only = parse_quick_capture("截止明天 交报告", 1_700_000_000_000, None);
+        assert!(day_only.deadline_day.is_some());
+        assert!(day_only.deadline_with_time.is_none());
+
+        let plan = parse_quick_capture("明天 15:00 写报告", 1_700_000_000_000, None);
+        assert!(plan.due_with_time.is_some());
+        assert!(plan.deadline_with_time.is_none());
     }
 }

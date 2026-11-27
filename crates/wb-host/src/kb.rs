@@ -216,9 +216,20 @@ pub fn list_worktree_files(root: &Path, max: usize) -> Result<Vec<KbEntry>> {
     Ok(out)
 }
 
+fn skip_walk_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "node_modules" | "target" | "dist" | "build" | "vendor" | ".git"
+        )
+}
+
 pub fn list_files_recursive(root: &Path, max: usize) -> Result<Vec<KbEntry>> {
     let mut out = Vec::new();
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
+        entry.depth() == 0 || !skip_walk_dir(&entry.file_name().to_string_lossy())
+    });
+    for entry in walker.filter_map(|e| e.ok()) {
         if out.len() >= max {
             break;
         }
@@ -265,6 +276,29 @@ pub fn create_markdown(dir: &Path, name: &str) -> Result<PathBuf> {
     Ok(file)
 }
 
+const MAX_SEARCH_BYTES: u64 = 512 * 1024;
+
+fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    let needle = needle_lower.as_bytes();
+    if !needle.is_ascii() {
+        return haystack.to_lowercase().contains(needle_lower);
+    }
+    let hay = haystack.as_bytes();
+    if hay.is_ascii() {
+        return hay.len() >= needle.len()
+            && hay.windows(needle.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(needle)
+                    .all(|(a, b)| a.to_ascii_lowercase() == *b)
+            });
+    }
+    haystack.to_lowercase().contains(needle_lower)
+}
+
 fn trim_snippet(line: &str, max: usize) -> String {
     let t = line.trim();
     if t.chars().count() <= max {
@@ -299,21 +333,36 @@ pub fn search_kb_content(
             continue;
         }
         let rel_l = entry.relative.to_lowercase();
-        if rel_l.contains(&q_lower) {
-            hits.push(KbSearchHit {
-                path: entry.path.clone(),
-                relative: entry.relative.clone(),
-                line: 0,
-                snippet: entry.relative.clone(),
-            });
+        let name_hit = rel_l.contains(&q_lower);
+        if path
+            .metadata()
+            .is_ok_and(|meta| meta.len() > MAX_SEARCH_BYTES)
+        {
+            if name_hit {
+                hits.push(KbSearchHit {
+                    path: entry.path.clone(),
+                    relative: entry.relative.clone(),
+                    line: 0,
+                    snippet: entry.relative.clone(),
+                });
+            }
             continue;
         }
         let Ok(text) = read_text(path) else {
+            if name_hit {
+                hits.push(KbSearchHit {
+                    path: entry.path.clone(),
+                    relative: entry.relative.clone(),
+                    line: 0,
+                    snippet: entry.relative.clone(),
+                });
+            }
             continue;
         };
+        let mut body_hit = None;
         for (idx, line) in text.lines().enumerate() {
-            if line.to_lowercase().contains(&q_lower) {
-                hits.push(KbSearchHit {
+            if contains_ignore_case(line, &q_lower) {
+                body_hit = Some(KbSearchHit {
                     path: entry.path.clone(),
                     relative: entry.relative.clone(),
                     line: idx + 1,
@@ -321,6 +370,16 @@ pub fn search_kb_content(
                 });
                 break;
             }
+        }
+        if let Some(hit) = body_hit {
+            hits.push(hit);
+        } else if name_hit {
+            hits.push(KbSearchHit {
+                path: entry.path.clone(),
+                relative: entry.relative.clone(),
+                line: 0,
+                snippet: entry.relative.clone(),
+            });
         }
     }
     Ok(hits)
@@ -342,6 +401,14 @@ mod search_tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].relative, "a.md");
         assert_eq!(hits[0].line, 2);
+        fs::write(dir.join("unique-token.md"), "no match in body\n").unwrap();
+        let named = search_kb_content(&dir, "unique-token", 50, 10).unwrap();
+        assert!(
+            named
+                .iter()
+                .any(|h| h.relative == "unique-token.md" && h.line == 0)
+        );
+        assert!(named.iter().any(|h| h.relative == "a.md" && h.line == 2));
         let _ = fs::remove_dir_all(&dir);
     }
 

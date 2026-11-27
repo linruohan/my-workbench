@@ -56,13 +56,18 @@ pub fn load_store() -> Result<MemoryWorkbenchRepository> {
 }
 
 pub fn save_store(repo: &mut MemoryWorkbenchRepository) -> Result<SaveStatus> {
+    let status = save_snapshot(&repo.export_snapshot())?;
+    repo.clear_dirty();
+    Ok(status)
+}
+
+/// Serialize and write a snapshot without touching the in-memory dirty flag.
+pub fn save_snapshot(snap: &WorkbenchSnapshot) -> Result<SaveStatus> {
     let path = store_path()?;
     maybe_rolling_backup(&path)?;
-    let snap = repo.export_snapshot();
-    let json = serde_json::to_string_pretty(&snap).context("序列化快照失败")?;
+    let json = serde_json::to_string(snap).context("序列化快照失败")?;
     let bytes = json.len();
     write_text_atomic(&path, &json)?;
-    repo.clear_dirty();
     let warning = if bytes > 6 * 1024 * 1024 {
         Some("快照体积偏大，建议整理历史会话或附件".into())
     } else {

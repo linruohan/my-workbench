@@ -21,6 +21,10 @@ pub struct CommandPalette {
     state: AppState,
     tasks: WeakEntity<TasksPane>,
     query: Entity<InputState>,
+    catalog: Vec<PaletteItem>,
+    catalog_gen: u64,
+    body_hits: Vec<PaletteItem>,
+    body_for: String,
     _subs: Vec<Subscription>,
 }
 
@@ -37,10 +41,18 @@ impl CommandPalette {
             state,
             tasks,
             query: query.clone(),
+            catalog: Vec::new(),
+            catalog_gen: 0,
+            body_hits: Vec::new(),
+            body_for: String::new(),
             _subs: Vec::new(),
         };
+        this.refresh_catalog(cx);
         this._subs.push(
             cx.subscribe_in(&query, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_body_search(cx);
+                }
                 if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
                     cx.notify();
                 }
@@ -208,78 +220,149 @@ impl CommandPalette {
                     kb_path: None,
                 });
             }
-            if let Some(root) = s
-                .prefs
+        });
+        items
+    }
+
+    pub fn refresh_catalog(&mut self, cx: &mut Context<Self>) {
+        self.catalog = self.all_items();
+        self.catalog_gen = self.catalog_gen.wrapping_add(1);
+        let generation = self.catalog_gen;
+        let root = self.state.with(|s| {
+            s.prefs
                 .knowledge_current
                 .clone()
                 .or_else(|| s.prefs.knowledge_roots.first().cloned())
-            {
-                if let Ok(files) = wb_host::list_files_recursive(std::path::Path::new(&root), 400) {
-                    for f in files.into_iter().filter(|e| !e.is_dir) {
-                        items.push(PaletteItem {
-                            id: format!("kb-{}", f.path),
-                            label: f.relative.clone(),
-                            kind: "知识库",
+        });
+        let Some(root) = root else {
+            return;
+        };
+        let root_for_list = root.clone();
+        cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move {
+                    wb_host::list_files_recursive(std::path::Path::new(&root_for_list), 400)
+                        .unwrap_or_default()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.catalog_gen != generation {
+                    return;
+                }
+                this.catalog.retain(|item| item.kind != "知识库");
+                for file in files.into_iter().filter(|entry| !entry.is_dir) {
+                    this.catalog.push(PaletteItem {
+                        id: format!("kb-{}", file.path),
+                        label: file.relative,
+                        kind: "知识库",
+                        nav: Some(AppNav::Knowledge),
+                        task_id: None,
+                        thread_id: None,
+                        note_id: None,
+                        kb_path: Some(file.path),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn schedule_body_search(&mut self, cx: &mut Context<Self>) {
+        let raw = self.query.read(cx).value().to_string();
+        let query = raw.trim().to_string();
+        if query.chars().count() < 2 {
+            self.body_for.clear();
+            self.body_hits.clear();
+            return;
+        }
+        let root = self.state.with(|s| {
+            s.prefs
+                .knowledge_current
+                .clone()
+                .or_else(|| s.prefs.knowledge_roots.first().cloned())
+        });
+        let Some(root) = root else {
+            self.body_hits.clear();
+            return;
+        };
+        let query_for_search = query.clone();
+        cx.spawn(async move |this, cx| {
+            let hits = cx
+                .background_executor()
+                .spawn(async move {
+                    wb_host::search_kb_content(
+                        std::path::Path::new(&root),
+                        &query_for_search,
+                        400,
+                        12,
+                    )
+                    .unwrap_or_default()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.query.read(cx).value().trim() != query {
+                    return;
+                }
+                this.body_for = query;
+                this.body_hits = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let label = if hit.line > 0 {
+                            format!("{} · L{} · {}", hit.relative, hit.line, hit.snippet)
+                        } else {
+                            hit.relative.clone()
+                        };
+                        PaletteItem {
+                            id: format!("kb-body-{}", hit.path),
+                            label,
+                            kind: if hit.line > 0 { "正文" } else { "知识库" },
                             nav: Some(AppNav::Knowledge),
                             task_id: None,
                             thread_id: None,
                             note_id: None,
-                            kb_path: Some(f.path),
-                        });
-                    }
-                }
-            }
-        });
-        items
+                            kb_path: Some(hit.path),
+                        }
+                    })
+                    .collect();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn filtered(&self, cx: &App) -> Vec<PaletteItem> {
         let raw = self.query.read(cx).value().to_string();
         let q = raw.trim().to_lowercase();
         let mut items: Vec<PaletteItem> = self
-            .all_items()
-            .into_iter()
+            .catalog
+            .iter()
             .filter(|i| q.is_empty() || i.label.to_lowercase().contains(&q) || i.kind.contains(&q))
             .take(24)
+            .cloned()
             .collect();
-        // Lightweight vault body search (no FTS index) when query is meaningful.
-        if q.chars().count() >= 2 {
-            let root = self.state.with(|s| {
-                s.prefs
-                    .knowledge_current
-                    .clone()
-                    .or_else(|| s.prefs.knowledge_roots.first().cloned())
-            });
-            if let Some(root) = root {
-                if let Ok(hits) =
-                    wb_host::search_kb_content(std::path::Path::new(&root), &raw, 400, 12)
-                {
-                    let existing: std::collections::HashSet<String> =
-                        items.iter().filter_map(|i| i.kb_path.clone()).collect();
-                    for h in hits {
-                        if existing.contains(&h.path) {
-                            continue;
-                        }
-                        let label = if h.line > 0 {
-                            format!("{} · L{} · {}", h.relative, h.line, h.snippet)
-                        } else {
-                            h.relative.clone()
-                        };
-                        items.push(PaletteItem {
-                            id: format!("kb-body-{}", h.path),
-                            label,
-                            kind: "正文",
-                            nav: Some(AppNav::Knowledge),
-                            task_id: None,
-                            thread_id: None,
-                            note_id: None,
-                            kb_path: Some(h.path),
-                        });
-                        if items.len() >= 30 {
-                            break;
-                        }
+        if q.chars().count() >= 2 && self.body_for.eq_ignore_ascii_case(raw.trim()) {
+            let existing: std::collections::HashSet<String> =
+                items.iter().filter_map(|i| i.kb_path.clone()).collect();
+            for hit in &self.body_hits {
+                let Some(path) = hit.kb_path.clone() else {
+                    continue;
+                };
+                if existing.contains(&path) {
+                    if hit.kind == "正文"
+                        && let Some(item) = items
+                            .iter_mut()
+                            .find(|i| i.kb_path.as_deref() == Some(path.as_str()))
+                    {
+                        item.kind = "正文";
+                        item.label = hit.label.clone();
                     }
+                    continue;
                 }
+                items.push(hit.clone());
             }
         }
         items.truncate(30);
@@ -288,6 +371,7 @@ impl CommandPalette {
 
     fn activate(&mut self, item: PaletteItem, window: &mut Window, cx: &mut Context<Self>) {
         let opened_task = item.task_id.clone();
+        let query = self.query.read(cx).value().to_string();
         self.state.with_mut(|s| {
             if let Some(nav) = item.nav {
                 if nav == AppNav::Settings && s.nav != AppNav::Settings {
@@ -319,6 +403,12 @@ impl CommandPalette {
             if let Some(path) = item.kb_path {
                 s.kb_current_file = Some(path);
                 s.nav = AppNav::Knowledge;
+                let q = query.trim();
+                s.kb_pending_query = if q.is_empty() {
+                    None
+                } else {
+                    Some(q.to_string())
+                };
             }
             if item.note_id.is_some() {
                 // Workbench notes live under Knowledge; open the pane.

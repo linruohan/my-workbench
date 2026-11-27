@@ -17,7 +17,8 @@ use wb_domain::{
     ToolEffect, ToolGate, ToolSpec, apply_hunks, apply_schedule_patch, at_local_time,
     builtin_host_tools, clear_plan_fields, create_id, create_task_draft, create_timed_task_draft,
     format_local_day, gate_tool, is_today_member, make_custom_schedule, make_preset_schedule,
-    now_ms, parse_apply_patch, settle_timer_segment, shift_remind_at, workspace_tools,
+    now_ms, parse_apply_patch, parse_quick_capture, settle_timer_segment, shift_remind_at,
+    workspace_tools,
 };
 use wb_host::{
     active_skills, cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive,
@@ -214,7 +215,7 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("未命名");
             let pid = args.get("projectId").and_then(|v| v.as_str());
-            let t = repo.create_task(title, pid);
+            let t = create_task_from_phrase(repo, title, pid);
             Ok(ToolResult::ok_text(format!(
                 "已创建任务 {} · {}",
                 t.id, t.title
@@ -2539,7 +2540,7 @@ fn resolve_note(repo: &MemoryWorkbenchRepository, args: &Value) -> Result<wb_dom
 
 fn format_task_detail(task: &Task) -> String {
     format!(
-        "id: {}\ntitle: {}\nproject: {}\ndone: {}\ndueDay: {:?}\ndueWithTime: {:?}\ndeadlineDay: {:?}\nremindAt: {:?}\nnotes: {}",
+        "id: {}\ntitle: {}\nproject: {}\ndone: {}\ndueDay: {:?}\ndueWithTime: {:?}\ndeadlineDay: {:?}\nremindAt: {:?}\ndeadlineRemindAt: {:?}\nnotes: {}",
         task.id,
         task.title,
         task.project_id,
@@ -2548,8 +2549,63 @@ fn format_task_detail(task: &Task) -> String {
         task.due_with_time,
         task.deadline_day,
         task.remind_at,
+        task.deadline_remind_at,
         task.notes
     )
+}
+
+fn create_task_from_phrase(
+    repo: &mut MemoryWorkbenchRepository,
+    phrase: &str,
+    project_id: Option<&str>,
+) -> Task {
+    let mut parsed = parse_quick_capture(phrase, now_ms(), None);
+    if parsed.remind_option == ReminderOptionId::None
+        && let Ok(prefs) = load_prefs()
+        && let Some(option) = ReminderOptionId::parse(&prefs.general.default_remind)
+    {
+        if parsed.remind_at.is_none()
+            && let Some(due) = parsed.due_with_time
+        {
+            parsed.remind_at = shift_remind_at(due, option);
+        }
+        if parsed.deadline_remind_at.is_none()
+            && let Some(due) = parsed.deadline_with_time
+        {
+            parsed.deadline_remind_at = shift_remind_at(due, option);
+        }
+    }
+    let project = if let Some(id) = project_id {
+        id.to_string()
+    } else if let Some(name) = parsed.project_title.clone() {
+        repo.list_projects()
+            .into_iter()
+            .find(|project| project.title == name)
+            .map(|project| project.id)
+            .unwrap_or_else(|| repo.create_project(&name).id)
+    } else {
+        wb_domain::INBOX_PROJECT_ID.to_string()
+    };
+    let mut task = repo.create_task(&parsed.title, Some(&project));
+    apply_schedule_patch(
+        &mut task,
+        &SchedulePatch {
+            due_day: Some(parsed.due_day),
+            due_with_time: Some(parsed.due_with_time),
+            deadline_day: Some(parsed.deadline_day),
+            deadline_with_time: Some(parsed.deadline_with_time),
+            remind_at: Some(parsed.remind_at),
+            deadline_remind_at: Some(parsed.deadline_remind_at),
+        },
+    );
+    repo.upsert_task(task.clone());
+    task
+}
+
+fn reminder_targets_deadline(args: &Value) -> bool {
+    arg_str(args, &["target", "remindTarget"])
+        .map(|raw| raw.to_ascii_lowercase())
+        .is_some_and(|raw| matches!(raw.as_str(), "deadline" | "截止" | "截止提醒"))
 }
 
 fn parse_remind(raw: &str) -> Option<ReminderOptionId> {
@@ -2618,24 +2674,36 @@ fn apply_task_reminder(
     let Some(mut next) = repo.get_task(&task.id).cloned() else {
         return Err("任务不存在".into());
     };
+    let deadline_side = reminder_targets_deadline(args);
     let mut patch = SchedulePatch::default();
-    if let Some(explicit) = args.get("remindAt").and_then(|v| v.as_i64()) {
-        patch.remind_at = Some(Some(explicit));
+    if let Some(explicit) = args.get("deadlineRemindAt").and_then(|v| v.as_i64()) {
+        patch.deadline_remind_at = Some(Some(explicit));
+    } else if let Some(explicit) = args.get("remindAt").and_then(|v| v.as_i64()) {
+        if deadline_side {
+            patch.deadline_remind_at = Some(Some(explicit));
+        } else {
+            patch.remind_at = Some(Some(explicit));
+        }
     } else if let Some(opt) = arg_str(args, &["remindOption"]).and_then(parse_remind) {
-        if opt == ReminderOptionId::None {
-            patch.remind_at = Some(None);
-        } else if let Some(due) = next.due_with_time.or(next.deadline_with_time) {
-            let at = shift_remind_at(due, opt);
-            if next.due_with_time.is_some() {
-                patch.remind_at = Some(at);
+        if deadline_side || next.due_with_time.is_none() {
+            if opt == ReminderOptionId::None {
+                patch.deadline_remind_at = Some(None);
+            } else if let Some(due) = next.deadline_with_time {
+                patch.deadline_remind_at = Some(shift_remind_at(due, opt));
+            } else if !deadline_side {
+                return Err("任务没有计划时刻，无法按提前量设置提醒".into());
             } else {
-                patch.deadline_remind_at = Some(at);
+                return Err("任务没有截止时刻，无法设置截止提醒".into());
             }
+        } else if opt == ReminderOptionId::None {
+            patch.remind_at = Some(None);
+        } else if let Some(due) = next.due_with_time {
+            patch.remind_at = Some(shift_remind_at(due, opt));
         } else {
             return Err("任务没有计划时刻，无法按提前量设置提醒".into());
         }
     } else {
-        return Err("需要 remindAt 或 remindOption".into());
+        return Err("需要 remindAt、deadlineRemindAt 或 remindOption".into());
     }
     apply_schedule_patch(&mut next, &patch);
     next.updated_at = now_ms();
@@ -3169,6 +3237,54 @@ mod tests {
         assert!(viewed.content.contains("alpha"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_create_reads_a_deadline_clock() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let created = execute_tool(
+            &mut repo,
+            "task_create",
+            &json!({ "title": "截止明天 15:00 交报告 提前10分钟" }),
+            None,
+        )
+        .unwrap();
+        assert!(created.ok);
+        let task = repo
+            .list_tasks()
+            .into_iter()
+            .find(|task| task.title.contains("交报告"))
+            .expect("created");
+        assert!(task.deadline_with_time.is_some());
+        assert!(task.due_with_time.is_none());
+        assert_eq!(
+            task.deadline_remind_at,
+            task.deadline_with_time.map(|due| due - 10 * 60_000)
+        );
+    }
+
+    #[test]
+    fn reminder_can_target_the_deadline() {
+        let mut repo = MemoryWorkbenchRepository::default();
+        let mut task = repo.create_task("两边都有", None);
+        let id = task.id.clone();
+        task.due_with_time = Some(1_700_000_000_000);
+        task.deadline_with_time = Some(1_700_000_600_000);
+        repo.upsert_task(task);
+        let r = execute_tool(
+            &mut repo,
+            "task_set_reminder",
+            &json!({ "taskId": id, "remindOption": "m15", "target": "deadline" }),
+            None,
+        )
+        .unwrap();
+        assert!(r.ok);
+        let saved = repo.get_task(&id).unwrap();
+        assert!(saved.remind_at.is_none());
+        assert_eq!(
+            saved.deadline_remind_at,
+            Some(1_700_000_600_000 - 15 * 60_000)
+        );
     }
 
     #[test]

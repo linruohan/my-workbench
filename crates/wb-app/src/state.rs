@@ -1,8 +1,26 @@
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use wb_domain::{AppPrefs, ThemeModePref, format_local_day, now_ms, settle_timer_segment};
 use wb_store::{
-    MemoryWorkbenchRepository, SaveStatus, load_prefs, load_store, save_prefs, save_store,
+    MemoryWorkbenchRepository, SaveStatus, WorkbenchSnapshot, load_prefs, load_store, save_prefs,
+    save_snapshot, save_store,
 };
+
+fn save_jobs() -> &'static Mutex<Option<JoinHandle<()>>> {
+    static JOBS: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(None))
+}
+
+fn save_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn save_latest() -> &'static AtomicU64 {
+    static LATEST: AtomicU64 = AtomicU64::new(0);
+    &LATEST
+}
 
 /// Crash recovery only counts a short slice. A later relaunch must not add the
 /// hours the app was closed onto a running timer.
@@ -89,6 +107,8 @@ pub struct AppStateInner {
     pub notifications_open: bool,
     pub selected_task_id: Option<String>,
     pub kb_current_file: Option<String>,
+    /// Query to select in the knowledge editor after the palette opens a file.
+    pub kb_pending_query: Option<String>,
     pub last_tick: i64,
     /// Active timer: (task_id, started_at_ms)
     pub active_timer: Option<(String, i64)>,
@@ -184,6 +204,7 @@ impl AppState {
                 notifications_open: false,
                 selected_task_id,
                 kb_current_file: None,
+                kb_pending_query: None,
                 last_tick: now,
                 active_timer,
             })),
@@ -198,23 +219,51 @@ impl AppState {
         f(&mut self.inner.lock().unwrap())
     }
 
+    /// Export under the state lock, then serialize and write on a background thread.
+    /// A newer export supersedes an older in-flight write.
     pub fn persist_if_dirty(&self) {
+        let Some(snap) = self.take_dirty_snapshot() else {
+            return;
+        };
+        let generation = save_latest().fetch_add(1, Ordering::SeqCst) + 1;
+        let state = self.clone();
+        let handle = std::thread::spawn(move || write_snapshot(state, snap, generation));
+        *save_jobs().lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// Wait for the background save, then write anything still dirty. Used on exit.
+    pub fn persist_blocking(&self) {
+        if let Some(handle) = save_jobs().lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = handle.join();
+        }
         self.with_mut(|s| {
-            if s.repo.is_dirty() {
-                match save_store(&mut s.repo) {
-                    Ok(status) => s.save_status = status,
-                    Err(e) => {
-                        s.save_status = SaveStatus {
-                            ok: false,
-                            message: Some(e.to_string()),
-                            at: now_ms(),
-                            bytes: None,
-                            warning: None,
-                        };
-                    }
+            if !s.repo.is_dirty() {
+                return;
+            }
+            match save_store(&mut s.repo) {
+                Ok(status) => s.save_status = status,
+                Err(e) => {
+                    s.save_status = SaveStatus {
+                        ok: false,
+                        message: Some(e.to_string()),
+                        at: now_ms(),
+                        bytes: None,
+                        warning: None,
+                    };
                 }
             }
         });
+    }
+
+    fn take_dirty_snapshot(&self) -> Option<WorkbenchSnapshot> {
+        self.with_mut(|s| {
+            if !s.repo.is_dirty() {
+                return None;
+            }
+            let snap = s.repo.export_snapshot();
+            s.repo.clear_dirty();
+            Some(snap)
+        })
     }
 
     pub fn persist_prefs(&self) {
@@ -273,6 +322,29 @@ impl AppState {
             if let Err(e) = wb_host::show_system_notification(title, body) {
                 log::debug!("系统通知失败: {e}");
             }
+        }
+    }
+}
+
+fn write_snapshot(state: AppState, snap: WorkbenchSnapshot, generation: u64) {
+    let _guard = save_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if save_latest().load(Ordering::SeqCst) != generation {
+        return;
+    }
+    match save_snapshot(&snap) {
+        Ok(status) => state.with_mut(|s| s.save_status = status),
+        Err(e) => {
+            log::warn!("保存快照失败: {e}");
+            state.with_mut(|s| {
+                s.repo.mark_dirty();
+                s.save_status = SaveStatus {
+                    ok: false,
+                    message: Some(e.to_string()),
+                    at: now_ms(),
+                    bytes: None,
+                    warning: None,
+                };
+            });
         }
     }
 }

@@ -243,7 +243,7 @@ impl WorkbenchApp {
         self.checkpoint_timer();
         self.agent.update(cx, |pane, cx| pane.flush_composer(cx));
         self.state.remember_session();
-        self.state.persist_if_dirty();
+        self.state.persist_blocking();
     }
 
     fn on_tick(&mut self, cx: &mut Context<Self>) {
@@ -260,26 +260,29 @@ impl WorkbenchApp {
             s.repo.wake_snoozed_notifications(now);
             let mut due = Vec::new();
             for task in s.repo.list_tasks() {
-                if let Some(at) = task.remind_at {
-                    if at <= now && !task.is_done {
-                        due.push((task.id.clone(), task.title.clone(), false));
-                        let mut t = task.clone();
-                        t.remind_at = None;
-                        s.repo.upsert_task(t);
-                    }
+                if task.is_done {
+                    continue;
                 }
-                if let Some(at) = task.deadline_remind_at {
-                    if at <= now && !task.is_done {
-                        due.push((task.id.clone(), task.title.clone(), true));
-                        let mut t = task.clone();
-                        t.deadline_remind_at = None;
-                        s.repo.upsert_task(t);
-                    }
+                let mut next = task.clone();
+                let mut changed = false;
+                if task.remind_at.is_some_and(|at| at <= now) {
+                    due.push((task.id.clone(), task.title.clone(), false));
+                    next.remind_at = None;
+                    changed = true;
+                }
+                if task.deadline_remind_at.is_some_and(|at| at <= now) {
+                    due.push((task.id.clone(), task.title.clone(), true));
+                    next.deadline_remind_at = None;
+                    changed = true;
+                }
+                if changed {
+                    s.repo.upsert_task(next);
                 }
             }
             s.last_tick = now;
             due
         });
+        let has_due = !due_reminds.is_empty();
         for (id, title, is_deadline) in due_reminds {
             if is_deadline {
                 self.state.push_notification(
@@ -299,7 +302,9 @@ impl WorkbenchApp {
         }
         self.state.remember_session();
         self.state.persist_if_dirty();
-        cx.notify();
+        if timing || has_due {
+            cx.notify();
+        }
     }
 
     fn on_ptt_poll(&mut self, cx: &mut Context<Self>) {
@@ -423,7 +428,10 @@ impl WorkbenchApp {
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.with_mut(|s| s.palette_open = true);
-        self.palette.update(cx, |p, cx| p.focus_query(window, cx));
+        self.palette.update(cx, |p, cx| {
+            p.refresh_catalog(cx);
+            p.focus_query(window, cx);
+        });
         cx.notify();
     }
 

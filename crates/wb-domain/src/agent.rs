@@ -288,7 +288,7 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
         tool(
             "task_create",
             ToolEffect::Write,
-            "创建任务",
+            "创建任务。title 可含今天/明天/时刻、截止、提前N分钟和 #项目",
             serde_json::json!({
                 "title": { "type": "string" },
                 "projectId": { "type": "string" }
@@ -364,17 +364,20 @@ pub fn builtin_host_tools() -> Vec<ToolSpec> {
             serde_json::json!({
                 "taskId": { "type": "string" },
                 "deadlineDay": { "type": "string" },
-                "deadlineWithTime": { "type": "integer" }
+                "deadlineWithTime": { "type": "integer" },
+                "remindOption": { "type": "string" }
             }),
         ),
         tool(
             "task_set_reminder",
             ToolEffect::Write,
-            "设置提醒：remindAt 或 remindOption",
+            "设置提醒：remindAt、deadlineRemindAt 或 remindOption；target 为 deadline 时改截止提醒",
             serde_json::json!({
                 "taskId": { "type": "string" },
                 "remindOption": { "type": "string" },
-                "remindAt": { "type": "integer" }
+                "remindAt": { "type": "integer" },
+                "deadlineRemindAt": { "type": "integer" },
+                "target": { "type": "string" }
             }),
         ),
         tool(
