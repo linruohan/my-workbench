@@ -416,19 +416,31 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn toggle_right_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.right_collapsed = !self.right_collapsed;
+        self.set_right_collapsed(!self.right_collapsed, window, cx);
+    }
+
+    /// Show or hide the Agent right rail. Hidden means the panel is gone, not a thin strip.
+    pub(crate) fn set_right_collapsed(
+        &mut self,
+        collapsed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.right_collapsed == collapsed {
+            return;
+        }
+        self.right_collapsed = collapsed;
         self.state
-            .with_mut(|s| s.prefs.right_sidebar_collapsed = self.right_collapsed);
+            .with_mut(|s| s.prefs.right_sidebar_collapsed = collapsed);
         self.state.persist_prefs();
-        let width = if self.right_collapsed {
-            RIGHT_SIDEBAR_COLLAPSED_WIDTH
-        } else {
-            self.state
-                .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width))
-        };
-        self.sidebar_panels.update(cx, |state, cx| {
-            state.resize_panel(2, px(width), window, cx);
-        });
+        if !collapsed {
+            let width = self
+                .state
+                .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width));
+            self.sidebar_panels.update(cx, |state, cx| {
+                state.resize_panel(2, px(width), window, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -798,6 +810,8 @@ impl Render for WorkbenchApp {
                         let entity = entity.clone();
                         let inspector = self.inspector.clone();
                         let right_collapsed = self.right_collapsed;
+                        let show_right = nav == AppNav::Agent
+                            && self.state.with(|s| s.active_thread_id.is_some());
                         let left_width = if collapsed { 48.0 } else { width };
                         let left_range = if collapsed {
                             px(48.)..px(48.)
@@ -836,7 +850,7 @@ impl Render for WorkbenchApp {
                                             .child(sidebar),
                                     )
                                     .child(resizable_panel().child(main))
-                                    .child({
+                                    .when(show_right, |row| {
                                         let right_size = if right_collapsed {
                                             RIGHT_SIDEBAR_COLLAPSED_WIDTH
                                         } else {
@@ -848,11 +862,13 @@ impl Render for WorkbenchApp {
                                         } else {
                                             px(RIGHT_SIDEBAR_WIDTH_MIN)..px(RIGHT_SIDEBAR_WIDTH_MAX)
                                         };
-                                        resizable_panel()
-                                            .size(px(right_size))
-                                            .size_range(right_range)
-                                            .fixed()
-                                            .child(inspector)
+                                        row.child(
+                                            resizable_panel()
+                                                .size(px(right_size))
+                                                .size_range(right_range)
+                                                .fixed()
+                                                .child(inspector),
+                                        )
                                     }),
                             )
                             .into_any_element()

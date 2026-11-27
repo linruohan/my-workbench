@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use wb_domain::{AgentEvent, create_id, is_text_extension, now_ms};
 use wb_host::{
     GitSnapshot, KbEntry, ensure_session_worktree, git_branches, git_checkout, git_commit_show,
-    git_fetch, git_file_diff, git_init, git_recent_log, git_remotes, git_snapshot,
+    git_diff_head, git_fetch, git_file_diff, git_init, git_recent_log, git_remotes, git_snapshot,
     git_worktree_list, global_terminals, list_dir, list_worktree_files, merge_session_worktree,
-    set_agent_cwd,
+    set_agent_cwd, spill_dir,
 };
 
 /// Agent 会话右侧栏，对齐参考应用的可切换轨道：终端、文件、Git、任务。
@@ -28,6 +28,7 @@ enum GitSection {
     Branches,
     Log,
     Worktrees,
+    Diff3,
     Remote,
 }
 
@@ -35,7 +36,9 @@ enum GitSection {
 enum MissionTab {
     Goal,
     Todos,
+    Gate,
     Log,
+    Artifacts,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,6 +47,7 @@ enum AgentRailTab {
     Files,
     Git,
     Mission,
+    Visualizer,
 }
 
 impl AgentRailTab {
@@ -53,6 +57,7 @@ impl AgentRailTab {
             Self::Files => 1,
             Self::Git => 2,
             Self::Mission => 3,
+            Self::Visualizer => 4,
         }
     }
 
@@ -62,6 +67,7 @@ impl AgentRailTab {
             Self::Files => "文件",
             Self::Git => "Git",
             Self::Mission => "任务",
+            Self::Visualizer => "可视化",
         }
     }
 }
@@ -117,6 +123,8 @@ pub struct InspectorPane {
     git_worktrees: Vec<(String, String)>,
     git_remotes: Vec<String>,
     rename_from: Option<String>,
+    /// 0 会话，1 目录，2 记录。对应 hadron 可视化的三种模式。
+    viz_mode: u8,
     mission_tab: MissionTab,
     _subs: Vec<Subscription>,
 }
@@ -155,6 +163,7 @@ impl InspectorPane {
             git_worktrees: Vec::new(),
             git_remotes: Vec::new(),
             rename_from: None,
+            viz_mode: 0,
             mission_tab: MissionTab::Goal,
             _subs: Vec::new(),
         };
@@ -448,6 +457,31 @@ impl InspectorPane {
                 }
                 if let Ok(rows) = result.3 {
                     this.git_remotes = rows;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_diff_head(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root() else {
+            return;
+        };
+        self.git_note = Some("正在比较工作区与 HEAD…".into());
+        cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            let result = async_cx
+                .background_executor()
+                .spawn(async move { git_diff_head(&root) })
+                .await;
+            let _ = this.update(async_cx, |this, cx| {
+                match result {
+                    Ok(text) => {
+                        this.git_diff = Some(("工作区 / HEAD".into(), text));
+                        this.git_note = None;
+                    }
+                    Err(err) => this.git_note = Some(err.to_string()),
                 }
                 cx.notify();
             });
@@ -1140,6 +1174,7 @@ impl InspectorPane {
                     AgentRailTab::Files,
                     AgentRailTab::Git,
                     AgentRailTab::Mission,
+                    AgentRailTab::Visualizer,
                 ]
                 .into_iter()
                 .map(|item| {
@@ -1193,12 +1228,12 @@ impl InspectorPane {
                         Button::new("agent-rail-collapse")
                             .xsmall()
                             .ghost()
-                            .icon(IconName::ChevronRight)
-                            .tooltip("收起右侧栏")
+                            .icon(IconName::PanelRight)
+                            .tooltip("关闭右侧栏")
                             .on_click(move |_, window, app| {
                                 if let Some(e) = host.upgrade() {
                                     e.update(app, |this, cx| {
-                                        this.toggle_right_collapsed(window, cx)
+                                        this.set_right_collapsed(true, window, cx)
                                     });
                                 }
                             }),
@@ -1222,6 +1257,9 @@ impl InspectorPane {
                     .into_any_element(),
                 AgentRailTab::Git => self.git_panel(git, muted, cx).into_any_element(),
                 AgentRailTab::Mission => self.mission_panel(muted, cx).into_any_element(),
+                AgentRailTab::Visualizer => {
+                    self.visualizer_panel(root, muted, cx).into_any_element()
+                }
             })
     }
 
@@ -1671,9 +1709,11 @@ impl InspectorPane {
         let current = self.mission_tab;
         let pills = h_flex().px_2().pt_2().gap_1().children(
             [
-                (MissionTab::Goal, "目标"),
+                (MissionTab::Goal, "计划"),
                 (MissionTab::Todos, "待办"),
-                (MissionTab::Log, "记录"),
+                (MissionTab::Gate, "门禁"),
+                (MissionTab::Log, "时间线"),
+                (MissionTab::Artifacts, "产物"),
             ]
             .into_iter()
             .map(|(tab, label)| {
@@ -1699,6 +1739,8 @@ impl InspectorPane {
         let mut body = v_flex().size_full().min_h_0();
         body = match current {
             MissionTab::Log => body.child(self.events_panel(muted)),
+            MissionTab::Gate => body.child(self.gate_panel(muted)),
+            MissionTab::Artifacts => body.child(self.artifacts_panel(muted)),
             MissionTab::Todos => body.child(
                 v_flex()
                     .px_3()
@@ -1811,6 +1853,170 @@ impl InspectorPane {
         cx.notify();
     }
 
+    fn gate_panel(&self, muted: Hsla) -> impl IntoElement {
+        let events = self.state.with(|s| {
+            s.active_thread_id
+                .as_ref()
+                .map(|id| s.repo.agent_events_for_thread(id))
+                .unwrap_or_default()
+        });
+        let rows: Vec<_> = events
+            .into_iter()
+            .rev()
+            .filter(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "tool_blocked" | "tool_pending" | "approval_granted" | "approval_denied"
+                )
+            })
+            .take(40)
+            .collect();
+        let mut body = v_flex().px_3().py_2().gap_1();
+        if rows.is_empty() {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("还没有拦住或审批的记录"),
+            );
+        }
+        body.children(rows.into_iter().map(|event| {
+            div()
+                .text_xs()
+                .child(format!("{} · {}", event.kind, event.name))
+        }))
+    }
+
+    fn artifacts_panel(&self, muted: Hsla) -> impl IntoElement {
+        let dir = self.root().map(|root| spill_dir(&root));
+        let files = dir
+            .as_ref()
+            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .map(|read| {
+                let mut names: Vec<_> = read
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect();
+                names.sort();
+                names.truncate(40);
+                names
+            });
+        let mut body = v_flex().px_3().py_2().gap_1();
+        match files {
+            None => {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("还没有工具溢出文件"),
+                );
+            }
+            Some(names) if names.is_empty() => {
+                body = body.child(div().text_xs().text_color(muted).child("溢出目录是空的"));
+            }
+            Some(names) => {
+                body = body.children(names.into_iter().map(|name| div().text_xs().child(name)));
+            }
+        }
+        body
+    }
+
+    fn visualizer_panel(
+        &mut self,
+        root: Option<PathBuf>,
+        muted: Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mode = self.viz_mode;
+        let accent = cx.theme().accent;
+        let pills = h_flex().px_2().pt_2().gap_1().children(
+            [(0u8, "会话"), (1, "目录"), (2, "记录")]
+                .into_iter()
+                .map(|(id, label)| {
+                    div()
+                        .id(("viz-mode", id as usize))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(mode == id, |pill| {
+                            pill.bg(accent).text_color(cx.theme().accent_foreground)
+                        })
+                        .when(mode != id, |pill| pill.text_color(muted))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.viz_mode = id;
+                            cx.notify();
+                        }))
+                }),
+        );
+        let content = match mode {
+            1 => {
+                let names = root
+                    .as_ref()
+                    .and_then(|root| std::fs::read_dir(root).ok())
+                    .map(|read| {
+                        let mut names: Vec<_> = read
+                            .filter_map(|entry| entry.ok())
+                            .map(|entry| entry.file_name().to_string_lossy().to_string())
+                            .filter(|name| !name.starts_with('.'))
+                            .collect();
+                        names.sort();
+                        names.truncate(40);
+                        names
+                    })
+                    .unwrap_or_default();
+                v_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .children(names.into_iter().map(|name| div().text_xs().child(name)))
+                    .into_any_element()
+            }
+            2 => self.events_panel(muted).into_any_element(),
+            _ => {
+                let (goal, todos) = self.state.with(|s| {
+                    let thread = s
+                        .active_thread_id
+                        .as_ref()
+                        .and_then(|id| s.repo.get_agent_thread(id));
+                    let goal = thread
+                        .as_ref()
+                        .and_then(|thread| thread.session_goal.as_ref())
+                        .map(|goal| goal.objective.clone())
+                        .unwrap_or_else(|| "还没有目标".into());
+                    let todos = thread.map(|thread| thread.session_todos.len()).unwrap_or(0);
+                    (goal, todos)
+                });
+                let changes = self
+                    .git
+                    .as_ref()
+                    .map(|snap| snap.changes.len())
+                    .unwrap_or(0);
+                v_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .child(div().text_sm().child(goal))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{todos} 项待办 · {changes} 个改动")),
+                    )
+                    .into_any_element()
+            }
+        };
+        v_flex().flex_1().min_h_0().child(pills).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .child(content),
+        )
+    }
+
     fn events_panel(&self, muted: impl Into<Hsla>) -> impl IntoElement {
         let muted = muted.into();
         let events = self.state.with(|s| {
@@ -1918,8 +2124,9 @@ impl InspectorPane {
                             [
                                 (GitSection::Changes, "改动"),
                                 (GitSection::Branches, "分支"),
-                                (GitSection::Log, "提交"),
                                 (GitSection::Worktrees, "工作树"),
+                                (GitSection::Log, "图谱"),
+                                (GitSection::Diff3, "三方差异"),
                                 (GitSection::Remote, "远程"),
                             ]
                             .into_iter()
@@ -1939,7 +2146,9 @@ impl InspectorPane {
                                     .child(label)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.git_section = item;
-                                        if item != GitSection::Changes {
+                                        if item == GitSection::Diff3 {
+                                            this.load_diff_head(cx);
+                                        } else if item != GitSection::Changes {
                                             this.load_git_lists(cx);
                                         }
                                         cx.notify();
@@ -1995,6 +2204,24 @@ impl InspectorPane {
                                     view.update(app, |this, cx| this.load_commit(rev, cx));
                                 })
                         }));
+                        return body;
+                    }
+                    if section == GitSection::Diff3 {
+                        if let Some(note) = self.git_note.clone() {
+                            body = body.child(div().text_xs().text_color(muted).child(note));
+                        }
+                        if let Some((title, diff)) = self.git_diff.clone() {
+                            body = body
+                                .child(div().text_xs().child(title))
+                                .child(div().font_family("monospace").text_xs().child(diff));
+                        } else {
+                            body = body.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("这里比较工作区、HEAD，以及已暂存的内容统计"),
+                            );
+                        }
                         return body;
                     }
                     if section == GitSection::Worktrees {

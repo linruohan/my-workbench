@@ -356,6 +356,21 @@ pub fn git_fetch(root: &Path) -> Result<String> {
     }
 }
 
+pub fn git_diff_head(root: &Path) -> Result<String> {
+    let text = git_ok(root, &["diff", "--stat", "HEAD"])?;
+    let text = if text.trim().is_empty() {
+        "工作区与 HEAD 没有差异".to_string()
+    } else {
+        text
+    };
+    const LIMIT: usize = 40_000;
+    if text.len() > LIMIT {
+        Ok(format!("{}…\n（差异已截断）", &text[..LIMIT]))
+    } else {
+        Ok(text)
+    }
+}
+
 pub fn git_remotes(root: &Path) -> Result<Vec<String>> {
     let text = git_ok(root, &["remote", "-v"])?;
     Ok(text
