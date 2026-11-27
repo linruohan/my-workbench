@@ -2236,11 +2236,13 @@ impl InspectorPane {
                             })
                             .context_menu(move |menu, _, _| {
                                 let mention = mention.clone();
-                                menu.item(PopupMenuItem::new("复制引用").on_click(move |_, _, app| {
-                                    app.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        mention.clone(),
-                                    ));
-                                }))
+                                menu.item(PopupMenuItem::new("复制引用").on_click(
+                                    move |_, _, app| {
+                                        app.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            mention.clone(),
+                                        ));
+                                    },
+                                ))
                             })
                     }));
                 }
