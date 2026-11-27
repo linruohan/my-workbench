@@ -10036,6 +10036,7 @@ dependencies = [
  "gpui-webview",
  "jiff",
  "log",
+ "raw-window-handle",
  "resvg",
  "serde",
  "serde_json",
@@ -10046,6 +10047,7 @@ dependencies = [
  "wb-domain",
  "wb-host",
  "wb-store",
+ "windows-sys 0.59.0",
  "wry",
 ]
 

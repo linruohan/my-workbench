@@ -129,12 +129,12 @@ impl WorkbenchApp {
         let close_to_tray = state.with(|s| s.prefs.close_to_tray);
         let tray_icon = if tray_on { tray::create_tray() } else { None };
         let app = cx.weak_entity();
-        let minimize_on_close = tray_on && close_to_tray;
-        // Close always flushes. With the tray, close minimizes instead of quitting.
+        let hide_on_close = tray_on && close_to_tray;
+        // Close always flushes. With the tray, close hides the window instead of quitting.
         window.on_window_should_close(cx, move |window, cx| {
-            if minimize_on_close && !tray::is_force_quit() {
+            if hide_on_close && !tray::is_force_quit() {
                 let _ = app.update(cx, |this, cx| this.flush_persistent_state(cx));
-                window.minimize_window();
+                tray::hide_main_window(window);
                 return false;
             }
             let _ = app.update(cx, |this, cx| this.flush_persistent_state(cx));
@@ -180,7 +180,7 @@ impl WorkbenchApp {
                 cx.activate(true);
                 if let Some(handle) = cx.active_window() {
                     let _ = handle.update(cx, |_, window, _| {
-                        window.activate_window();
+                        tray::show_main_window(window);
                     });
                 }
             }

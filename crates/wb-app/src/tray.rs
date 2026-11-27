@@ -1,4 +1,4 @@
-//! System tray icon: show / quit. Close-to-tray is handled in the window layer.
+//! System tray icon: show / quit. Close-to-tray hides the window so the taskbar button goes away.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,45 @@ pub fn request_force_quit() {
 
 pub fn is_force_quit() -> bool {
     FORCE_QUIT.load(Ordering::SeqCst)
+}
+
+/// Hide the main window. On Windows, minimize keeps the taskbar button; `SW_HIDE` removes it.
+pub fn hide_main_window(window: &gpui_kit::Window) {
+    #[cfg(windows)]
+    if let Some(hwnd) = hwnd_of(window) {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE,
+            );
+        }
+        return;
+    }
+    window.minimize_window();
+}
+
+/// Show a window that was hidden into the tray, then bring it forward.
+pub fn show_main_window(window: &gpui_kit::Window) {
+    #[cfg(windows)]
+    if let Some(hwnd) = hwnd_of(window) {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW,
+            );
+        }
+    }
+    window.activate_window();
+}
+
+#[cfg(windows)]
+fn hwnd_of(window: &gpui_kit::Window) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(win) => Some(win.hwnd.get() as _),
+        _ => None,
+    }
 }
 
 /// Application icon embedded from `data/icons/app.svg` (Windows resource id 1).

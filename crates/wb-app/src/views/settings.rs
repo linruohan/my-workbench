@@ -2693,7 +2693,7 @@ fn data_page(state: AppState, entity: WeakEntity<SettingsPane>, data_msg: String
                 )
                 .item(
                     SettingItem::new(
-                        "关闭时最小化到托盘",
+                        "关闭时收到托盘",
                         SettingField::switch(
                             move |_| close_read.with(|inner| inner.prefs.close_to_tray),
                             move |enabled, cx: &mut App| {
