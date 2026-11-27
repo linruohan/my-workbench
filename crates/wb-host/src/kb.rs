@@ -287,6 +287,16 @@ pub fn git_branches(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+pub fn git_remote_branches(root: &Path) -> Result<Vec<String>> {
+    let text = git_ok(root, &["branch", "-r", "--format=%(refname:short)"])?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.ends_with("/HEAD"))
+        .map(str::to_string)
+        .collect())
+}
+
 pub fn git_worktree_list(root: &Path) -> Result<Vec<(String, String)>> {
     let text = git_ok(root, &["worktree", "list", "--porcelain"])?;
     let mut rows = Vec::new();
@@ -326,7 +336,7 @@ pub fn git_commit_show(root: &Path, rev: &str) -> Result<String> {
 }
 
 pub fn git_recent_log(root: &Path) -> Result<Vec<String>> {
-    let text = git_ok(root, &["log", "-12", "--oneline"])?;
+    let text = git_ok(root, &["log", "-40", "--graph", "--oneline", "--decorate"])?;
     Ok(text
         .lines()
         .map(str::trim)

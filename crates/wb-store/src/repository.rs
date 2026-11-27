@@ -721,6 +721,15 @@ impl MemoryWorkbenchRepository {
         self.touch();
     }
 
+    /// Drop the workspace record. Threads that pointed at it stay, and show up ungrouped.
+    pub fn delete_agent_workspace(&mut self, id: &str) -> bool {
+        let removed = self.agent_workspaces.remove(id).is_some();
+        if removed {
+            self.touch();
+        }
+        removed
+    }
+
     pub fn get_agent_message(&self, id: &str) -> Option<AgentMessage> {
         self.agent_messages.get(id).cloned()
     }

@@ -10,15 +10,17 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 use wb_domain::{AgentEvent, create_id, is_text_extension, now_ms};
 use wb_host::{
     GitSnapshot, KbEntry, ensure_session_worktree, git_branches, git_checkout, git_commit_show,
-    git_diff_head, git_fetch, git_file_diff, git_init, git_recent_log, git_remotes, git_snapshot,
-    git_worktree_list, global_terminals, list_dir, list_worktree_files, merge_session_worktree,
-    set_agent_cwd, spill_dir,
+    git_diff_head, git_fetch, git_file_diff, git_init, git_recent_log, git_remote_branches,
+    git_remotes, git_snapshot, git_worktree_list, global_terminals, list_dir, list_worktree_files,
+    merge_session_worktree, set_agent_cwd, spill_dir,
 };
 
 /// Agent 会话右侧栏，对齐参考应用的可切换轨道：终端、文件、Git、任务。
@@ -29,6 +31,13 @@ enum GitSection {
     Log,
     Worktrees,
     Diff3,
+    Remote,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BranchScope {
+    All,
+    Local,
     Remote,
 }
 
@@ -119,12 +128,30 @@ pub struct InspectorPane {
     git_diff: Option<(String, String)>,
     git_section: GitSection,
     git_branches: Vec<String>,
+    git_remote_branches: Vec<String>,
+    branch_scope: BranchScope,
+    /// 时间线回放到第几条（从新到旧）。None 表示看到最新。
+    event_cursor: Option<usize>,
     git_log: Vec<String>,
     git_worktrees: Vec<(String, String)>,
     git_remotes: Vec<String>,
     rename_from: Option<String>,
-    /// 0 会话，1 目录，2 记录。对应 hadron 可视化的三种模式。
+    /// 0 蜂群三维，1 依赖图，2 核图谱。
     viz_mode: u8,
+    viz_yaw: f32,
+    viz_pitch: f32,
+    viz_drag: Option<(f32, f32, f32, f32)>,
+    viz_focus: Option<String>,
+    dep_focus: Option<String>,
+    nucleus_focus: Option<String>,
+    nucleus_zoom: f32,
+    /// 0 全部，1 孤立，2 断链。
+    nucleus_filter: u8,
+    dep_key: Option<String>,
+    dep_graph: crate::views::visualizer::VizGraph,
+    nucleus_key: Option<String>,
+    nucleus_graph: crate::views::visualizer::VizGraph,
+    viz_hits: crate::views::visualizer::VizHits,
     mission_tab: MissionTab,
     _subs: Vec<Subscription>,
 }
@@ -159,11 +186,27 @@ impl InspectorPane {
             git_diff: None,
             git_section: GitSection::Changes,
             git_branches: Vec::new(),
+            git_remote_branches: Vec::new(),
+            branch_scope: BranchScope::All,
+            event_cursor: None,
             git_log: Vec::new(),
             git_worktrees: Vec::new(),
             git_remotes: Vec::new(),
             rename_from: None,
             viz_mode: 0,
+            viz_yaw: 0.4,
+            viz_pitch: 0.2,
+            viz_drag: None,
+            viz_focus: None,
+            dep_focus: None,
+            nucleus_focus: None,
+            nucleus_zoom: 1.0,
+            nucleus_filter: 0,
+            dep_key: None,
+            dep_graph: crate::views::visualizer::VizGraph::default(),
+            nucleus_key: None,
+            nucleus_graph: crate::views::visualizer::VizGraph::default(),
+            viz_hits: Rc::new(RefCell::new(Vec::new())),
             mission_tab: MissionTab::Goal,
             _subs: Vec::new(),
         };
@@ -190,7 +233,14 @@ impl InspectorPane {
                 let alive = this
                     .update(async_cx, |this, cx| {
                         let agent = this.state.with(|s| s.nav) == AppNav::Agent;
-                        if agent && this.agent_tab == AgentRailTab::Terminal {
+                        if agent
+                            && (this.agent_tab == AgentRailTab::Terminal
+                                || this.agent_tab == AgentRailTab::Visualizer)
+                        {
+                            if this.agent_tab == AgentRailTab::Visualizer && this.viz_drag.is_none()
+                            {
+                                this.viz_yaw += 0.03;
+                            }
                             cx.notify();
                         }
                     })
@@ -438,10 +488,11 @@ impl InspectorPane {
                 .background_executor()
                 .spawn(async move {
                     let branches = git_branches(&root);
+                    let remote_branches = git_remote_branches(&root);
                     let log = git_recent_log(&root);
                     let worktrees = git_worktree_list(&root);
                     let remotes = git_remotes(&root);
-                    (branches, log, worktrees, remotes)
+                    (branches, remote_branches, log, worktrees, remotes)
                 })
                 .await;
             let _ = this.update(async_cx, |this, cx| {
@@ -450,12 +501,15 @@ impl InspectorPane {
                     Err(err) => this.git_note = Some(err.to_string()),
                 }
                 if let Ok(rows) = result.1 {
-                    this.git_log = rows;
+                    this.git_remote_branches = rows;
                 }
                 if let Ok(rows) = result.2 {
-                    this.git_worktrees = rows;
+                    this.git_log = rows;
                 }
                 if let Ok(rows) = result.3 {
+                    this.git_worktrees = rows;
+                }
+                if let Ok(rows) = result.4 {
                     this.git_remotes = rows;
                 }
                 cx.notify();
@@ -1738,7 +1792,7 @@ impl InspectorPane {
         );
         let mut body = v_flex().size_full().min_h_0();
         body = match current {
-            MissionTab::Log => body.child(self.events_panel(muted)),
+            MissionTab::Log => body.child(self.timeline_panel(muted, cx)),
             MissionTab::Gate => body.child(self.gate_panel(muted)),
             MissionTab::Artifacts => body.child(self.artifacts_panel(muted)),
             MissionTab::Todos => body.child(
@@ -1927,10 +1981,11 @@ impl InspectorPane {
         muted: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        use crate::views::visualizer;
         let mode = self.viz_mode;
         let accent = cx.theme().accent;
         let pills = h_flex().px_2().pt_2().gap_1().children(
-            [(0u8, "会话"), (1, "目录"), (2, "记录")]
+            [(0u8, "蜂群三维"), (1, "依赖图"), (2, "核图谱")]
                 .into_iter()
                 .map(|(id, label)| {
                     div()
@@ -1951,73 +2006,325 @@ impl InspectorPane {
                         }))
                 }),
         );
-        let content = match mode {
+        let (summary, canvas_view, detail) = match mode {
             1 => {
-                let names = root
-                    .as_ref()
-                    .and_then(|root| std::fs::read_dir(root).ok())
-                    .map(|read| {
-                        let mut names: Vec<_> = read
-                            .filter_map(|entry| entry.ok())
-                            .map(|entry| entry.file_name().to_string_lossy().to_string())
-                            .filter(|name| !name.starts_with('.'))
-                            .collect();
-                        names.sort();
-                        names.truncate(40);
-                        names
-                    })
-                    .unwrap_or_default();
-                v_flex()
-                    .px_3()
-                    .py_2()
-                    .gap_1()
-                    .children(names.into_iter().map(|name| div().text_xs().child(name)))
-                    .into_any_element()
+                let key = root.as_ref().map(|path| path.display().to_string());
+                if self.dep_key != key {
+                    self.dep_graph = root
+                        .as_ref()
+                        .map(|path| visualizer::dependency_graph(path))
+                        .unwrap_or_default();
+                    self.dep_key = key;
+                }
+                let graph = self.dep_graph.clone();
+                let focus = self.dep_focus.clone();
+                let summary = format!("{} 个包 · {} 条依赖", graph.nodes.len(), graph.edges.len());
+                let detail = Self::focused_detail(&graph, focus.as_deref());
+                let hits = self.viz_hits.clone();
+                let view = visualizer::paint_flat(
+                    &graph,
+                    1.0,
+                    focus.as_deref(),
+                    &hits,
+                    accent,
+                    muted,
+                    true,
+                );
+                (summary, view.into_any_element(), detail)
             }
-            2 => self.events_panel(muted).into_any_element(),
+            2 => {
+                let key = root.as_ref().map(|path| path.display().to_string());
+                if self.nucleus_key != key {
+                    self.nucleus_graph = root
+                        .as_ref()
+                        .map(|path| visualizer::nucleus_graph(path))
+                        .unwrap_or_default();
+                    self.nucleus_key = key;
+                }
+                let mut graph = self.nucleus_graph.clone();
+                if self.nucleus_filter == 1 {
+                    graph.nodes.retain(|node| node.hot);
+                    let ids: HashSet<_> = graph.nodes.iter().map(|node| node.id.clone()).collect();
+                    graph.edges.retain(|edge| ids.contains(&edge.from));
+                } else if self.nucleus_filter == 2 {
+                    let broken: HashSet<_> = graph
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.broken)
+                        .map(|edge| edge.from.clone())
+                        .collect();
+                    graph.nodes.retain(|node| broken.contains(&node.id));
+                    graph.edges.retain(|edge| edge.broken);
+                }
+                let orphans = self
+                    .nucleus_graph
+                    .nodes
+                    .iter()
+                    .filter(|node| node.hot)
+                    .count();
+                let dead = self
+                    .nucleus_graph
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.broken)
+                    .count();
+                let summary = format!(
+                    "{} 篇笔记 · {} 孤立 · {} 断链",
+                    self.nucleus_graph.nodes.len(),
+                    orphans,
+                    dead
+                );
+                let focus = self.nucleus_focus.clone();
+                let detail = Self::focused_detail(&graph, focus.as_deref());
+                let hits = self.viz_hits.clone();
+                let zoom = self.nucleus_zoom;
+                let view = visualizer::paint_flat(
+                    &graph,
+                    zoom,
+                    focus.as_deref(),
+                    &hits,
+                    accent,
+                    muted,
+                    false,
+                );
+                (summary, view.into_any_element(), detail)
+            }
             _ => {
-                let (goal, todos) = self.state.with(|s| {
-                    let thread = s
-                        .active_thread_id
-                        .as_ref()
-                        .and_then(|id| s.repo.get_agent_thread(id));
-                    let goal = thread
-                        .as_ref()
-                        .and_then(|thread| thread.session_goal.as_ref())
-                        .map(|goal| goal.objective.clone())
-                        .unwrap_or_else(|| "还没有目标".into());
-                    let todos = thread.map(|thread| thread.session_todos.len()).unwrap_or(0);
-                    (goal, todos)
+                let graph = self.state.with(|s| {
+                    let threads: Vec<_> = s
+                        .repo
+                        .list_agent_threads()
+                        .into_iter()
+                        .filter(|thread| thread.archived_at.is_none())
+                        .map(|thread| {
+                            let busy = thread
+                                .session_goal
+                                .as_ref()
+                                .is_some_and(|goal| goal.status == "active");
+                            (thread.id, thread.title, busy)
+                        })
+                        .collect();
+                    visualizer::swarm_nodes(&threads, s.active_thread_id.as_deref())
                 });
-                let changes = self
-                    .git
-                    .as_ref()
-                    .map(|snap| snap.changes.len())
-                    .unwrap_or(0);
-                v_flex()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    .child(div().text_sm().child(goal))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("{todos} 项待办 · {changes} 个改动")),
-                    )
-                    .into_any_element()
+                let summary = format!("{} 个会话", graph.nodes.len());
+                let focus = self.viz_focus.clone();
+                let detail = Self::focused_detail(&graph, focus.as_deref());
+                let hits = self.viz_hits.clone();
+                let view = visualizer::paint_swarm(
+                    &graph,
+                    self.viz_yaw,
+                    self.viz_pitch,
+                    focus.as_deref(),
+                    &hits,
+                    accent,
+                    muted,
+                );
+                (summary, view.into_any_element(), detail)
             }
         };
-        v_flex().flex_1().min_h_0().child(pills).child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .child(content),
-        )
+        let filter_row = mode == 2;
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(pills)
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_1()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_xs().text_color(muted).child(summary))
+                    .when(filter_row, |row| row.child(self.nucleus_filters(cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(220.0))
+                    .child(canvas_view)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.viz_drag = Some((
+                                f32::from(event.position.x),
+                                f32::from(event.position.y),
+                                this.viz_yaw,
+                                this.viz_pitch,
+                            ));
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        let Some((x0, y0, yaw, pitch)) = this.viz_drag else {
+                            return;
+                        };
+                        if this.viz_mode != 0 {
+                            return;
+                        }
+                        let dx = f32::from(event.position.x) - x0;
+                        let dy = f32::from(event.position.y) - y0;
+                        this.viz_yaw = yaw + dx * 0.01;
+                        this.viz_pitch = (pitch - dy * 0.01).clamp(-1.2, 1.2);
+                        cx.notify();
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                            let dragged = this.viz_drag.take().is_some_and(|(x0, y0, _, _)| {
+                                let dx = f32::from(event.position.x) - x0;
+                                let dy = f32::from(event.position.y) - y0;
+                                dx * dx + dy * dy > 16.0
+                            });
+                            if !dragged {
+                                let x = f32::from(event.position.x);
+                                let y = f32::from(event.position.y);
+                                let hit =
+                                    this.viz_hits.borrow().iter().find_map(|(id, hx, hy, r)| {
+                                        let dx = x - hx;
+                                        let dy = y - hy;
+                                        (dx * dx + dy * dy <= r * r).then(|| id.clone())
+                                    });
+                                match this.viz_mode {
+                                    1 => this.dep_focus = hit,
+                                    2 => this.nucleus_focus = hit,
+                                    _ => this.viz_focus = hit,
+                                }
+                            }
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(detail),
+            )
+    }
+
+    fn focused_detail(graph: &crate::views::visualizer::VizGraph, focus: Option<&str>) -> String {
+        let Some(id) = focus else {
+            return "拖动旋转蜂群。点一个节点查看它。".into();
+        };
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| format!("{} · {}", node.label, node.detail))
+            .unwrap_or_else(|| "没有选中节点".into())
+    }
+
+    fn nucleus_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.nucleus_filter;
+        h_flex()
+            .gap_1()
+            .children(
+                [(0u8, "全部"), (1, "孤立"), (2, "断链")]
+                    .into_iter()
+                    .map(|(id, label)| {
+                        div()
+                            .id(("nucleus-filter", id as usize))
+                            .px_2()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(current == id, |pill| pill.text_color(cx.theme().accent))
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.nucleus_filter = id;
+                                if id == 0 {
+                                    this.nucleus_zoom = 1.0;
+                                } else {
+                                    this.nucleus_zoom = 1.15;
+                                }
+                                cx.notify();
+                            }))
+                    }),
+            )
+    }
+
+    fn timeline_panel(&self, muted: Hsla, cx: &mut Context<Self>) -> impl IntoElement {
+        let events = self.state.with(|s| {
+            s.active_thread_id
+                .as_ref()
+                .map(|id| s.repo.agent_events_for_thread(id))
+                .unwrap_or_default()
+        });
+        let total = events.len();
+        let shown = self.event_cursor.unwrap_or(total).min(total);
+        let cursor = self.event_cursor;
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("timeline-older")
+                            .xsmall()
+                            .ghost()
+                            .label("更早")
+                            .disabled(shown == 0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let total = this.state.with(|s| {
+                                    s.active_thread_id
+                                        .as_ref()
+                                        .map(|id| s.repo.agent_events_for_thread(id).len())
+                                        .unwrap_or(0)
+                                });
+                                let shown = this.event_cursor.unwrap_or(total);
+                                this.event_cursor = Some(shown.saturating_sub(1));
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().text_xs().text_color(muted).child(if total == 0 {
+                        "还没有记录".to_string()
+                    } else {
+                        format!("看到最近 {shown} / {total} 条")
+                    }))
+                    .child(
+                        Button::new("timeline-newer")
+                            .xsmall()
+                            .ghost()
+                            .label("更新")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let total = this.state.with(|s| {
+                                    s.active_thread_id
+                                        .as_ref()
+                                        .map(|id| s.repo.agent_events_for_thread(id).len())
+                                        .unwrap_or(0)
+                                });
+                                match this.event_cursor {
+                                    Some(n) if n + 1 >= total => this.event_cursor = None,
+                                    Some(n) => this.event_cursor = Some(n + 1),
+                                    None => {}
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("timeline-live")
+                            .xsmall()
+                            .ghost()
+                            .label("回到最新")
+                            .disabled(cursor.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.event_cursor = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(self.events_panel_limited(muted, shown))
     }
 
     fn events_panel(&self, muted: impl Into<Hsla>) -> impl IntoElement {
+        self.events_panel_limited(muted, usize::MAX)
+    }
+
+    fn events_panel_limited(&self, muted: impl Into<Hsla>, limit: usize) -> impl IntoElement {
         let muted = muted.into();
         let events = self.state.with(|s| {
             s.active_thread_id
@@ -2040,7 +2347,7 @@ impl InspectorPane {
                     .child("这个会话还没有工具或审批记录"),
             );
         } else {
-            body = body.children(events.into_iter().rev().take(80).map(|event| {
+            body = body.children(events.into_iter().rev().take(limit.min(80)).map(|event| {
                 let mark = match event.ok {
                     Some(true) => "完成",
                     Some(false) => "失败",
@@ -2075,6 +2382,16 @@ impl InspectorPane {
             }));
         }
         body
+    }
+
+    fn commit_rev(line: &str) -> String {
+        line.split_whitespace()
+            .find_map(|token| {
+                let token = token.trim_matches(|ch: char| !ch.is_ascii_hexdigit());
+                (token.len() >= 4 && token.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .then(|| token.to_string())
+            })
+            .unwrap_or_default()
     }
 
     fn git_panel(
@@ -2157,9 +2474,64 @@ impl InspectorPane {
                         ),
                     );
                     if section == GitSection::Branches {
-                        let rows = self.git_branches.clone();
+                        let scope = self.branch_scope;
+                        let accent = cx.theme().accent;
+                        body = body.child(
+                            h_flex().gap_1().children(
+                                [
+                                    (BranchScope::All, "全部"),
+                                    (BranchScope::Local, "本地"),
+                                    (BranchScope::Remote, "远程"),
+                                ]
+                                .into_iter()
+                                .map(|(item, label)| {
+                                    let selected = item == scope;
+                                    div()
+                                        .id(SharedString::from(format!("branch-scope-{label}")))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .when(selected, |pill| {
+                                            pill.bg(accent).text_color(cx.theme().accent_foreground)
+                                        })
+                                        .when(!selected, |pill| pill.text_color(muted))
+                                        .child(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.branch_scope = item;
+                                            this.load_git_lists(cx);
+                                            cx.notify();
+                                        }))
+                                }),
+                            ),
+                        );
+                        body = body.child(
+                            Button::new("git-fetch-branches")
+                                .xsmall()
+                                .label("获取远程")
+                                .on_click(cx.listener(|this, _, _, cx| this.fetch_remote(cx))),
+                        );
+                        let local = self.git_branches.clone();
+                        let remote = self.git_remote_branches.clone();
+                        let rows: Vec<(String, bool)> = match scope {
+                            BranchScope::Local => {
+                                local.into_iter().map(|name| (name, true)).collect()
+                            }
+                            BranchScope::Remote => {
+                                remote.into_iter().map(|name| (name, false)).collect()
+                            }
+                            BranchScope::All => local
+                                .into_iter()
+                                .map(|name| (name, true))
+                                .chain(remote.into_iter().map(|name| (name, false)))
+                                .collect(),
+                        };
+                        if rows.is_empty() {
+                            body = body.child(div().text_xs().text_color(muted).child("没有分支"));
+                        }
                         let entity = cx.weak_entity();
-                        body = body.children(rows.into_iter().map(|name| {
+                        body = body.children(rows.into_iter().map(|(name, checkout)| {
                             let entity = entity.clone();
                             let current = branch.contains(name.as_str());
                             div()
@@ -2169,13 +2541,17 @@ impl InspectorPane {
                                 .cursor_pointer()
                                 .child(if current {
                                     format!("{name} · 当前")
-                                } else {
+                                } else if checkout {
                                     name.clone()
+                                } else {
+                                    format!("{name} · 远程")
                                 })
-                                .on_click(move |_, _, app| {
-                                    let Some(view) = entity.upgrade() else { return };
-                                    let name = name.clone();
-                                    view.update(app, |this, cx| this.checkout_branch(name, cx));
+                                .when(checkout, |row| {
+                                    row.on_click(move |_, _, app| {
+                                        let Some(view) = entity.upgrade() else { return };
+                                        let name = name.clone();
+                                        view.update(app, |this, cx| this.checkout_branch(name, cx));
+                                    })
                                 })
                         }));
                         return body;
@@ -2190,7 +2566,7 @@ impl InspectorPane {
                                 .child("点一条提交，在改动页查看内容"),
                         );
                         body = body.children(rows.into_iter().map(|line| {
-                            let rev = line.split_whitespace().next().unwrap_or("").to_string();
+                            let rev = Self::commit_rev(&line);
                             let entity = entity.clone();
                             div()
                                 .id(SharedString::from(format!("git-log-{rev}")))

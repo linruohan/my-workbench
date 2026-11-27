@@ -6,6 +6,7 @@ pub mod settings;
 mod task_form;
 pub mod tasks;
 pub mod timed;
+mod visualizer;
 
 pub use agent::*;
 pub use inspector::*;
