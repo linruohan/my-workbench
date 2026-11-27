@@ -427,6 +427,7 @@ impl KnowledgePane {
             .as_ref()
             .and_then(|p| Path::new(p).parent().map(Path::to_path_buf));
         let lib_root = self.root();
+        let files = self.files.clone();
         TextView::new(&self.preview)
             .scrollable(true)
             .selectable(true)
@@ -434,7 +435,12 @@ impl KnowledgePane {
             .text_size(rems(self.preview_zoom))
             .markdown_extensions(kb_markdown_extensions())
             .image_source(move |uri| {
-                kb_preview_image_source(uri.as_ref(), note_dir.as_deref(), lib_root.as_deref())
+                kb_preview_image_source(
+                    uri.as_ref(),
+                    note_dir.as_deref(),
+                    lib_root.as_deref(),
+                    &files,
+                )
             })
             .px_5()
             .py_4()
@@ -1258,7 +1264,7 @@ fn wikilinks_for_preview_in(body: &str, files: &[(String, String)]) -> String {
                         out.push_str("![");
                         out.push_str(label);
                         out.push_str("](");
-                        out.push_str(target);
+                        out.push_str(&markdown_image_dest(target));
                         out.push(')');
                     } else {
                         if bang {
@@ -1686,10 +1692,19 @@ fn kb_toggle_task(
     });
 }
 
+fn markdown_image_dest(target: &str) -> String {
+    if target.contains([' ', '(', ')', '<', '>']) {
+        format!("<{}>", target.replace('>', "%3E"))
+    } else {
+        target.to_string()
+    }
+}
+
 fn kb_preview_image_source(
     uri: &str,
     note_dir: Option<&Path>,
     lib_root: Option<&Path>,
+    files: &[(String, String)],
 ) -> gpui::ImageSource {
     let uri = uri.trim();
     if uri.starts_with("data:")
@@ -1702,7 +1717,7 @@ fn kb_preview_image_source(
     if let Some(path) = file_uri_to_path(uri) {
         return gpui::ImageSource::from(path);
     }
-    if let Some(path) = resolve_preview_image_path(uri, note_dir, lib_root) {
+    if let Some(path) = resolve_preview_image_path(uri, note_dir, lib_root, files) {
         return gpui::ImageSource::from(path);
     }
     gpui::SharedUri::from(uri.to_string()).into()
@@ -1712,25 +1727,102 @@ fn resolve_preview_image_path(
     uri: &str,
     note_dir: Option<&Path>,
     lib_root: Option<&Path>,
+    files: &[(String, String)],
 ) -> Option<PathBuf> {
-    let decoded = percent_decode_path(uri);
-    if decoded.is_empty() {
-        return None;
-    }
+    let decoded = image_ref(uri)?;
     let raw = PathBuf::from(&decoded);
     if raw.is_absolute() {
         return Some(raw);
     }
-    let rel = decoded.trim_start_matches("./");
-    let from_note = note_dir.map(|dir| dir.join(rel));
-    if from_note.as_ref().is_some_and(|p| p.is_file()) {
-        return from_note;
+    // A leading slash is vault-root relative. Path::join would treat it as a
+    // drive root on Windows and drop the library path.
+    let vault_abs = decoded.starts_with('/');
+    let rel = decoded.trim_start_matches('/');
+    if rel.is_empty() {
+        return None;
     }
-    let from_root = lib_root.map(|root| root.join(rel));
-    if from_root.as_ref().is_some_and(|p| p.is_file()) {
-        return from_root;
+    if !vault_abs {
+        if let Some(path) = note_dir.and_then(|dir| existing_file(&join_relative(dir, rel))) {
+            return Some(path);
+        }
     }
-    from_note.or(from_root)
+    // `..` is relative to the note. Applying it to the library root walks out of the vault.
+    if !rel.split('/').any(|part| part == "..") {
+        if let Some(path) = lib_root.and_then(|root| existing_file(&join_relative(root, rel))) {
+            return Some(path);
+        }
+    }
+    lookup_library_image(rel, files)
+}
+
+fn image_ref(uri: &str) -> Option<String> {
+    let trimmed = uri
+        .trim()
+        .trim_matches(|c| matches!(c, '<' | '>' | '"' | '\''));
+    let without_suffix = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    let decoded = percent_decode_path(without_suffix).replace('\\', "/");
+    let mut rel = decoded.trim();
+    while let Some(rest) = rel.strip_prefix("./") {
+        rel = rest;
+    }
+    if rel.is_empty() {
+        None
+    } else {
+        Some(rel.to_string())
+    }
+}
+
+fn join_relative(base: &Path, rel: &str) -> PathBuf {
+    let mut path = base.to_path_buf();
+    for part in rel.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            path.pop();
+            continue;
+        }
+        path.push(part);
+    }
+    path
+}
+
+fn existing_file(path: &Path) -> Option<PathBuf> {
+    path.is_file().then(|| path.to_path_buf())
+}
+
+fn lookup_library_image(rel: &str, files: &[(String, String)]) -> Option<PathBuf> {
+    let want = normalize_image_rel(rel);
+    if want.is_empty() {
+        return None;
+    }
+    let bare = !want.contains('/');
+    let mut by_name = None;
+    for (abs, relative) in files {
+        if Path::new(abs)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_none_or(|ext| !is_image_extension(ext))
+        {
+            continue;
+        }
+        let rel_norm = normalize_image_rel(relative);
+        if rel_norm == want {
+            return Some(PathBuf::from(abs));
+        }
+        if bare && rel_norm.rsplit('/').next() == Some(want.as_str()) && by_name.is_none() {
+            by_name = Some(PathBuf::from(abs));
+        }
+    }
+    by_name
+}
+
+fn normalize_image_rel(path: &str) -> String {
+    let mut rel = path.replace('\\', "/");
+    while let Some(rest) = rel.strip_prefix("./") {
+        rel = rest.to_string();
+    }
+    rel.trim_matches('/').to_ascii_lowercase()
 }
 
 fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
@@ -2727,6 +2819,10 @@ mod tests {
             "![图](assets/a.jpg)"
         );
         assert_eq!(
+            wikilinks_for_preview_in("![[my photo.png]]", &[]),
+            "![my photo.png](<my photo.png>)"
+        );
+        assert_eq!(
             wikilinks_for_preview_in("见 ![[note]]。", &[]),
             "见 [note](wiki:///note)。"
         );
@@ -2760,7 +2856,7 @@ mod tests {
         std::fs::create_dir_all(&note_dir).unwrap();
         std::fs::write(note_dir.join("a.png"), b"note").unwrap();
         std::fs::write(root.join("a.png"), b"root").unwrap();
-        let path = resolve_preview_image_path("a.png", Some(&note_dir), Some(&root)).unwrap();
+        let path = resolve_preview_image_path("a.png", Some(&note_dir), Some(&root), &[]).unwrap();
         assert_eq!(path, note_dir.join("a.png"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -2773,8 +2869,34 @@ mod tests {
         std::fs::create_dir_all(&note_dir).unwrap();
         std::fs::write(tmp.join("assets").join("pic.png"), b"root").unwrap();
         let path =
-            resolve_preview_image_path("assets/pic.png", Some(&note_dir), Some(&tmp)).unwrap();
+            resolve_preview_image_path("assets/pic.png", Some(&note_dir), Some(&tmp), &[]).unwrap();
         assert_eq!(path, tmp.join("assets").join("pic.png"));
+        let vault = resolve_preview_image_path("/assets/pic.png", Some(&note_dir), Some(&tmp), &[])
+            .unwrap();
+        assert_eq!(vault, tmp.join("assets").join("pic.png"));
+        let parent = tmp.join("assets").join("pic.png");
+        let nested = note_dir.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let via_parent =
+            resolve_preview_image_path("../../assets/pic.png", Some(&nested), Some(&tmp), &[])
+                .unwrap();
+        assert_eq!(via_parent, parent);
+        let listed = resolve_preview_image_path(
+            "pic.png",
+            Some(&note_dir),
+            Some(&tmp),
+            &[(
+                parent.to_string_lossy().into_owned(),
+                "assets/pic.png".into(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(listed, parent);
+        let spaced = note_dir.join("my photo.png");
+        std::fs::write(&spaced, b"sp").unwrap();
+        let via_space =
+            resolve_preview_image_path("my%20photo.png", Some(&note_dir), Some(&tmp), &[]).unwrap();
+        assert_eq!(via_space, spaced);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

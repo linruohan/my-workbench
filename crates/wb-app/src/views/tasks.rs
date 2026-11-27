@@ -1777,7 +1777,7 @@ impl Render for TasksPane {
                                 EmptyHeader::new()
                                     .title(EmptyTitle::new().child("计划是空的"))
                                     .description(EmptyDescription::new().child(
-                                        "用上方快速捕获写「今天 写报告」或「明天 10:00 开会」。",
+                                        "用底部快速捕获写「今天 写报告」或「明天 10:00 开会」。",
                                     )),
                             )
                             .into_any_element()
@@ -1861,11 +1861,7 @@ impl Render for TasksPane {
                             EmptyHeader::new()
                                 .title(EmptyTitle::new().child("暂无任务"))
                                 .description(EmptyDescription::new().child(if hint {
-                                    if show_archive {
-                                        "在底部输入一句话即可捕获，例如「明天 写周报 提前10分钟」。"
-                                    } else {
-                                        "在上方输入一句话即可捕获，例如「明天 写周报 #工作 提前10分钟」。"
-                                    }
+                                    "在底部输入一句话即可捕获，例如「明天 写周报 #工作 提前10分钟」。"
                                 } else {
                                     "当前列表是空的。"
                                 })),
@@ -2288,9 +2284,6 @@ impl Render for TasksPane {
             .when(show_archive, |col| {
                 col.child(Input::new(&self.task_query).cleanable(true))
             })
-            .when(nav != AppNav::Tags && !show_archive, |col| {
-                col.child(Input::new(&self.capture).cleanable(true))
-            })
             .when(nav != AppNav::Tags && !suggestions.is_empty(), |col| {
                 let entity = entity.clone();
                 col.child(
@@ -2333,8 +2326,8 @@ impl Render for TasksPane {
                         })),
                 )
             })
-            .child(body)
-            .when(show_archive, |col| {
+            .child(v_flex().flex_1().min_h_0().overflow_hidden().child(body))
+            .when(nav != AppNav::Tags, |col| {
                 col.child(Input::new(&self.capture).cleanable(true))
             })
     }
