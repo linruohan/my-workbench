@@ -800,6 +800,9 @@ fn general_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPag
     let name_state = state.clone();
     let name_write = state.clone();
     let name_entity = entity.clone();
+    let shell_state = state.clone();
+    let shell_write = state.clone();
+    let shell_entity = entity.clone();
     let locale_state = state.clone();
     let locale_write = state.clone();
     let locale_entity = entity.clone();
@@ -896,6 +899,37 @@ fn general_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPag
                         ),
                     )
                     .description("选择应用界面的显示语言（文案国际化将逐步接入）"),
+                )
+                .item(
+                    SettingItem::new(
+                        "终端类型",
+                        SettingField::dropdown(
+                            vec![
+                                ("auto".into(), "自动".into()),
+                                ("bash".into(), "Bash".into()),
+                                ("cmd".into(), "命令提示符".into()),
+                                ("powershell".into(), "Windows PowerShell".into()),
+                                ("pwsh".into(), "PowerShell 7".into()),
+                                ("alacritty".into(), "Alacritty".into()),
+                            ],
+                            move |_| {
+                                let value = shell_state
+                                    .with(|inner| inner.prefs.general.terminal_shell.clone());
+                                if value.is_empty() {
+                                    "auto".into()
+                                } else {
+                                    value.into()
+                                }
+                            },
+                            move |value: SharedString, cx: &mut App| {
+                                let value = value.to_string();
+                                set_general(&shell_write, &shell_entity, cx, |prefs| {
+                                    prefs.terminal_shell = value;
+                                });
+                            },
+                        ),
+                    )
+                    .description("右侧栏和 Agent 里新开的终端使用这个程序。Alacritty 会打开独立窗口，其余在内嵌终端中运行。"),
                 )
                 .item(
                     SettingItem::new(

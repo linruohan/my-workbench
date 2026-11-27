@@ -642,7 +642,8 @@ impl InspectorPane {
         let id = if let Some(id) = self.term_id.clone() {
             id
         } else {
-            match global_terminals().open("", cwd.as_deref()) {
+            let shell = self.state.terminal_program();
+            match global_terminals().open(&shell, cwd.as_deref()) {
                 Ok(id) => {
                     self.term_id = Some(id.clone());
                     id
@@ -1582,7 +1583,8 @@ impl InspectorPane {
     }
 
     fn open_agent_terminal(&mut self, root: Option<&Path>, cx: &mut Context<Self>) {
-        match global_terminals().open("", root) {
+        let shell = self.state.terminal_program();
+        match global_terminals().open(&shell, root) {
             Ok(id) => {
                 self.term_id = Some(id);
                 self.term_note = None;

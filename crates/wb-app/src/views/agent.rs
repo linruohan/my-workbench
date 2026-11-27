@@ -2499,7 +2499,8 @@ impl AgentPane {
                 .find(|w| w.id == thread.workspace_id)
                 .and_then(|w| w.root_path)
         });
-        match global_terminals().open("", cwd.as_deref().map(std::path::Path::new)) {
+        let shell = self.state.terminal_program();
+        match global_terminals().open(&shell, cwd.as_deref().map(std::path::Path::new)) {
             Ok(id) => {
                 self.term_id = Some(id);
                 self.show_terminal = true;
@@ -3189,6 +3190,7 @@ impl AgentPane {
                                     let delete_entity = entity.clone();
                                     let host = self.host.clone();
                                     row.child(
+                                        h_flex().ml_auto().gap_1().items_center().child(
                                         Button::new("agent-thread-more")
                                             .xsmall()
                                             .ghost()
@@ -3295,6 +3297,7 @@ impl AgentPane {
                                                     });
                                                 }
                                             }),
+                                    ),
                                     )
                                 }),
                         )

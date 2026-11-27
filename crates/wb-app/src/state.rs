@@ -266,6 +266,11 @@ impl AppState {
         })
     }
 
+    /// Shell id from General settings. Empty and `auto` follow the host default.
+    pub fn terminal_program(&self) -> String {
+        self.with(|s| s.prefs.general.terminal_shell.clone())
+    }
+
     pub fn persist_prefs(&self) {
         self.with(|s| {
             if let Err(e) = save_prefs(&s.prefs) {

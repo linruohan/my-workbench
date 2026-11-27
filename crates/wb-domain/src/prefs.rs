@@ -132,6 +132,9 @@ pub struct GeneralPrefs {
     pub remember_last_note: bool,
     #[serde(default)]
     pub last_note_path: Option<String>,
+    /// `auto` | `bash` | `cmd` | `powershell` | `pwsh` | `alacritty`.
+    #[serde(default = "default_terminal_shell")]
+    pub terminal_shell: String,
 }
 
 fn default_display_name() -> String {
@@ -162,6 +165,10 @@ fn default_remind() -> String {
     "m15".into()
 }
 
+fn default_terminal_shell() -> String {
+    "auto".into()
+}
+
 impl Default for GeneralPrefs {
     fn default() -> Self {
         Self {
@@ -177,6 +184,7 @@ impl Default for GeneralPrefs {
             default_remind: default_remind(),
             remember_last_note: true,
             last_note_path: None,
+            terminal_shell: default_terminal_shell(),
         }
     }
 }

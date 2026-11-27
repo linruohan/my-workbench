@@ -41,11 +41,10 @@ impl TerminalRegistry {
         let cwd = cwd
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let shell_label = if shell.trim().is_empty() {
-            default_shell().to_string()
-        } else {
-            shell.trim().to_string()
-        };
+        let shell_label = resolve_terminal_shell(shell);
+        if shell_label.eq_ignore_ascii_case("alacritty") {
+            return self.open_alacritty(&cwd);
+        }
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -92,6 +91,33 @@ impl TerminalRegistry {
                 child: Some(child),
                 master: Some(pair.master),
                 closed: false,
+            },
+        );
+        Ok(id)
+    }
+
+    fn open_alacritty(&self, cwd: &Path) -> Result<String> {
+        let bin = which_bin("alacritty").unwrap_or_else(|| "alacritty".to_string());
+        std::process::Command::new(&bin)
+            .arg("--working-directory")
+            .arg(cwd)
+            .spawn()
+            .map_err(|err| anyhow::anyhow!("无法打开 Alacritty：{err}"))?;
+        let id = Uuid::new_v4().to_string();
+        let buffer = Arc::new(Mutex::new(
+            "已在独立的 Alacritty 窗口中打开。输入请在那个窗口里进行。\n".to_string(),
+        ));
+        let mut map = self.inner.lock().unwrap();
+        map.insert(
+            id.clone(),
+            TerminalSession {
+                shell: "alacritty".into(),
+                cwd: cwd.to_path_buf(),
+                buffer,
+                writer: None,
+                child: None,
+                master: None,
+                closed: true,
             },
         );
         Ok(id)
@@ -412,6 +438,18 @@ fn default_shell() -> &'static str {
     }
 }
 
+fn resolve_terminal_shell(shell: &str) -> String {
+    match shell.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => default_shell().to_string(),
+        "psh" | "powershell" | "powershell.exe" => "powershell".into(),
+        "cmd" | "cmd.exe" => "cmd".into(),
+        "pwsh" | "pwsh.exe" => "pwsh".into(),
+        "bash" | "sh" => "bash".into(),
+        "alacritty" => "alacritty".into(),
+        _ => shell.trim().to_string(),
+    }
+}
+
 fn interactive_shell(shell: &str) -> CommandBuilder {
     let s = shell.to_ascii_lowercase();
     if s.contains("bash") || s == "sh" {
@@ -420,7 +458,11 @@ fn interactive_shell(shell: &str) -> CommandBuilder {
         cmd
     } else if s == "cmd" || s == "cmd.exe" {
         CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "sh" })
-    } else if s.contains("powershell") && !s.contains("pwsh") {
+    } else if s == "pwsh" || s.contains("pwsh") {
+        let mut cmd = CommandBuilder::new("pwsh");
+        cmd.arg("-NoLogo");
+        cmd
+    } else if s.contains("powershell") {
         let mut cmd = CommandBuilder::new("powershell");
         cmd.arg("-NoLogo");
         cmd.arg("-NoProfile");
