@@ -1,9 +1,14 @@
+use crate::app::WorkbenchApp;
 use crate::state::{AppNav, AppState};
 use crate::views::TasksPane;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use std::path::Path;
+use wb_agent::permission_mode_label;
+use wb_domain::{AgentEvent, AgentPermissionMode, NotificationKind, create_id, now_ms};
+use wb_host::{ensure_session_worktree, merge_session_worktree, set_agent_cwd};
 
 #[derive(Clone)]
 struct PaletteItem {
@@ -19,6 +24,7 @@ struct PaletteItem {
 
 pub struct CommandPalette {
     state: AppState,
+    host: WeakEntity<WorkbenchApp>,
     tasks: WeakEntity<TasksPane>,
     query: Entity<InputState>,
     catalog: Vec<PaletteItem>,
@@ -31,6 +37,7 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new(
         state: AppState,
+        host: WeakEntity<WorkbenchApp>,
         tasks: WeakEntity<TasksPane>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -39,6 +46,7 @@ impl CommandPalette {
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索任务、会话、笔记、页面…"));
         let mut this = Self {
             state,
+            host,
             tasks,
             query: query.clone(),
             catalog: Vec::new(),
@@ -132,6 +140,76 @@ impl CommandPalette {
                 id: "nav-agent".into(),
                 label: "Agent".into(),
                 kind: "页面",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "agent-worktree".into(),
+                label: "为本会话打开 worktree".into(),
+                kind: "操作",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "agent-worktree-merge".into(),
+                label: "快进合并当前 worktree".into(),
+                kind: "操作",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "perm-ask".into(),
+                label: "会话权限：询问".into(),
+                kind: "操作",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "perm-write".into(),
+                label: "会话权限：可写".into(),
+                kind: "操作",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "perm-auto".into(),
+                label: "会话权限：自动".into(),
+                kind: "操作",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "perm-bypass".into(),
+                label: "会话权限：放行".into(),
+                kind: "操作",
+                nav: Some(AppNav::Agent),
+                task_id: None,
+                thread_id: None,
+                note_id: None,
+                kb_path: None,
+            },
+            PaletteItem {
+                id: "perm-readonly".into(),
+                label: "会话权限：只读".into(),
+                kind: "操作",
                 nav: Some(AppNav::Agent),
                 task_id: None,
                 thread_id: None,
@@ -400,6 +478,149 @@ impl CommandPalette {
             if let Some(id) = item.thread_id {
                 s.active_thread_id = Some(id);
             }
+            if let Some(mode) = match item.id.as_str() {
+                "perm-ask" => Some(AgentPermissionMode::Ask),
+                "perm-write" => Some(AgentPermissionMode::Write),
+                "perm-auto" => Some(AgentPermissionMode::Auto),
+                "perm-bypass" => Some(AgentPermissionMode::Bypass),
+                "perm-readonly" => Some(AgentPermissionMode::Readonly),
+                _ => None,
+            } {
+                if let Some(id) = s.active_thread_id.clone() {
+                    if let Some(mut thread) = s.repo.get_agent_thread(&id).cloned() {
+                        thread.permission_mode = mode;
+                        s.repo.upsert_agent_thread(thread);
+                        let now = now_ms();
+                        s.repo.append_agent_event(AgentEvent {
+                            id: create_id(now),
+                            thread_id: id,
+                            kind: "permission".into(),
+                            name: "会话权限".into(),
+                            detail: permission_mode_label(mode).into(),
+                            ok: Some(true),
+                            duration_ms: None,
+                            created_at: now,
+                        });
+                    }
+                } else {
+                    s.repo.push_notification(
+                        NotificationKind::System,
+                        "会话权限",
+                        "先打开一个会话",
+                        None,
+                    );
+                }
+            }
+            if item.id == "agent-worktree" {
+                let thread_id = s.active_thread_id.clone();
+                let workspace = thread_id.as_ref().and_then(|id| {
+                    let thread = s.repo.get_agent_thread(id)?;
+                    s.repo
+                        .list_agent_workspaces()
+                        .into_iter()
+                        .find(|workspace| workspace.id == thread.workspace_id)
+                        .and_then(|workspace| workspace.root_path)
+                });
+                match (thread_id, workspace) {
+                    (None, _) => {
+                        s.repo.push_notification(
+                            NotificationKind::System,
+                            "Worktree",
+                            "先打开一个会话",
+                            None,
+                        );
+                    }
+                    (_, None) => {
+                        s.repo.push_notification(
+                            NotificationKind::System,
+                            "Worktree",
+                            "这个会话的工作区没有目录",
+                            None,
+                        );
+                    }
+                    (Some(thread_id), Some(workspace)) => {
+                        match ensure_session_worktree(Path::new(&workspace), &thread_id) {
+                            Ok(dest) => {
+                                let shown = dest.display().to_string();
+                                set_agent_cwd(Some(dest));
+                                s.repo.set_thread_cwd(&thread_id, Some(shown.clone()));
+                                let now = now_ms();
+                                let detail: String = shown.chars().take(160).collect();
+                                s.repo.append_agent_event(AgentEvent {
+                                    id: create_id(now),
+                                    thread_id: thread_id.clone(),
+                                    kind: "cwd".into(),
+                                    name: "打开 worktree".into(),
+                                    detail,
+                                    ok: Some(true),
+                                    duration_ms: None,
+                                    created_at: now,
+                                });
+                                s.repo.push_notification(
+                                    NotificationKind::System,
+                                    "Worktree",
+                                    &format!("已打开，不会自动合并：{shown}"),
+                                    None,
+                                );
+                            }
+                            Err(err) => {
+                                s.repo.push_notification(
+                                    NotificationKind::System,
+                                    "Worktree",
+                                    &err.to_string(),
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if item.id == "agent-worktree-merge" {
+                let cwd = s.active_thread_id.as_ref().and_then(|id| {
+                    s.repo
+                        .get_agent_thread(id)
+                        .and_then(|thread| thread.cwd.clone())
+                });
+                match cwd {
+                    None => {
+                        s.repo.push_notification(
+                            NotificationKind::System,
+                            "合并",
+                            "当前会话不在 worktree 里",
+                            None,
+                        );
+                    }
+                    Some(cwd) => match merge_session_worktree(Path::new(&cwd)) {
+                        Ok(message) => {
+                            let line = message.lines().next().unwrap_or("已快进合并");
+                            if let Some(thread_id) = s.active_thread_id.clone() {
+                                let now = now_ms();
+                                let detail: String = line.chars().take(160).collect();
+                                s.repo.append_agent_event(AgentEvent {
+                                    id: create_id(now),
+                                    thread_id,
+                                    kind: "merge".into(),
+                                    name: "快进合并".into(),
+                                    detail,
+                                    ok: Some(true),
+                                    duration_ms: None,
+                                    created_at: now,
+                                });
+                            }
+                            s.repo
+                                .push_notification(NotificationKind::System, "合并", line, None);
+                        }
+                        Err(err) => {
+                            s.repo.push_notification(
+                                NotificationKind::System,
+                                "合并",
+                                &err.to_string(),
+                                None,
+                            );
+                        }
+                    },
+                }
+            }
             if let Some(path) = item.kb_path {
                 s.kb_current_file = Some(path);
                 s.nav = AppNav::Knowledge;
@@ -416,12 +637,14 @@ impl CommandPalette {
             }
             s.palette_open = false;
         });
+        self.state.persist_if_dirty();
         self.state.remember_session();
         if let Some(id) = opened_task {
             self.tasks
                 .update(cx, |tasks, cx| tasks.open_task_dialog(Some(id), window, cx))
                 .ok();
         }
+        self.host.update(cx, |_, cx| cx.notify()).ok();
         cx.notify();
     }
 

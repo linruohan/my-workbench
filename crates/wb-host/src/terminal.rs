@@ -97,10 +97,15 @@ impl TerminalRegistry {
         Ok(id)
     }
 
-    pub fn send(&self, id: &str, command: &str) -> Result<String> {
-        if command.len() > 32_000 || command.contains('\0') {
+    pub fn paste(&self, id: &str, text: &str) -> Result<()> {
+        if text.len() > 32_000 || text.contains('\0') {
             bail!("输入无效");
         }
+        let text = text.replace("\r\n", "\n").replace('\n', "\r");
+        self.write_bytes(id, text.as_bytes())
+    }
+
+    fn write_bytes(&self, id: &str, bytes: &[u8]) -> Result<()> {
         let mut writer = {
             let mut map = self.inner.lock().unwrap();
             let Some(session) = map.get_mut(id) else {
@@ -115,8 +120,7 @@ impl TerminalRegistry {
                 .ok_or_else(|| anyhow::anyhow!("终端已关闭"))?
         };
         let write_result = (|| -> Result<()> {
-            writer.write_all(command.as_bytes())?;
-            writer.write_all(b"\r")?;
+            writer.write_all(bytes)?;
             writer.flush()?;
             Ok(())
         })();
@@ -128,7 +132,16 @@ impl TerminalRegistry {
                 }
             }
         }
-        write_result?;
+        write_result
+    }
+
+    pub fn send(&self, id: &str, command: &str) -> Result<String> {
+        if command.len() > 32_000 || command.contains('\0') {
+            bail!("输入无效");
+        }
+        let mut bytes = command.as_bytes().to_vec();
+        bytes.push(b'\r');
+        self.write_bytes(id, &bytes)?;
 
         let started = Instant::now();
         let timeout = Duration::from_secs(8);

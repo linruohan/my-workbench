@@ -1,3 +1,4 @@
+use crate::app::WorkbenchApp;
 use crate::state::{AppNav, AppState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
@@ -27,7 +28,7 @@ use wb_agent::{
     resolve_approval, resolve_turn_reply_streaming, slash_suggestions,
 };
 use wb_domain::{
-    AgentMessage, AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE,
+    AgentEvent, AgentMessage, AgentRole, AgentWorkspace, WEB_AGENT_THREAD_TITLE,
     agent_workspace_title_from_path, create_id, format_chat_day_label, format_local_clock,
     format_local_day, normalize_agent_web_url, now_ms,
 };
@@ -88,6 +89,7 @@ fn apply_stream_event(event: StreamEvent, draft: &Arc<Mutex<String>>, status: &A
 
 pub struct AgentPane {
     state: AppState,
+    host: Option<WeakEntity<WorkbenchApp>>,
     input: Entity<TextareaState>,
     /// Title typed in the new web-session dialog. Empty falls back to the default title.
     web_title_input: Entity<InputState>,
@@ -245,6 +247,7 @@ impl AgentPane {
             chat_scroll: ScrollHandle::new(),
             chat_follow: true,
             ghost_suffix: None,
+            host: None,
             _subs: Vec::new(),
         };
         this._subs.push(cx.subscribe_in(
@@ -1524,10 +1527,28 @@ impl AgentPane {
                 t.permission_mode = mode;
                 t.updated_at = now_ms();
                 s.repo.upsert_agent_thread(t);
+                let now = now_ms();
+                s.repo.append_agent_event(AgentEvent {
+                    id: create_id(now),
+                    thread_id: tid.clone(),
+                    kind: "permission".into(),
+                    name: "会话权限".into(),
+                    detail: permission_mode_label(mode).into(),
+                    ok: Some(true),
+                    duration_ms: None,
+                    created_at: now,
+                });
             }
         });
         self.state.persist_if_dirty();
+        if let Some(host) = self.host.clone() {
+            host.update(cx, |_, cx| cx.notify()).ok();
+        }
         cx.notify();
+    }
+
+    pub fn bind_host(&mut self, host: WeakEntity<WorkbenchApp>) {
+        self.host = Some(host);
     }
 
     /// Cycle to the next model. Kept for keyboard/CLI callers; the composer uses
@@ -2117,18 +2138,25 @@ impl AgentPane {
         Some(branch)
     }
 
+    pub fn invalidate_branch(&mut self, cx: &mut Context<Self>) {
+        self.branch_cache = None;
+        cx.notify();
+    }
+
     fn workspace_root(&self) -> Option<String> {
         self.state.with(|s| {
             let tid = s.active_thread_id.clone()?;
-            let thread = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)?;
+            let thread = s.repo.get_agent_thread(&tid)?;
+            if let Some(cwd) = thread.cwd.clone() {
+                if std::path::Path::new(&cwd).is_dir() {
+                    return Some(cwd);
+                }
+            }
+            let workspace_id = thread.workspace_id.clone();
             s.repo
                 .list_agent_workspaces()
                 .into_iter()
-                .find(|w| w.id == thread.workspace_id)
+                .find(|w| w.id == workspace_id)
                 .and_then(|w| w.root_path)
         })
     }
@@ -2358,6 +2386,7 @@ impl AgentPane {
             active_web_url,
             queued,
             model_ref,
+            cwd_label,
         ) = self.state.with(|s| {
             let tid = s.active_thread_id.clone();
             let messages = tid
@@ -2377,7 +2406,18 @@ impl AgentPane {
             let perm = thread
                 .as_ref()
                 .map(|t| permission_mode_label(t.permission_mode))
-                .unwrap_or("确认");
+                .unwrap_or("询问");
+            let cwd_label = thread.as_ref().and_then(|t| t.cwd.as_ref()).map(|cwd| {
+                let name = std::path::Path::new(cwd)
+                    .file_name()
+                    .and_then(|part| part.to_str())
+                    .unwrap_or(cwd);
+                if cwd.contains(".wb-worktrees") {
+                    format!("worktree · {name}")
+                } else {
+                    name.to_string()
+                }
+            });
             let thread_perm = thread
                 .as_ref()
                 .map(|t| t.permission_mode)
@@ -2398,6 +2438,7 @@ impl AgentPane {
                 web_url,
                 queued,
                 model_ref,
+                cwd_label,
             )
         });
         self.sync_webview(active_web_url.as_deref(), window, cx);
@@ -2565,7 +2606,7 @@ impl AgentPane {
             })
         };
         let has_todos = !todos_all.is_empty();
-        let has_session_bar = goal_chip.is_some() || todo_chip.is_some() || has_todos;
+        let has_session_bar = true;
 
         let approval_rows: Vec<_> = approvals
             .into_iter()
@@ -2786,14 +2827,14 @@ impl AgentPane {
             danger: danger_theme,
             workspace_root: self.workspace_root(),
         };
-        for m in messages {
+        for (idx, m) in messages.iter().enumerate() {
             let day = format_local_day(m.created_at);
             // Batch consecutive tool results into one collapsed row.
             if m.role == AgentRole::Tool {
                 if tool_group.is_empty() {
                     tool_group_day = day.clone();
                 }
-                tool_group.push(m);
+                tool_group.push(m.clone());
                 continue;
             }
             if !tool_group.is_empty() {
@@ -2811,7 +2852,8 @@ impl AgentPane {
                 message_rows.push(day_marker(&day, muted, m.created_at));
             }
             message_rows.push(render_chat_message(
-                &m,
+                m,
+                turn_summary(&messages, idx),
                 &self.expanded_tools,
                 chat_palette.clone(),
                 entity.clone(),
@@ -2928,14 +2970,36 @@ impl AgentPane {
                     .p_3()
                     .gap_2()
                     .when(has_session_bar, |col| {
+                        let ctx_color = if ctx_pct >= 80.0 { danger } else { muted };
                         col.child(
                             h_flex()
                                 .w_full()
-                                .justify_end()
+                                .justify_between()
                                 .items_center()
                                 .gap_2()
-                                .when_some(goal_chip, |row, chip| row.child(chip))
-                                .when_some(todo_chip, |row, chip| row.child(chip))
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(border)
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(ctx_color)
+                                                .child(format!("上下文 {ctx_pct:.0}%")),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .when_some(goal_chip, |row, chip| row.child(chip))
+                                        .when_some(todo_chip, |row, chip| row.child(chip)),
+                                )
                                 .when(has_todos, |row| {
                                     row.child(
                                         Button::new("agent-todo-toggle")
@@ -3151,56 +3215,8 @@ impl AgentPane {
                                     cx.notify();
                                 },
                             ))
+                            .px_1()
                             .children(message_rows)
-                            .when(self.busy, |col| {
-                                let draft = draft_text.clone();
-                                col.child(
-                                    v_flex()
-                                        .gap_1()
-                                        .p_2()
-                                        .rounded(radius)
-                                        .max_w(relative(0.86))
-                                        .bg(secondary)
-                                        .border_1()
-                                        .border_color(accent.opacity(0.45))
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .items_center()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .font_bold()
-                                                        .text_color(muted)
-                                                        .child("Agent"),
-                                                )
-                                                .child(div().text_xs().text_color(muted).child(
-                                                    if draft_stage.is_empty() {
-                                                        "正在回复…".to_string()
-                                                    } else {
-                                                        draft_stage.clone()
-                                                    },
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("agent-stream-draft")
-                                                .text_sm()
-                                                .text_color(if draft.trim().is_empty() {
-                                                    muted
-                                                } else {
-                                                    cx.theme().foreground
-                                                })
-                                                .max_h(px(100.))
-                                                .overflow_y_scroll()
-                                                .child(if draft.trim().is_empty() {
-                                                    "…".to_string()
-                                                } else {
-                                                    draft
-                                                }),
-                                        ),
-                                )
-                            })
                             .into_any_element()
                     })
                     .when(!self.chat_follow, |col| {
@@ -3380,6 +3396,58 @@ impl AgentPane {
                                         .child(div().text_xs().child(path.clone()))
                                         .into_any_element()
                                 })),
+                        )
+                    })
+                    .when(self.busy, |col| {
+                        // Pinned above the composer, where the reader is already looking.
+                        // Plain text: this re-renders on every stream tick.
+                        let draft = draft_text.clone();
+                        let writing = if draft_stage.is_empty() {
+                            "正在写…".to_string()
+                        } else {
+                            draft_stage.clone()
+                        };
+                        col.child(
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(8.))
+                                .bg(secondary)
+                                .border_1()
+                                .border_color(accent.opacity(0.5))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(div().size(px(6.)).rounded_full().bg(accent))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_bold()
+                                                .text_color(accent)
+                                                .child("Agent"),
+                                        )
+                                        .child(div().text_xs().text_color(muted).child(writing)),
+                                )
+                                .child(
+                                    div()
+                                        .id("agent-stream-draft")
+                                        .text_xs()
+                                        .text_color(if draft.trim().is_empty() {
+                                            muted
+                                        } else {
+                                            foreground
+                                        })
+                                        .max_h(px(100.))
+                                        .overflow_y_scroll()
+                                        .child(if draft.trim().is_empty() {
+                                            "…".to_string()
+                                        } else {
+                                            draft
+                                        }),
+                                ),
                         )
                     })
                     .child(
@@ -4123,8 +4191,10 @@ impl AgentPane {
                                                             move |menu, _, _| {
                                                                 let mut menu = menu;
                                                                 for mode in [
-                                                                    wb_domain::AgentPermissionMode::Confirm,
-                                                                    wb_domain::AgentPermissionMode::SessionAuto,
+                                                                    wb_domain::AgentPermissionMode::Ask,
+                                                                    wb_domain::AgentPermissionMode::Write,
+                                                                    wb_domain::AgentPermissionMode::Auto,
+                                                                    wb_domain::AgentPermissionMode::Bypass,
                                                                     wb_domain::AgentPermissionMode::Readonly,
                                                                 ] {
                                                                     let entity = entity.clone();
@@ -4145,6 +4215,14 @@ impl AgentPane {
                                                                 menu
                                                             },
                                                         )
+                                                })
+                                                .when_some(cwd_label, |row, label| {
+                                                    row.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(label),
+                                                    )
                                                 })
                                                 .when(draft_chars > 0, |row| {
                                                     row.child(
@@ -4294,8 +4372,47 @@ struct ChatPalette {
     workspace_root: Option<String>,
 }
 
+/// Tools and time spent between the previous user turn and this message.
+fn turn_summary(messages: &[AgentMessage], idx: usize) -> Option<String> {
+    if !matches!(
+        messages.get(idx).map(|m| m.role),
+        Some(AgentRole::Assistant)
+    ) {
+        return None;
+    }
+    let mut tools = 0u32;
+    let mut ms = 0u64;
+    let mut i = idx;
+    while i > 0 {
+        i -= 1;
+        match messages[i].role {
+            AgentRole::User => break,
+            AgentRole::Tool => {
+                tools += 1;
+                ms += messages[i].duration_ms.unwrap_or(0);
+            }
+            AgentRole::Assistant | AgentRole::System => break,
+        }
+    }
+    if tools == 0 && ms == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if ms > 0 {
+        parts.push(format!(
+            "用时 {}",
+            crate::thread_export::format_duration(ms)
+        ));
+    }
+    if tools > 0 {
+        parts.push(format!("调用了 {tools} 个工具"));
+    }
+    Some(parts.join(" · "))
+}
+
 fn render_chat_message(
     m: &AgentMessage,
+    summary: Option<String>,
     expanded_tools: &HashSet<String>,
     palette: ChatPalette,
     entity: WeakEntity<AgentPane>,
@@ -4366,27 +4483,49 @@ fn render_chat_message(
             ("成功", cx_success)
         }
     });
+    let name_color = if is_user {
+        accent
+    } else if is_tool {
+        muted
+    } else if is_assistant {
+        cx_success
+    } else {
+        muted
+    };
+    let initial: String = role.chars().take(1).collect();
     let header = h_flex()
         .w_full()
         .items_center()
         .gap_2()
-        .when_some(tool_state, |row, (label, color)| {
-            row.child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().size(px(6.)).rounded_full().bg(color))
-                    .child(div().text_xs().text_color(color).child(label)),
-            )
-        })
         .child(
-            div()
-                .text_xs()
-                .font_bold()
-                .text_color(muted)
-                .child(role.to_string()),
+            h_flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .when_some(tool_state, |row, (label, color)| {
+                    row.child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(div().size(px(6.)).rounded_full().bg(color))
+                            .child(div().text_xs().text_color(color).child(label)),
+                    )
+                })
+                .child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .bg(name_color.opacity(0.12))
+                        .border_1()
+                        .border_color(name_color.opacity(0.28))
+                        .text_xs()
+                        .font_bold()
+                        .text_color(name_color)
+                        .child(role.to_string()),
+                )
+                .child(div().text_xs().text_color(muted).child(clock)),
         )
-        .child(div().text_xs().text_color(muted).child(clock))
         .when_some(m.duration_ms, |row, ms| {
             // Slow tool calls get a warning tint so a 30 s `run_shell` stands out
             // from the ms-scale reads around it.
@@ -4506,21 +4645,64 @@ fn render_chat_message(
                 .tooltip("复制消息"),
         );
     h_flex()
+        .id(SharedString::from(format!("chat-msg-row-{msg_id}")))
         .w_full()
-        .when(is_user, |row| row.justify_end())
+        .items_start()
+        .gap_2()
+        .py_1()
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .size(px(28.))
+                .rounded_full()
+                .bg(name_color.opacity(0.18))
+                .border_1()
+                .border_color(name_color.opacity(0.45))
+                .text_xs()
+                .font_bold()
+                .text_color(name_color)
+                .child(initial),
+        )
         .child(
             v_flex()
+                .flex_1()
+                .w_full()
+                .min_w_0()
                 .gap_1()
-                .p_2()
-                .rounded(radius)
-                .max_w(relative(0.86))
-                .bg(if is_user {
-                    accent.opacity(0.18)
-                } else {
-                    secondary
-                })
                 .child(header)
-                .child(body),
+                .when_some(summary, |col, text| {
+                    col.child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(4.))
+                            .bg(secondary)
+                            .border_1()
+                            .border_color(muted.opacity(0.25))
+                            .child(div().text_xs().text_color(accent).child("⟳"))
+                            .child(div().text_xs().text_color(muted).child(text)),
+                    )
+                })
+                .child(
+                    div()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded(radius)
+                        .when(is_user, |card| card.bg(accent.opacity(0.12)))
+                        .when(!is_user && !is_tool, |card| {
+                            card.bg(secondary)
+                                .border_l(px(3.))
+                                .border_color(name_color.opacity(0.7))
+                        })
+                        .when(is_tool, |card| card.bg(secondary.opacity(0.6)))
+                        .child(body),
+                ),
         )
         .into_any_element()
 }
@@ -4534,7 +4716,7 @@ fn day_marker(day: &str, muted: Hsla, created_at: i64) -> AnyElement {
         .justify_center()
         .child(
             div()
-                .text_xs()
+                .text_sm()
                 .font_bold()
                 .text_color(muted)
                 .child(format_chat_day_label(created_at)),
@@ -4562,6 +4744,7 @@ fn flush_tool_group(
     if group.len() == 1 {
         rows.push(render_chat_message(
             &group[0],
+            None,
             expanded_tools,
             palette.clone(),
             entity,
@@ -4584,7 +4767,7 @@ fn flush_tool_group(
     let body: Vec<AnyElement> = if expanded {
         group
             .iter()
-            .map(|m| render_chat_message(m, expanded_tools, palette.clone(), entity.clone()))
+            .map(|m| render_chat_message(m, None, expanded_tools, palette.clone(), entity.clone()))
             .collect()
     } else {
         Vec::new()
@@ -4596,14 +4779,18 @@ fn flush_tool_group(
         v_flex()
             .w_full()
             .gap_1()
+            .pl(px(36.))
             .child(
                 h_flex()
-                    .w_full()
                     .items_center()
                     .gap_2()
-                    .p_2()
+                    .px_2()
+                    .py_1()
                     .rounded(radius)
                     .bg(secondary)
+                    .border_1()
+                    .border_color(muted.opacity(0.25))
+                    .child(div().text_xs().text_color(muted).child("⟳"))
                     .child(div().flex_1().text_xs().text_color(muted).child(summary))
                     .child(
                         Button::new(SharedString::from(format!("tool-group-exp-{group_id}")))

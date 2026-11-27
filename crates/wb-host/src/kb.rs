@@ -162,6 +162,239 @@ pub fn parse_git_status(text: &str) -> GitSnapshot {
     GitSnapshot { branch, changes }
 }
 
+fn git_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("无法运行 git {}", args.join(" ")))
+}
+
+fn git_ok(cwd: &Path, args: &[&str]) -> Result<String> {
+    let out = git_output(cwd, args)?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!(
+            "{}",
+            if err.is_empty() {
+                format!("git {} 失败", args.join(" "))
+            } else {
+                err
+            }
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn worktree_slug(raw: &str) -> String {
+    let mut slug: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    slug.truncate(40);
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "session".into()
+    } else {
+        slug
+    }
+}
+
+/// Create or reuse a git worktree under `<repo>/.wb-worktrees/<slug>`.
+/// The directory is listed in `.git/info/exclude` so the main tree stays clean.
+/// This does not merge or rebase.
+pub fn ensure_session_worktree(workspace: &Path, raw_slug: &str) -> Result<PathBuf> {
+    let top = git_ok(workspace, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| anyhow::anyhow!("当前工作区不是 git 仓库，不能开 worktree"))?;
+    let top = PathBuf::from(top);
+    let slug = worktree_slug(raw_slug);
+    let exclude = top.join(".git").join("info").join("exclude");
+    if let Ok(mut text) = fs::read_to_string(&exclude) {
+        if !text.contains(".wb-worktrees/") {
+            if !text.ends_with('\n') && !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(".wb-worktrees/\n");
+            let _ = fs::write(&exclude, text);
+        }
+    }
+    let dest = top.join(".wb-worktrees").join(&slug);
+    if dest.join(".git").exists() {
+        return Ok(dest);
+    }
+    fs::create_dir_all(top.join(".wb-worktrees"))?;
+    let branch = format!("wb/{slug}");
+    let dest_arg = dest.display().to_string();
+    if git_ok(&top, &["worktree", "add", "-b", &branch, &dest_arg, "HEAD"]).is_err() {
+        git_ok(&top, &["worktree", "add", &dest_arg, &branch])?;
+    }
+    Ok(dest)
+}
+
+/// Merge the session worktree's branch into the main checkout's current branch.
+/// Refuses unless `worktree` is under `.wb-worktrees`, and refuses when the main
+/// checkout has uncommitted changes. Does not delete the worktree.
+pub fn merge_session_worktree(worktree: &Path) -> Result<String> {
+    let under = worktree
+        .components()
+        .any(|part| part.as_os_str() == ".wb-worktrees");
+    if !under {
+        bail!("只能合并 .wb-worktrees 里的会话目录");
+    }
+    let branch = git_ok(worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch == "HEAD" {
+        bail!("会话目录处于分离头指针，不能合并");
+    }
+    let common = git_ok(
+        worktree,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let main = Path::new(&common)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("找不到主工作区"))?;
+    if !git_ok(&main, &["status", "--porcelain"])?.is_empty() {
+        bail!("主工作区有未提交改动，先处理后再合并");
+    }
+    let target = git_ok(&main, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if target == branch {
+        bail!("主工作区已经在 {branch}");
+    }
+    let message = git_ok(&main, &["merge", "--ff-only", &branch])?;
+    Ok(format!(
+        "已将 {branch} 快进合并到 {target}{}",
+        if message.is_empty() {
+            String::new()
+        } else {
+            format!("\n{message}")
+        }
+    ))
+}
+
+pub fn git_branches(root: &Path) -> Result<Vec<String>> {
+    let text = git_ok(root, &["branch", "--format=%(refname:short)"])?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn git_worktree_list(root: &Path) -> Result<Vec<(String, String)>> {
+    let text = git_ok(root, &["worktree", "list", "--porcelain"])?;
+    let mut rows = Vec::new();
+    let mut path = String::new();
+    let mut branch = String::new();
+    let flush = |rows: &mut Vec<(String, String)>, path: &mut String, branch: &mut String| {
+        if path.is_empty() {
+            return;
+        }
+        rows.push((path.clone(), branch.clone()));
+        path.clear();
+        branch.clear();
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            flush(&mut rows, &mut path, &mut branch);
+            path = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            branch = rest.trim().trim_start_matches("refs/heads/").to_string();
+        }
+    }
+    flush(&mut rows, &mut path, &mut branch);
+    Ok(rows)
+}
+
+pub fn git_commit_show(root: &Path, rev: &str) -> Result<String> {
+    if rev.len() < 4 || !rev.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("提交号无效");
+    }
+    let text = git_ok(root, &["show", "--stat", "-p", "--format=%h %s", rev])?;
+    const LIMIT: usize = 40_000;
+    if text.len() > LIMIT {
+        Ok(format!("{}…\n（提交内容已截断）", &text[..LIMIT]))
+    } else {
+        Ok(text)
+    }
+}
+
+pub fn git_recent_log(root: &Path) -> Result<Vec<String>> {
+    let text = git_ok(root, &["log", "-12", "--oneline"])?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn git_checkout(root: &Path, branch: &str) -> Result<String> {
+    if branch.is_empty()
+        || branch.contains("..")
+        || branch
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch == ';' || ch == '&')
+    {
+        bail!("分支名无效");
+    }
+    git_ok(root, &["checkout", branch])
+}
+
+pub fn git_fetch(root: &Path) -> Result<String> {
+    let text = git_ok(root, &["fetch", "--prune"])?;
+    if text.is_empty() {
+        Ok("已获取远程更新".into())
+    } else {
+        Ok(text)
+    }
+}
+
+pub fn git_remotes(root: &Path) -> Result<Vec<String>> {
+    let text = git_ok(root, &["remote", "-v"])?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn git_init(root: &Path) -> Result<String> {
+    git_ok(root, &["init"])?;
+    Ok("已初始化 Git 仓库".into())
+}
+
+/// Unstaged diff for one path, falling back to the staged diff.
+pub fn git_file_diff(root: &Path, path: &str) -> Result<String> {
+    if path.contains('\0') || path.contains(" -> ") {
+        bail!("路径无效");
+    }
+    let unstaged = git_ok(root, &["diff", "--", path])?;
+    let text = if unstaged.trim().is_empty() {
+        git_ok(root, &["diff", "--cached", "--", path])?
+    } else {
+        unstaged
+    };
+    let text = if text.trim().is_empty() {
+        "没有未提交的差异".to_string()
+    } else {
+        text
+    };
+    const LIMIT: usize = 40_000;
+    if text.len() > LIMIT {
+        Ok(format!("{}…\n（差异已截断）", &text[..LIMIT]))
+    } else {
+        Ok(text)
+    }
+}
+
 pub fn git_snapshot(root: &Path) -> Option<GitSnapshot> {
     let out = Command::new("git")
         .args(["status", "--porcelain", "-b"])
@@ -421,5 +654,59 @@ mod search_tests {
         assert_eq!(snap.changes[0].path, "src/a.rs");
         assert_eq!(snap.changes[1].status, "??");
         assert_eq!(snap.changes[1].path, "new.txt");
+    }
+
+    #[test]
+    fn session_worktree_reuses_the_same_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "wb-wt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "wb")
+                .env("GIT_AUTHOR_EMAIL", "wb@example.com")
+                .env("GIT_COMMITTER_NAME", "wb")
+                .env("GIT_COMMITTER_EMAIL", "wb@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+        let first = ensure_session_worktree(&dir, "thread/1").unwrap();
+        let second = ensure_session_worktree(&dir, "thread/1").unwrap();
+        assert_eq!(first, second);
+        assert!(first.join(".git").exists());
+        fs::write(first.join("note.txt"), "from-session").unwrap();
+        let status = Command::new("git")
+            .args(["add", "note.txt"])
+            .current_dir(&first)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .args(["commit", "-m", "note"])
+            .current_dir(&first)
+            .env("GIT_AUTHOR_NAME", "wb")
+            .env("GIT_AUTHOR_EMAIL", "wb@example.com")
+            .env("GIT_COMMITTER_NAME", "wb")
+            .env("GIT_COMMITTER_EMAIL", "wb@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let merged = merge_session_worktree(&first).unwrap();
+        assert!(merged.contains("合并"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "from-session"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

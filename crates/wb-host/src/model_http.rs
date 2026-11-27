@@ -284,6 +284,10 @@ pub async fn chat_completions_stream(
     let mut stream_body = body.clone();
     if let Some(obj) = stream_body.as_object_mut() {
         obj.insert("stream".into(), Value::Bool(true));
+        obj.insert(
+            "stream_options".into(),
+            serde_json::json!({ "include_usage": true }),
+        );
     }
 
     let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(180));
@@ -316,6 +320,8 @@ pub async fn chat_completions_stream(
     let mut bytes = resp.bytes_stream();
     let mut buf = String::new();
     let mut content = String::new();
+    let mut prompt_tokens: Option<u64> = None;
+    let mut completion_tokens: Option<u64> = None;
     // index -> (id, name, arguments)
     let mut tools: std::collections::BTreeMap<usize, (String, String, String)> =
         std::collections::BTreeMap::new();
@@ -346,6 +352,14 @@ pub async fn chat_completions_stream(
             let Ok(json) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            if let Some(usage) = json.get("usage") {
+                if let Some(n) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    prompt_tokens = Some(n);
+                }
+                if let Some(n) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                    completion_tokens = Some(n);
+                }
+            }
             let Some(delta) = json.pointer("/choices/0/delta") else {
                 continue;
             };
@@ -399,7 +413,7 @@ pub async fn chat_completions_stream(
             })
         })
         .collect();
-    Ok(json!({
+    let mut assembled = json!({
         "choices": [{
             "message": {
                 "role": "assistant",
@@ -407,7 +421,14 @@ pub async fn chat_completions_stream(
                 "tool_calls": if tool_calls.is_empty() { Value::Null } else { Value::Array(tool_calls) }
             }
         }]
-    }))
+    });
+    if prompt_tokens.is_some() || completion_tokens.is_some() {
+        assembled["usage"] = json!({
+            "prompt_tokens": prompt_tokens.unwrap_or(0),
+            "completion_tokens": completion_tokens.unwrap_or(0),
+        });
+    }
+    Ok(assembled)
 }
 
 #[cfg(test)]

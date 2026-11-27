@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wb_domain::{
-    AgentApproval, AgentMessage, AgentThread, AgentWorkspace, AppNotification, Note, Project,
-    ProjectBucket, Tag, Task, TimedRunRecord, TimedTask,
+    AgentApproval, AgentEvent, AgentMessage, AgentThread, AgentWorkspace, AppNotification, Note,
+    Project, ProjectBucket, Tag, Task, TimedRunRecord, TimedTask,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -36,4 +36,6 @@ pub struct WorkbenchSnapshot {
     pub agent_messages: Vec<AgentMessage>,
     #[serde(default)]
     pub agent_approvals: Vec<AgentApproval>,
+    #[serde(default)]
+    pub agent_events: Vec<AgentEvent>,
 }

@@ -176,6 +176,7 @@ mod tests {
             session_goal: None,
             cwd: None,
             draft: None,
+            allowed_commands: Vec::new(),
             created_at: now,
             updated_at: now,
         });

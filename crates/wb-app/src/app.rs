@@ -55,6 +55,10 @@ pub struct WorkbenchApp {
 }
 
 impl WorkbenchApp {
+    pub fn refresh_agent_branch(&mut self, cx: &mut Context<Self>) {
+        self.agent.update(cx, |pane, cx| pane.invalidate_branch(cx));
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::load();
         let collapsed = state.with(|s| s.prefs.sidebar_collapsed);
@@ -65,13 +69,15 @@ impl WorkbenchApp {
         let timed = cx.new(|cx| TimedPane::new(state.clone(), window, cx));
         let knowledge = cx.new(|cx| KnowledgePane::new(state.clone(), window, cx));
         let agent = cx.new(|cx| AgentPane::new(state.clone(), window, cx));
+        let host = cx.weak_entity();
+        agent.update(cx, |pane, _| pane.bind_host(host.clone()));
         timed.update(cx, |timed, _| timed.bind_agent(agent.clone()));
         let settings = cx.new(|cx| SettingsPane::new(state.clone(), window, cx));
-        let host = cx.weak_entity();
-        let inspector = cx.new(|cx| InspectorPane::new(state.clone(), host, window, cx));
+        let inspector = cx.new(|cx| InspectorPane::new(state.clone(), host.clone(), window, cx));
         let tasks_for_palette = tasks.downgrade();
-        let palette =
-            cx.new(|cx| CommandPalette::new(state.clone(), tasks_for_palette, window, cx));
+        let palette = cx.new(|cx| {
+            CommandPalette::new(state.clone(), host.clone(), tasks_for_palette, window, cx)
+        });
         let sidebar_panels = cx.new(|_| ResizableState::default());
 
         let voice_on = state.with(|s| s.prefs.voice.enabled || s.prefs.voice.caps_lock_ptt);

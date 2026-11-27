@@ -1,7 +1,7 @@
 use crate::snapshot::WorkbenchSnapshot;
 use std::collections::{HashMap, HashSet};
 use wb_domain::{
-    AgentApproval, AgentMessage, AgentThread, AgentWorkspace, AppNotification,
+    AgentApproval, AgentEvent, AgentMessage, AgentThread, AgentWorkspace, AppNotification,
     DEFAULT_AGENT_WORKSPACE_TITLE, INBOX_PROJECT_ID, Note, NotificationKind, NotificationStatus,
     Project, ProjectBucket, Tag, Task, TimedRunRecord, TimedTask, create_id, create_inbox_project,
     create_task_draft, mark_task_complete, mark_task_incomplete, now_ms, try_advance_repeat,
@@ -23,6 +23,7 @@ pub struct MemoryWorkbenchRepository {
     agent_threads: HashMap<String, AgentThread>,
     agent_messages: HashMap<String, AgentMessage>,
     agent_approvals: HashMap<String, AgentApproval>,
+    agent_events: Vec<AgentEvent>,
     dirty: bool,
     /// Bumps on every mutation so views can reuse a sorted task list.
     revision: u64,
@@ -66,6 +67,7 @@ impl MemoryWorkbenchRepository {
             agent_threads: HashMap::new(),
             agent_messages: HashMap::new(),
             agent_approvals: HashMap::new(),
+            agent_events: Vec::new(),
             dirty: false,
             revision: 0,
         }
@@ -116,6 +118,7 @@ impl MemoryWorkbenchRepository {
             agent_threads: self.list_agent_threads(),
             agent_messages: self.list_agent_messages(),
             agent_approvals: self.list_agent_approvals(),
+            agent_events: self.agent_events.clone(),
         }
     }
 
@@ -180,6 +183,7 @@ impl MemoryWorkbenchRepository {
             .into_iter()
             .map(|a| (a.id.clone(), a))
             .collect();
+        self.agent_events = snap.agent_events;
         self.dirty = false;
         self.revision = self.revision.wrapping_add(1);
     }
@@ -708,6 +712,7 @@ impl MemoryWorkbenchRepository {
     pub fn delete_agent_thread(&mut self, id: &str) {
         self.agent_threads.remove(id);
         self.agent_messages.retain(|_, m| m.thread_id != id);
+        self.agent_events.retain(|e| e.thread_id != id);
         self.touch();
     }
 
@@ -780,6 +785,7 @@ impl MemoryWorkbenchRepository {
     pub fn clear_agent_messages(&mut self, thread_id: &str) {
         self.agent_messages.retain(|_, m| m.thread_id != thread_id);
         self.agent_approvals.retain(|_, a| a.thread_id != thread_id);
+        self.agent_events.retain(|e| e.thread_id != thread_id);
         if let Some(thread) = self.agent_threads.get_mut(thread_id) {
             thread.queue_json = None;
             thread.updated_at = now_ms();
@@ -821,6 +827,43 @@ impl MemoryWorkbenchRepository {
         self.touch();
     }
 
+    const AGENT_EVENT_CAP: usize = 400;
+
+    /// Append a session ledger line and keep the newest 400 events for that thread.
+    pub fn append_agent_event(&mut self, event: AgentEvent) {
+        let thread_id = event.thread_id.clone();
+        self.agent_events.push(event);
+        let extra = self
+            .agent_events
+            .iter()
+            .filter(|event| event.thread_id == thread_id)
+            .count()
+            .saturating_sub(Self::AGENT_EVENT_CAP);
+        if extra > 0 {
+            let mut drop_left = extra;
+            self.agent_events.retain(|event| {
+                if event.thread_id != thread_id {
+                    return true;
+                }
+                if drop_left > 0 {
+                    drop_left -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        self.touch();
+    }
+
+    pub fn agent_events_for_thread(&self, thread_id: &str) -> Vec<AgentEvent> {
+        self.agent_events
+            .iter()
+            .filter(|e| e.thread_id == thread_id)
+            .cloned()
+            .collect()
+    }
+
     pub fn list_agent_approvals(&self) -> Vec<AgentApproval> {
         let mut v: Vec<_> = self.agent_approvals.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.created_at));
@@ -848,6 +891,43 @@ mod tests {
         repo2.import_snapshot(parsed);
         assert_eq!(repo2.list_tasks().len(), 1);
         assert_eq!(repo2.list_tasks()[0].title, "hello");
+    }
+
+    #[test]
+    fn agent_events_round_trip_and_cap() {
+        let mut repo = MemoryWorkbenchRepository::new();
+        for i in 0..405 {
+            repo.append_agent_event(AgentEvent {
+                id: format!("e{i}"),
+                thread_id: "th".into(),
+                kind: "tool_ran".into(),
+                name: "read".into(),
+                detail: i.to_string(),
+                ok: Some(true),
+                duration_ms: None,
+                created_at: i,
+            });
+        }
+        repo.append_agent_event(AgentEvent {
+            id: "other".into(),
+            thread_id: "other".into(),
+            kind: "tool_ran".into(),
+            name: "read".into(),
+            detail: "keep".into(),
+            ok: Some(true),
+            duration_ms: None,
+            created_at: 1,
+        });
+        let events = repo.agent_events_for_thread("th");
+        assert_eq!(events.len(), 400);
+        assert_eq!(events[0].detail, "5");
+        assert_eq!(events.last().unwrap().detail, "404");
+        let snap = repo.export_snapshot();
+        let mut repo2 = MemoryWorkbenchRepository::new();
+        repo2.import_snapshot(snap);
+        assert_eq!(repo2.agent_events_for_thread("other").len(), 1);
+        repo2.delete_agent_thread("th");
+        assert!(repo2.agent_events_for_thread("th").is_empty());
     }
 
     #[test]
@@ -885,6 +965,7 @@ mod tests {
             }),
             cwd: Some("D:/work".into()),
             draft: Some("还没发送".into()),
+            allowed_commands: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -1029,6 +1110,7 @@ mod tests {
             session_goal: None,
             cwd: None,
             draft: None,
+            allowed_commands: Vec::new(),
             created_at: now,
             updated_at: now,
         };

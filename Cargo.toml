@@ -22,7 +22,9 @@ wb-store = { path = "crates/wb-store" }
 wb-host = { path = "crates/wb-host" }
 wb-agent = { path = "crates/wb-agent" }
 
-gpui-kit = { git = "https://github.com/linruohan/gpui-kit.git" }
+# 与 Hadron 的 gpui-component `tree-sitter-languages` 相同：Markdown 围栏按语法上色。
+# 引擎仍是 gpui-kit 自带的 Zed GPUI 快照（gpui-pre），界面控件不用手写。
+gpui-kit = { git = "https://github.com/linruohan/gpui-kit.git", features = ["tree-sitter-languages"] }
 gpui-webview = { git = "https://github.com/linruohan/gpui-kit.git" }
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.14" }
 wry = "0.57.4"
@@ -56,7 +58,14 @@ paddle-ocr-rs = { version = "0.6.1", default-features = false, features = ["down
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries", "load-dynamic"] }
 sherpa-onnx = { version = "=2.0.2", default-features = false, features = ["shared"] }
 
+# GPUI 的排版、文本整形和滚动几乎都在依赖里。debug 下依赖保持 opt-level 0
+# 时，输入和滚动会明显掉帧。对齐 Zed / Hadron：依赖优化到 2，本仓库 crate
+# 用 1（仍可调试，热路径上的泛型也不会完全没优化）。
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.dev]
+opt-level = 1
 debug = "limited"
 
 [profile.release]

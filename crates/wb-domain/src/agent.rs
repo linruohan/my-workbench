@@ -7,12 +7,23 @@ pub const WEB_AGENT_THREAD_TITLE: &str = "网页会话";
 /// Autonomous goal rounds must reach this before `blocked` is accepted.
 pub const DEFAULT_GOAL_BLOCKED_AFTER: u32 = 3;
 
+/// 会话权限阶梯，语义对齐 Hadron 的 ask / write / auto / bypass。
+/// 读和纯查询始终直接执行。`confirm`、`session_auto` 是旧存档别名。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPermissionMode {
+    /// 改文件、执行命令、破坏性操作都先问。
     #[default]
-    Confirm,
-    SessionAuto,
+    #[serde(alias = "confirm")]
+    Ask,
+    /// 改文件直接执行；命令和破坏性操作先问。
+    #[serde(alias = "session_auto")]
+    Write,
+    /// 改文件直接执行；同一条命令同意过一次后直接执行；破坏性操作先问。
+    Auto,
+    /// 全部直接执行。
+    Bypass,
+    /// 只允许读和查询。
     Readonly,
 }
 
@@ -46,7 +57,10 @@ impl AgentMessage {
 pub enum ToolEffect {
     None,
     Read,
+    /// 改工作区文件或工作台数据。
     Write,
+    /// 执行 shell、后台任务或往终端送命令。
+    Exec,
     Destructive,
 }
 
@@ -142,6 +156,9 @@ pub struct AgentThread {
     /// Unsent composer text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
+    /// Commands already approved while this session is in `Auto`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_commands: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -183,6 +200,25 @@ pub struct AgentApproval {
     pub created_at: i64,
     #[serde(default)]
     pub resolved_at: Option<i64>,
+}
+
+/// One append-only record for a session: a tool decision, a finished tool, or an approval.
+/// Full tool text stays on `AgentMessage`; `detail` is a short ledger line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvent {
+    pub id: String,
+    pub thread_id: String,
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// Tool wall time, when this line records a finished call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,15 +276,38 @@ pub fn gate_tool(effect: ToolEffect, mode: AgentPermissionMode) -> ToolGate {
             ToolEffect::None | ToolEffect::Read => ToolGate::Run,
             _ => ToolGate::Block,
         },
-        AgentPermissionMode::SessionAuto => match effect {
-            ToolEffect::Destructive => ToolGate::Ask,
-            _ => ToolGate::Run,
-        },
-        AgentPermissionMode::Confirm => match effect {
+        AgentPermissionMode::Ask => match effect {
             ToolEffect::None | ToolEffect::Read => ToolGate::Run,
             _ => ToolGate::Ask,
         },
+        AgentPermissionMode::Write => match effect {
+            ToolEffect::None | ToolEffect::Read | ToolEffect::Write => ToolGate::Run,
+            ToolEffect::Exec | ToolEffect::Destructive => ToolGate::Ask,
+        },
+        AgentPermissionMode::Auto => match effect {
+            ToolEffect::Exec | ToolEffect::Destructive => ToolGate::Ask,
+            _ => ToolGate::Run,
+        },
+        AgentPermissionMode::Bypass => ToolGate::Run,
     }
+}
+
+/// Stable key for an exec tool. `Auto` remembers this after the user approves it.
+pub fn command_allow_key(name: &str, args: &serde_json::Value) -> Option<String> {
+    let command = match name {
+        "shell" | "bash" | "pwsh" | "job_start" | "terminal_send" => args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim(),
+        "terminal_open" => "terminal_open",
+        _ => return None,
+    };
+    if command.is_empty() {
+        return None;
+    }
+    let command: String = command.chars().take(120).collect();
+    Some(format!("{name}:{command}"))
 }
 
 pub fn normalize_agent_web_url(raw: &str) -> Option<String> {
@@ -1015,7 +1074,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         ),
         tool(
             "shell",
-            ToolEffect::Write,
+            ToolEffect::Exec,
             "在工作区执行 shell（平台默认：Windows=cmd，其它=bash）",
             serde_json::json!({
                 "command": { "type": "string" }
@@ -1023,7 +1082,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         ),
         tool(
             "bash",
-            ToolEffect::Write,
+            ToolEffect::Exec,
             "强制用 bash -lc 执行命令",
             serde_json::json!({
                 "command": { "type": "string" }
@@ -1031,7 +1090,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         ),
         tool(
             "pwsh",
-            ToolEffect::Write,
+            ToolEffect::Exec,
             "强制用 pwsh -Command 执行命令",
             serde_json::json!({
                 "command": { "type": "string" }
@@ -1066,7 +1125,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         ),
         tool(
             "job_start",
-            ToolEffect::Write,
+            ToolEffect::Exec,
             "后台启动 shell 任务",
             serde_json::json!({ "command": { "type": "string" } }),
         ),
@@ -1124,6 +1183,18 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
             }),
         ),
         tool(
+            "worktree_open",
+            ToolEffect::Write,
+            "为当前会话在仓库内打开独立 git worktree（.wb-worktrees），并把它设为工作目录。不合并、不变基",
+            serde_json::json!({}),
+        ),
+        tool(
+            "worktree_diff",
+            ToolEffect::Read,
+            "查看当前工作目录的 git 分支和未提交改动，不合并",
+            serde_json::json!({}),
+        ),
+        tool(
             "working_directory",
             ToolEffect::None,
             "设置或查看会话工作目录（相对工作区）",
@@ -1133,7 +1204,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         ),
         tool(
             "terminal_open",
-            ToolEffect::Write,
+            ToolEffect::Exec,
             "打开交互终端会话（portable-pty / ConPTY）",
             serde_json::json!({
                 "shell": { "type": "string" }
@@ -1141,7 +1212,7 @@ pub fn workspace_tools() -> Vec<ToolSpec> {
         ),
         tool(
             "terminal_send",
-            ToolEffect::Write,
+            ToolEffect::Exec,
             "向终端会话发送命令",
             serde_json::json!({
                 "terminalId": { "type": "string" },
@@ -1209,6 +1280,50 @@ mod tests {
         assert_eq!(
             gate_tool(ToolEffect::Write, AgentPermissionMode::Readonly),
             ToolGate::Block
+        );
+    }
+
+    #[test]
+    fn gate_ladder_separates_edit_and_exec() {
+        assert_eq!(
+            gate_tool(ToolEffect::Write, AgentPermissionMode::Ask),
+            ToolGate::Ask
+        );
+        assert_eq!(
+            gate_tool(ToolEffect::Write, AgentPermissionMode::Write),
+            ToolGate::Run
+        );
+        assert_eq!(
+            gate_tool(ToolEffect::Exec, AgentPermissionMode::Write),
+            ToolGate::Ask
+        );
+        assert_eq!(
+            gate_tool(ToolEffect::Exec, AgentPermissionMode::Auto),
+            ToolGate::Ask
+        );
+        assert_eq!(
+            command_allow_key("shell", &serde_json::json!({"command": "git status"})).as_deref(),
+            Some("shell:git status")
+        );
+        assert_eq!(
+            gate_tool(ToolEffect::Destructive, AgentPermissionMode::Auto),
+            ToolGate::Ask
+        );
+        assert_eq!(
+            gate_tool(ToolEffect::Destructive, AgentPermissionMode::Bypass),
+            ToolGate::Run
+        );
+    }
+
+    #[test]
+    fn old_permission_names_still_load() {
+        assert_eq!(
+            serde_json::from_str::<AgentPermissionMode>(r#""confirm""#).unwrap(),
+            AgentPermissionMode::Ask
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentPermissionMode>(r#""session_auto""#).unwrap(),
+            AgentPermissionMode::Write
         );
     }
 

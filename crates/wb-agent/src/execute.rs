@@ -21,12 +21,13 @@ use wb_domain::{
     workspace_tools,
 };
 use wb_host::{
-    active_skills, cleanup_tool_spill, global_jobs, global_terminals, list_files_recursive,
-    list_plugins, list_skills, load_skill, managed_tool_block_reason, managed_tool_location,
-    managed_tools_brief, maybe_spill, mcp_http_call, mcp_stdio_call, ocr_image, ocr_status,
-    path_is_within, paths_equal, present_path, probe_workspace_dependencies, read_image_info,
-    read_text, resolve_agent_cwd, run_shell_in, run_shell_kind, set_agent_cwd,
-    shell_command_block_reason, web_fetch, web_search, which_bin, write_text,
+    active_skills, cleanup_tool_spill, ensure_session_worktree, git_snapshot, global_jobs,
+    global_terminals, list_files_recursive, list_plugins, list_skills, load_skill,
+    managed_tool_block_reason, managed_tool_location, managed_tools_brief, maybe_spill,
+    mcp_http_call, mcp_stdio_call, ocr_image, ocr_status, path_is_within, paths_equal,
+    present_path, probe_workspace_dependencies, read_image_info, read_text, resolve_agent_cwd,
+    run_shell_in, run_shell_kind, set_agent_cwd, shell_command_block_reason, web_fetch, web_search,
+    which_bin, write_text,
 };
 use wb_store::{MemoryWorkbenchRepository, load_prefs, update_prefs};
 
@@ -2390,6 +2391,46 @@ pub fn execute_tool(
             })?;
             Ok(result)
         }
+        "worktree_open" => {
+            let ws = workspace_root.ok_or_else(|| anyhow::anyhow!("未绑定工作区"))?;
+            let slug = args
+                .get("threadId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("session");
+            let dest = ensure_session_worktree(Path::new(ws), slug)?;
+            let shown = dest.display().to_string();
+            set_agent_cwd(Some(dest));
+            if let Some(thread_id) = args.get("threadId").and_then(|v| v.as_str()) {
+                repo.set_thread_cwd(thread_id, Some(shown.clone()));
+            }
+            Ok(ToolResult::ok_text(format!(
+                "已打开 worktree，后续改动只落在这里，不会自动合并：{shown}"
+            )))
+        }
+        "worktree_diff" => {
+            let root = effective_root(workspace_root)?;
+            let Some(snap) = git_snapshot(Path::new(&root)) else {
+                return Ok(ToolResult::err_text("当前目录不是 git 工作区"));
+            };
+            if snap.changes.is_empty() {
+                return Ok(ToolResult::ok_text(format!(
+                    "{} · 无未提交改动",
+                    snap.branch
+                )));
+            }
+            let lines: Vec<_> = snap
+                .changes
+                .iter()
+                .take(80)
+                .map(|c| format!("{} {}", c.status, c.path))
+                .collect();
+            Ok(ToolResult::ok_text(format!(
+                "{} · {} 个改动\n{}",
+                snap.branch,
+                snap.changes.len(),
+                lines.join("\n")
+            )))
+        }
         "working_directory" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path.trim().is_empty() {
@@ -2960,7 +3001,7 @@ fn spawn_subagent(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<
         permission_mode: if parent.permission_mode == AgentPermissionMode::Readonly {
             AgentPermissionMode::Readonly
         } else {
-            AgentPermissionMode::SessionAuto
+            AgentPermissionMode::Write
         },
         queue_json: None,
         web_url: None,
@@ -2970,6 +3011,7 @@ fn spawn_subagent(repo: &mut MemoryWorkbenchRepository, args: &Value) -> Result<
         session_goal: None,
         cwd: None,
         draft: None,
+        allowed_commands: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -3417,6 +3459,7 @@ mod tests {
             session_goal: None,
             cwd: None,
             draft: None,
+            allowed_commands: Vec::new(),
             created_at: now,
             updated_at: now,
         };

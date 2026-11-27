@@ -81,6 +81,7 @@
 | DSH 工具 | 本仓库 | 说明 |
 | --- | --- | --- |
 | `working_directory` | ✅ | 会话级 cwd；相对路径与 shell/文件工具跟随 |
+| `worktree_open` / `worktree_diff` | ✅ | 仅 git 工作区；在 `.wb-worktrees/<会话>` 开独立 worktree 并查看未提交改动。不自动合并 |
 
 未对齐：已打开的 PTY 进程不会随 cwd 切换自动 `cd`（与 DSH 文档一致：终端独立保留目录）。
 

@@ -4,8 +4,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use wb_domain::{
-    AgentApproval, AgentMessage, AgentPermissionMode, AgentRole, AgentThread, ApprovalStatus,
-    BUILTIN_MODEL_REF, PlannedCall, ToolGate, create_id, now_ms,
+    AgentApproval, AgentEvent, AgentMessage, AgentPermissionMode, AgentRole, AgentThread,
+    ApprovalStatus, BUILTIN_MODEL_REF, PlannedCall, ToolGate, command_allow_key, create_id, now_ms,
 };
 use wb_host::{active_skills, chat_completions_stream};
 use wb_store::MemoryWorkbenchRepository;
@@ -23,6 +23,8 @@ pub struct TurnOutcome {
 pub struct ModelReply {
     pub content: String,
     pub tool_calls: Vec<PlannedCall>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
 }
 
 /// Incremental model output for the live draft card.
@@ -115,7 +117,7 @@ pub async fn resolve_turn_reply_streaming(
         }
         return ModelReply {
             content: text.clone(),
-            tool_calls: Vec::new(),
+            ..ModelReply::default()
         };
     }
     call_remote_model(
@@ -157,10 +159,7 @@ pub async fn continue_turn_reply_streaming(
 }
 
 fn cancelled_reply() -> ModelReply {
-    ModelReply {
-        content: String::new(),
-        tool_calls: Vec::new(),
-    }
+    ModelReply::default()
 }
 
 fn model_error_reply(e: anyhow::Error) -> ModelReply {
@@ -170,7 +169,7 @@ fn model_error_reply(e: anyhow::Error) -> ModelReply {
     }
     ModelReply {
         content: format!("模型请求失败：{msg}"),
-        tool_calls: Vec::new(),
+        ..ModelReply::default()
     }
 }
 
@@ -325,6 +324,19 @@ fn apply_model_reply_inner(
         created_at: now_ms(),
     };
     repo.upsert_agent_message(assistant.clone());
+    if reply.prompt_tokens.is_some() || reply.completion_tokens.is_some() {
+        let prompt = reply.prompt_tokens.unwrap_or(0);
+        let completion = reply.completion_tokens.unwrap_or(0);
+        ledger(
+            repo,
+            &thread.id,
+            "model_usage",
+            &thread.model_ref,
+            &format!("输入 {prompt} · 输出 {completion}"),
+            Some(true),
+            None,
+        );
+    }
 
     openai_messages.push(assistant_openai_message(&reply));
 
@@ -391,6 +403,28 @@ fn apply_model_reply_inner(
     }
 }
 
+fn ledger(
+    repo: &mut MemoryWorkbenchRepository,
+    thread_id: &str,
+    kind: &str,
+    name: &str,
+    detail: &str,
+    ok: Option<bool>,
+    duration_ms: Option<u64>,
+) {
+    let detail: String = detail.chars().take(160).collect();
+    repo.append_agent_event(AgentEvent {
+        id: create_id(now_ms()),
+        thread_id: thread_id.to_string(),
+        kind: kind.to_string(),
+        name: name.to_string(),
+        detail,
+        ok,
+        duration_ms,
+        created_at: now_ms(),
+    });
+}
+
 fn dispatch_tool_calls(
     repo: &mut MemoryWorkbenchRepository,
     thread: &AgentThread,
@@ -401,9 +435,25 @@ fn dispatch_tool_calls(
     let mut open_view = None;
     let mut asked = false;
     for call in calls {
-        let gate = check_gate(&call.name, thread.permission_mode);
+        let mut gate = check_gate(&call.name, thread.permission_mode);
+        if thread.permission_mode == AgentPermissionMode::Auto
+            && matches!(gate, ToolGate::Ask)
+            && command_allow_key(&call.name, &call.args)
+                .is_some_and(|key| thread.allowed_commands.iter().any(|item| item == &key))
+        {
+            gate = ToolGate::Run;
+        }
         match gate {
             ToolGate::Block => {
+                ledger(
+                    repo,
+                    &thread.id,
+                    "tool_blocked",
+                    &call.name,
+                    "当前权限模式禁止此工具",
+                    Some(false),
+                    None,
+                );
                 msgs.push(tool_msg(
                     &thread.id,
                     &call.name,
@@ -421,6 +471,15 @@ fn dispatch_tool_calls(
                     Some(&call.id),
                 );
                 repo.upsert_agent_approval(approval.clone());
+                ledger(
+                    repo,
+                    &thread.id,
+                    "tool_pending",
+                    &call.name,
+                    &approval.summary,
+                    None,
+                    None,
+                );
                 msgs.push(tool_msg(
                     &thread.id,
                     &call.name,
@@ -476,6 +535,15 @@ fn dispatch_tool_calls(
                 }
                 let mut msg = tool_msg(&thread.id, &call.name, Some(&call.id), &result.content);
                 msg.duration_ms = Some(elapsed);
+                ledger(
+                    repo,
+                    &thread.id,
+                    "tool_ran",
+                    &call.name,
+                    &result.content,
+                    Some(result.ok),
+                    Some(elapsed),
+                );
                 msgs.push(msg);
             }
         }
@@ -518,6 +586,34 @@ pub fn resolve_approval(
     };
     approval.resolved_at = Some(now);
     repo.upsert_agent_approval(approval.clone());
+    if approved {
+        if let Ok(args) = serde_json::from_str::<Value>(&approval.args_json) {
+            if let Some(key) = command_allow_key(&approval.tool_name, &args) {
+                if let Some(thread) = repo.get_agent_thread(&approval.thread_id).cloned() {
+                    if thread.permission_mode == AgentPermissionMode::Auto
+                        && !thread.allowed_commands.iter().any(|item| item == &key)
+                    {
+                        let mut thread = thread;
+                        thread.allowed_commands.push(key);
+                        repo.upsert_agent_thread(thread);
+                    }
+                }
+            }
+        }
+    }
+    ledger(
+        repo,
+        &approval.thread_id,
+        if approved {
+            "approval_granted"
+        } else {
+            "approval_denied"
+        },
+        &approval.tool_name,
+        &approval.summary,
+        Some(approved),
+        None,
+    );
 
     let mut open_view = None;
     let content =
@@ -646,16 +742,20 @@ pub fn pending_approvals_for_thread(
 
 pub fn cycle_permission_mode(mode: AgentPermissionMode) -> AgentPermissionMode {
     match mode {
-        AgentPermissionMode::Confirm => AgentPermissionMode::SessionAuto,
-        AgentPermissionMode::SessionAuto => AgentPermissionMode::Readonly,
-        AgentPermissionMode::Readonly => AgentPermissionMode::Confirm,
+        AgentPermissionMode::Ask => AgentPermissionMode::Write,
+        AgentPermissionMode::Write => AgentPermissionMode::Auto,
+        AgentPermissionMode::Auto => AgentPermissionMode::Bypass,
+        AgentPermissionMode::Bypass => AgentPermissionMode::Readonly,
+        AgentPermissionMode::Readonly => AgentPermissionMode::Ask,
     }
 }
 
 pub fn permission_mode_label(mode: AgentPermissionMode) -> &'static str {
     match mode {
-        AgentPermissionMode::Confirm => "确认",
-        AgentPermissionMode::SessionAuto => "会话自动",
+        AgentPermissionMode::Ask => "询问",
+        AgentPermissionMode::Write => "可写",
+        AgentPermissionMode::Auto => "自动",
+        AgentPermissionMode::Bypass => "放行",
         AgentPermissionMode::Readonly => "只读",
     }
 }
@@ -890,6 +990,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         invoke: "/compact",
         tool: "compact",
         hint: "把较早历史折叠成摘要，只保留最近几轮",
+    },
+    SlashCommand {
+        invoke: "/worktree",
+        tool: "worktree_open",
+        hint: "为当前会话打开独立 git worktree",
+    },
+    SlashCommand {
+        invoke: "/worktree_diff",
+        tool: "worktree_diff",
+        hint: "查看 worktree 里尚未提交的改动",
     },
 ];
 
@@ -1225,6 +1335,7 @@ fn history_to_openai(history: &[AgentMessage]) -> Vec<Value> {
                         messages.push(assistant_openai_message(&ModelReply {
                             content: m.content.clone(),
                             tool_calls: parsed,
+                            ..ModelReply::default()
                         }));
                         continue;
                     }
@@ -1442,9 +1553,16 @@ fn parse_model_reply(resp: &Value) -> ModelReply {
         }
     }
 
+    let usage = resp.get("usage");
     ModelReply {
         content,
         tool_calls,
+        prompt_tokens: usage
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64()),
+        completion_tokens: usage
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64()),
     }
 }
 
@@ -1464,7 +1582,7 @@ pub fn create_thread(workspace_id: &str, title: &str, model_ref: Option<&str>) -
         project_id: None,
         title: title.into(),
         model_ref: model_ref.unwrap_or(BUILTIN_MODEL_REF).into(),
-        permission_mode: AgentPermissionMode::Confirm,
+        permission_mode: AgentPermissionMode::Ask,
         queue_json: None,
         web_url: None,
         archived_at: None,
@@ -1473,6 +1591,7 @@ pub fn create_thread(workspace_id: &str, title: &str, model_ref: Option<&str>) -
         session_goal: None,
         cwd: None,
         draft: None,
+        allowed_commands: Vec::new(),
         created_at: now,
         updated_at: now,
     }
@@ -1539,21 +1658,30 @@ mod tests {
         let reply = parse_model_reply(&resp);
         assert_eq!(reply.tool_calls.len(), 1);
         assert_eq!(reply.tool_calls[0].name, "task_list");
+        assert_eq!(reply.prompt_tokens, None);
     }
 
     #[test]
     fn permission_mode_cycles() {
         assert_eq!(
-            cycle_permission_mode(AgentPermissionMode::Confirm),
-            AgentPermissionMode::SessionAuto
+            cycle_permission_mode(AgentPermissionMode::Ask),
+            AgentPermissionMode::Write
         );
         assert_eq!(
-            cycle_permission_mode(AgentPermissionMode::SessionAuto),
+            cycle_permission_mode(AgentPermissionMode::Write),
+            AgentPermissionMode::Auto
+        );
+        assert_eq!(
+            cycle_permission_mode(AgentPermissionMode::Auto),
+            AgentPermissionMode::Bypass
+        );
+        assert_eq!(
+            cycle_permission_mode(AgentPermissionMode::Bypass),
             AgentPermissionMode::Readonly
         );
         assert_eq!(
             cycle_permission_mode(AgentPermissionMode::Readonly),
-            AgentPermissionMode::Confirm
+            AgentPermissionMode::Ask
         );
     }
 
