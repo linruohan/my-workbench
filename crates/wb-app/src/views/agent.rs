@@ -93,6 +93,8 @@ pub struct AgentPane {
     input: Entity<TextareaState>,
     /// Title typed in the new web-session dialog. Empty falls back to the default title.
     web_title_input: Entity<InputState>,
+    /// Title typed in the rename-session dialog.
+    rename_input: Entity<InputState>,
     /// Link typed in the new web-session dialog.
     web_link_input: Entity<InputState>,
     ask_input: Entity<InputState>,
@@ -177,6 +179,7 @@ impl AgentPane {
         });
         let web_title_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(WEB_AGENT_THREAD_TITLE));
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
         let web_link_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://example.com"));
         let thread_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话…"));
@@ -200,6 +203,7 @@ impl AgentPane {
             state,
             input: input.clone(),
             web_title_input: web_title_input.clone(),
+            rename_input: rename_input.clone(),
             web_link_input: web_link_input.clone(),
             ask_input: ask_input.clone(),
             thread_query: thread_query.clone(),
@@ -1908,6 +1912,80 @@ impl AgentPane {
         cx.notify();
     }
 
+    fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.state.with(|s| {
+            s.active_thread_id.as_deref().and_then(|id| {
+                s.repo
+                    .list_agent_threads()
+                    .into_iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.title)
+            })
+        });
+        let Some(title) = title else {
+            return;
+        };
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(&title, window, cx);
+        });
+        let input = self.rename_input.clone();
+        let entity = cx.weak_entity();
+        let focus = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if focus.replace(false) {
+                window.focus(&input.focus_handle(cx), cx);
+            }
+            let submit = entity.clone();
+            let input_for_submit = input.clone();
+            dialog
+                .title("重命名会话")
+                .w(px(360.))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_3()
+                        .px_4()
+                        .child(Input::new(&input).w_full()),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("rename-thread-cancel")
+                                .small()
+                                .ghost()
+                                .label("取消")
+                                .on_click(|_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("rename-thread-ok")
+                                .small()
+                                .primary()
+                                .label("保存")
+                                .on_click(move |_, window, cx| {
+                                    let title = input_for_submit.read(cx).value().to_string();
+                                    let saved = submit
+                                        .update(cx, |this, cx| {
+                                            if title.trim().is_empty() {
+                                                return false;
+                                            }
+                                            this.rename_active_thread(&title, cx);
+                                            true
+                                        })
+                                        .unwrap_or(false);
+                                    if saved {
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        ),
+                )
+        });
+    }
+
     fn rename_active_thread(&mut self, title: &str, cx: &mut Context<Self>) {
         let title = title.trim();
         if title.is_empty() {
@@ -2776,6 +2854,24 @@ impl AgentPane {
                             }),
                     )
                     .child(
+                        Button::new(SharedString::from(format!("rename-thread-{id}")))
+                            .xsmall()
+                            .ghost()
+                            .label("重命名")
+                            .on_click({
+                                let id = id.clone();
+                                let entity = entity.clone();
+                                move |_, window, app| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(app, |this, cx| {
+                                            this.select_thread(id.clone(), cx);
+                                            this.open_rename_dialog(window, cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .child(
                         Button::new(SharedString::from(format!("arch-thread-{id}")))
                             .xsmall()
                             .ghost()
@@ -3010,6 +3106,85 @@ impl AgentPane {
                                                 this.show_todos = !this.show_todos;
                                                 cx.notify();
                                             })),
+                                    )
+                                })
+                                .when(active.is_some(), |row| {
+                                    let archived = self.state.with(|s| {
+                                        s.active_thread_id.as_deref().is_some_and(|id| {
+                                            s.repo
+                                                .list_agent_threads()
+                                                .into_iter()
+                                                .any(|t| t.id == id && t.archived_at.is_some())
+                                        })
+                                    });
+                                    let menu_entity = entity.clone();
+                                    let archive_entity = entity.clone();
+                                    let host = self.host.clone();
+                                    row.child(
+                                        Button::new("agent-thread-more")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::Ellipsis)
+                                            .tooltip("更多")
+                                            .dropdown_menu_with_anchor(
+                                                Anchor::BottomRight,
+                                                move |menu, _, _| {
+                                                    let rename_entity = menu_entity.clone();
+                                                    let archive_entity = archive_entity.clone();
+                                                    menu.item(
+                                                        PopupMenuItem::new("重命名").on_click(
+                                                            move |_, window, app| {
+                                                                if let Some(e) = rename_entity.upgrade()
+                                                                {
+                                                                    e.update(app, |this, cx| {
+                                                                        this.open_rename_dialog(
+                                                                            window, cx,
+                                                                        );
+                                                                    });
+                                                                }
+                                                            },
+                                                        ),
+                                                    )
+                                                    .item(
+                                                        PopupMenuItem::new(if archived {
+                                                            "取消归档"
+                                                        } else {
+                                                            "归档"
+                                                        })
+                                                        .on_click(move |_, _, app| {
+                                                            if let Some(e) = archive_entity.upgrade()
+                                                            {
+                                                                e.update(app, |this, cx| {
+                                                                    let Some(id) = this.state.with(
+                                                                        |s| s.active_thread_id.clone(),
+                                                                    ) else {
+                                                                        return;
+                                                                    };
+                                                                    this.toggle_archive_thread(
+                                                                        &id, cx,
+                                                                    );
+                                                                });
+                                                            }
+                                                        }),
+                                                    )
+                                                },
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("agent-rail-open")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::PanelRightOpen)
+                                            .tooltip("打开右侧栏")
+                                            .on_click(move |_, window, app| {
+                                                if let Some(e) =
+                                                    host.as_ref().and_then(|host| host.upgrade())
+                                                {
+                                                    e.update(app, |this, cx| {
+                                                        this.set_right_collapsed(false, window, cx);
+                                                    });
+                                                }
+                                            }),
                                     )
                                 }),
                         )

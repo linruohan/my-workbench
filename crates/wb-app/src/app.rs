@@ -24,8 +24,6 @@ actions!(
     [OpenPalette, FocusCapture, Escape, EditLastMessage]
 );
 
-const RIGHT_SIDEBAR_COLLAPSED_WIDTH: f32 = 40.0;
-
 fn recording_chip(bg: Hsla, fg: Hsla) -> impl IntoElement {
     div()
         .text_xs()
@@ -423,7 +421,7 @@ impl WorkbenchApp {
     pub(crate) fn set_right_collapsed(
         &mut self,
         collapsed: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.right_collapsed == collapsed {
@@ -433,14 +431,6 @@ impl WorkbenchApp {
         self.state
             .with_mut(|s| s.prefs.right_sidebar_collapsed = collapsed);
         self.state.persist_prefs();
-        if !collapsed {
-            let width = self
-                .state
-                .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width));
-            self.sidebar_panels.update(cx, |state, cx| {
-                state.resize_panel(2, px(width), window, cx);
-            });
-        }
         cx.notify();
     }
 
@@ -850,18 +840,10 @@ impl Render for WorkbenchApp {
                                             .child(sidebar),
                                     )
                                     .child(resizable_panel().child(main))
-                                    .when(show_right, |row| {
-                                        let right_size = if right_collapsed {
-                                            RIGHT_SIDEBAR_COLLAPSED_WIDTH
-                                        } else {
-                                            right_width
-                                        };
-                                        let right_range = if right_collapsed {
-                                            px(RIGHT_SIDEBAR_COLLAPSED_WIDTH)
-                                                ..px(RIGHT_SIDEBAR_COLLAPSED_WIDTH)
-                                        } else {
-                                            px(RIGHT_SIDEBAR_WIDTH_MIN)..px(RIGHT_SIDEBAR_WIDTH_MAX)
-                                        };
+                                    .when(show_right && !right_collapsed, |row| {
+                                        let right_size = right_width;
+                                        let right_range = px(RIGHT_SIDEBAR_WIDTH_MIN)
+                                            ..px(RIGHT_SIDEBAR_WIDTH_MAX);
                                         row.child(
                                             resizable_panel()
                                                 .size(px(right_size))
