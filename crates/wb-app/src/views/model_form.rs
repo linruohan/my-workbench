@@ -1,5 +1,6 @@
 //! 添加 / 编辑模型弹窗：智能配置、上下文、输入类型、能力与推理映射。
 
+use crate::style;
 use crate::views::settings::SettingsPane;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
@@ -302,10 +303,10 @@ impl Render for ModelDraft {
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
         let colors = ChipColors {
-            border: cx.theme().border,
+            border: style::hairline(cx),
             primary: cx.theme().primary,
             on_primary: cx.theme().primary_foreground,
-            secondary: cx.theme().secondary,
+            secondary: style::card(cx),
         };
         let success = cx.theme().success;
         let entity = cx.entity().downgrade();

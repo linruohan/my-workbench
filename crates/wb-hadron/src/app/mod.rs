@@ -1,0 +1,3646 @@
+//! GPUI window for the chamber. Behind the `gui` feature.
+//!
+//! Built on the git gpui stack + gpui-component: a transparent, dark,
+//! client-decorated window inside our own rounded, shadowed [`crate::window_frame`],
+//! with a custom `TitleBar` and a 3-pane body — a Quarks rail, the field chat
+//! (grows), and an Inspector rail. Expanded rails are gpui-component `Resizable`
+//! panels (drag-resize); a collapsed rail is a fixed strip outside the group.
+//! Widths + collapse state persist via [`crate::config`].
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use gpui_kit::component::avatar::Avatar;
+use gpui_kit::{
+    actions, div, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, App, Context,
+    Decorations, Entity, FocusHandle, Focusable, Hsla, KeyBinding, MouseButton, Pixels, Render,
+    Rgba, ScrollHandle, SharedString, Subscription, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
+};
+// badge removed
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::chart::AreaChart;
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::input::{
+    Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveRight, MoveUp, Paste,
+    Textarea, TextareaState,
+};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+pub use gpui_kit::component::scroll::{ScrollableElement, Scrollbar, ScrollbarMode};
+use gpui_kit::component::switch::Switch;
+// tab imports removed
+// tag imports removed
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::tooltip::Tooltip;
+use settings::{create_model_delegate, ModelSelectDelegate};
+
+// table imports removed
+use gpui_kit::component::{
+    h_flex, v_flex, Icon, IconName, Root, Sizable, Size, Theme, ThemeMode, TitleBar,
+};
+use hadron_lattice::{
+    io, load_team, resolve_team, Actor, Event, Kind, Mode, QuarkId, QuarkState, SandboxMode, Seat,
+    SeatOverride, Team,
+};
+
+use crate::config::{self, ChamberPrefs, Identity};
+use crate::model::{self, ChamberView, MessageRow, RosterRow, StatsWindow, SwarmTask, TaskState};
+use crate::theme;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CachedStats {
+    pub window: StatsWindow,
+    pub messages_len: usize,
+    pub archived_len: usize,
+    pub roster_len: usize,
+    pub stats: crate::model::SessionStats,
+    pub timeline: crate::model::SpendTimeline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceMode {
+    Chamber,
+    Selector,
+}
+
+pub(super) mod delegation;
+pub(crate) mod toasts;
+use toasts::{ToastKind, ToastManager};
+
+mod mentions;
+pub(crate) use mentions::StepStatus;
+use mentions::{parse_plan_overview, parse_plan_tasks, resolve_mention_names_with_human};
+
+mod identity;
+use identity::{
+    hsla_to_hex, identity_avatar, identity_avatar_with_state, parse_hex, ResolvedIdentity,
+    IDENTITY_SWATCHES,
+};
+
+mod tabs;
+use tabs::{
+    BranchScope, ChatTab, GitSubtab, InfoTab, MissionSubtab, Rail, RightRailTab, RosterTab,
+    VisualizerMode,
+};
+
+mod providers;
+use providers::{
+    cli_seat_from, configured_providers, custom_cli_vendor_is_valid, migrate_legacy_ids,
+    migrate_repo_to_catalogue, parse_max_exchanges, prompt_channel_from, AcpModelProbe,
+    AcpModelState, AgentDescriptor, AgyBridgeProbe, AgyBridgeState, CliChannelChoice,
+    ConfiguredQuark, HttpModelProbe, HttpModelState, ProviderState, SettingsTarget, WizardState,
+    DEFAULT_SECRET_VAR,
+};
+
+mod widgets;
+use widgets::{
+    control_button, drag_region, effective_presence_state, effort_tag, empty_hint,
+    fallback_pick_image, format_num, frame_corner_radii, kv_row, log_row, markdown_style,
+    menu_button, mode_color, mode_hint, mode_label, mode_tag, next_global_mode, next_mode,
+    next_sandbox_mode, panel_eyebrow, progress_meter, sandbox_tag, session_card,
+    settings_card_section, settings_field, settings_field_stacked, stat_tile, stat_tile_with_note,
+    streaming_drafts, task_row, text_button,
+};
+
+mod actions;
+mod render;
+mod settings;
+
+mod input;
+#[cfg(test)]
+use input::split_leading_commands;
+
+mod reload;
+mod terminal;
+pub mod update;
+pub use update::UpdateState;
+pub mod audio;
+pub mod audio_intercom;
+#[allow(unused_imports)]
+pub use audio_intercom::*;
+
+actions!(
+    chamber,
+    [
+        CycleMode,
+        CycleSandbox,
+        NextChatTab,
+        PrevChatTab,
+        NextRosterTab,
+        PrevRosterTab,
+        NextInspectorTab,
+        PrevInspectorTab,
+        NextStatsSubTab,
+        PrevStatsSubTab,
+        NextQuark,
+        PrevQuark,
+        ToggleSelectedQuark,
+        OpenMenu,
+        ToggleFocus,
+        FocusChat,
+        FindInView,
+        Dismiss,
+        ToggleProcessManager,
+        NewTerminalTab,
+        CloseTerminalTab,
+        NextTerminalTab,
+        PrevTerminalTab,
+        NextGitSubtab,
+        PrevGitSubtab,
+        SelectGitBranches,
+        SelectGitWorktrees,
+        SelectGitGraph,
+        SelectGitDiff3Way,
+        SelectGitRemote,
+        NextGitItem,
+        PrevGitItem,
+        OpenGitItem,
+        ToggleReplOverlay,
+        ToggleProjectSwitcher,
+        TerminalCopy,
+    ]
+);
+
+/// Key-dispatch context for the chamber's window-level actions.
+const KEY_CONTEXT: &str = "Chamber";
+pub(super) const GIT_KEY_CONTEXT: &str = "GitRail";
+
+/// Width of a collapsed rail's strip (just the expand affordance).
+const RAIL_STRIP: f32 = 44.0;
+/// Minimum drag width for the resizable terminal rail.
+const RAIL_MIN: f32 = 160.0;
+/// The terminal/multitool has no meaningful upper width — cap it far past any
+/// screen so the only real limit is the chat keeping its [`CHAT_MIN`].
+const TERMINAL_MAX: f32 = 6000.0;
+/// The chat can be squeezed but never collapsed to nothing.
+const CHAT_MIN: f32 = 360.0;
+
+/// Corner radius for floating panels/containers on the unified canvas.
+const INNER_RADIUS: Pixels = px(12.0);
+
+/// Terminal grid metrics: the render font size and one cell's width/height for
+/// Cascadia Code at that size, plus the inner padding (`.p_3()` = 12px) of the
+/// terminal lines container. The pump loop divides the measured screen by
+/// these to pick the PTY's columns/rows, so they must track the values used in
+/// the grid render. (Cascadia's advance is ~0.6em; line height ~1.3em.)
+const TERM_FONT: f32 = 13.0;
+const TERM_CELL_W: f32 = 7.8;
+const TERM_CELL_H: f32 = 17.0;
+const TERM_PAD: f32 = 12.0;
+
+/// Translate the terminal screen's measured pixel size into a PTY column/row
+/// grid. The single source of truth for the cell → grid conversion, used both to
+/// spawn the PTY and to resize it. Floored, and never below a 2×2 usable grid.
+fn term_dims((w, h): (f32, f32)) -> (usize, usize) {
+    let inner_w = (w - 2.0 * TERM_PAD).max(0.0);
+    let inner_h = (h - 2.0 * TERM_PAD).max(0.0);
+    (
+        ((inner_w / TERM_CELL_W).floor() as usize).max(2),
+        ((inner_h / TERM_CELL_H).floor() as usize).max(2),
+    )
+}
+
+/// The live completion card for the chat box: the rows it offers and which one
+/// Enter accepts. Held as `Option<CompletionCard>` on the chamber — `None` is
+/// "no card", so the open-flag and the rows can never disagree (there is no
+/// separate bool to fall out of sync). Rebuilt on every `InputEvent::Change`.
+struct CompletionCard {
+    /// Byte offset of the trigger char in the input; the accept replaces
+    /// `input[start..cursor]` with the chosen row's `new_text`.
+    start: usize,
+    candidates: Vec<crate::text::Candidate>,
+    /// The highlighted row (Up/Down move it, Enter/click accept it).
+    selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CachedPlanDag {
+    pub content_hash: u64,
+    pub head_oid: Option<String>,
+    pub graph: hadron_lattice::task_graph::TaskGraph,
+    pub waves: Vec<Vec<hadron_lattice::task_graph::TaskNode>>,
+    pub ready_ids: std::collections::HashSet<String>,
+    pub landed_commits: std::collections::HashSet<String>,
+    pub progress: (usize, usize, usize, Vec<(String, mentions::StepStatus)>),
+    pub task_groups: Vec<(String, Vec<(String, mentions::StepStatus)>)>,
+}
+
+pub(super) struct TerminalTab {
+    pub title: String,
+    pub term: Option<crate::pty::PtyTerminal>,
+    pub error: Option<String>,
+}
+
+/// 工作台内嵌模式的 Chamber 实体。
+///
+/// 与独立窗口的 [`run`] 复用同一套状态机与渲染；区别只在于不自己开窗、
+/// 不改全局主题，渲染入口是 [`Chamber::render_chat_surface`] 与
+/// [`Chamber::render_rail_surface`]。
+pub struct Chamber {
+    view: ChamberView,
+    prefs: ChamberPrefs,
+    /// The **repo** team file (`.hadron/team.json`): legacy full seats plus per-repo
+    /// role/state overrides. This is what the chamber edits and writes. The roster is
+    /// projected from `resolve_team(&self.team, &self.global)`, not this directly.
+    team: Team,
+    /// The **global catalogue** (`~/.hadron/team.json`): every quark's definition. A
+    /// repo override names one of these; catalogue quarks not adopted here show greyed.
+    global: Team,
+    /// The field file this chamber reads from and steers into.
+    path: PathBuf,
+    /// Where per-seat secret env-var VALUES are written/read (the Settings API-key
+    /// field). Real backend: `hadron_gluon::KeyringStore` over the OS credential
+    /// store, constructed once in [`Chamber::new`]. Boxed as the trait so a test
+    /// can inject a `MemoryStore` instead — the chamber itself never sees which.
+    secret_store: Box<dyn hadron_lattice::secrets::SecretStore>,
+    /// The human's message box at the foot of the chat column.
+    input: Entity<TextareaState>,
+    /// The prompt history list for Up/Down arrow recall in the chat prompt.
+    pub(super) prompt_history: Vec<String>,
+    /// Active position in `prompt_history` when navigating with Up/Down arrows.
+    pub(super) history_index: Option<usize>,
+    /// In-progress prompt text saved when history navigation begins.
+    pub(super) history_draft: String,
+    /// The completion card floating above the message box, or `None` when no
+    /// `@`/`:`/`/` query is live. Our own overlay, not the fork's LSP menu.
+    completion: Option<CompletionCard>,
+    /// Inline ghost-text completion suffix offered at the end of the chat input.
+    pub(super) ghost_completion: Option<String>,
+    /// Whether the composer is currently displaying the live Markdown preview.
+    pub(super) composer_preview_mode: bool,
+    /// Scroll handle for the live Markdown composer preview pane (`#composer-preview-content`).
+    pub(super) composer_preview_scroll: ScrollHandle,
+    /// Root focus target, so Ctrl+Shift+P dispatches regardless of what's focused.
+    focus_handle: FocusHandle,
+    /// Which view the chat column's segmented tabs are showing.
+    chat_tab: ChatTab,
+    /// Which section the quark info panel is showing.
+    info_tab: InfoTab,
+    /// The time window the Stats views (chat Stats tab + info Stats tab) aggregate over.
+    /// Shared: the info panel is a modal overlay, never on-screen with the chat Stats tab.
+    stats_window: StatsWindow,
+    /// Projected messages of every archived session (`sessions/*/field.jsonl`), the
+    /// history the wider [`StatsWindow`]s fold in. Loaded once at startup and rebuilt by
+    /// [`Self::reload_archives_in_background`].
+    archived_messages: Vec<MessageRow>,
+    /// The archived sessions the app menu's `Sessions` submenu offers to `/resume`,
+    /// newest first. Cached rather than listed on menu-open: [`crate::model::list_sessions`]
+    /// reads every archive's whole `field.jsonl`, which is not something to do on the
+    /// frame that paints a menu. Rebuilt alongside `archived_messages`.
+    sessions: Vec<crate::model::SessionInfo>,
+    /// Which view the right rail's segmented tabs are showing. The right rail is
+    /// independent of the chat column: changing the chat tab must not move it.
+    right_rail_tab: RightRailTab,
+    /// 3D Swarm Topology visualizer camera rotation, zoom, auto-spin, and focus state.
+    visualizer_yaw: f32,
+    visualizer_pitch: f32,
+    visualizer_zoom: f32,
+    visualizer_auto_spin: bool,
+    visualizer_selected_quark: Option<String>,
+    visualizer_last_mouse: Option<gpui_kit::Point<gpui_kit::Pixels>>,
+    pub(super) visualizer_mode: VisualizerMode,
+    pub(super) visualizer_selected_crate: Option<String>,
+    pub(super) visualizer_selected_note: Option<String>,
+    pub(super) visualizer_nucleus_filter: Option<String>,
+    pub(super) nucleus_graph_zoom: f32,
+    pub(super) nucleus_graph_pan: (f32, f32),
+    pub(super) nucleus_graph_yaw: f32,
+    pub(super) nucleus_graph_pitch: f32,
+    pub(super) nucleus_graph_last_mouse: Option<gpui_kit::Point<gpui_kit::Pixels>>,
+    pub(super) nucleus_graph_drag_moved: bool,
+    pub(super) nucleus_graph_canvas_center: std::cell::Cell<(f32, f32)>,
+    pub(super) nucleus_graph_hovered_note: Option<String>,
+    pub(super) cached_crate_graph: std::cell::RefCell<Option<render::visualizer::CachedCrateGraph>>,
+    pub(super) cached_crate_graph_loading: std::cell::Cell<bool>,
+    pub(super) cached_nucleus_graph:
+        std::cell::RefCell<Option<render::nucleus_graph::CachedNucleusGraph>>,
+    pub(super) cached_nucleus_graph_loading: std::cell::Cell<bool>,
+    /// Keyboard cursor over the roster (index into `view.roster`), moved by the
+    /// quark-nav keys and drawn as a highlighted row. `None` = nothing selected.
+    selected_quark_ix: Option<usize>,
+    /// Which filter tab the roster rail is showing (Active vs All).
+    roster_tab: RosterTab,
+    /// Whether the keyboard-triggered app menu overlay is open (mirrors the click
+    /// dropdown behind the hamburger button, but reachable without the mouse).
+    app_menu_open: bool,
+    /// Cached diff string for the Changes rail
+    working_diff: Option<Vec<crate::vcs::FileDiff>>,
+    changes_open_ixs: std::collections::HashSet<usize>,
+    changes_scroll: ScrollHandle,
+    /// Cached branches/worktrees/log-graph for the Git rail, refreshed on tab entry
+    /// (like `working_diff`) rather than every render — each is its own git subprocess.
+    git_branch_fingerprint: Option<String>,
+    git_branches: Option<Vec<crate::vcs::BranchInfo>>,
+    git_remote_branches: Option<Vec<crate::vcs::BranchInfo>>,
+    git_branch_scope: BranchScope,
+    git_fetching_remotes: bool,
+    git_worktrees: Option<Vec<crate::vcs::WorktreeInfo>>,
+    git_log_graph: Option<String>,
+    git_scroll: ScrollHandle,
+    git_subtab: GitSubtab,
+    mission_subtab: MissionSubtab,
+    pub(in crate::app) gate_streams:
+        std::collections::BTreeMap<String, render::gate_explorer::QuarkGateStream>,
+    pub(in crate::app) selected_gate_quark: Option<String>,
+    pub(in crate::app) gate_test_filter: render::gate_explorer::GateTestFilter,
+    pub(in crate::app) gate_output_scroll: ScrollHandle,
+    pub(super) repo_health_report: Option<hadron_gatekeeper::RepoHealthReport>,
+    pub(super) git_remote_info: Option<crate::vcs::RemoteTrackingInfo>,
+    pub(super) github_issues: Option<Vec<crate::vcs::GitHubIssueInfo>>,
+    pub(super) github_prs: Option<Vec<crate::vcs::GitHubPrInfo>>,
+    pub(super) github_actions: Option<Vec<crate::vcs::GitHubWorkflowRunInfo>>,
+    pub(super) github_security_alerts: Option<Vec<crate::vcs::GitHubSecurityAlertInfo>>,
+    pub(super) github_status_msg: Option<String>,
+    pub(super) git_focus: FocusHandle,
+    pub(super) git_cursor_branch: Option<usize>,
+    pub(super) git_cursor_worktree: Option<usize>,
+    pub(super) git_cursor_graph: Option<usize>,
+    /// The branch whose diff-against-`main` is expanded in the Branches subtab, with
+    /// its cached diff and per-file open set (like `changes_open_ixs`).
+    git_selected_branch: Option<String>,
+    git_branch_diff: Option<Vec<crate::vcs::FileDiff>>,
+    git_branch_open_ixs: std::collections::HashSet<usize>,
+    pub git_selected_commit: Option<String>,
+    pub git_commit_message: Option<String>,
+    pub git_commit_diff: Option<Vec<crate::vcs::FileDiff>>,
+    pub git_commit_open_ixs: std::collections::HashSet<usize>,
+    pub git_show_snapshots: bool,
+    /// The Graph subtab's rows, already parsed, snapshot-filtered and connector-collapsed,
+    /// plus the lane count their rail gutter is sized from. Derived state, rebuilt by
+    /// [`Chamber::rebuild_graph_rows`] only when `git_log_graph` or `git_show_snapshots`
+    /// changes — GPUI re-renders on every hover, and re-parsing the whole `git log` there
+    /// is what made the tab lag.
+    pub(super) git_graph_rows: Vec<crate::vcs::GraphRow>,
+    pub(super) git_graph_max_lanes: usize,
+    pub(super) delegations: Vec<delegation::Delegation>,
+    /// Virtual list state for the Graph subtab: without it every commit builds an element
+    /// and a lane `canvas` on every frame, so an uncapped walk would be unaffordable.
+    pub(super) git_graph_list: gpui_kit::ListState,
+    /// Scroll position of the Plan tracker pane.
+    plan_scroll: ScrollHandle,
+    /// Scroll position of the Execution Topology & Wave DAG row.
+    pub(super) dag_waves_scroll: ScrollHandle,
+    /// Cached parsed Plan DAG, waves, and merged-commit status.
+    pub(super) cached_plan_dag: std::cell::RefCell<Option<CachedPlanDag>>,
+    /// Cached 3-way diff inspector state, computed off-thread.
+    pub(super) cached_three_way_diff:
+        std::cell::RefCell<Option<render::diff_inspector::CachedDiffInspector>>,
+    pub(super) cached_three_way_diff_loading: std::cell::Cell<bool>,
+    /// Active drag state for the borderless Chat <-> Inspector splitter `(start_x, start_width)`.
+    pub(super) inspector_resize_drag: Option<(f32, f32)>,
+    /// Scroll position of the Tasks pane.
+    tasks_scroll: ScrollHandle,
+    /// Scroll position of the Time Travel inspector pane.
+    time_travel_scroll: ScrollHandle,
+    /// Timeline scrub instant for the Tasks tab. `None` means live.
+    pub(super) task_scrub: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) plan_collapsed_tasks: std::collections::HashSet<String>,
+    pub(super) plan_dag_expanded: bool,
+    pub(super) plan_context_collapsed: bool,
+    pub(super) plan_overview_collapsed: bool,
+    pub(super) audio_intercom: audio_intercom::AudioIntercomBridge,
+    pub(super) interactive_canvas: render::canvas::InteractiveCanvasState,
+    pub(super) diff_steering: render::diff_steering::DiffSteeringState,
+    pub(super) split_canvas: render::split_canvas::SplitCanvasState,
+    pub(super) file_tree_previous_tab: Option<RightRailTab>,
+    pub(super) last_plan_path: Option<String>,
+    pub(super) manual_plan_override_at_message_len: Option<usize>,
+    pub(super) last_incomplete_task: Option<String>,
+    /// Virtual list state for the Chat tab.
+    chat_list_state: gpui_kit::ListState,
+    log_list_state: gpui_kit::ListState,
+    /// Log rows (by message index) the user has clicked to expand to their full body.
+    log_expanded: std::collections::HashSet<usize>,
+    /// Maps a virtual list item index to the message's true index in `view.messages`,
+    /// narrowed by `chat_search_query`.
+    chat_message_ixs: Vec<usize>,
+    /// The Log tab's twin of `chat_message_ixs`, narrowed by `log_search_query` +
+    /// `log_kind_filter`. `log_list_state`'s count is this vector's length.
+    log_message_ixs: Vec<usize>,
+    /// Live chat filter, set while the composer holds `/find …` (or `/search …`).
+    /// In memory only — never written to the field.
+    chat_search_query: String,
+    /// The Log tab's search box and its last-seen value.
+    log_search_input: Entity<InputState>,
+    log_search_query: String,
+    log_kind_filter: model::LogKindFilter,
+    /// Scroll position for the Stats tab.
+    stats_scroll: ScrollHandle,
+    /// Cache of parsed Markdown to HTML, keyed by message index, storing (raw_body, resolved_content)
+    parsed_markdown: std::cell::RefCell<std::collections::HashMap<usize, (String, String)>>,
+    /// Memoized turn summary (thought duration, tool count) keyed by message index.
+    turn_summaries: std::cell::RefCell<std::collections::HashMap<usize, Option<(i64, usize)>>>,
+    /// Cached aggregated statistics and spend timeline per time window.
+    cached_stats: std::cell::RefCell<std::collections::HashMap<StatsWindow, CachedStats>>,
+    /// Which stats windows are currently computing in the background.
+    stats_computing: std::cell::RefCell<std::collections::HashSet<StatsWindow>>,
+    /// A debounced window-bounds save is already in flight, so a drag (which
+    /// re-renders every frame) coalesces into one write instead of one per frame.
+    bounds_save_pending: bool,
+    /// Whether the Process Manager overlay is showing (pinned Roster rail button,
+    /// above Settings).
+    process_manager_open: bool,
+    /// Whether the Settings overlay is showing, and which identity it edits.
+    settings_open: bool,
+    settings_target: SettingsTarget,
+    /// Settings editor fields (display name + image path for the current target).
+    settings_name: Entity<InputState>,
+    settings_path: Entity<InputState>,
+    settings_deny_skills: Entity<InputState>,
+    settings_energy_limit: Entity<InputState>,
+    settings_temperature: Entity<InputState>,
+    settings_top_p: Entity<InputState>,
+    settings_max_tokens: Entity<InputState>,
+    settings_new_role: Entity<InputState>,
+    settings_model: Entity<InputState>,
+    settings_effort: Entity<InputState>,
+    settings_mode_config: Entity<InputState>,
+    /// The team-wide "Max exchanges" field on the Providers panel (not per-identity, so
+    /// it's loaded/committed unconditionally in `load_settings_inputs`/
+    /// `commit_settings_inputs` rather than keyed off `settings_target`). Blank = clear
+    /// the repo override; see `parse_max_exchanges`.
+    settings_max_exchanges: Entity<InputState>,
+    /// The per-quark secret env-var **name** to declare/set/clear (e.g.
+    /// `"GEMINI_API_KEY"`), defaulted from the seat's existing `secret_env` (or
+    /// [`providers::DEFAULT_SECRET_VAR`] when none is declared yet).
+    settings_secret_var: Entity<InputState>,
+    /// The masked secret **value** input — write-only: never populated from the
+    /// store, always blank on load and cleared again after Set/Clear so the
+    /// stored value is never rendered back into the UI.
+    settings_secret_value: Entity<InputState>,
+    /// Cached set / not-set / keychain-unavailable status for `settings_secret_var`,
+    /// refreshed on load/Set/Clear (not read every render — a keychain lookup per frame
+    /// would hammer the OS credential store, e.g. a D-Bus round trip to Secret Service).
+    settings_secret_status: settings::SecretStatus,
+    /// Whether the current Settings quark's provider needs a secret key at all —
+    /// gates the API-key field so it isn't shown under every quark. Set on load.
+    settings_secret_applies: bool,
+    /// Whether the current Settings quark supports model parameters (temperature, top_p, max_tokens).
+    settings_model_params_applies: bool,
+    /// Whether the "Advanced Model Parameters" collapsible section is expanded in Settings.
+    settings_advanced_expanded: bool,
+    /// Whether the "General" settings group is expanded in the sidebar.
+    settings_general_expanded: bool,
+    /// Whether the "Standard Swarm Skills" collapsible accordion is expanded in Settings.
+    settings_standard_skills_expanded: bool,
+    /// Inline validation error when a Quark display name is reserved or collides with another Quark.
+    pub(super) settings_name_error: Option<String>,
+    /// Schedule creation form inputs in `Settings -> Schedules`.
+    settings_schedule_id: Entity<InputState>,
+    settings_schedule_cron: Entity<InputState>,
+    settings_schedule_target: Entity<InputState>,
+    settings_schedule_prompt: Entity<InputState>,
+    settings_schedule_missed_policy: hadron_lattice::MissedPolicy,
+    settings_schedule_status_msg: Option<(bool, String)>,
+    /// Live filter for the add-quark preset catalogue (~37 entries): a case-insensitive
+    /// substring match on preset name + command, so the list is searchable instead of a
+    /// long scroll.
+    preset_filter: Entity<InputState>,
+    /// The "Custom CLI" wizard form fields (`WizardState::CustomCli`): a generic
+    /// `Transport::Cli` seat built by hand rather than probed from an ACP preset. Live
+    /// here (not in the `WizardState` variant itself) so the enum stays a plain, cheaply
+    /// `Clone + PartialEq`-able value — matching `settings_name`/`settings_model` etc.
+    custom_cli_vendor: Entity<InputState>,
+    custom_cli_program: Entity<InputState>,
+    custom_cli_args: Entity<InputState>,
+    custom_cli_model: Entity<InputState>,
+    /// The argv flag when `custom_cli_channel` is `Arg` (e.g. `--prompt`); blank means a
+    /// bare positional argument (`PromptChannel::Arg { flag: None }`).
+    custom_cli_flag: Entity<InputState>,
+    /// Which of the two prompt-delivery channels the toggle currently selects.
+    custom_cli_channel: CliChannelChoice,
+    /// The boot command for an ACP agent the catalogue has none for — a registry row
+    /// whose only distribution is a `binary` archive Hadron will not download, or an
+    /// agent nobody has written a preset for (a local model behind `opencode`, say).
+    ///
+    /// The wizard used to render those rows greyed with the words "Needs a manual
+    /// command" and no way anywhere in the UI to supply one, which made the sentence
+    /// a dead end rather than an instruction. These two fields are what it now leads
+    /// to; `WizardState::Connecting` boots and probes whatever they hold, so a
+    /// hand-typed command reaches the daemon down exactly the same path a preset does.
+    acp_program: Entity<InputState>,
+    acp_args: Entity<InputState>,
+    /// The "Ollama (local)" / "LM Studio (local)" / "Cloud (OpenAI-compatible)" wizard
+    /// form (`WizardState::LocalProvider`): a `Transport::Http` seat, base URL
+    /// pre-filled to the vendor's default and editable (e.g. a Windows-hosted LM Studio
+    /// reached from WSL on a different port, or an OpenRouter-compatible base for the
+    /// cloud vendor). Connect GETs the models endpoint; the fetched ids populate
+    /// `local_models` for the picker, and the chosen one lands here.
+    local_base_url: Entity<InputState>,
+    local_models: Vec<String>,
+    local_selected_model: Option<String>,
+    /// The cloud vendor's API key — read live at Connect (to probe the real endpoint)
+    /// and again at Save (to write it to the keyring). Never touches `team.json`;
+    /// only its VAR NAME (`CLOUD_API_KEY_VAR`) is declared onto the saved seat's
+    /// `secret_env`. Masked, and empty/inert for the keyless Ollama/LM Studio rows.
+    local_api_key: Entity<InputState>,
+    /// Arbitrary-colour picker for the current Settings identity, beside the preset
+    /// swatches. Its `Change` events write the identity's colour (see `new`).
+    color_picker: Entity<ColorPickerState>,
+    /// A path chosen from the native file picker (avatar image), parked here by the
+    /// async picker task and drained into `settings_path` at the next `render` — the
+    /// picker returns without a `Window`, but `set_value` needs one, so `render`
+    /// (which has the window) applies it.
+    pending_image_pick: Option<String>,
+    /// Keep the input subscriptions alive for the window's lifetime. The last
+    /// two repaint the Settings overlay so its live preview tracks typing.
+    _input_sub: Subscription,
+    _settings_subs: Vec<Subscription>,
+    providers: Vec<ConfiguredQuark>,
+    wizard_state: WizardState,
+    /// Offered-model probe for the ACP quark whose Settings are open — drives the model
+    /// dropdown. `None` for a non-ACP target or before the first probe. See `providers`.
+    acp_model_probe: Option<AcpModelProbe>,
+    /// Monotonic generation counter guarding async ACP/CLI model probes against stale overwrites.
+    acp_probe_seq: u64,
+    /// Native SelectState dropdown for Settings Model list of an ACP quark.
+    acp_model_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    acp_model_select_key: Option<(String, Vec<String>)>,
+    /// Offered-model probe for the `Transport::Http` quark whose Settings are open —
+    /// mirrors `acp_model_probe`. `None` for a non-Http target or before the first
+    /// probe. See `start_http_model_probe`.
+    http_model_probe: Option<HttpModelProbe>,
+    /// Native SelectState dropdown for Settings Model list of an Http quark.
+    http_model_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    http_model_select_key: Option<(String, Vec<String>)>,
+    /// Native SelectState dropdown for Settings Model list of general/CLI quarks.
+    general_model_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    general_model_select_key: Option<String>,
+    /// Native SelectState dropdown for wizard's model list.
+    wizard_model_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    wizard_model_select_key: Option<(Option<String>, Vec<String>)>,
+    /// Native SelectState dropdown for Settings Permission Mode.
+    mode_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    mode_select_key: Option<(String, String)>,
+    /// Native SelectState dropdown for Settings Reasoning Effort.
+    effort_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    effort_select_key: Option<(String, Vec<String>)>,
+    /// Native SelectState dropdown for Roster > Quark > Info Model selector.
+    info_model_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    info_model_select_key: Option<(String, String, Vec<String>)>,
+    /// Native SelectState dropdown for Roster > Quark > Info Effort selector.
+    info_effort_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    info_effort_select_key: Option<(String, String, Vec<String>)>,
+    /// Native SelectState dropdown for General Settings Default Permission Mode.
+    default_mode_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    default_mode_select_key: Option<Mode>,
+    /// Native SelectState dropdown for General Settings Code Editor.
+    editor_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    editor_select_key: Option<crate::sys::EditorChoice>,
+    /// Native SelectState dropdown for General Settings Nucleus Index Budget.
+    nucleus_budget_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    nucleus_budget_select_key: Option<usize>,
+    /// Native SelectState dropdown for General Settings Merge Strategy.
+    merge_strategy_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    merge_strategy_select_key: Option<hadron_lattice::MergeStrategy>,
+    /// Native SelectState dropdown for General Settings Theme Preset.
+    theme_preset_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    theme_preset_select_key: Option<String>,
+    /// Native SelectState dropdown for General Settings Primary Accent Choice.
+    accent_choice_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    accent_choice_select_key: Option<Option<config::AccentChoice>>,
+    /// Native SelectState dropdown for General Settings UI Font Family.
+    ui_font_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    ui_font_select_key: Option<Option<String>>,
+    /// Native SelectState dropdown for General Settings UI Font Size.
+    ui_font_size_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    ui_font_size_select_key: Option<Option<f32>>,
+    /// Native SelectState dropdown for General Settings Mono Font Family.
+    mono_font_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    mono_font_select_key: Option<Option<String>>,
+    /// Native SelectState dropdown for General Settings Mono Font Size.
+    mono_font_size_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    mono_font_size_select_key: Option<Option<f32>>,
+    /// Native SelectState dropdown for Chat Row Density.
+    chat_density_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    chat_density_select_key: Option<config::ChatDensity>,
+    /// Native SelectState dropdown for Timestamp Format.
+    timestamp_format_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    timestamp_format_select_key: Option<config::TimestampFormat>,
+    /// Native SelectState dropdown for Terminal Cursor Style.
+    cursor_style_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    cursor_style_select_key: Option<config::TerminalCursorStyle>,
+    /// Native SelectState dropdown for Terminal Scrollback Depth.
+    scrollback_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    scrollback_select_key: Option<usize>,
+    /// Native SelectState dropdown for Master Audio Volume.
+    volume_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    volume_select_key: Option<u32>,
+    /// Native SelectState dropdown for Sound Theme / Profile.
+    sound_theme_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    sound_theme_select_key: Option<config::SoundTheme>,
+    /// Native SelectState dropdown for Turn Silence Deadline.
+    turn_deadline_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    turn_deadline_select_key: Option<u64>,
+    /// Native SelectState dropdown for Max Turn Wall-Clock Ceiling.
+    max_turn_wall_clock_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    max_turn_wall_clock_select_key: Option<u64>,
+    /// Native SelectState dropdown for Periodic Repository Diagnostics Interval.
+    repo_monitor_interval_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    repo_monitor_interval_select_key: Option<u64>,
+    /// Native SelectState dropdown for Sandbox Confinement Mode.
+    sandbox_mode_select_state: Entity<SelectState<ModelSelectDelegate>>,
+    sandbox_mode_select_key: Option<SandboxMode>,
+    pub(super) settings_terminal_shell: Entity<InputState>,
+    pub(super) settings_git_author_name: Entity<InputState>,
+    pub(super) settings_git_author_email: Entity<InputState>,
+    pub(super) theme_name_input: Entity<InputState>,
+    pub(super) theme_color_hex_input: Entity<InputState>,
+    pub(super) theme_selected_token: Option<settings::ThemeTokenKey>,
+    pub(super) theme_category_tab: settings::ThemeCategoryTab,
+    pub(super) theme_color_picker: Entity<ColorPickerState>,
+    /// Active in-app toast notification queue.
+    pub(super) toast_manager: ToastManager,
+    /// In-progress `agy` ACP bridge venv provisioning for the seat whose Settings are
+    /// open, if any. `None` for any other kind of seat, before the first attempt, or
+    /// once already provisioned — see `start_agy_bridge_provision`. This runs off the
+    /// seating path: seating only checks the boot command's paths are well-formed
+    /// (`AcpTarget::resolved`), never that the venv actually exists on disk.
+    agy_bridge_probe: Option<AgyBridgeProbe>,
+    /// Every workspace entry with its ignored flag; drives the file tree. Gitignored
+    /// entries are flagged `true` (rendered muted) and wholly-ignored dirs are collapsed.
+    file_tree_paths: Vec<(String, bool)>,
+    _lock_file: Option<std::fs::File>,
+    git_statuses: std::collections::HashMap<String, crate::vcs::GitStatus>,
+    completion_files: std::rc::Rc<std::cell::RefCell<Vec<(String, bool)>>>,
+    pub(super) update_state: UpdateState,
+    file_tree_open: Option<(String, String)>,
+    file_tree_expanded: std::collections::HashSet<String>,
+    pub(super) file_tree_clipboard: Option<FileTreeClipboard>,
+    pub(super) file_tree_pending_op: Option<FileTreePendingOp>,
+    pub(super) file_tree_op_input: Entity<InputState>,
+    pub(super) file_tree_filter_input: Entity<InputState>,
+    pub(super) file_tree_hide_ignored: bool,
+    pub(super) terminals: Vec<TerminalTab>,
+    pub(super) active_terminal_index: usize,
+    pub(super) terminal_grid_mode: bool,
+    pub(super) terminal_split_mode: render::pty_grid::PtySplitMode,
+    /// Keyboard focus for the terminal grid — keystrokes flow to the PTY only
+    /// while this holds focus.
+    terminal_focus: FocusHandle,
+    /// The terminal screen's measured pixel size, written by a paint-time canvas
+    /// probe and read by the pump loop to size the PTY to fit.
+    /// The terminal grid's painted screen rect in window pixels: `(x, y, w, h)`.
+    /// Width/height size the PTY; the origin maps a pointer position to a cell.
+    terminal_px: std::rc::Rc<std::cell::Cell<Option<(f32, f32, f32, f32)>>>,
+    /// Pump ticks left in which to force a repaint so the paint-time size probe
+    /// re-measures. The measured size only refreshes on paint, and an idle
+    /// terminal forces none — so without this the PTY stays stuck at whatever
+    /// width the first (often transient-narrow) frame measured, leaving the shell
+    /// prompt wrapped until the user types. Re-armed whenever the size moves; runs
+    /// down to zero once it settles, then the pump goes quiet again.
+    terminal_warmup: u8,
+    info_panel: Option<String>,
+    /// The About dialog, opened from the app menu.
+    about_open: bool,
+    /// The Changelog dialog overlay.
+    pub(super) changelog_open: bool,
+    /// Quick REPL and tool scratchpad overlay state (Capability #16).
+    pub(super) repl_overlay_open: bool,
+    pub(super) repl_input: Entity<InputState>,
+    pub(super) repl_output: Option<String>,
+    file_tree_scroll: ScrollHandle,
+    file_tree_open_scroll: ScrollHandle,
+    completion_scroll: ScrollHandle,
+    terminal_grid_scroll: ScrollHandle,
+    pub(super) last_live_activities:
+        std::collections::HashMap<String, Option<hadron_lattice::live::Activity>>,
+    /// The merge gate's `live/gates/` heartbeats from the previous poll, so a gate
+    /// starting or finishing triggers a repaint the same way a quark's own live
+    /// activity does — the Tasks tab reads `live::gates` at render time and nothing
+    /// else would notice it changed (nucleus `live-activity-needs-notify-repaint`).
+    pub(super) last_gate_activities: Vec<hadron_lattice::live::Activity>,
+    pub(super) last_prompt_cost: Option<(String, hadron_lattice::prompt_cost::PromptBreakdown)>,
+    /// Last wall-clock second for which a live turn timer repaint was emitted while at
+    /// least one quark/task/gate was active (`None` when the swarm is idle).
+    pub(super) last_live_timer_sec: Option<i64>,
+    /// The `gluon.lock` flock reading from the previous poll — compared against the
+    /// fresh reading each tick so a toast fires only on the running→stopped edge,
+    /// not on every tick gluon happens to still be down. Starts optimistic (running)
+    /// since the chamber normally auto-spawns the daemon on launch.
+    pub(super) last_gluon_running: bool,
+    pub(super) last_gluon_pid: Option<u32>,
+    pub(super) last_hadron_processes: Vec<hadron_lattice::sys::inspect::ProcessInfo>,
+    pub(super) rpc_endpoint: Option<hadron_lattice::wire::RpcEndpointMetadata>,
+    /// Owns the background `daemon/subscribe` TCP reader thread for the chamber's lifetime;
+    /// dropping `Chamber` signals stop and joins the thread cleanly.
+    _rpc_subscription: Option<crate::rpc_client::RpcSubscriptionHandle>,
+    /// Whether the "gluon stopped" banner is currently shown. Set on the
+    /// running→stopped edge, cleared on stopped→running or manual dismiss.
+    /// Whether `.hadron/nucleus/index.md` exceeds the 32 KiB prompt limit
+    pub(super) nucleus_over_budget: bool,
+    pub(super) gluon_stopped_notice: bool,
+    #[allow(dead_code)]
+    pub(super) audio_manager: audio::AudioTelemetryManager,
+    pub(super) workspace_mode: WorkspaceMode,
+    pub(super) selector_search: Entity<InputState>,
+    pub(super) project_switcher_open: bool,
+    pub(super) events: Vec<Event>,
+    pub(super) field_write_queue: reload::FieldWriteQueue,
+    pub(super) cached_skill_ids: Vec<String>,
+    pub(super) cached_plan_paths: Vec<(std::time::SystemTime, String)>,
+    pub(super) cached_active_plan_content: Option<(String, String)>,
+    pub(super) cached_plan_landed_commits: std::collections::HashSet<String>,
+    pub(super) cached_nucleus_docs: (Option<String>, Option<String>, Option<String>),
+    pub(super) cached_nucleus_fingerprint: u64,
+    pub(super) git_ready: bool,
+    pub(super) git_ready_verified: bool,
+    pub(super) overdue_schedule_jobs: Vec<(String, String, String, String)>,
+    pub(super) visualizer_last_tick: Option<std::time::Instant>,
+    pub(super) visualizer_hit_nodes: std::rc::Rc<std::cell::RefCell<Vec<(String, f32, f32)>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FileTreeClipboard {
+    pub rel_path: String,
+    pub is_cut: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FileTreePendingOp {
+    NewFile { parent_dir: String },
+    NewFolder { parent_dir: String },
+    Rename { target_path: String },
+}
+
+#[derive(Clone, Debug)]
+pub enum ContextMenuAction {
+    OpenFile(String),
+    OpenInEditor(String),
+    OpenInFolder(String),
+    CopyPath(String),
+    CopyRelativePath(String),
+    CopyFileItem(String),
+    CutFileItem(String),
+    PasteFileItem(String),
+    DuplicateFileItem(String),
+    NewFileIn(String),
+    NewFolderIn(String),
+    RenameFileItem(String),
+    DeleteFileItem(String),
+    InsertFileMention(String),
+    CopyText(String),
+    QuarkInfo(String),
+    ToggleQuark(String),
+    SetFlavor(String, hadron_lattice::Flavor),
+    /// Adopt a catalogue quark into this repo (available → participating).
+    AdoptQuark(String),
+    /// Remove / delete a quark completely from both repo and global catalogue.
+    RemoveQuark(String),
+    /// Force-restart a resident quark's session (reap the subprocess, keep it seated).
+    /// Offered only for `Transport::Acp` quarks — a one-shot CLI quark holds nothing
+    /// resident to kill.
+    RestartQuark(String),
+    /// Promote message or turn to a nucleus lesson note (Capability #20).
+    PromoteToNucleus {
+        slug: String,
+        fact: String,
+        description: String,
+    },
+}
+
+/// 嵌入工作台时构造 [`Chamber`] 所需的初始快照。
+///
+/// 由 [`prepare_embedded`] 在创建窗口之外（可以放在任意线程/时机）产出，
+/// 再交给 [`Chamber::embedded`] 在宿主窗口里实例化。
+pub struct EmbeddedChamberInit {
+    view: ChamberView,
+    events: Vec<Event>,
+    prefs: ChamberPrefs,
+    team: Team,
+    global: Team,
+    path: PathBuf,
+}
+
+/// 为嵌入模式准备 chamber 状态：定位 `<repo>/.hadron/field.jsonl`，读出仓库
+/// team（`.hadron/team.json`）与全局目录（`~/.hadron/team.json`），执行一次性
+/// 迁移，再把事件投影成初始视图。加载路径与 [`run`] 完全一致，但不注册全局
+/// 主题、不开独立窗口。
+pub fn prepare_embedded(repo_root: &Path) -> EmbeddedChamberInit {
+    // 与独立启动一样，先把 `.hadron/` 与 field 文件落盘，保证首次使用即可写事件。
+    let hadron_dir = repo_root.join(".hadron");
+    let _ = std::fs::create_dir_all(&hadron_dir);
+    let field_path = hadron_dir.join("field.jsonl");
+    if !field_path.exists() {
+        let _ = std::fs::File::create(&field_path);
+    }
+    let repo_path = hadron_lattice::repo_team_for_field(&field_path);
+    let global_path =
+        hadron_lattice::team_config_path().filter(|g| Some(g.as_path()) != repo_path.as_deref());
+
+    // 与独立窗口一致的两次幂等迁移：拆分全局目录、把旧 id 改名并搬移外观配置。
+    let mut prefs = config::load();
+    if let (Some(rp), Some(gp)) = (repo_path.as_deref(), global_path.as_deref()) {
+        migrate_repo_to_catalogue(rp, gp);
+        migrate_legacy_ids(rp, gp, &mut prefs);
+        let _ = config::save(&prefs);
+    }
+
+    let team = repo_path.as_deref().map(load_team).unwrap_or_default();
+    let mut global = global_path.as_deref().map(load_team).unwrap_or_default();
+    hadron_lattice::merge_wsl_catalogue(&mut global, &field_path);
+    let events = io::read_events(&field_path).unwrap_or_default();
+    let view = model::project_with_team(&events, &resolve_team(&team, &global), &global);
+
+    EmbeddedChamberInit {
+        view,
+        events,
+        prefs,
+        team,
+        global,
+        path: field_path,
+    }
+}
+
+/// 工作台嵌入前的一次性全局初始化：注册 chamber 自带字体并把 `file://` 链接
+/// 的打开策略指向工作区根目录。宿主应用负责主题与组件初始化。
+pub fn init_embedded(cx: &mut App, repo_root: &Path) {
+    if let Err(e) = cx.text_system().add_fonts(crate::fonts::embedded()) {
+        hadron_lattice::term::warn(
+            hadron_lattice::term::Source::Chamber,
+            &format!(
+                "fonts: could not register bundled fonts ({e:#}); falling back to system fonts"
+            ),
+        );
+    }
+    set_link_workspace_path(repo_root.join(".hadron").join("field.jsonl"));
+}
+
+/// 确保该仓库的 gluon 守护进程在运行：已经在跑就直接复用，没有就拉起一个
+/// 与宿主同目录的 `hadron-gluon`。
+///
+/// 返回**本次新拉起**的子进程句柄（已有守护进程时为 `None`）。调用方可以把它
+/// 存起来，进程退出时由系统一并回收；不存也不会影响守护进程继续工作。
+pub fn ensure_daemon_for_repo(repo_root: &Path) -> Option<std::process::Child> {
+    let field_path = repo_root.join(".hadron").join("field.jsonl");
+    if crate::sys::probe_gluon_pid(&field_path).is_some() {
+        return None;
+    }
+    let show_console = config::load().show_console_window;
+    match crate::sys::spawn_gluon_for_field(&field_path, show_console) {
+        Ok(child) => {
+            hadron_lattice::term::info(
+                hadron_lattice::term::Source::Chamber,
+                &format!(
+                    "已为 {:?} 启动 hadron-gluon（PID {}）",
+                    field_path,
+                    child.id()
+                ),
+            );
+            Some(child)
+        }
+        Err(e) => {
+            hadron_lattice::term::warn(
+                hadron_lattice::term::Source::Chamber,
+                &format!("无法启动 hadron-gluon：{e:#}（聊天将无法收到回复）"),
+            );
+            None
+        }
+    }
+}
+
+impl Chamber {
+    /// 嵌入式构造：由宿主窗口承载渲染，不打开独立窗口、不覆盖全局主题。
+    pub fn embedded(
+        init: EmbeddedChamberInit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(
+            init.view,
+            init.events,
+            init.prefs,
+            init.team,
+            init.global,
+            init.path,
+            None,
+            WorkspaceMode::Chamber,
+            window,
+            cx,
+        )
+    }
+}
+
+impl Chamber {
+    fn new(
+        view: ChamberView,
+        events: Vec<Event>,
+        prefs: ChamberPrefs,
+        team: Team,
+        global: Team,
+        path: PathBuf,
+        lock_file: Option<std::fs::File>,
+        workspace_mode: WorkspaceMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let repo_root = crate::vcs::repo_root_of(&path).to_path_buf();
+        crate::theme::set_active_workspace(Some(path.clone()));
+        let is_wsl = crate::wsl::is_wsl_unc_path(&repo_root);
+        let files = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            Vec::new()
+        } else {
+            crate::sys::list_workspace_files(&repo_root, &std::collections::HashSet::new())
+        };
+        // `@`-mention autocomplete offers gitignored entries too (`d4679265`): a
+        // wholly-ignored directory reaches us collapsed to one row (`target/`,
+        // `.hadron/`), so the list gains ~16 entries, not the 51k files under them.
+        let completion_files = std::rc::Rc::new(std::cell::RefCell::new(files.clone()));
+
+        let selector_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .submit_on_enter(true)
+                .placeholder("Search recent projects…")
+        });
+
+        // No `completion_provider`: the fork's LSP menu is drawn with `deferred()`
+        // and paints off the bottom of the window (seven fixes could not move it —
+        // see `completion-menu-draws-out-of-bounds`). The chat completions are our
+        // own card instead (`completion_card_overlay`), driven from `InputEvent`.
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 12)
+                .submit_on_enter(true)
+                .placeholder("Type @quark a message…  (Enter to send · Shift+Enter for newline)")
+        });
+        let _input_sub = cx.subscribe_in(&input, window, Self::on_input_submit);
+
+        let log_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search events…  (@actor, to:@target, text)")
+        });
+
+        let repl_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type /command, ?note query, or tool:name (Enter to run)…")
+        });
+
+        let file_tree_op_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .submit_on_enter(true)
+                .placeholder("Enter file or folder name…")
+        });
+        let file_tree_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter files…"));
+
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+
+        let settings_name = cx.new(|cx| InputState::new(window, cx).placeholder("Display name"));
+        let settings_path =
+            cx.new(|cx| InputState::new(window, cx).placeholder("/path/to/image.png"));
+        let settings_model =
+            cx.new(|cx| InputState::new(window, cx).placeholder("inherit catalogue default"));
+        let settings_effort =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. low, standard, high"));
+        let settings_mode_config =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. architect, code, ask"));
+        let settings_new_role = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Enter skill name (e.g. security-auditor)...")
+        });
+        let settings_deny_skills = cx
+            .new(|cx| InputState::new(window, cx).placeholder("e.g. writing-plans, brainstorming"));
+        let settings_energy_limit =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. 500000 (blank = default)"));
+        let settings_temperature = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("e.g. 0.1 for code, 0.8 for creative (blank = default)")
+        });
+        let settings_top_p =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. 0.95 (blank = default)"));
+        let settings_max_tokens =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. 4096 (blank = default)"));
+        let settings_max_exchanges =
+            cx.new(|cx| InputState::new(window, cx).placeholder("12 (default)"));
+        let settings_secret_var =
+            cx.new(|cx| InputState::new(window, cx).placeholder(DEFAULT_SECRET_VAR));
+        // `.masked(true)`: a password field — the stored value is never rendered back
+        // into this input, on load or after Set/Clear (see `load_settings_inputs`).
+        let settings_secret_value = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("value (write-only)")
+        });
+        let preset_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search providers…"));
+        let custom_cli_vendor = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. ollama"));
+        let custom_cli_program = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. ollama or /usr/local/bin/mytool")
+        });
+        let custom_cli_args = cx
+            .new(|cx| InputState::new(window, cx).placeholder("space-separated, e.g. run llama3"));
+        let acp_program = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. npx, opencode, or an absolute path")
+        });
+        let acp_args = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("space-separated, e.g. -y @scope/agent@latest")
+        });
+        let local_base_url =
+            cx.new(|cx| InputState::new(window, cx).placeholder("http://localhost:11434"));
+        let local_api_key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("sk-… (write-only)")
+        });
+        let acp_model_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Inherit", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let http_model_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Inherit", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let general_model_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Inherit", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let wizard_model_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Default", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let mode_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Default", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let effort_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Inherit", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let info_model_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Inherit", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let info_effort_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Inherit", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let default_mode_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "Ask",
+                    &["Write".into(), "Auto".into(), "Bypass".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let editor_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "System",
+                    &[
+                        "VS Code".into(),
+                        "Cursor".into(),
+                        "Zed".into(),
+                        "Sublime Text".into(),
+                    ],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let nucleus_budget_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "32 KiB",
+                    &["16 KiB".into(), "64 KiB".into(), "128 KiB".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let merge_strategy_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "Fast-forward",
+                    &["Squash commit".into(), "GitHub PR mirror".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let theme_preset_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Obsidian Neutral (Default)", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let accent_choice_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Amethyst (Default)", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let ui_font_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Noto Sans (Default)", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let ui_font_size_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("14px (Default)", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let mono_font_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("Cascadia Code (Default)", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let mono_font_size_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate("13px (Default)", &[], None),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let chat_density_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "Comfortable (Standard Spacing)",
+                    &["Compact (Dense View)".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let timestamp_format_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "24-Hour (15:04:05)",
+                    &["12-Hour (3:04:05 PM)".into(), "Relative (2m ago)".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let cursor_style_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "Beam (Vertical Line)",
+                    &[
+                        "Block (Full Rectangle)".into(),
+                        "Underline (Bottom Bar)".into(),
+                    ],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let scrollback_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "5,000 lines (Default)",
+                    &[
+                        "1,000 lines".into(),
+                        "2,500 lines".into(),
+                        "10,000 lines".into(),
+                        "50,000 lines".into(),
+                    ],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let volume_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "50% (Default)",
+                    &["10%".into(), "25%".into(), "75%".into(), "100%".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let sound_theme_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "Classic (Harmonic Chimes)",
+                    &[
+                        "Synth (Electronic FM Blips)".into(),
+                        "Minimal (Soft Clicks & Pops)".into(),
+                        "Retro 8-Bit (Arcade Bleeps)".into(),
+                    ],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let turn_deadline_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "15 minutes (Default)",
+                    &[
+                        "5 minutes".into(),
+                        "30 minutes".into(),
+                        "45 minutes".into(),
+                        "60 minutes".into(),
+                    ],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let max_turn_wall_clock_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "4 hours (Default)",
+                    &["1 hour".into(), "2 hours".into(), "8 hours".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let repo_monitor_interval_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "5 minutes (Default)",
+                    &["1 minute".into(), "15 minutes".into(), "30 minutes".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let sandbox_mode_select_state = cx.new(|cx| {
+            SelectState::new(
+                create_model_delegate(
+                    "Worktree Only",
+                    &["Strict (Offline)".into(), "Off (Host Direct)".into()],
+                    None,
+                ),
+                None,
+                window,
+                cx,
+            )
+            .searchable(false)
+        });
+        let settings_terminal_shell = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. /bin/zsh, pwsh (blank = default)")
+        });
+        let settings_git_author_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. Jane Doe (blank = git config)")
+        });
+        let settings_git_author_email = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. jane@example.com (blank = git config)")
+        });
+        let settings_schedule_id =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. weekly-security-audit"));
+        let settings_schedule_cron = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder("e.g. @daily or 0 9 * * 1-5");
+            s.set_value("@daily", window, cx);
+            s
+        });
+        let settings_schedule_target = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder("@orchestrator");
+            s.set_value("@orchestrator", window, cx);
+            s
+        });
+        let settings_schedule_prompt = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Task instructions saved to .hadron/schedules/tasks/<id>/TASK.md...")
+        });
+        let custom_cli_model =
+            cx.new(|cx| InputState::new(window, cx).placeholder("model name (optional)"));
+        let custom_cli_flag = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. --prompt (blank = positional)")
+        });
+        let color_picker = cx.new(|cx| ColorPickerState::new(window, cx));
+        let theme_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Theme Name"));
+        let theme_color_hex_input = cx.new(|cx| InputState::new(window, cx).placeholder("#rrggbb"));
+        let theme_color_picker = cx.new(|cx| ColorPickerState::new(window, cx));
+        // Repaint the Settings overlay on every edit so its preview is live.
+        let _settings_subs = vec![
+            cx.subscribe_in(&settings_name, window, |this, _, _: &InputEvent, _, cx| {
+                let key = this.settings_target.key().to_string();
+                let is_quark = key != "human"
+                    && key != "providers"
+                    && key != "general"
+                    && key != "appearance"
+                    && key != "execution"
+                    && key != "environment"
+                    && key != "skills"
+                    && key != "schedules";
+                if is_quark {
+                    let typed = this.settings_name.read(cx).value().trim().to_string();
+                    this.settings_name_error =
+                        this.validate_current_quark_display_name(&typed, &key).err();
+                } else {
+                    this.settings_name_error = None;
+                }
+                cx.notify()
+            }),
+            cx.subscribe_in(
+                &file_tree_filter_input,
+                window,
+                |_, _, _: &InputEvent, _, cx| cx.notify(),
+            ),
+            cx.subscribe_in(
+                &log_search_input,
+                window,
+                |this, input, event: &InputEvent, _, cx| {
+                    if let InputEvent::Change = event {
+                        let query = input.read(cx).value().to_string();
+                        this.set_log_filter(query, this.log_kind_filter, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &file_tree_op_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.commit_file_tree_pending_op(window, cx);
+                    } else {
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(&settings_path, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
+            // Re-render the add-quark wizard on every keystroke so the preset list
+            // re-filters live as the search box is typed into.
+            cx.subscribe_in(&preset_filter, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
+            cx.subscribe_in(
+                &acp_model_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    this.settings_model
+                        .update(cx, |s, cx| s.set_value(val.to_string(), window, cx));
+                    this.commit_settings_inputs(cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &http_model_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    this.settings_model
+                        .update(cx, |s, cx| s.set_value(val.to_string(), window, cx));
+                    this.commit_settings_inputs(cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &general_model_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    this.settings_model
+                        .update(cx, |s, cx| s.set_value(val.to_string(), window, cx));
+                    this.commit_settings_inputs(cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &wizard_model_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    this.local_selected_model = if val.is_empty() {
+                        None
+                    } else {
+                        Some(val.to_string())
+                    };
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &mode_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let target_key = this.settings_target.key().to_string();
+                    if target_key != "general" && target_key != "providers" {
+                        if val.is_empty() {
+                            this.clear_quark_mode(&target_key, cx);
+                        } else if let Ok(m) = match val {
+                            "Ask" => Ok(Mode::Ask),
+                            "Write" => Ok(Mode::Write),
+                            "Auto" => Ok(Mode::Auto),
+                            "Bypass" => Ok(Mode::Bypass),
+                            _ => Err(()),
+                        } {
+                            this.set_quark_mode(&target_key, m, cx);
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &effort_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    this.settings_effort
+                        .update(cx, |s, cx| s.set_value(val.to_string(), window, cx));
+                    this.commit_settings_inputs(cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &info_model_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(qid) = this.info_panel.clone() {
+                        this.set_quark_model(&qid, val, window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &info_effort_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(qid) = this.info_panel.clone() {
+                        this.set_quark_effort(&qid, val, window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &default_mode_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Ok(m) = match val {
+                        "Ask" => Ok(Mode::Ask),
+                        "Write" => Ok(Mode::Write),
+                        "Auto" => Ok(Mode::Auto),
+                        "Bypass" => Ok(Mode::Bypass),
+                        _ => Err(()),
+                    } {
+                        this.prefs.default_mode = m;
+                        let _ = config::save(&this.prefs);
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &editor_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(choice) =
+                        crate::sys::EDITOR_LADDER.iter().find(|e| e.label() == val)
+                    {
+                        this.prefs.editor = choice.clone();
+                        let _ = config::save(&this.prefs);
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &nucleus_budget_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(kb_str) = val.strip_suffix(" KiB") {
+                        if let Ok(kb) = kb_str.parse::<usize>() {
+                            this.team.nucleus_index_budget_kb = Some(kb);
+                            this.save_repo_team(cx);
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &merge_strategy_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let strategy = match val {
+                        "Squash commit" => hadron_lattice::MergeStrategy::Squash,
+                        "GitHub PR mirror" => hadron_lattice::MergeStrategy::GitHubPr,
+                        _ => hadron_lattice::MergeStrategy::FastForward,
+                    };
+                    this.team.merge_strategy = Some(strategy);
+                    this.save_repo_team(cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &theme_preset_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(custom_name) = val.strip_prefix("Custom: ") {
+                        let custom_themes = theme::load_custom_themes();
+                        if let Some(found) =
+                            custom_themes.into_iter().find(|t| t.name == custom_name)
+                        {
+                            this.prefs.custom_theme = Some(found);
+                            this.prefs.theme_preset = None;
+                        }
+                    } else if let Some(preset) = config::ThemePreset::from_str(val) {
+                        this.prefs.theme_preset = Some(preset);
+                        this.prefs.custom_theme = None;
+                    }
+                    let _ = config::save(&this.prefs);
+                    Self::apply_theme_and_typography(cx, &this.prefs);
+                    let label = if let Some(c) = &this.prefs.custom_theme {
+                        format!("Custom Theme ({})", c.name)
+                    } else {
+                        this.prefs
+                            .theme_preset
+                            .unwrap_or_default()
+                            .label()
+                            .to_string()
+                    };
+                    this.show_toast(
+                        toasts::ToastKind::Success,
+                        format!("Theme set to {label}"),
+                        Some(3),
+                        cx,
+                    );
+                    cx.refresh_windows();
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &accent_choice_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let accent = config::AccentChoice::from_str(val);
+                    this.prefs.accent_choice = accent;
+                    let _ = config::save(&this.prefs);
+                    Self::apply_theme_and_typography(cx, &this.prefs);
+                    let label = accent.unwrap_or_default().label();
+                    this.show_toast(
+                        toasts::ToastKind::Success,
+                        format!("Accent set to {label}"),
+                        Some(3),
+                        cx,
+                    );
+                    cx.refresh_windows();
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &ui_font_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if val.is_empty() || val == "Noto Sans (Default)" || val == "Noto Sans" {
+                        this.prefs.ui_font_family = None;
+                    } else {
+                        this.prefs.ui_font_family = Some(val.to_string());
+                    }
+                    let _ = config::save(&this.prefs);
+                    Self::apply_theme_and_typography(cx, &this.prefs);
+                    cx.refresh_windows();
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &ui_font_size_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let stripped = val
+                        .strip_suffix("px (Default)")
+                        .or_else(|| val.strip_suffix("px"))
+                        .unwrap_or(val);
+                    if let Ok(sz) = stripped.trim().parse::<f32>() {
+                        if (sz - 14.0).abs() < 0.01 {
+                            this.prefs.ui_font_size = None;
+                        } else {
+                            this.prefs.ui_font_size = Some(sz);
+                        }
+                        let _ = config::save(&this.prefs);
+                        Self::apply_theme_and_typography(cx, &this.prefs);
+                        cx.refresh_windows();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &mono_font_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if val.is_empty() || val == "Cascadia Code (Default)" || val == "Cascadia Code"
+                    {
+                        this.prefs.mono_font_family = None;
+                    } else {
+                        this.prefs.mono_font_family = Some(val.to_string());
+                    }
+                    let _ = config::save(&this.prefs);
+                    Self::apply_theme_and_typography(cx, &this.prefs);
+                    cx.refresh_windows();
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &mono_font_size_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let stripped = val
+                        .strip_suffix("px (Default)")
+                        .or_else(|| val.strip_suffix("px"))
+                        .unwrap_or(val);
+                    if let Ok(sz) = stripped.trim().parse::<f32>() {
+                        if (sz - 13.0).abs() < 0.01 {
+                            this.prefs.mono_font_size = None;
+                        } else {
+                            this.prefs.mono_font_size = Some(sz);
+                        }
+                        let _ = config::save(&this.prefs);
+                        Self::apply_theme_and_typography(cx, &this.prefs);
+                        cx.refresh_windows();
+                        cx.notify();
+                    }
+                },
+            ),
+            // Same reason: the custom-CLI form's "Save" button is only wired up once
+            // vendor + program are non-empty (`can_save` in `providers_view`), so typing
+            // into either must repaint the wizard for the button to light up live.
+            cx.subscribe_in(&custom_cli_vendor, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
+            cx.subscribe_in(
+                &custom_cli_program,
+                window,
+                |_, _, _: &InputEvent, _, cx| cx.notify(),
+            ),
+            // Same reason: "Connect" only lights up once a program has been typed.
+            cx.subscribe_in(&acp_program, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
+            cx.subscribe_in(
+                &selector_search,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        let search_val = this.selector_search.read(cx).value().trim().to_string();
+                        if !search_val.is_empty() {
+                            let filtered: Vec<_> = this
+                                .prefs
+                                .recent_projects
+                                .iter()
+                                .filter(|p| {
+                                    p.display_name.eq_ignore_ascii_case(&search_val)
+                                        || p.path.eq_ignore_ascii_case(&search_val)
+                                })
+                                .collect();
+                            if let Some(first) = filtered.first() {
+                                let path = first.path.clone();
+                                this.open_project_path(&path, window, cx);
+                            }
+                            return;
+                        }
+                    }
+                    cx.notify()
+                },
+            ),
+            // A colour chosen in the picker writes the current Settings identity's colour.
+            cx.subscribe_in(
+                &color_picker,
+                window,
+                |this, _, event: &ColorPickerEvent, _, cx| {
+                    let ColorPickerEvent::Change(Some(hsla)) = event else {
+                        return;
+                    };
+                    this.set_settings_color(hsla_to_hex(*hsla), cx);
+                },
+            ),
+            cx.subscribe_in(
+                &theme_name_input,
+                window,
+                |this, _, _: &InputEvent, _, cx| {
+                    let name = this.theme_name_input.read(cx).value().trim().to_string();
+                    if let Some(custom) = &mut this.prefs.custom_theme {
+                        custom.name = if name.is_empty() {
+                            "Custom Theme".into()
+                        } else {
+                            name
+                        };
+                    }
+                    let _ = config::save(&this.prefs);
+                    theme::set_active_custom_theme(this.prefs.custom_theme.clone());
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &theme_color_hex_input,
+                window,
+                |this, _, _: &InputEvent, _, cx| {
+                    let hex_val = this
+                        .theme_color_hex_input
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_string();
+                    if let Some(token) = this.theme_selected_token {
+                        if config::parse_hex_color(&hex_val).is_some() {
+                            this.set_custom_theme_token_color(token, hex_val, cx);
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &theme_color_picker,
+                window,
+                |this, _, event: &ColorPickerEvent, window, cx| {
+                    let ColorPickerEvent::Change(Some(hsla)) = event else {
+                        return;
+                    };
+                    if let Some(token) = this.theme_selected_token {
+                        let hex = format!("#{:06x}", hsla_to_hex(*hsla));
+                        this.set_custom_theme_token_color(token, hex.clone(), cx);
+                        this.theme_color_hex_input
+                            .update(cx, |s, cx| s.set_value(hex, window, cx));
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &chat_density_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(density) = config::ChatDensity::from_str(val) {
+                        this.prefs.chat_density = density;
+                        let _ = config::save(&this.prefs);
+                        cx.refresh_windows();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &timestamp_format_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(fmt) = config::TimestampFormat::from_str(val) {
+                        this.prefs.timestamp_format = fmt;
+                        let _ = config::save(&this.prefs);
+                        cx.refresh_windows();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &cursor_style_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(style) = config::TerminalCursorStyle::from_str(val) {
+                        this.prefs.terminal_cursor_style = style;
+                        let _ = config::save(&this.prefs);
+                        cx.refresh_windows();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &scrollback_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let num: usize = val
+                        .replace(',', "")
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(5000);
+                    this.prefs.terminal_scrollback = num;
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &volume_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let pct: f32 = val
+                        .trim_end_matches('%')
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(50.0);
+                    let vol = pct / 100.0;
+                    this.prefs.audio.volume = vol;
+                    this.audio_manager.config.volume = vol;
+                    let _ = config::save(&this.prefs);
+                    this.audio_manager
+                        .trigger_cue(crate::app::audio::AudioCue::TurnFinish);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &sound_theme_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(theme) = config::SoundTheme::from_str(val) {
+                        this.prefs.audio.sound_theme = theme;
+                        this.audio_manager.config.sound_theme = theme;
+                        let _ = config::save(&this.prefs);
+                        this.audio_manager
+                            .trigger_cue(crate::app::audio::AudioCue::MessageReceived);
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &turn_deadline_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let mins: u64 = val
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(15);
+                    let secs = mins * 60;
+                    this.team.turn_deadline_secs = Some(secs);
+                    this.prefs.turn_deadline_secs = Some(secs);
+                    this.save_repo_team(cx);
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &max_turn_wall_clock_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let hours: u64 = val
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(4);
+                    let secs = hours * 3600;
+                    this.team.max_turn_wall_clock_secs = Some(secs);
+                    this.prefs.max_turn_wall_clock_secs = Some(secs);
+                    this.save_repo_team(cx);
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &repo_monitor_interval_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    let mins: u64 = val
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(5);
+                    let secs = mins * 60;
+                    this.prefs.repo_monitor_interval_secs = secs;
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &sandbox_mode_select_state,
+                window,
+                |this, _, event: &SelectEvent<ModelSelectDelegate>, _window, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let val = selected.as_ref().map(|v| v.as_ref()).unwrap_or("");
+                    if let Some(m) = match val {
+                        "Worktree Only" => Some(hadron_lattice::SandboxMode::WorktreeOnly),
+                        "Strict (Offline)" => Some(hadron_lattice::SandboxMode::Strict),
+                        "Off (Host Direct)" => Some(hadron_lattice::SandboxMode::Off),
+                        _ => None,
+                    } {
+                        this.set_sandbox_mode(m, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &settings_terminal_shell,
+                window,
+                |this, _, _: &InputEvent, _, cx| {
+                    let val = this
+                        .settings_terminal_shell
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_string();
+                    this.prefs.terminal_shell = if val.is_empty() { None } else { Some(val) };
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &settings_git_author_name,
+                window,
+                |this, _, _: &InputEvent, _, cx| {
+                    let val = this
+                        .settings_git_author_name
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_string();
+                    this.prefs.git_author_name = if val.is_empty() {
+                        None
+                    } else {
+                        Some(val.clone())
+                    };
+                    this.team.git_author_name = if val.is_empty() { None } else { Some(val) };
+                    this.save_repo_team(cx);
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &settings_git_author_email,
+                window,
+                |this, _, _: &InputEvent, _, cx| {
+                    let val = this
+                        .settings_git_author_email
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_string();
+                    this.prefs.git_author_email = if val.is_empty() {
+                        None
+                    } else {
+                        Some(val.clone())
+                    };
+                    this.team.git_author_email = if val.is_empty() { None } else { Some(val) };
+                    this.save_repo_team(cx);
+                    let _ = config::save(&this.prefs);
+                    cx.notify();
+                },
+            ),
+        ];
+
+        // Live tail: re-read the field on an interval so quark turns appended by
+        // the gluon (a separate process) appear without interaction. Dumb full
+        // re-read — the field is small and this matches the engine's own posture.
+        // While the daemon's `daemon/subscribe` stream is up, a push wakes the loop
+        // early for a light poll (field, live, gates — no workspace/process scan);
+        // the timer keeps running underneath as the fallback and the heavy-scan cadence.
+        // The loop ends when the entity is dropped (`update` returns `Err`).
+        let rpc_subscription = (workspace_mode != WorkspaceMode::Selector)
+            .then(|| crate::rpc_client::RpcSubscriptionHandle::spawn(path.clone()));
+        let push_signal = rpc_subscription.as_ref().map(|s| s.signal());
+        let mut last_health_scan: Option<std::time::Instant> = None;
+        let mut tick_count: u64 = 0;
+        let mut last_poll = std::time::Instant::now();
+        let mut timer_due = last_poll + reload::FIELD_POLL_INTERVAL;
+        cx.spawn(async move |this, cx| loop {
+            let trigger = reload::wait_for_field_poll(
+                cx.background_executor(),
+                push_signal.as_ref(),
+                timer_due,
+                last_poll,
+            )
+            .await;
+            last_poll = std::time::Instant::now();
+            let push_tick = trigger == reload::PollTrigger::Push;
+            if !push_tick {
+                timer_due = last_poll + reload::FIELD_POLL_INTERVAL;
+                // This poll already covers any push that landed while we slept.
+                if let Some(signal) = &push_signal {
+                    signal.take_dirty();
+                }
+            }
+
+            let state = match this.update(cx, |chamber, _| {
+                if chamber.workspace_mode == WorkspaceMode::Selector {
+                    return None;
+                }
+                let need_health = chamber.prefs.repo_monitor
+                    && (chamber.repo_health_report.is_none()
+                        || last_health_scan.is_none_or(|t| {
+                            t.elapsed()
+                                >= Duration::from_secs(
+                                    chamber.prefs.repo_monitor_interval_secs.max(10),
+                                )
+                        }));
+                let prev_fp =
+                    if chamber.git_branches.is_some() && chamber.git_remote_branches.is_some() {
+                        chamber.git_branch_fingerprint.clone()
+                    } else {
+                        None
+                    };
+                let roster_ids: Vec<String> =
+                    chamber.view.roster.iter().map(|r| r.id.clone()).collect();
+                let terminal_pids: Vec<u32> = chamber
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.term.as_ref().and_then(|pty| pty.process_id()))
+                    .collect();
+                let verified_git_ready = chamber.git_ready && chamber.git_ready_verified;
+                let selected_branch = chamber.git_selected_branch.clone();
+                let selected_worktree_path = chamber
+                    .git_cursor_worktree
+                    .and_then(|ix| chamber.git_worktrees.as_ref()?.get(ix))
+                    .map(|wt| wt.path.clone());
+                Some((
+                    chamber.path.clone(),
+                    chamber.repo_team_path(),
+                    chamber.team.clone(),
+                    chamber.global.clone(),
+                    roster_ids,
+                    chamber.file_tree_expanded.clone(),
+                    chamber.right_rail_tab,
+                    need_health,
+                    prev_fp,
+                    chamber.file_tree_paths.is_empty(),
+                    chamber.last_plan_path.clone(),
+                    verified_git_ready,
+                    chamber.field_write_queue.clone(),
+                    chamber.process_manager_open,
+                    terminal_pids,
+                    selected_branch,
+                    selected_worktree_path,
+                ))
+            }) {
+                Ok(Some(s)) => s,
+                Ok(None) => continue,
+                Err(_) => break,
+            };
+
+            let is_wsl_path = crate::wsl::is_wsl_unc_path(&state.0);
+            let do_workspace_scan = !push_tick
+                && (!is_wsl_path
+                    || state.9
+                    || tick_count.is_multiple_of(5)
+                    || matches!(state.6, RightRailTab::Git | RightRailTab::Mission));
+            let scan_processes = !push_tick && (state.13 || tick_count.is_multiple_of(5));
+            if !push_tick {
+                tick_count = tick_count.wrapping_add(1);
+            }
+            if do_workspace_scan && state.7 {
+                last_health_scan = Some(std::time::Instant::now());
+            }
+
+            let poll = cx
+                .background_executor()
+                .spawn(async move {
+                    reload::FieldPoll::gather(
+                        &state.0,
+                        &state.12,
+                        &state.1,
+                        state.2,
+                        state.3,
+                        &state.4,
+                        &state.5,
+                        do_workspace_scan,
+                        state.6 == RightRailTab::Git,
+                        matches!(state.6, RightRailTab::Git | RightRailTab::Mission),
+                        state.7,
+                        state.11,
+                        state.8.as_deref(),
+                        state.10.as_deref(),
+                        scan_processes,
+                        &state.14,
+                        state.15.as_deref(),
+                        state.16.as_deref(),
+                    )
+                })
+                .await;
+
+            let gate_outputs = push_signal
+                .as_ref()
+                .map(|s| s.take_gate_outputs())
+                .unwrap_or_default();
+            let gate_updates = push_signal
+                .as_ref()
+                .map(|s| s.take_gate_updates())
+                .unwrap_or_default();
+            if this
+                .update(cx, |chamber, cx| {
+                    let mut gate_changed = false;
+                    for out in gate_outputs {
+                        let stream_str = match out.stream {
+                            hadron_lattice::wire::GateStream::Stdout => "stdout",
+                            hadron_lattice::wire::GateStream::Stderr => "stderr",
+                        };
+                        chamber.ingest_gate_output_line(&out.quark, stream_str, &out.line);
+                        gate_changed = true;
+                    }
+                    for (quark, passed) in gate_updates {
+                        chamber.mark_gate_finished(&quark, passed);
+                        gate_changed = true;
+                    }
+                    chamber.reload_if_changed(poll, cx);
+                    if gate_changed {
+                        cx.notify();
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
+        // Terminal pump: while the Terminal tab holds a live PTY, size it to the
+        // measured screen and repaint when new output arrives. Capped at ~10fps: a
+        // repaint here re-renders the WHOLE window in software (llvmpipe, no GPU), so a
+        // live TUI that emits every frame (an agent CLI's spinner/token counter) drove
+        // a full-window raster ~30x/sec. A text terminal reads fine at 10fps, and
+        // keystrokes still echo immediately (on_terminal_key notifies directly). Does
+        // nothing (forces no frame) when the terminal is closed or idle.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            if this
+                .update(cx, |chamber, cx| chamber.pump_terminal(cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(33))
+                .await;
+            if this
+                .update(cx, |chamber, cx| chamber.pump_visualizer(cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
+        // Precompute the message indices for the virtualized chat.
+        let chat_message_ixs = model::chat_message_indices(&view.messages);
+
+        let chat_list_state = gpui_kit::ListState::new(
+            chat_message_ixs.len(),
+            gpui_kit::ListAlignment::Bottom,
+            px(1000.),
+        );
+
+        let log_message_ixs =
+            model::filter_log_message_indices(&view.messages, "", model::LogKindFilter::All);
+        let log_list_state = gpui_kit::ListState::new(
+            log_message_ixs.len(),
+            gpui_kit::ListAlignment::Bottom,
+            px(1000.),
+        );
+
+        // The commit graph reads newest-first, so it anchors at the top — unlike the
+        // chat/log lists, which follow the newest message at the bottom.
+        // `measure_all` so the scrollbar thumb is honest: `ListState`'s content height
+        // is the sum over *measured* items, and unmeasured ones count as zero — with
+        // 2000+ rows and ~40 on screen the thumb would claim the list barely scrolls.
+        // It measures once per `reset` (i.e. per `rebuild_graph_rows`), not per splice
+        // or per frame, so the cost lands on Git-tab entry and nowhere else.
+        let git_graph_list =
+            gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, px(400.)).measure_all();
+
+        let stats_scroll = ScrollHandle::new();
+        // The Configured Providers list is every ADOPTED quark (resolved), so a
+        // migrated repo whose seats are now overrides still lists them.
+        let providers = configured_providers(&resolve_team(&team, &global));
+        // Resolved before `team` moves into the struct literal below.
+        let nucleus_index_budget_bytes = hadron_gluon::nucleus_status::resolve_budget_bytes(&team);
+
+        // The real secret backend: the OS credential store, via the same
+        // `KeyringStore` the daemon uses (`hadron_gluon::secrets`) — same service
+        // name and account format, so a value set here in the chamber and a value
+        // the daemon resolves at spawn are the SAME keychain entry.
+        let secret_store: Box<dyn hadron_lattice::secrets::SecretStore> =
+            Box::new(hadron_gluon::KeyringStore::new());
+
+        // Load the archived sessions once — the history the wider Stats windows fold in,
+        // and the rows the app menu's `Sessions` submenu offers. Rebuilt by
+        // `Self::reload_archives_in_background` after `/clear` or `/resume` writes a new archive.
+        let sessions_dir = path
+            .parent()
+            .map(|p| p.join("sessions"))
+            .unwrap_or_default();
+        let (archived_messages, sessions) = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            (Vec::new(), Vec::new())
+        } else {
+            crate::model::load_archives_and_sessions(&sessions_dir)
+        };
+        let prompt_history: Vec<String> = view
+            .messages
+            .iter()
+            .filter_map(|m| {
+                if m.is_chat() && m.from.eq_ignore_ascii_case("human") {
+                    Some(m.body.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let cached_skill_ids = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            Vec::new()
+        } else {
+            crate::text::custom_skill_names(Some(&repo_root))
+        };
+        let (
+            cached_plan_paths,
+            cached_active_plan_content,
+            cached_plan_landed_commits,
+            cached_nucleus_docs,
+            cached_nucleus_fingerprint,
+        ) = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            (
+                Vec::new(),
+                None,
+                std::collections::HashSet::new(),
+                (None, None, None),
+                0,
+            )
+        } else {
+            let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+            let plan_paths = reload::scan_all_plan_paths(&repo_root);
+            let active_plan =
+                reload::resolve_active_plan_with_plans(&repo_root, &view.messages, &plan_paths);
+            let active_content = active_plan.and_then(|rel| {
+                crate::sys::read_workspace_file(&repo_root, &rel).map(|body| (rel, body))
+            });
+            let landed = active_content
+                .as_ref()
+                .map(|(_, body)| reload::collect_plan_landed_commits(&repo_root, body))
+                .unwrap_or_default();
+            (
+                plan_paths,
+                active_content,
+                landed,
+                (
+                    std::fs::read_to_string(nucleus_dir.join("features.md")).ok(),
+                    std::fs::read_to_string(nucleus_dir.join("invariants").join("always.md")).ok(),
+                    std::fs::read_to_string(nucleus_dir.join("index.md")).ok(),
+                ),
+                render::visualizer::compute_nucleus_graph_fingerprint(&repo_root),
+            )
+        };
+        let alias_map: std::collections::HashMap<String, hadron_lattice::QuarkId> = view
+            .roster
+            .iter()
+            .flat_map(|r| {
+                let qid = hadron_lattice::QuarkId::new(&r.id);
+                let mut pairs = vec![(r.id.clone(), qid.clone())];
+                if let Some(ref dn) = r.display_name {
+                    pairs.push((dn.clone(), qid.clone()));
+                }
+                if r.id.contains("agy") || r.id.contains("orchestrator") {
+                    pairs.push(("orchestrator".to_string(), qid));
+                }
+                pairs
+            })
+            .collect();
+        let delegations = delegation::parse_delegations(&events, &alias_map);
+        let audio_manager = audio::AudioTelemetryManager::new(prefs.audio.clone());
+        let rpc_endpoint = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            None
+        } else {
+            crate::rpc_client::active_endpoint(&path)
+        };
+        let last_prompt_cost = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            None
+        } else {
+            let roster_ids: Vec<String> = view.roster.iter().map(|r| r.id.clone()).collect();
+            let cost_dir = hadron_lattice::prompt_cost::prompt_cost_dir(&path);
+            hadron_lattice::prompt_cost::load_latest(&cost_dir, &roster_ids)
+        };
+        let (git_ready, git_ready_verified) = if workspace_mode == WorkspaceMode::Selector {
+            (false, true)
+        } else if is_wsl {
+            (true, false)
+        } else {
+            (
+                crate::vcs::is_git_repo(&repo_root) && crate::vcs::has_commits(&repo_root),
+                true,
+            )
+        };
+        let overdue_schedule_jobs = if workspace_mode == WorkspaceMode::Selector || is_wsl {
+            Vec::new()
+        } else {
+            reload::gather_overdue_schedule_jobs(&repo_root)
+        };
+
+        let mut chamber = Chamber {
+            view,
+            prefs,
+            team,
+            global,
+            path,
+            secret_store,
+            input,
+            prompt_history,
+            history_index: None,
+            history_draft: String::new(),
+            completion: None,
+            ghost_completion: None,
+            composer_preview_mode: false,
+            composer_preview_scroll: ScrollHandle::new(),
+            focus_handle,
+            chat_tab: ChatTab::Chat,
+            info_tab: InfoTab::Home,
+            stats_window: StatsWindow::Current,
+            archived_messages,
+            sessions,
+            right_rail_tab: RightRailTab::Terminal,
+            visualizer_yaw: 0.0,
+            visualizer_pitch: 0.25,
+            visualizer_zoom: 1.0,
+            visualizer_auto_spin: true,
+            visualizer_selected_quark: None,
+            visualizer_last_mouse: None,
+            visualizer_mode: VisualizerMode::Swarm3D,
+            visualizer_selected_crate: None,
+            visualizer_selected_note: None,
+            visualizer_nucleus_filter: None,
+            nucleus_graph_zoom: 1.0,
+            nucleus_graph_pan: (0.0, 0.0),
+            nucleus_graph_yaw: 0.4,
+            nucleus_graph_pitch: 0.25,
+            nucleus_graph_last_mouse: None,
+            nucleus_graph_drag_moved: false,
+            nucleus_graph_canvas_center: std::cell::Cell::new((0.0, 0.0)),
+            nucleus_graph_hovered_note: None,
+            cached_crate_graph: std::cell::RefCell::new(None),
+            cached_crate_graph_loading: std::cell::Cell::new(false),
+            cached_nucleus_graph: std::cell::RefCell::new(None),
+            cached_nucleus_graph_loading: std::cell::Cell::new(false),
+            selected_quark_ix: None,
+            roster_tab: RosterTab::Active,
+            app_menu_open: false,
+            working_diff: None,
+            changes_open_ixs: std::collections::HashSet::new(),
+            changes_scroll: ScrollHandle::new(),
+            git_branch_fingerprint: None,
+            git_branches: None,
+            git_remote_branches: None,
+            git_branch_scope: BranchScope::All,
+            git_fetching_remotes: false,
+            git_worktrees: None,
+            git_log_graph: None,
+            git_scroll: ScrollHandle::new(),
+            git_subtab: GitSubtab::Branches,
+            mission_subtab: MissionSubtab::Plan,
+            gate_streams: std::collections::BTreeMap::new(),
+            selected_gate_quark: None,
+            gate_test_filter: render::gate_explorer::GateTestFilter::All,
+            gate_output_scroll: ScrollHandle::new(),
+            repo_health_report: None,
+            git_remote_info: None,
+            github_issues: None,
+            github_prs: None,
+            github_actions: None,
+            github_security_alerts: None,
+            github_status_msg: None,
+            git_focus: cx.focus_handle(),
+            git_cursor_branch: None,
+            git_cursor_worktree: None,
+            git_cursor_graph: None,
+            git_selected_branch: None,
+            git_branch_diff: None,
+            git_branch_open_ixs: Default::default(),
+            git_selected_commit: None,
+            git_commit_message: None,
+            git_commit_diff: None,
+            git_commit_open_ixs: std::collections::HashSet::new(),
+            git_show_snapshots: false,
+            git_graph_rows: Vec::new(),
+            git_graph_max_lanes: 1,
+            delegations,
+            git_graph_list,
+            plan_scroll: ScrollHandle::new(),
+            dag_waves_scroll: ScrollHandle::new(),
+            cached_plan_dag: std::cell::RefCell::new(None),
+            cached_three_way_diff: std::cell::RefCell::new(None),
+            cached_three_way_diff_loading: std::cell::Cell::new(false),
+            inspector_resize_drag: None,
+            tasks_scroll: ScrollHandle::new(),
+            time_travel_scroll: ScrollHandle::new(),
+            task_scrub: None,
+            plan_collapsed_tasks: std::collections::HashSet::new(),
+            plan_dag_expanded: false,
+            plan_context_collapsed: true,
+            plan_overview_collapsed: false,
+            audio_intercom: audio_intercom::AudioIntercomBridge::new(),
+            interactive_canvas: render::canvas::InteractiveCanvasState::new(),
+            diff_steering: render::diff_steering::DiffSteeringState::new(),
+            split_canvas: render::split_canvas::SplitCanvasState::new(),
+            file_tree_previous_tab: None,
+            last_plan_path: None,
+            manual_plan_override_at_message_len: None,
+            last_incomplete_task: None,
+            chat_list_state,
+            log_list_state,
+            log_expanded: std::collections::HashSet::new(),
+            chat_message_ixs,
+            log_message_ixs,
+            chat_search_query: String::new(),
+            log_search_input,
+            log_search_query: String::new(),
+            log_kind_filter: model::LogKindFilter::All,
+            stats_scroll,
+            parsed_markdown: std::cell::RefCell::new(std::collections::HashMap::new()),
+            turn_summaries: std::cell::RefCell::new(std::collections::HashMap::new()),
+            cached_stats: std::cell::RefCell::new(std::collections::HashMap::new()),
+            stats_computing: std::cell::RefCell::new(std::collections::HashSet::new()),
+            bounds_save_pending: false,
+            process_manager_open: false,
+            settings_open: false,
+            settings_target: SettingsTarget::Human,
+            settings_name,
+            settings_path,
+            settings_model,
+            settings_effort,
+            settings_mode_config,
+            settings_new_role,
+            settings_deny_skills,
+            settings_energy_limit,
+            settings_temperature,
+            settings_top_p,
+            settings_max_tokens,
+            settings_max_exchanges,
+            settings_secret_var,
+            settings_secret_value,
+            settings_secret_status: settings::SecretStatus::NotSet,
+            settings_secret_applies: false,
+            settings_model_params_applies: false,
+            settings_advanced_expanded: false,
+            settings_general_expanded: true,
+            settings_standard_skills_expanded: false,
+            settings_name_error: None,
+            settings_schedule_id,
+            settings_schedule_cron,
+            settings_schedule_target,
+            settings_schedule_prompt,
+            settings_schedule_missed_policy: hadron_lattice::MissedPolicy::Ask,
+            settings_schedule_status_msg: None,
+            preset_filter,
+            custom_cli_vendor,
+            custom_cli_program,
+            custom_cli_args,
+            acp_program,
+            acp_args,
+            local_base_url,
+            local_models: Vec::new(),
+            local_selected_model: None,
+            local_api_key,
+            custom_cli_model,
+            custom_cli_flag,
+            custom_cli_channel: CliChannelChoice::default(),
+            color_picker,
+            pending_image_pick: None,
+            _input_sub,
+            _settings_subs,
+            providers,
+            wizard_state: WizardState::None,
+            acp_model_probe: None,
+            acp_probe_seq: 0,
+            acp_model_select_state,
+            acp_model_select_key: None,
+            http_model_probe: None,
+            http_model_select_state,
+            http_model_select_key: None,
+            general_model_select_state,
+            general_model_select_key: None,
+            wizard_model_select_state,
+            wizard_model_select_key: None,
+            mode_select_state,
+            mode_select_key: None,
+            effort_select_state,
+            effort_select_key: None,
+            info_model_select_state,
+            info_model_select_key: None,
+            info_effort_select_state,
+            info_effort_select_key: None,
+            default_mode_select_state,
+            default_mode_select_key: None,
+            editor_select_state,
+            editor_select_key: None,
+            nucleus_budget_select_state,
+            nucleus_budget_select_key: None,
+            merge_strategy_select_state,
+            merge_strategy_select_key: None,
+            theme_preset_select_state,
+            theme_preset_select_key: None,
+            accent_choice_select_state,
+            accent_choice_select_key: None,
+            ui_font_select_state,
+            ui_font_select_key: None,
+            ui_font_size_select_state,
+            ui_font_size_select_key: None,
+            mono_font_select_state,
+            mono_font_select_key: None,
+            mono_font_size_select_state,
+            mono_font_size_select_key: None,
+            chat_density_select_state,
+            chat_density_select_key: None,
+            timestamp_format_select_state,
+            timestamp_format_select_key: None,
+            cursor_style_select_state,
+            cursor_style_select_key: None,
+            scrollback_select_state,
+            scrollback_select_key: None,
+            volume_select_state,
+            volume_select_key: None,
+            sound_theme_select_state,
+            sound_theme_select_key: None,
+            turn_deadline_select_state,
+            turn_deadline_select_key: None,
+            max_turn_wall_clock_select_state,
+            max_turn_wall_clock_select_key: None,
+            repo_monitor_interval_select_state,
+            repo_monitor_interval_select_key: None,
+            sandbox_mode_select_state,
+            sandbox_mode_select_key: None,
+            settings_terminal_shell,
+            settings_git_author_name,
+            settings_git_author_email,
+            theme_name_input,
+            theme_color_hex_input,
+            theme_selected_token: None,
+            theme_category_tab: settings::ThemeCategoryTab::default(),
+            theme_color_picker,
+            toast_manager: ToastManager::new(),
+            agy_bridge_probe: None,
+            file_tree_paths: files,
+            _lock_file: lock_file,
+            git_statuses: if workspace_mode == WorkspaceMode::Selector || is_wsl {
+                std::collections::HashMap::new()
+            } else {
+                crate::vcs::get_git_statuses(&repo_root)
+            },
+            completion_files,
+            file_tree_open: None,
+            file_tree_expanded: std::collections::HashSet::new(),
+            file_tree_clipboard: None,
+            file_tree_pending_op: None,
+            file_tree_op_input,
+            file_tree_filter_input,
+            file_tree_hide_ignored: false,
+            terminals: Vec::new(),
+            active_terminal_index: 0,
+            terminal_grid_mode: false,
+            terminal_split_mode: render::pty_grid::PtySplitMode::Single,
+            terminal_focus: cx.focus_handle(),
+            terminal_px: std::rc::Rc::new(std::cell::Cell::new(None)),
+            terminal_warmup: 0,
+            info_panel: None,
+            about_open: false,
+            changelog_open: false,
+            repl_overlay_open: false,
+            repl_input,
+            repl_output: None,
+            file_tree_scroll: ScrollHandle::new(),
+            file_tree_open_scroll: ScrollHandle::new(),
+            completion_scroll: ScrollHandle::new(),
+            terminal_grid_scroll: ScrollHandle::new(),
+            last_live_activities: std::collections::HashMap::new(),
+            last_gate_activities: Vec::new(),
+            last_prompt_cost,
+            last_live_timer_sec: None,
+            last_gluon_running: true,
+            last_gluon_pid: None,
+            last_hadron_processes: Vec::new(),
+            rpc_endpoint,
+            _rpc_subscription: rpc_subscription,
+            nucleus_over_budget: if workspace_mode == WorkspaceMode::Selector || is_wsl {
+                false
+            } else {
+                hadron_gluon::nucleus_status::index_over_budget(
+                    &repo_root,
+                    nucleus_index_budget_bytes,
+                )
+            },
+            gluon_stopped_notice: false,
+            update_state: UpdateState::default(),
+            audio_manager,
+            workspace_mode,
+            selector_search,
+            project_switcher_open: false,
+            events,
+            field_write_queue: reload::FieldWriteQueue::new(),
+            cached_skill_ids,
+            cached_plan_paths,
+            cached_active_plan_content,
+            cached_plan_landed_commits,
+            cached_nucleus_docs,
+            cached_nucleus_fingerprint,
+            git_ready,
+            git_ready_verified,
+            overdue_schedule_jobs,
+            visualizer_last_tick: None,
+            visualizer_hit_nodes: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        };
+        if workspace_mode != WorkspaceMode::Selector && !is_wsl {
+            chamber.update_active_plan();
+        }
+        if workspace_mode != WorkspaceMode::Selector
+            && chamber.right_rail_tab == RightRailTab::Visualizer
+        {
+            chamber.warm_visualizer_graphs(cx);
+        }
+        if workspace_mode != WorkspaceMode::Selector && is_wsl {
+            chamber.reload_archives_in_background(cx);
+        }
+        chamber.check_for_updates(cx);
+        chamber
+    }
+
+    /// Resolve an actor's display identity: prefs overrides over code defaults.
+    /// `actor` is `"human"` or a quark id (as it appears in [`MessageRow::from`]
+    /// / [`RosterRow::id`]).
+    fn resolve_identity(&self, actor: &str) -> ResolvedIdentity {
+        let stored: Option<&Identity> = if actor == "human" {
+            Some(&self.prefs.human)
+        } else {
+            self.prefs.quarks.get(actor)
+        };
+        let default_name = if actor == "human" {
+            self.prefs
+                .git_author_name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("USER")
+                        .or_else(|_| std::env::var("USERNAME"))
+                        .ok()
+                        .filter(|u| !u.trim().is_empty())
+                })
+                .unwrap_or_else(|| "You".to_string())
+        } else {
+            let mut c = actor.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        };
+        let roster_name =
+            if stored.is_none() || stored.and_then(|i| i.display_name.as_deref()).is_none() {
+                self.view
+                    .roster
+                    .iter()
+                    .find(|r| r.id == actor)
+                    .and_then(|r| r.display_name.clone())
+            } else {
+                None
+            };
+        let name = stored
+            .and_then(|i| i.display_name.clone())
+            .or_else(|| roster_name)
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or(default_name);
+        let color: Hsla = stored
+            .and_then(|i| i.color.as_deref())
+            .and_then(parse_hex)
+            .map(Into::into)
+            .unwrap_or_else(|| theme::actor_hue(actor).into());
+        let image = stored
+            .and_then(|i| i.image_path.clone())
+            .filter(|p| !p.trim().is_empty());
+        ResolvedIdentity { name, color, image }
+    }
+
+    pub(super) fn active_terminal(&self) -> Option<&crate::pty::PtyTerminal> {
+        self.terminals
+            .get(self.active_terminal_index)
+            .and_then(|tab| tab.term.as_ref())
+    }
+
+    pub(super) fn active_terminal_mut(&mut self) -> Option<&mut crate::pty::PtyTerminal> {
+        let idx = self.active_terminal_index;
+        self.terminals
+            .get_mut(idx)
+            .and_then(|tab| tab.term.as_mut())
+    }
+
+    pub(super) fn active_terminal_error(&self) -> Option<&str> {
+        self.terminals
+            .get(self.active_terminal_index)
+            .and_then(|tab| tab.error.as_deref())
+    }
+}
+
+/// Every chord the chamber binds at startup. A free function (not an inline
+/// array inside `run`) so a test can assert a chord is actually bound without
+/// opening a window.
+fn default_key_bindings() -> Vec<KeyBinding> {
+    default_key_bindings_scoped(None)
+}
+
+/// 同一套快捷键，但可把「原本全局」的绑定收窄到给定上下文。
+///
+/// 独立窗口传 `None`（与原行为一致）；嵌入工作台时传 `Some(KEY_CONTEXT)`，
+/// 让这些快捷键只在聊天区获得焦点时生效，不抢宿主的全局快捷键。
+fn default_key_bindings_scoped(global: Option<&str>) -> Vec<KeyBinding> {
+    vec![
+        // Verified-free (was shift-tab, dead while typing — see above).
+        KeyBinding::new("f6", CycleMode, Some(KEY_CONTEXT)),
+        KeyBinding::new("f7", CycleSandbox, Some(KEY_CONTEXT)),
+        // Chat column tabs (Chat / Log / Stats).
+        KeyBinding::new("alt-right", NextChatTab, global),
+        KeyBinding::new("alt-left", PrevChatTab, global),
+        // Roster filter tabs (Active / All).
+        KeyBinding::new("alt-shift-right", NextRosterTab, global),
+        KeyBinding::new("alt-shift-left", PrevRosterTab, global),
+        // Right rail tabs (Terminal / Files / Changes / Plan).
+        KeyBinding::new("alt-pagedown", NextInspectorTab, global),
+        KeyBinding::new("alt-pageup", PrevInspectorTab, global),
+        // Stats time window (Session / Week / Month / All time).
+        KeyBinding::new("alt-down", NextStatsSubTab, global),
+        KeyBinding::new("alt-up", PrevStatsSubTab, global),
+        // Roster cursor (vim-style j/k) and open-selected.
+        KeyBinding::new("ctrl-j", NextQuark, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-k", PrevQuark, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-alt-enter", ToggleSelectedQuark, Some(KEY_CONTEXT)),
+        // App menu overlay — F10 (the conventional "focus the menu" key) plus
+        // `ctrl-m` as a chord that reaches the menu without leaving the home row.
+        // Both are scoped: the text input's key context claims neither.
+        KeyBinding::new("f10", OpenMenu, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-m", OpenMenu, Some(KEY_CONTEXT)),
+        // Multi-terminal PTY shortcuts
+        KeyBinding::new("ctrl-shift-t", NewTerminalTab, global),
+        KeyBinding::new("ctrl-shift-w", CloseTerminalTab, global),
+        KeyBinding::new("ctrl-pagedown", NextTerminalTab, global),
+        KeyBinding::new("ctrl-pageup", PrevTerminalTab, global),
+        KeyBinding::new("ctrl-shift-]", NextTerminalTab, global),
+        KeyBinding::new("ctrl-shift-[", PrevTerminalTab, global),
+        // Chat input <-> terminal focus toggle (`ctrl-tab` / `ctrl-``).
+        // Global so it fires from either side.
+        KeyBinding::new("ctrl-tab", ToggleFocus, global),
+        KeyBinding::new("ctrl-`", ToggleFocus, global),
+        // Global chat prompt focus hotkey (Cmd+L / Ctrl+L) to focus chat from anywhere.
+        KeyBinding::new("cmd-l", FocusChat, global),
+        KeyBinding::new("ctrl-l", FocusChat, global),
+        // Find in the current view: Chat -> `/find ` in the composer, Log -> its search box.
+        KeyBinding::new("cmd-f", FindInView, global),
+        KeyBinding::new("ctrl-f", FindInView, global),
+        // Quick REPL & Tool Scratchpad overlay (Capability #16)
+        KeyBinding::new("cmd-k", ToggleReplOverlay, global),
+        KeyBinding::new("ctrl-shift-k", ToggleReplOverlay, global),
+        // Quick Project Switcher (Ctrl+O / Cmd+O)
+        KeyBinding::new("ctrl-o", ToggleProjectSwitcher, global),
+        KeyBinding::new("cmd-o", ToggleProjectSwitcher, global),
+        // Global keyboard dismiss (Escape) to drop completions, modals, overlays, or return focus.
+        KeyBinding::new("escape", Dismiss, global),
+        // Global text copy (Cmd+C / Ctrl+C / Ctrl+Shift+C) to copy selection from terminal or chat
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-c", gpui_kit::component::input::Copy, global),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, global),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-c", TerminalCopy, global),
+        // Git Rail scoped shortcuts (when Git panel has focus)
+        KeyBinding::new("1", SelectGitBranches, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("2", SelectGitWorktrees, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("3", SelectGitGraph, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("4", SelectGitDiff3Way, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("5", SelectGitRemote, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("j", NextGitItem, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("k", PrevGitItem, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("down", NextGitItem, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("up", PrevGitItem, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("enter", OpenGitItem, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("space", OpenGitItem, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("]", NextGitSubtab, Some(GIT_KEY_CONTEXT)),
+        KeyBinding::new("[", PrevGitSubtab, Some(GIT_KEY_CONTEXT)),
+        // Git Rail global chords
+        KeyBinding::new("alt-1", SelectGitBranches, global),
+        KeyBinding::new("alt-2", SelectGitWorktrees, global),
+        KeyBinding::new("alt-3", SelectGitGraph, global),
+        KeyBinding::new("alt-4", SelectGitDiff3Way, global),
+        KeyBinding::new("alt-5", SelectGitRemote, global),
+        KeyBinding::new("alt-shift-right", NextGitSubtab, global),
+        KeyBinding::new("alt-shift-left", PrevGitSubtab, global),
+        KeyBinding::new("alt-j", NextGitItem, global),
+        KeyBinding::new("alt-k", PrevGitItem, global),
+        KeyBinding::new("alt-enter", OpenGitItem, global),
+    ]
+}
+
+/// 嵌入工作台时注册快捷键：全部收窄到 `Chamber` 上下文，只有在聊天区
+/// 获得焦点时才会命中，不会覆盖宿主的全局绑定。
+pub fn bind_embedded_keys(cx: &mut App) {
+    cx.bind_keys(default_key_bindings_scoped(Some(KEY_CONTEXT)));
+}
+
+/// The first UI font family whose **bold actually renders**.
+///
+/// GPUI has no CSS font-stack parsing. `Theme::font_family` is ONE literal family name,
+/// matched exactly against the platform font database (`cosmic_text_system.rs`'s
+/// `load_family` compares `*name == family.0`), so gpui-component's non-macOS default —
+/// `"Inter, Segoe UI, DejaVu Sans, Liberation Sans, sans-serif"` — matches nothing at all.
+///
+/// The miss is **silent, and it eats bold specifically**: `TextSystem::resolve_font` falls
+/// through to its own hardcoded fallback stack, and every entry in that stack is built with
+/// `font(family)`, i.e. `FontWeight::default()`. Bold and regular then resolve to the SAME
+/// regular face, so `**bold**` renders flat while everything else looks fine. Three fixes
+/// were shipped against this symptom (`3001c67`, `59479e8`) by swapping one unresolvable
+/// name for another — `.SystemUIFont` maps to "IBM Plex Sans" on Linux, which is not
+/// installed on this box either.
+///
+/// `TextSystem::font_id` — the one that reports the miss — is private, so the probe uses
+/// the observable consequence instead: resolve the family at bold and at regular and
+/// compare the two `FontId`s. Different ids mean the family resolved AND has a real bold
+/// face. Equal ids mean either the family missed (both landed on the same fallback) or it
+/// has no bold face — both render flat, so both are rejected. This is the property we
+/// actually care about, which is why it is checked rather than "is the name installed".
+fn first_family_with_a_real_bold(cx: &App, candidates: &[&str]) -> SharedString {
+    let text_system = cx.text_system();
+    candidates
+        .iter()
+        .copied()
+        .filter(|&name| !crate::fonts::is_emoji_or_symbol_font(name))
+        .find(|&name| {
+            let regular = gpui_kit::font(name);
+            text_system.resolve_font(&regular.clone().bold()) != text_system.resolve_font(&regular)
+        })
+        .map(SharedString::from)
+        .unwrap_or_else(|| ".SystemUIFont".into())
+}
+
+fn font_family_with_a_real_bold(cx: &App, preferred: Option<&str>) -> SharedString {
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(p) = preferred {
+        if !p.trim().is_empty() {
+            candidates.push(p);
+        }
+    }
+    candidates.extend_from_slice(&[
+        crate::fonts::UI_FAMILY,
+        "Noto Sans",
+        "Inter",
+        "Geist",
+        ".SystemUIFont", // the real system face on macOS/Windows; "IBM Plex Sans" on Linux
+        "Segoe UI",
+        "Ubuntu",
+        "Cantarell",
+        "DejaVu Sans",
+    ]);
+    first_family_with_a_real_bold(cx, &candidates)
+}
+
+fn mono_family_with_a_real_bold(cx: &App, preferred: Option<&str>) -> SharedString {
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(p) = preferred {
+        if !p.trim().is_empty() {
+            candidates.push(p);
+        }
+    }
+    candidates.extend_from_slice(&[
+        crate::fonts::MONO_FAMILY,
+        "Cascadia Code",
+        "JetBrains Mono",
+        "Fira Code",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "monospace",
+    ]);
+    first_family_with_a_real_bold(cx, &candidates)
+}
+
+impl Chamber {
+    /// Show a lightweight floating toast notification.
+    pub fn show_toast(
+        &mut self,
+        kind: ToastKind,
+        message: impl Into<String>,
+        duration_secs: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.toast_manager.push(kind, message, duration_secs);
+        cx.notify();
+    }
+
+    /// Dismiss a toast notification by id.
+    pub fn dismiss_toast(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.toast_manager.dismiss(id);
+        cx.notify();
+    }
+
+    /// Apply typography preferences (families and font sizes) and color presets to gpui-component's Theme.
+    pub(super) fn apply_theme_and_typography(cx: &mut App, prefs: &ChamberPrefs) {
+        let ui_font = font_family_with_a_real_bold(cx, prefs.ui_font_family.as_deref());
+        let mono_font = mono_family_with_a_real_bold(cx, prefs.mono_font_family.as_deref());
+        let ui_size = prefs.ui_font_size.unwrap_or(14.0);
+        let mono_size = prefs.mono_font_size.unwrap_or(13.0);
+
+        if let Some(custom) = &prefs.custom_theme {
+            theme::set_active_custom_theme(Some(custom.clone()));
+        } else {
+            let preset = prefs.theme_preset.unwrap_or_default();
+            let accent = prefs.accent_choice.unwrap_or_default();
+            theme::set_active_preset(preset);
+            theme::set_active_accent(accent);
+        }
+
+        let bg_surf = theme::bg_surface();
+        let bg_surf_raised = theme::bg_surface_raised();
+        let canvas = theme::canvas_base();
+        let in_bg = theme::input_bg();
+        let brd = theme::border();
+        let pop = theme::popover();
+        let acc = theme::accent();
+
+        let t = gpui_kit::component::Theme::global_mut(cx);
+        t.title_bar = bg_surf.into();
+        t.tokens.title_bar = gpui_kit::Hsla::from(bg_surf).into();
+        t.title_bar_border = brd.into();
+        t.background = canvas;
+        t.input = in_bg.into();
+        t.secondary = bg_surf.into();
+        t.secondary_hover = bg_surf_raised.into();
+        t.popover = pop.into();
+        t.popover_foreground = theme::text().into();
+        t.tokens.popover = gpui_kit::Hsla::from(pop).into();
+        t.tokens.popover_foreground = gpui_kit::Hsla::from(theme::text()).into();
+        t.border = brd.into();
+        t.drag_border = acc.into();
+        t.selection = theme::selection_bg().into();
+        t.list_active = acc.opacity(0.2).into();
+        t.list_active_border = acc.into();
+        t.accent = gpui_kit::rgba(0xffffff20).into();
+        t.tokens.tab_bar_segmented = gpui_kit::Hsla::from(bg_surf_raised).into();
+        t.danger = theme::error().into();
+        t.danger_foreground = theme::text().into();
+        t.link = theme::file_link().into();
+        t.link_hover = theme::file_link().into();
+        t.link_active = theme::file_link().into();
+        t.scrollbar_mode = ScrollbarMode::Hover;
+        t.scrollbar = gpui_kit::rgba(0x00000000).into();
+        t.scrollbar_thumb = gpui_kit::rgba(0xffffff40).into();
+        t.scrollbar_thumb_hover = gpui_kit::rgba(0xffffffa0).into();
+        t.tokens.scrollbar_thumb = gpui_kit::Hsla::from(gpui_kit::rgba(0xffffff40)).into();
+        t.tokens.scrollbar_thumb_hover = gpui_kit::Hsla::from(gpui_kit::rgba(0xffffffa0)).into();
+        t.window_border = theme::window_border().into();
+        t.tokens.background = gpui_kit::Hsla::from(bg_surf).into();
+        t.mode = gpui_kit::component::ThemeMode::Dark;
+        t.highlight_theme = widgets::github_syntax_theme();
+        t.font_family = ui_font;
+        t.mono_font_family = mono_font;
+        t.font_size = px(ui_size);
+        t.mono_font_size = px(mono_size);
+    }
+}
+
+static LINK_WORKSPACE_PATH: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn set_link_workspace_path(path: PathBuf) {
+    let lock = LINK_WORKSPACE_PATH.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = lock.lock() {
+        *guard = Some(path);
+    }
+}
+
+pub(crate) fn resolve_link_for_active_workspace(url: &str) -> Option<(PathBuf, Option<u32>)> {
+    let workspace = LINK_WORKSPACE_PATH
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.clone());
+    crate::sys::resolve_file_url_for_workspace(url, workspace.as_deref())
+}
+
+/// Link click handler wired to `TextView::on_link_click` across chat and log views.
+///
+/// Routes `file://` URLs through [`crate::sys::resolve_file_url_for_workspace`] and opens
+/// them in the configured editor (`chamber.json`), falling back to `open_path_or_url`
+/// for web links or if editor launch fails.
+pub(crate) fn handle_chat_link_click(
+    url: &gpui_kit::SharedString,
+    event: &gpui_kit::ClickEvent,
+    _window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) {
+    // `hadron://mention/…` links exist only to colour `@mention`s; never open them.
+    if event.is_right_click() || url.starts_with("hadron://") {
+        return;
+    }
+    if let Some((path, line)) = resolve_link_for_active_workspace(url.as_ref()) {
+        if crate::sys::spawn_editor(&config::load().editor, &path, line).is_err() {
+            cx.open_url(url.as_ref());
+        }
+    } else {
+        crate::sys::open_path_or_url(url.as_ref());
+    }
+}
+
+/// Launch the chamber window against a field file path.
+pub fn run(field_path: Option<String>, chamber_lock_file: Option<std::fs::File>) {
+    let (field_path, workspace_mode) = match field_path {
+        Some(path) => (PathBuf::from(path), WorkspaceMode::Chamber),
+        None => {
+            let dummy_path = hadron_lattice::team_config_path()
+                .and_then(|p| p.parent().map(|d| d.join("field.jsonl")))
+                .unwrap_or_else(|| PathBuf::from("field.jsonl"));
+            (dummy_path, WorkspaceMode::Selector)
+        }
+    };
+    // The repo team file (`.hadron/team.json`) and the separate global catalogue
+    // (`~/.hadron/team.json`, skipped when it IS the repo file).
+    let repo_path = if workspace_mode == WorkspaceMode::Selector {
+        None
+    } else {
+        hadron_lattice::repo_team_for_field(&field_path)
+    };
+    let global_path =
+        hadron_lattice::team_config_path().filter(|g| Some(g.as_path()) != repo_path.as_deref());
+
+    // Load prefs before either migration below, so the id-rename can move ChamberPrefs'
+    // per-quark identity (colour/name/avatar) onto the renamed keys and persist it.
+    let mut prefs = config::load();
+
+    // One-shot migration to the global-catalogue split: if the repo file still carries
+    // legacy full seats and there is a separate catalogue, move each definition into the
+    // catalogue and rewrite the repo file as role/state overrides. Idempotent (a repo
+    // with no legacy seats is a no-op), and the resolved seats are byte-identical to the
+    // originals, so the running daemon reconciles to a no-op re-seat.
+    if let (Some(rp), Some(gp)) = (repo_path.as_deref(), global_path.as_deref()) {
+        migrate_repo_to_catalogue(rp, gp);
+        // One-shot: rename legacy ids (`agy` → `cli-agy`, `opus` → `cli-claude`) to the
+        // `<transport>-<vendor>` convention in both team files, and move the chamber's own
+        // per-quark identity onto the new keys so a rename doesn't reset a quark's
+        // appearance. Idempotent — safe on every launch.
+        migrate_legacy_ids(rp, gp, &mut prefs);
+        let _ = config::save(&prefs);
+    }
+
+    // Load the SAME repo team the daemon seated for this field, plus the catalogue.
+    let team = repo_path.as_deref().map(load_team).unwrap_or_default();
+    let mut global = global_path.as_deref().map(load_team).unwrap_or_default();
+    if workspace_mode != WorkspaceMode::Selector {
+        hadron_lattice::merge_wsl_catalogue(&mut global, &field_path);
+    }
+    let events = if workspace_mode == WorkspaceMode::Selector {
+        Vec::new()
+    } else {
+        io::read_events(&field_path).unwrap_or_default()
+    };
+    let view = model::project_with_team(&events, &resolve_team(&team, &global), &global);
+
+    let app = gpui_kit::application().with_assets(crate::symbols::ChamberAssets);
+    app.run(move |cx: &mut App| {
+        gpui_kit::component::init(cx);
+        crate::sys::init_windows_app_icon();
+        crate::sys::set_windows_console_visible(prefs.show_console_window);
+        // A `file://` link in a chat message is a SOURCE FILE, not a document for the
+        // desktop to guess about: without this it reaches `xdg-open` and lands in
+        // whatever the system association says (Vim, here). Declining anything that
+        // is not a local file keeps `https://` links going to the browser.
+        //
+        // The choice is re-read from disk per click rather than captured here: the
+        // Settings picker writes `chamber.json` on click, so reading it at click time
+        // keeps ONE home for the setting instead of a second cached copy that could
+        // drift. A click is rare and the file is tiny.
+        set_link_workspace_path(field_path.clone());
+        Theme::change(ThemeMode::Dark, None, cx);
+        // Registered BEFORE `font_family_with_a_real_bold` probes: the probe asks
+        // the text system what it can already resolve, so a face added after it
+        // runs is a face the probe never sees.
+        if let Err(e) = cx.text_system().add_fonts(crate::fonts::embedded()) {
+            hadron_lattice::term::warn(
+                hadron_lattice::term::Source::Chamber,
+                &format!(
+                    "fonts: could not register bundled fonts ({e:#}); falling back to system fonts"
+                ),
+            );
+        }
+        // Apply initial theme palette, accent, and verified typography.
+        Chamber::apply_theme_and_typography(cx, &prefs);
+        // Keyboard navigation. The chords still scoped to `KEY_CONTEXT` are ones
+        // the text input's own key context (`gpui_kit::component::input::state::CONTEXT`)
+        // does NOT claim, so they fall through to this Chamber context even while
+        // the chat box has focus. (That claim used to be taken on faith for
+        // `shift-tab`: Input binds `shift-tab` for `OutdentInline`, so `CycleMode`
+        // was silently dead while typing — hence `f6`. Every scoped chord below has
+        // been grepped against `crates/gpui-component/crates/ui/src/input/state.rs`
+        // and confirmed unclaimed.)
+        //
+        // The navigation chords are bound with `None` (global) so they dispatch
+        // regardless of which sub-context holds focus — `content` (which carries
+        // `KEY_CONTEXT`) is always their ancestor, so a global binding still reaches
+        // its handler. The navigation scheme is modifier + arrows:
+        //   ctrl-tab           chat input  <-> terminal (reuses `ToggleFocus`)
+        //   alt-left/right     chat column tabs   (Chat / Log / Stats)
+        //   alt-pageup/pagedn  right-rail tabs     (Terminal / Files / Changes / Plan)
+        //   alt-up/down        Stats time window
+        cx.bind_keys(default_key_bindings());
+        cx.on_window_closed(|cx, _window_id| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        // Build window options here (needs `&App`, not the async cx below).
+        //
+        // Size and origin are restored *independently*, which matters: the first
+        // cut treated them as one unit, so a saved origin the compositor wouldn't
+        // vouch for threw the saved size away too and the window reopened at the
+        // default. Under Wayland (WSLg) that fired every launch — a client there
+        // can't position itself, and `displays()` may enumerate nothing — so the
+        // origin check must not be able to veto the size.
+        let default_size = gpui_kit::size(px(1440.0), px(900.0));
+        let mut bounds = WindowBounds::centered(None, default_size, cx);
+        if let Some(wb) = &prefs.window_bounds {
+            let size = gpui_kit::size(px(wb.width), px(wb.height));
+            let origin = gpui_kit::point(px(wb.x), px(wb.y));
+
+            // Keep the saved size regardless — centered is the honest fallback for
+            // a position we can't place.
+            bounds = WindowBounds::centered(None, size, cx);
+
+            // Only place the window at its saved origin if a display actually
+            // covers it, so an unplugged monitor can't strand it offscreen.
+            let displays = cx.displays();
+            let on_screen = displays.iter().any(|d| d.bounds().contains(&origin));
+            if on_screen {
+                bounds = WindowBounds::Windowed(gpui_kit::Bounds { origin, size });
+            }
+        }
+
+        let window_options = WindowOptions {
+            titlebar: Some(gpui_kit::TitlebarOptions {
+                title: Some("Hadron".into()),
+                ..TitleBar::title_bar_options()
+            }),
+            window_decorations: Some(WindowDecorations::Client),
+            // Transparent so the rounded corner cut-outs composite over the desktop
+            // (see window_frame). The old fear — "transparent recomposites every repaint
+            // and pegs the CPU" — was misdiagnosed: the CPU sink was *continuous repaints*
+            // (a pulsing animation + a 30fps terminal pump), now fixed. Repaints are rare,
+            // so the alpha channel costs almost nothing at rest.
+            window_background: WindowBackgroundAppearance::Transparent,
+            window_bounds: Some(bounds),
+            ..Default::default()
+        };
+
+        cx.spawn(async move |cx| {
+            cx.open_window(window_options, move |window, cx| {
+                window.set_window_title("Hadron");
+                let chamber = cx.new(|cx| {
+                    Chamber::new(
+                        view.clone(),
+                        events.clone(),
+                        prefs.clone(),
+                        team.clone(),
+                        global.clone(),
+                        field_path.clone(),
+                        chamber_lock_file,
+                        workspace_mode,
+                        window,
+                        cx,
+                    )
+                });
+                // `Root` fills its bounds with `tokens.background`; we need it to
+                // paint nothing so `crate::window_frame`'s rounded corners show the
+                // shadow through instead of a square fill. Said HERE, on the one
+                // element that wants it, because `Root::render` applies its
+                // `StyleRefinement` after that `.bg(..)` — the token itself has to
+                // stay opaque for the fork's `Select` popups (see the palette block).
+                cx.new(|cx| Root::new(chamber, window, cx).bg(gpui_kit::transparent_black()))
+            })
+            .expect("failed to open window");
+        })
+        .detach();
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `self.reproject(` is the raw, un-resynced path: it leaves `chat_list_state`,
+    /// `log_list_state` and `chat_message_ixs` exactly as they were, which is what let
+    /// `/rename`/`/reboot`/`/approve`/`/deny`/`answer_permission` under-count the Log tab
+    /// (see `sync-view-log-list-state-ssot`). `Chamber::sync_view` is the one place
+    /// allowed to call it; everything else must call `sync_view` instead. A hand-written
+    /// allowlist of "already fixed" call sites would not catch a *new* one added later —
+    /// exactly the class of bug this guards — so this scans the real source text of
+    /// every file that used to hold a bare call, via `include_str!` (this file, `mod.rs`,
+    /// is deliberately NOT one of them, so the search needle below can't match itself).
+    #[test]
+    fn every_reproject_call_goes_through_sync_view() {
+        let files: &[(&str, &str)] = &[
+            ("actions.rs", include_str!("actions.rs")),
+            ("reload.rs", include_str!("reload.rs")),
+            ("input.rs", include_str!("input.rs")),
+        ];
+        let needle = ["self", ".reproject("].concat();
+        let total: usize = files
+            .iter()
+            .map(|(_, text)| text.matches(&needle).count())
+            .sum();
+        assert_eq!(
+            total, 1,
+            "expected exactly one `self.reproject(` call (inside Chamber::sync_view) \
+             across actions.rs/reload.rs/input.rs, found {total} — a new or migrated call \
+             site must go through `sync_view` instead"
+        );
+    }
+
+    #[test]
+    fn leading_commands_peel_and_preserve_message_newlines() {
+        // No command: the whole body is returned verbatim, newlines intact.
+        let (cmds, body) = split_leading_commands("line one\nline two");
+        assert!(cmds.is_empty());
+        assert_eq!(body.as_deref(), Some("line one\nline two"));
+
+        // A leading command runs; the multi-line remainder keeps its newline (this is the
+        // regression guard — the old tokenizer flattened it to "line one line two").
+        let (cmds, body) = split_leading_commands("/toggle-roster line one\nline two");
+        assert_eq!(cmds, vec![("toggle-roster".to_string(), String::new())]);
+        assert_eq!(body.as_deref(), Some("line one\nline two"));
+
+        // Chained zero-arg commands, no message left → body None (caller clears the box).
+        let (cmds, body) = split_leading_commands("/toggle-roster /toggle-inspector");
+        assert_eq!(
+            cmds,
+            vec![
+                ("toggle-roster".to_string(), String::new()),
+                ("toggle-inspector".to_string(), String::new()),
+            ]
+        );
+        assert_eq!(body, None);
+
+        // team-brainstorm swallows the rest of the line as its argument.
+        let (cmds, body) = split_leading_commands("/team-brainstorm ship the release");
+        assert_eq!(
+            cmds,
+            vec![(
+                "team-brainstorm".to_string(),
+                "ship the release".to_string()
+            )]
+        );
+        assert_eq!(body, None);
+
+        // reboot swallows the rest of the line as its argument.
+        let (cmds, body) = split_leading_commands("/reboot @acp-claude");
+        assert_eq!(
+            cmds,
+            vec![("reboot".to_string(), "@acp-claude".to_string())]
+        );
+        assert_eq!(body, None);
+
+        // approve swallows the rest of the line as its argument.
+        let (cmds, body) = split_leading_commands("/approve @acp-claude remember");
+        assert_eq!(
+            cmds,
+            vec![("approve".to_string(), "@acp-claude remember".to_string())]
+        );
+        assert_eq!(body, None);
+
+        // toggle swallows the rest of the line as its argument — and must NOT be
+        // shadowed by `/toggle-roster`, which shares its prefix. A `/toggle` that the
+        // parser did not know would be swept into `body` and POSTED as a chat message,
+        // silently, however good the handler arm is.
+        let (cmds, body) = split_leading_commands("/toggle @Sonnet");
+        assert_eq!(cmds, vec![("toggle".to_string(), "@Sonnet".to_string())]);
+        assert_eq!(body, None);
+        let (cmds, body) = split_leading_commands("/toggle-roster hello");
+        assert_eq!(cmds, vec![("toggle-roster".to_string(), String::new())]);
+        assert_eq!(
+            body.as_deref(),
+            Some("hello"),
+            "the longer name still wins its own arm"
+        );
+
+        // deny swallows the rest of the line as its argument.
+        let (cmds, body) = split_leading_commands("/deny @acp-claude");
+        assert_eq!(cmds, vec![("deny".to_string(), "@acp-claude".to_string())]);
+        assert_eq!(body, None);
+
+        // limit swallows the rest of the line as its argument.
+        let (cmds, body) = split_leading_commands("/limit @acp-claude 1000000");
+        assert_eq!(
+            cmds,
+            vec![("limit".to_string(), "@acp-claude 1000000".to_string())]
+        );
+        assert_eq!(body, None);
+
+        // reset-energy swallows the rest of the line as its argument.
+        let (cmds, body) = split_leading_commands("/reset-energy @Claude");
+        assert_eq!(
+            cmds,
+            vec![("reset-energy".to_string(), "@Claude".to_string())]
+        );
+        assert_eq!(body, None);
+
+        // A "/command" that is NOT leading stays literal text in the message body.
+        let (cmds, body) = split_leading_commands("please run /clear later");
+        assert!(cmds.is_empty());
+        assert_eq!(body.as_deref(), Some("please run /clear later"));
+
+        // A bare slash is not a command.
+        let (cmds, body) = split_leading_commands("/ and /clear");
+        assert!(cmds.is_empty());
+        assert_eq!(body.as_deref(), Some("/ and /clear"));
+    }
+
+    #[test]
+    fn the_app_menu_answers_to_both_f10_and_ctrl_m() {
+        // `KeyBinding` exposes neither its keystrokes nor its action, so Debug is
+        // the only handle a headless test has on what was actually bound.
+        let bound: Vec<String> = super::default_key_bindings()
+            .iter()
+            .map(|b| format!("{:?}", b))
+            .filter(|b| b.contains("OpenMenu"))
+            .collect();
+        // Debug prints the *parsed* keystroke (`control: true`, `key: "m"`), never
+        // the source string "ctrl-m" — asserting on the literal chord passes only
+        // by accident of it never running.
+        assert_eq!(
+            bound.len(),
+            2,
+            "expected exactly two OpenMenu chords: {bound:?}"
+        );
+        assert!(
+            bound.iter().any(|b| b.contains(r#"key: "f10""#)),
+            "f10 lost: {bound:?}"
+        );
+        assert!(
+            bound
+                .iter()
+                .any(|b| b.contains("control: true") && b.contains(r#"key: "m""#)),
+            "ctrl-m missing: {bound:?}"
+        );
+    }
+
+    #[test]
+    fn the_toggle_focus_answers_to_both_ctrl_tab_and_ctrl_backtick() {
+        let bound: Vec<String> = super::default_key_bindings()
+            .iter()
+            .map(|b| format!("{:?}", b))
+            .filter(|b| b.contains("ToggleFocus"))
+            .collect();
+        assert_eq!(
+            bound.len(),
+            2,
+            "expected exactly two ToggleFocus chords: {bound:?}"
+        );
+        assert!(
+            bound
+                .iter()
+                .any(|b| b.contains("control: true") && b.contains(r#"key: "tab""#)),
+            "ctrl-tab missing for ToggleFocus: {bound:?}"
+        );
+        assert!(
+            bound
+                .iter()
+                .any(|b| b.contains("control: true") && b.contains(r#"key: "`""#)),
+            "ctrl-` missing for ToggleFocus: {bound:?}"
+        );
+    }
+
+    /// The point of bundling is that the probe stops depending on the machine.
+    /// This asserts the mechanism, not the file: registration happened AND the
+    /// registered family resolves a bold face distinct from its regular.
+    #[test]
+    fn the_bundled_ui_and_mono_families_each_resolve_a_real_bold() {
+        let text_system = std::sync::Arc::new(gpui_wgpu::CosmicTextSystem::new("fallback"));
+        let mut cx = gpui_kit::HeadlessAppContext::new(text_system);
+        cx.update(|cx| {
+            cx.text_system()
+                .add_fonts(crate::fonts::embedded())
+                .expect("register bundled fonts");
+            for family in crate::fonts::BUNDLED_UI_FAMILIES
+                .into_iter()
+                .chain(crate::fonts::BUNDLED_MONO_FAMILIES)
+            {
+                let regular = gpui_kit::font(family);
+                let bold = regular.clone().bold();
+                assert_ne!(
+                    cx.text_system().resolve_font(&regular),
+                    cx.text_system().resolve_font(&bold),
+                    "{family}: bold resolved to the same face as regular"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn default_key_bindings_include_global_focus_and_dismiss_chords() {
+        let bindings: Vec<String> = default_key_bindings()
+            .iter()
+            .map(|b| format!("{:?}", b))
+            .collect();
+        // Global Focus Hotkey: Cmd+L / Ctrl+L -> FocusChat
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("FocusChat") && b.contains(r#"key: "l""#)));
+        // Global Keyboard Dismiss: Escape -> Dismiss
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("Dismiss") && b.contains(r#"key: "escape""#)));
+        // Focus Toggle: Ctrl+Tab and Ctrl+` -> ToggleFocus
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("ToggleFocus") && b.contains(r#"key: "tab""#)));
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("ToggleFocus") && b.contains(r#"key: "`""#)));
+        // Global Copy: Copy -> gpui_kit::component::input::Copy and TerminalCopy
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("Copy") && b.contains(r#"key: "c""#)));
+        #[cfg(not(target_os = "macos"))]
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("TerminalCopy") && b.contains(r#"key: "c""#)));
+        // Project Switcher: Ctrl+O / Cmd+O -> ToggleProjectSwitcher
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("ToggleProjectSwitcher") && b.contains(r#"key: "o""#)));
+        // Find in view: Ctrl+F / Cmd+F -> FindInView
+        assert!(bindings
+            .iter()
+            .any(|b| b.contains("FindInView") && b.contains(r#"key: "f""#)));
+    }
+
+    #[test]
+    fn terminal_grid_cell_and_dims_account_for_inner_padding() {
+        let bounds = (1000.0, 200.0, 800.0, 400.0);
+        // Clicking exactly at the top-left of the padded text area (ox + TERM_PAD, oy + TERM_PAD) -> (0, 0, false)
+        assert_eq!(
+            terminal::terminal_grid_cell((1000.0 + TERM_PAD, 200.0 + TERM_PAD), bounds),
+            (0, 0, false)
+        );
+        // Clicking inside the top-left padding clamps to (0, 0, false)
+        assert_eq!(
+            terminal::terminal_grid_cell((1002.0, 202.0), bounds),
+            (0, 0, false)
+        );
+        // Clicking 2 rows and 3.6 columns inside the padded text area
+        let px_x = 1000.0 + TERM_PAD + 3.6 * TERM_CELL_W;
+        let px_y = 200.0 + TERM_PAD + 2.2 * TERM_CELL_H;
+        assert_eq!(
+            terminal::terminal_grid_cell((px_x, px_y), bounds),
+            (2, 3, true)
+        );
+
+        // term_dims subtracts 2 * TERM_PAD from width and height
+        let (cols, rows) = term_dims((
+            2.0 * TERM_PAD + 10.0 * TERM_CELL_W,
+            2.0 * TERM_PAD + 5.0 * TERM_CELL_H,
+        ));
+        assert_eq!((cols, rows), (10, 5));
+    }
+
+    #[test]
+    fn chamber_window_title_and_windows_bin_descriptions_are_distinct() {
+        let opts = gpui_kit::TitlebarOptions {
+            title: Some("Hadron".into()),
+            ..TitleBar::title_bar_options()
+        };
+        assert_eq!(opts.title.as_deref(), Some("Hadron"));
+
+        let build_rs = include_str!("../../build.rs");
+        assert!(build_rs.contains(r#"("hadron", "Hadron", "hadron.exe")"#));
+        assert!(build_rs.contains(r#"("hadron-gluon", "Hadron Gluon", "hadron-gluon.exe")"#));
+        assert!(build_rs
+            .contains(r#"("hadron-forge-mcp", "Hadron Forge MCP", "hadron-forge-mcp.exe")"#));
+        assert!(build_rs.contains("cargo:rustc-link-arg-bin="));
+    }
+
+    #[test]
+    fn resolve_link_for_active_workspace_routes_file_urls_and_ignores_http() {
+        set_link_workspace_path(PathBuf::from("/workspace/.hadron/field.jsonl"));
+        let resolved = resolve_link_for_active_workspace("file:///workspace/src/main.rs#L42");
+        assert_eq!(
+            resolved,
+            Some((PathBuf::from("/workspace/src/main.rs"), Some(42)))
+        );
+        assert_eq!(
+            resolve_link_for_active_workspace("https://github.com/zed-industries/zed"),
+            None
+        );
+    }
+}

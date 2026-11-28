@@ -1,0 +1,655 @@
+use hadron_lattice::io::append_event;
+use hadron_lattice::term::{self, Source};
+use hadron_lattice::{Actor, Event, Kind};
+use std::path::{Path, PathBuf};
+
+/// High-level actions parsed from CLI arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliAction {
+    Version,
+    Help,
+    Init,
+    Update { version: Option<String> },
+    Batch(HeadlessCommand),
+    LaunchChamber,
+}
+
+/// Parses CLI arguments into a `CliAction`.
+pub fn parse_cli_action(args: &[String]) -> CliAction {
+    if args.len() < 2 {
+        return CliAction::LaunchChamber;
+    }
+    match args[1].as_str() {
+        "-V" | "--version" => CliAction::Version,
+        "-h" | "--help" => CliAction::Help,
+        "init" | "--init" => CliAction::Init,
+        "update" => {
+            let mut version = None;
+            let mut iter = args[2..].iter();
+            while let Some(arg) = iter.next() {
+                if arg == "--version" || arg == "-v" {
+                    if let Some(val) = iter.next() {
+                        version = Some(val.trim_start_matches('v').to_string());
+                    }
+                } else if arg == "--latest" {
+                    version = None;
+                } else if !arg.starts_with("--") {
+                    version = Some(arg.trim_start_matches('v').to_string());
+                }
+            }
+            CliAction::Update { version }
+        }
+        "run" | "ci" => {
+            if let Some(cmd) = parse_headless_command(args) {
+                CliAction::Batch(cmd)
+            } else {
+                CliAction::Help
+            }
+        }
+        _ => CliAction::LaunchChamber,
+    }
+}
+
+/// Prints top-level CLI help text.
+pub fn print_help() {
+    let version = env!("CARGO_PKG_VERSION");
+    println!("Hadron {version}");
+    println!("A desktop chamber for orchestrating a swarm of AI coding agents across isolated git worktrees\n");
+    println!("USAGE:");
+    println!("    hadron [OPTIONS] [FIELD_PATH]");
+    println!("    hadron <SUBCOMMAND>\n");
+    println!("OPTIONS:");
+    println!("    -h, --help       Print help information");
+    println!("    -V, --version    Print version information");
+    println!("    --no-daemon      Attach to an already-running gluon daemon without auto-spawning one\n");
+    println!("SUBCOMMANDS:");
+    println!(
+        "    init                    Initialize Git repository and auto-discover Quark roster"
+    );
+    println!("    run <prompt>            Run a single headless swarm turn");
+    println!("    ci [--plan <path>]      Run autonomous headless CI execution");
+    println!("    update [--version <v>]  Self-update to latest or specific release version");
+}
+
+/// Validates that a version string contains only safe semver characters.
+pub fn validate_version_string(v: &str) -> Result<&str, String> {
+    let clean = v.trim_start_matches('v');
+    if clean.is_empty() || clean.len() > 64 {
+        return Err("Version string must not be empty or excessively long".into());
+    }
+    if !clean
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(format!("Invalid characters in version string: '{v}'"));
+    }
+    Ok(v)
+}
+
+/// Runs self-update from the CLI.
+pub fn run_cli_update(target_version: Option<&str>) -> Result<(), String> {
+    if let Some(v) = target_version {
+        validate_version_string(v)?;
+    }
+    term::info(
+        Source::Chamber,
+        &format!(
+            "Hadron Updater: Preparing update (target: {})...",
+            target_version.unwrap_or("latest")
+        ),
+    );
+
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot locate current binary: {e}"))?;
+    let path_str = exe.to_string_lossy();
+    if path_str.contains(".cargo") {
+        let tag = target_version.map(|v| format!("v{}", v.trim_start_matches('v')));
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.args([
+            "install",
+            "--locked",
+            "--git",
+            "https://github.com/s0lda/hadron.git",
+        ]);
+        if let Some(t) = &tag {
+            cmd.args(["--tag", t]);
+        }
+        cmd.arg("hadron");
+        term::info(Source::Chamber, &format!("Executing cargo: {:?}", cmd));
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to run cargo: {e}"))?;
+        if status.success() {
+            term::info(Source::Chamber, "Hadron updated successfully via Cargo.");
+            Ok(())
+        } else {
+            Err(format!("Cargo install failed with status: {status}"))
+        }
+    } else {
+        let parent = exe
+            .parent()
+            .ok_or_else(|| "Failed to resolve binary directory".to_string())?;
+        let update_dir = hadron_lattice::user_hadron_dir()
+            .map(|p| p.join("update"))
+            .unwrap_or_else(|| std::env::temp_dir().join("hadron-update"));
+        std::fs::create_dir_all(&update_dir)
+            .map_err(|e| format!("Failed to create update directory: {e}"))?;
+
+        let is_windows = cfg!(windows);
+        let script_filename = if is_windows {
+            "install.ps1"
+        } else {
+            "install.sh"
+        };
+        let script_path = update_dir.join(script_filename);
+
+        term::info(Source::Chamber, "Downloading installer script...");
+        let curl_out = std::process::Command::new("curl")
+            .args([
+                "-fsSL",
+                &format!("https://raw.githubusercontent.com/s0lda/hadron/main/{script_filename}"),
+                "-o",
+            ])
+            .arg(&script_path)
+            .output()
+            .map_err(|e| format!("Failed to invoke curl: {e}"))?;
+
+        if !curl_out.status.success() {
+            return Err(format!(
+                "Failed to download installer: {}",
+                String::from_utf8_lossy(&curl_out.stderr)
+            ));
+        }
+
+        let mut cmd = if is_windows {
+            let mut c = std::process::Command::new("powershell.exe");
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+            c.arg(&script_path);
+            if let Some(v) = target_version {
+                c.args(["-Version", v]);
+            }
+            c.args(["-InstallDir", &parent.to_string_lossy(), "-NoShortcut"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.arg(&script_path);
+            if let Some(v) = target_version {
+                c.args(["--version", v]);
+            }
+            c.args(["-b", &parent.to_string_lossy()]);
+            c
+        };
+        cmd.stdin(std::process::Stdio::null());
+        term::info(Source::Chamber, &format!("Executing installer: {:?}", cmd));
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to run installer: {e}"))?;
+        if status.success() {
+            term::info(Source::Chamber, "Hadron updated successfully.");
+            Ok(())
+        } else {
+            Err(format!("Installer failed with status: {status}"))
+        }
+    }
+}
+
+/// Subcommands supported by Hadron in headless runner mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadlessCommand {
+    Run { prompt: String },
+    Ci { plan_path: PathBuf },
+}
+
+/// Parses CLI arguments into a `HeadlessCommand` if matching `run` or `ci`.
+pub fn parse_headless_command(args: &[String]) -> Option<HeadlessCommand> {
+    if args.len() < 2 {
+        return None;
+    }
+    match args[1].as_str() {
+        "run" => {
+            if args.len() >= 3 {
+                Some(HeadlessCommand::Run {
+                    prompt: args[2..].join(" "),
+                })
+            } else {
+                None
+            }
+        }
+        "ci" => {
+            let mut plan_path = None;
+            let mut iter = args[2..].iter();
+            while let Some(arg) = iter.next() {
+                if arg == "--plan" {
+                    if let Some(val) = iter.next() {
+                        plan_path = Some(PathBuf::from(val));
+                    }
+                } else if !arg.starts_with("--") {
+                    plan_path = Some(PathBuf::from(arg));
+                }
+            }
+            plan_path.map(|p| HeadlessCommand::Ci { plan_path: p })
+        }
+        _ => None,
+    }
+}
+
+/// Executes a headless batch command, appending a turn event to the field.
+pub fn run_headless_batch(cmd: HeadlessCommand, repo_root: &Path) -> Result<(), String> {
+    let field_path = repo_root.join(".hadron").join("field.jsonl");
+    if let Some(parent) = field_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match cmd {
+        HeadlessCommand::Run { prompt } => {
+            term::info(
+                Source::Chamber,
+                &format!(
+                    "Headless Runner: Submitting prompt to swarm: \"{}\"",
+                    prompt
+                ),
+            );
+            let ev = Event::new(Actor::Human, None, Kind::Message { body: prompt });
+            append_event(&field_path, &ev).map_err(|e| format!("Failed to append event: {e}"))?;
+            term::info(Source::Chamber, "Turn submitted successfully to field.");
+            Ok(())
+        }
+        HeadlessCommand::Ci { plan_path } => {
+            let resolved_plan = if plan_path.is_absolute() {
+                plan_path
+            } else {
+                repo_root.join(plan_path)
+            };
+
+            if !resolved_plan.exists() {
+                return Err(format!("Plan file not found: {}", resolved_plan.display()));
+            }
+
+            term::info(
+                Source::Chamber,
+                &format!("Headless CI: Executing plan at {}", resolved_plan.display()),
+            );
+            let content = std::fs::read_to_string(&resolved_plan)
+                .map_err(|e| format!("Failed to read plan: {e}"))?;
+            let prompt = format!(
+                "Execute CI plan: {}\n\nContent:\n{}",
+                resolved_plan.display(),
+                content
+            );
+            let ev = Event::new(Actor::Human, None, Kind::Message { body: prompt });
+            append_event(&field_path, &ev).map_err(|e| format!("Failed to append event: {e}"))?;
+            term::info(Source::Chamber, "CI plan submitted successfully to field.");
+            Ok(())
+        }
+    }
+}
+
+/// Check whether `program` exists as an executable file on `PATH`.
+pub fn which_binary_exists(program: &str) -> bool {
+    let Some(path_os) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_os) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            for ext in ["exe", "cmd", "bat"] {
+                if dir.join(format!("{program}.{ext}")).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Pure, testable builder for zero-config NUX Quark discovery (SSOT shared by CLI `hadron init`
+/// and GPUI `auto_detect_and_seed_quarks`).
+/// Probes CLI binaries (`claude`, `agy`, `gemini`, `codex`) and standard API-key env vars,
+/// enforcing the SSOT invariant that the first seated Quark is `Flavor::Orchestrator`
+/// when `existing_has_orchestrator` is `false`.
+pub fn discover_default_seats(
+    has_binary: &dyn Fn(&str) -> bool,
+    env_vars: &[(String, String)],
+    existing_has_orchestrator: bool,
+) -> Vec<hadron_lattice::Seat> {
+    let mut seats = Vec::new();
+    let mut has_orch = existing_has_orchestrator;
+    let mut next_flavor = || {
+        if !has_orch {
+            has_orch = true;
+            hadron_lattice::Flavor::Orchestrator
+        } else {
+            hadron_lattice::Flavor::Worker
+        }
+    };
+
+    let cli_candidates = [
+        ("claude", "cli-claude", "claude", "claude-opus-4-8"),
+        ("agy", "cli-agy", "agy", "gemini-3-pro"),
+        ("gemini", "cli-gemini", "gemini", "gemini-2.5-pro"),
+        ("codex", "cli-codex", "codex", "gpt-5"),
+    ];
+
+    for (bin, id, vendor, model) in cli_candidates {
+        if has_binary(bin) {
+            seats.push(hadron_lattice::Seat::cli(
+                hadron_lattice::QuarkId::new(id),
+                vendor,
+                model,
+                next_flavor(),
+            ));
+        }
+    }
+
+    if seats.is_empty() {
+        let map: std::collections::HashMap<&str, &str> = env_vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let env_pick = if map
+            .get("ANTHROPIC_API_KEY")
+            .copied()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            Some((
+                "cli-claude",
+                "claude",
+                "claude-opus-4-8",
+                "ANTHROPIC_API_KEY",
+            ))
+        } else if map
+            .get("OPENAI_API_KEY")
+            .copied()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            Some(("cli-codex", "codex", "gpt-5", "OPENAI_API_KEY"))
+        } else if map
+            .get("GEMINI_API_KEY")
+            .copied()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            Some(("cli-gemini", "gemini", "gemini-2.5-pro", "GEMINI_API_KEY"))
+        } else {
+            None
+        };
+        if let Some((id, vendor, model, env_var)) = env_pick {
+            let mut seat = hadron_lattice::Seat::cli(
+                hadron_lattice::QuarkId::new(id),
+                vendor,
+                model,
+                next_flavor(),
+            );
+            seat.secret_env = vec![env_var.to_string()];
+            seats.push(seat);
+        }
+    }
+
+    seats
+}
+
+/// Initializes a repository for Hadron from the CLI (`hadron init` / `hadron --init`):
+/// 1. Ensures Git repository + `.gitignore` + root commit on `main` via `crate::vcs::init_repository`.
+/// 2. Auto-discovers installed CLI agents & API keys and seeds `.hadron/team.json` with the first
+///    Quark promoted to `Flavor::Orchestrator`.
+pub fn run_cli_init(repo_root: &Path) -> Result<String, String> {
+    let git_msg = crate::vcs::init_repository(repo_root)
+        .map_err(|e| format!("Git initialization failed: {e}"))?;
+    term::info(Source::Chamber, &git_msg);
+
+    let hadron_dir = repo_root.join(".hadron");
+    std::fs::create_dir_all(&hadron_dir)
+        .map_err(|e| format!("Failed to create .hadron directory: {e}"))?;
+    let team_path = hadron_dir.join("team.json");
+    let mut team = if team_path.exists() {
+        hadron_lattice::load_team(&team_path)
+    } else {
+        hadron_lattice::Team::default()
+    };
+
+    let has_orchestrator = team
+        .quarks
+        .iter()
+        .any(|s| s.flavor == hadron_lattice::Flavor::Orchestrator);
+    let env_vars: Vec<(String, String)> = std::env::vars().collect();
+    let discovered = discover_default_seats(&which_binary_exists, &env_vars, has_orchestrator);
+
+    let mut added = 0usize;
+    for seat in discovered {
+        if !team.quarks.iter().any(|s| s.id == seat.id)
+            && !team.roster.iter().any(|o| o.id == seat.id)
+        {
+            team.quarks.push(seat);
+            added += 1;
+        }
+    }
+
+    hadron_lattice::save_team(&team_path, &team)
+        .map_err(|e| format!("Failed to save {}: {e}", team_path.display()))?;
+
+    let summary = format!(
+        "{git_msg} Seated {added} new Quark(s) in {} (total: {}).",
+        team_path.display(),
+        team.quarks.len()
+    );
+    term::info(Source::Chamber, &summary);
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hadron_lattice::io::read_events;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_parse_headless_command_run() {
+        let args = vec![
+            "hadron".into(),
+            "run".into(),
+            "Fix".into(),
+            "the".into(),
+            "bug".into(),
+        ];
+        let cmd = parse_headless_command(&args);
+        assert_eq!(
+            cmd,
+            Some(HeadlessCommand::Run {
+                prompt: "Fix the bug".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_headless_command_ci_flag() {
+        let args = vec![
+            "hadron".into(),
+            "ci".into(),
+            "--plan".into(),
+            ".hadron/docs/plans/task.md".into(),
+        ];
+        let cmd = parse_headless_command(&args);
+        assert_eq!(
+            cmd,
+            Some(HeadlessCommand::Ci {
+                plan_path: PathBuf::from(".hadron/docs/plans/task.md")
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_headless_command_ci_positional() {
+        let args = vec![
+            "hadron".into(),
+            "ci".into(),
+            ".hadron/docs/plans/task.md".into(),
+        ];
+        let cmd = parse_headless_command(&args);
+        assert_eq!(
+            cmd,
+            Some(HeadlessCommand::Ci {
+                plan_path: PathBuf::from(".hadron/docs/plans/task.md")
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_headless_command_none() {
+        let args = vec!["hadron".into(), "--no-daemon".into()];
+        assert_eq!(parse_headless_command(&args), None);
+
+        let args_empty = vec!["hadron".into()];
+        assert_eq!(parse_headless_command(&args_empty), None);
+    }
+
+    #[test]
+    fn test_run_headless_batch_run_appends_event() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path();
+
+        let cmd = HeadlessCommand::Run {
+            prompt: "Refactor router".into(),
+        };
+        let res = run_headless_batch(cmd, repo_root);
+        assert!(res.is_ok());
+
+        let field_path = repo_root.join(".hadron").join("field.jsonl");
+        assert!(field_path.exists());
+
+        let events = read_events(&field_path).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            Kind::Message { body } => assert_eq!(body, "Refactor router"),
+            _ => panic!("Expected Message event"),
+        }
+    }
+
+    #[test]
+    fn test_run_headless_batch_ci_missing_plan() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path();
+
+        let cmd = HeadlessCommand::Ci {
+            plan_path: PathBuf::from("non_existent_plan.md"),
+        };
+        let res = run_headless_batch(cmd, repo_root);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Plan file not found"));
+    }
+
+    #[test]
+    fn test_run_headless_batch_ci_valid_plan() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path();
+        let plan_file = repo_root.join("plan.md");
+        std::fs::write(&plan_file, "# CI Plan\n- [ ] Task 1").unwrap();
+
+        let cmd = HeadlessCommand::Ci {
+            plan_path: PathBuf::from("plan.md"),
+        };
+        let res = run_headless_batch(cmd, repo_root);
+        assert!(res.is_ok());
+
+        let field_path = repo_root.join(".hadron").join("field.jsonl");
+        let events = read_events(&field_path).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            Kind::Message { body } => {
+                assert!(body.contains("Execute CI plan:"));
+                assert!(body.contains("# CI Plan\n- [ ] Task 1"));
+            }
+            _ => panic!("Expected Message event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_cli_actions() {
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "-V".into()]),
+            CliAction::Version
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "--version".into()]),
+            CliAction::Version
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "-h".into()]),
+            CliAction::Help
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "--help".into()]),
+            CliAction::Help
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "update".into()]),
+            CliAction::Update { version: None }
+        );
+        assert_eq!(
+            parse_cli_action(&[
+                "hadron".into(),
+                "update".into(),
+                "--version".into(),
+                "0.32.0".into()
+            ]),
+            CliAction::Update {
+                version: Some("0.32.0".into())
+            }
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "run".into(), "test prompt".into()]),
+            CliAction::Batch(HeadlessCommand::Run {
+                prompt: "test prompt".into()
+            })
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "init".into()]),
+            CliAction::Init
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into(), "--init".into()]),
+            CliAction::Init
+        );
+        assert_eq!(
+            parse_cli_action(&["hadron".into()]),
+            CliAction::LaunchChamber
+        );
+    }
+
+    #[test]
+    fn test_discover_default_seats_promotes_first_to_orchestrator() {
+        let seats = discover_default_seats(&|bin| bin == "claude" || bin == "gemini", &[], false);
+        assert_eq!(seats.len(), 2);
+        assert_eq!(seats[0].id.as_str(), "cli-claude");
+        assert_eq!(seats[0].flavor, hadron_lattice::Flavor::Orchestrator);
+        assert_eq!(seats[1].id.as_str(), "cli-gemini");
+        assert_eq!(seats[1].flavor, hadron_lattice::Flavor::Worker);
+    }
+
+    #[test]
+    fn test_run_cli_init_initializes_git_and_writes_team_json() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path();
+
+        let summary = run_cli_init(repo_root).expect("run_cli_init should succeed");
+        assert!(summary.contains("Initialized Git repository"));
+        assert!(crate::vcs::is_git_repo(repo_root));
+        assert!(crate::vcs::has_commits(repo_root));
+        assert!(repo_root.join(".hadron").join("team.json").exists());
+    }
+
+    #[test]
+    fn test_validate_version_string() {
+        assert!(validate_version_string("0.31.1").is_ok());
+        assert!(validate_version_string("v0.31.1").is_ok());
+        assert!(validate_version_string("1.0.0-alpha.1").is_ok());
+
+        assert!(validate_version_string("").is_err());
+        assert!(validate_version_string("v").is_err());
+        assert!(validate_version_string("0.31.1; rm -rf /").is_err());
+        assert!(validate_version_string("0.31.1 | sh").is_err());
+        assert!(validate_version_string("0.31.1`whoami`").is_err());
+        assert!(validate_version_string("0.31.1$(id)").is_err());
+    }
+}

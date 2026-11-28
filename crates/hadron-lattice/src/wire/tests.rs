@@ -1,0 +1,116 @@
+#[cfg(test)]
+mod tests {
+    use super::super::codec::*;
+    use super::super::protocol::*;
+    use bytes::BytesMut;
+    use tokio_util::codec::{Decoder, Encoder};
+
+    #[test]
+    fn test_jsonrpc_request_response_roundtrip() {
+        let req = JsonRpcRequest::new(
+            "swarm/turn/dispatch",
+            serde_json::json!({
+                "quark": "http-ollama",
+                "prompt": "Verify health"
+            }),
+        );
+        assert_eq!(req.jsonrpc, "2.0");
+        assert!(!req.id.is_empty());
+
+        let json_str = serde_json::to_string(&req).expect("serialize request");
+        let parsed: JsonRpcRequest = serde_json::from_str(&json_str).expect("deserialize request");
+        assert_eq!(parsed.method, "swarm/turn/dispatch");
+        assert_eq!(parsed.id, req.id);
+
+        let res = JsonRpcResponse::success(&req.id, serde_json::json!({"status": "dispatched"}));
+        let res_str = serde_json::to_string(&res).expect("serialize response");
+        let parsed_res: JsonRpcResponse =
+            serde_json::from_str(&res_str).expect("deserialize response");
+        assert_eq!(parsed_res.id, req.id);
+        assert!(parsed_res.error.is_none());
+        assert_eq!(parsed_res.result.unwrap()["status"], "dispatched");
+    }
+
+    #[test]
+    fn test_jsonrpc_codec_framing() {
+        let mut codec = JsonRpcCodec::new();
+        let mut buffer = BytesMut::new();
+
+        let notif = JsonRpcNotification::new(
+            "stream/field/event",
+            serde_json::json!({
+                "seq": 42,
+                "text": "Streaming output"
+            }),
+        );
+        let msg = JsonRpcMessage::Notification(notif);
+
+        codec
+            .encode(msg.clone(), &mut buffer)
+            .expect("encode frame");
+        assert!(buffer.ends_with(b"\n"));
+
+        let decoded = codec
+            .decode(&mut buffer)
+            .expect("decode frame")
+            .expect("must produce frame");
+        match decoded {
+            JsonRpcMessage::Notification(n) => {
+                assert_eq!(n.method, "stream/field/event");
+                assert_eq!(n.params["seq"], 42);
+            }
+            _ => panic!("expected notification frame"),
+        }
+    }
+
+    #[test]
+    fn test_rpc_endpoint_metadata_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let field_dir = tmp.path();
+
+        assert!(read_rpc_metadata(field_dir).is_none());
+
+        let meta = RpcEndpointMetadata {
+            addr: "127.0.0.1:45678".to_string(),
+            pid: 12345,
+            version: "0.33.27".to_string(),
+            platform: "linux".to_string(),
+        };
+
+        write_rpc_metadata(field_dir, &meta).expect("write metadata");
+        let read_meta = read_rpc_metadata(field_dir).expect("read metadata");
+        assert_eq!(read_meta, meta);
+
+        remove_rpc_metadata(field_dir).expect("remove metadata");
+        assert!(read_rpc_metadata(field_dir).is_none());
+    }
+
+    #[test]
+    fn test_read_rpc_metadata_rejects_non_loopback_and_zero_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let field_dir = tmp.path();
+
+        for bad_addr in ["198.51.100.42:45678", "0.0.0.0:45678", "127.0.0.1:0"] {
+            let meta = RpcEndpointMetadata {
+                addr: bad_addr.to_string(),
+                pid: 12345,
+                version: "0.33.53".to_string(),
+                platform: "linux".to_string(),
+            };
+            write_rpc_metadata(field_dir, &meta).expect("write metadata");
+            assert!(
+                read_rpc_metadata(field_dir).is_none(),
+                "must reject unsafe RPC endpoint addr {bad_addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_jsonrpc_response_rejects_unknown_fields() {
+        let with_extra = r#"{"jsonrpc":"2.0","id":"req-1","result":{"ok":true},"extra":123}"#;
+        assert!(
+            serde_json::from_str::<JsonRpcResponse>(with_extra).is_err(),
+            "JsonRpcResponse must deny unknown fields"
+        );
+    }
+}

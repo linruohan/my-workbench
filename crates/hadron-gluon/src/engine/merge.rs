@@ -1,0 +1,1749 @@
+use serde::{Deserialize, Serialize};
+
+use hadron_lattice::term::{self, Source};
+use hadron_lattice::{Actor, Event, Kind, QuarkId, QuarkState};
+
+use crate::field::read_events;
+
+use super::*;
+
+/// Does this text read like a turn that had to debug something?
+///
+/// The three markers are the vocabulary the nucleus lesson
+/// `grepping-a-test-run-throws-away-the-only-diagnostic` already names: a panic line, a
+/// failed test, or a rustc error code. Deliberately a dumb substring check — deciding
+/// whether a lesson was *learned* is a model judgment, not something the engine can
+/// observe, so this only spots the evidence and leaves the judgment to whoever reads it.
+pub(super) fn looks_like_a_debugging_turn(text: &str) -> bool {
+    text.contains("panicked") || text.contains("FAILED") || text.contains("error[E")
+}
+
+/// How far back the nudge looks for that evidence. The field is one long log, so this is
+/// an approximation of "this turn" — generous enough to catch a debugging pass, short
+/// enough that yesterday's red suite does not nag forever.
+const NUDGE_LOOKBACK: usize = 20;
+
+/// Opening sentence of the debugging-pass `/learn` nudge emitted upon landing a
+/// branch whose turn history showed a red test / compiler error / panic. Used to
+/// bound lookback so a single debugging pass never triggers repeat nudges on later
+/// green merges or re-triggers itself on the distillation turn.
+pub(super) const DEBUGGING_PASS_NUDGE_MARKER: &str =
+    "This turn's transcript shows a debugging pass.";
+
+/// The sentence every merge-gate hand-back opens with. Two jobs: it tells the quark what
+/// happened, and it is what `is_gate_handback` matches to bound the retries. A
+/// visible sentence rather than a hidden token on purpose — the quark reads this body as
+/// its task, so a marker it can see is one it can quote back.
+pub(super) const GATE_HANDBACK_MARKER: &str = "The merge gate stopped this branch from landing.";
+
+/// How many repair turns ONE assignment gets before the gate stops handing the branch
+/// back and asks a human instead. Each one costs a full test run plus a model turn, so
+/// this is deliberately small: a branch that cannot heal itself in two passes is not
+/// going to heal itself in five, and the loop is the expensive failure mode here.
+const MAX_GATE_HANDBACKS: usize = 2;
+
+/// Categorization of failure causes encountered at the merge gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiagnosticErrorKind {
+    CompilerError,
+    TestFailure,
+    MergeConflict,
+    UncommittedChanges,
+    Unknown,
+}
+
+/// Outcome of the asynchronous pre-landing gate stages (`sync` + `tests`),
+/// executed off the main dispatch loop so sibling quarks and `@orchestrator`
+/// remain responsive while a quark's test suite runs.
+pub(super) enum PreGateOutcome {
+    NoCommits,
+    Conflicted(String),
+    Emptied,
+    Ready {
+        state: hadron_gatekeeper::BranchState,
+        passed: bool,
+        tail: String,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    },
+}
+
+/// A specific diagnostic fault point extracted from compiler/test/git output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticItem {
+    pub kind: DiagnosticErrorKind,
+    pub location: Option<String>,
+    pub message: String,
+    pub code_snippet: Option<String>,
+}
+
+/// Structured failure diagnostics providing root-cause analysis and remediation steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredDiagnostics {
+    pub primary_kind: DiagnosticErrorKind,
+    pub items: Vec<DiagnosticItem>,
+    pub summary: String,
+    pub suggested_remediation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimized_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesized_invariant: Option<hadron_gatekeeper::SynthesizedInvariant>,
+}
+
+/// Parse unstructured compiler, test, or rebase error logs into structured actionable diagnostics.
+pub fn extract_structured_diagnostics(output: &str) -> StructuredDiagnostics {
+    let mut items = Vec::new();
+    let mut primary_kind = DiagnosticErrorKind::Unknown;
+
+    let lines: Vec<&str> = output.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        // 1. Rustc compiler error
+        if (line.contains("error[E") || line.starts_with("error:"))
+            && !line.contains("could not compile")
+        {
+            primary_kind = DiagnosticErrorKind::CompilerError;
+            let msg = line.trim().to_string();
+            let mut location = None;
+            let mut snippet_lines = Vec::new();
+
+            let mut j = i + 1;
+            while j < lines.len() && j < i + 10 {
+                let next_line = lines[j];
+                if next_line.trim().starts_with("--> ") {
+                    location = Some(
+                        next_line
+                            .trim()
+                            .trim_start_matches("--> ")
+                            .trim()
+                            .to_string(),
+                    );
+                } else if next_line.trim().starts_with('|') || next_line.trim().starts_with(":::") {
+                    snippet_lines.push(next_line.to_string());
+                } else if next_line.starts_with("error[E") || next_line.starts_with("error:") {
+                    break;
+                }
+                j += 1;
+            }
+
+            let code_snippet = if snippet_lines.is_empty() {
+                None
+            } else {
+                Some(snippet_lines.join("\n"))
+            };
+
+            items.push(DiagnosticItem {
+                kind: DiagnosticErrorKind::CompilerError,
+                location,
+                message: msg,
+                code_snippet,
+            });
+            i = j;
+            continue;
+        }
+
+        // 2. Test assertion failure or panic
+        if line.contains("panicked at") {
+            if primary_kind == DiagnosticErrorKind::Unknown {
+                primary_kind = DiagnosticErrorKind::TestFailure;
+            }
+            let msg = line.trim().to_string();
+            let location = if let Some(idx) = line.find("panicked at") {
+                let tail = line[idx + 11..].trim();
+                let loc_cand = tail
+                    .split(['\'', '"', ','])
+                    .last()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(':');
+                if loc_cand.contains(".rs:") {
+                    Some(loc_cand.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut snippet_lines = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() && j < i + 6 {
+                let next_line = lines[j];
+                if next_line.starts_with("test ")
+                    || next_line.starts_with("failures:")
+                    || next_line.starts_with("----")
+                {
+                    break;
+                }
+                snippet_lines.push(next_line.to_string());
+                j += 1;
+            }
+
+            let full_msg = if snippet_lines.is_empty() {
+                msg
+            } else {
+                format!("{}\n{}", msg, snippet_lines.join("\n"))
+            };
+
+            items.push(DiagnosticItem {
+                kind: DiagnosticErrorKind::TestFailure,
+                location,
+                message: full_msg,
+                code_snippet: None,
+            });
+            i = j;
+            continue;
+        }
+
+        // 3. Merge conflict
+        if (line.contains("CONFLICT") && line.contains("Merge conflict in"))
+            || line.contains("AST block conflict detected")
+        {
+            primary_kind = DiagnosticErrorKind::MergeConflict;
+            let file = line
+                .split("Merge conflict in")
+                .nth(1)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            items.push(DiagnosticItem {
+                kind: DiagnosticErrorKind::MergeConflict,
+                location: file,
+                message: line.trim().to_string(),
+                code_snippet: None,
+            });
+        }
+
+        i += 1;
+    }
+
+    let mut minimized_summary = None;
+    if output.contains("FAILED") || output.contains("---- ") {
+        let (minimized_failures, minimized_md) =
+            hadron_gatekeeper::TestFailureMinimizer::minimize(output);
+        if !minimized_failures.is_empty() {
+            if primary_kind == DiagnosticErrorKind::Unknown {
+                primary_kind = DiagnosticErrorKind::TestFailure;
+            }
+            minimized_summary = Some(minimized_md.trim().to_string());
+            for f in minimized_failures {
+                let f_clean_loc = f.panic_location.trim().trim_end_matches(':');
+                if !items.iter().any(|it| {
+                    it.location.as_deref().unwrap_or("").trim_end_matches(':') == f_clean_loc
+                        || it.message.contains(&f.test_name)
+                }) {
+                    items.push(DiagnosticItem {
+                        kind: DiagnosticErrorKind::TestFailure,
+                        location: Some(f_clean_loc.to_string()),
+                        message: format!("{} (assertion: {})", f.test_name, f.assertion_diff),
+                        code_snippet: None,
+                    });
+                }
+            }
+        } else if output.contains("FAILED") && primary_kind == DiagnosticErrorKind::Unknown {
+            primary_kind = DiagnosticErrorKind::TestFailure;
+        }
+    }
+
+    let invariant_category = match primary_kind {
+        DiagnosticErrorKind::CompilerError => {
+            if output.contains("cannot borrow")
+                || output.contains("already borrowed")
+                || output.contains("E0502")
+                || output.contains("E0499")
+                || output.contains("E0505")
+            {
+                Some(hadron_gatekeeper::InvariantCategory::BorrowChecker)
+            } else {
+                Some(hadron_gatekeeper::InvariantCategory::CompileError)
+            }
+        }
+        DiagnosticErrorKind::TestFailure => Some(hadron_gatekeeper::InvariantCategory::TestFailure),
+        DiagnosticErrorKind::MergeConflict => {
+            Some(hadron_gatekeeper::InvariantCategory::MergeConflict)
+        }
+        DiagnosticErrorKind::UncommittedChanges | DiagnosticErrorKind::Unknown => None,
+    };
+    let synthesized_invariant =
+        invariant_category.map(|cat| hadron_gatekeeper::synthesize_invariant(output, cat));
+
+    let summary = match primary_kind {
+        DiagnosticErrorKind::CompilerError => {
+            format!("Compilation failed with {} error(s)", items.len())
+        }
+        DiagnosticErrorKind::TestFailure => {
+            format!("Test suite failed with {} failure(s)", items.len())
+        }
+        DiagnosticErrorKind::MergeConflict => {
+            format!("Rebase merge conflict across {} file(s)", items.len())
+        }
+        DiagnosticErrorKind::UncommittedChanges => {
+            "Uncommitted changes detected in worktree".to_string()
+        }
+        DiagnosticErrorKind::Unknown => "Merge gate verification stopped".to_string(),
+    };
+
+    let suggested_remediation = match primary_kind {
+        DiagnosticErrorKind::CompilerError => {
+            "Fix compilation errors in the files listed above. Touch the crate entrypoint (src/lib.rs) and verify with `cargo check` before finishing turn.".to_string()
+        }
+        DiagnosticErrorKind::TestFailure => {
+            "Fix failing tests and assertions listed above. Run `cargo test` locally in your worktree to verify pass before finishing turn.".to_string()
+        }
+        DiagnosticErrorKind::MergeConflict => {
+            "Resolve git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) in conflicting files and commit the resolution.".to_string()
+        }
+        DiagnosticErrorKind::UncommittedChanges => {
+            "Commit or clean up untracked/unstaged changes in your worktree before resubmitting.".to_string()
+        }
+        DiagnosticErrorKind::Unknown => {
+            "Inspect the error log output above, apply necessary fixes in your worktree, and verify tests pass.".to_string()
+        }
+    };
+
+    StructuredDiagnostics {
+        primary_kind,
+        items,
+        summary,
+        suggested_remediation,
+        minimized_summary,
+        synthesized_invariant,
+    }
+}
+
+/// Format structured diagnostics into a concise, actionable markdown section.
+pub fn format_remediation_instructions(diag: &StructuredDiagnostics) -> String {
+    let mut out = format!("### Remediation Guidance: {}\n\n", diag.summary);
+    if !diag.items.is_empty() {
+        out.push_str("**Specific Fault Points:**\n");
+        for (idx, item) in diag.items.iter().enumerate() {
+            let loc_str = item.location.as_deref().unwrap_or("unknown location");
+            out.push_str(&format!(
+                "{}. [{}] `{}`\n",
+                idx + 1,
+                loc_str,
+                item.message.lines().next().unwrap_or("")
+            ));
+        }
+        out.push('\n');
+    }
+    if let Some(ref min_md) = diag.minimized_summary {
+        out.push_str(min_md);
+        out.push_str("\n\n");
+    }
+    if let Some(ref inv) = diag.synthesized_invariant {
+        out.push_str(&format!(
+            "**Invariant Prevention Hint (`{}`):** {}\n",
+            inv.slug, inv.description
+        ));
+        if let Some(how_line) = inv
+            .rule_markdown
+            .lines()
+            .find(|l| l.starts_with("**How to apply:**"))
+        {
+            out.push_str(how_line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "**Action Required:**\n{}\n",
+        diag.suggested_remediation
+    ));
+    out
+}
+
+/// Returns `true` for high-signal cargo test/compiler lines that should bypass
+/// per-line stream throttling so test outcomes and failures are never dropped.
+pub(super) fn is_priority_gate_line(line: &str) -> bool {
+    if hadron_lattice::wire::parse_cargo_test_line(line).is_some() {
+        return true;
+    }
+    let trimmed = line.trim();
+    trimmed.starts_with("error[")
+        || trimmed.starts_with("error:")
+        || trimmed.contains("panicked at")
+        || trimmed == "failures:"
+}
+
+/// Minimum spacing between non-priority verbose compiler/log lines forwarded from
+/// the merge-gate test runner, preventing broadcast channel lag (`PUSH_CHANNEL_CAPACITY = 256`).
+const GATE_STREAM_THROTTLE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Build a throttled [`crate::merge::GateLineSink`] bound to `dispatcher` for `quark`.
+///
+/// Priority test/error lines pass immediately; verbose non-priority lines are rate-limited
+/// to at most once per [`GATE_STREAM_THROTTLE`]. Parses running pass/fail totals via
+/// [`hadron_lattice::wire::parse_cargo_test_line`] (SSOT Rule 3) and broadcasts
+/// [`hadron_lattice::wire::RpcPushEvent::GateOutput`].
+pub(super) fn build_gate_line_sink(
+    quark: String,
+    dispatcher: Arc<crate::rpc_server::RpcDispatcher>,
+) -> crate::merge::GateLineSink {
+    use hadron_lattice::wire::{
+        parse_cargo_test_line, GateStream, GateTestEvent, GateTestOutcome, RpcPushEvent,
+    };
+
+    let last_verbose_emit = std::sync::Mutex::new(Option::<std::time::Instant>::None);
+    let running_counts = std::sync::Mutex::new((0usize, 0usize));
+
+    Arc::new(move |stream: &str, line: &str| {
+        let parsed = parse_cargo_test_line(line);
+        let (passed, failed) = {
+            let mut counts = running_counts.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref ev) = parsed {
+                match ev {
+                    GateTestEvent::Case { outcome, .. } => match outcome {
+                        GateTestOutcome::Ok => counts.0 += 1,
+                        GateTestOutcome::Failed => counts.1 += 1,
+                        GateTestOutcome::Ignored => {}
+                    },
+                    GateTestEvent::Summary {
+                        passed: p,
+                        failed: f,
+                        ..
+                    } => {
+                        counts.0 = counts.0.max(*p);
+                        counts.1 = counts.1.max(*f);
+                    }
+                }
+            }
+            *counts
+        };
+
+        let priority = parsed.is_some() || is_priority_gate_line(line);
+        if !priority {
+            let mut guard = last_verbose_emit.lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            if let Some(prev) = *guard {
+                if now.duration_since(prev) < GATE_STREAM_THROTTLE {
+                    return;
+                }
+            }
+            *guard = Some(now);
+        }
+
+        let gate_stream = if stream.eq_ignore_ascii_case("stderr") {
+            GateStream::Stderr
+        } else {
+            GateStream::Stdout
+        };
+
+        dispatcher.publish(RpcPushEvent::GateOutput {
+            quark: quark.clone(),
+            stream: gate_stream,
+            line: line.to_string(),
+            passed: Some(passed),
+            failed: Some(failed),
+        });
+    })
+}
+
+/// Format non-blocking Rule 1 Liveness & Evidence Claim advisories for a merge-gate run.
+/// Returns `None` when neither auditor found anything actionable.
+pub(super) fn format_gate_advisory(
+    quark: &str,
+    liveness: Option<&hadron_gatekeeper::LivenessReport>,
+    claim: Option<&hadron_gatekeeper::ClaimAuditReport>,
+) -> Option<String> {
+    let mut notes = Vec::new();
+    if let Some(liv) = liveness {
+        if !liv.unwired.is_empty() {
+            const MAX_LISTED: usize = 8;
+            let items: Vec<String> = liv
+                .unwired
+                .iter()
+                .take(MAX_LISTED)
+                .map(|u| {
+                    let suffix = if u.reexport_only {
+                        " (re-exported only)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "`{}` ({} at `{}:{}`){}",
+                        u.symbol, u.kind, u.file_path, u.line_number, suffix
+                    )
+                })
+                .collect();
+            let extra = if liv.unwired.len() > MAX_LISTED {
+                format!(" (+{} more)", liv.unwired.len() - MAX_LISTED)
+            } else {
+                String::new()
+            };
+            notes.push(format!(
+                "- **Rule 1 Liveness Advisory**: {}/{} new `pub` symbol(s) have no detected production caller: {}{extra}.",
+                liv.unwired.len(),
+                liv.checked_symbols,
+                items.join(", ")
+            ));
+        }
+    }
+    if let Some(clm) = claim {
+        if clm.verdict == hadron_gatekeeper::ClaimVerdict::Contradicted {
+            notes.push(format!(
+                "- **Evidence Claim Advisory**: {} (non-blocking).",
+                clm.detail
+            ));
+        }
+    }
+    if notes.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Merge-gate advisory for `@{quark}`:\n{}",
+            notes.join("\n")
+        ))
+    }
+}
+
+impl super::Engine {
+    /// Whether `e` is a merge-gate hand-back already issued to `target` for `assignment`.
+    pub(super) fn is_gate_handback(e: &Event, target: &QuarkId, assignment: ulid::Ulid) -> bool {
+        e.from == Actor::Gluon
+            && e.to.as_ref() == Some(target)
+            && e.answers == Some(assignment)
+            && matches!(&e.kind, Kind::Message { body } if body.contains(GATE_HANDBACK_MARKER))
+    }
+
+    /// Stop the merge, but let the quark keep working on it.
+    ///
+    /// The gate refuses for two very different kinds of reason, and they need two very
+    /// different routes:
+    ///
+    /// - Something wrong INSIDE the quark's own worktree — a rebase that conflicts, a
+    ///   block conflict, red tests, uncommitted work. The quark is the only party that
+    ///   can fix it, it is sitting in the tree that needs fixing, and asking a human is
+    ///   just latency. That is this function.
+    /// - Something wrong in the TARGET checkout — `git merge --ff-only` refusing because
+    ///   the human's tree has uncommitted changes to a file the branch rewrites. The
+    ///   quark cannot fix that, and must not try: it works in the human's own checkout
+    ///   (see the `live-swarm-shares-the-checkout` hazard), so a quark told "fix the
+    ///   merge" would `stash`/`add` work the human never committed. Those stay on
+    ///   [`reroute_blocked_with_severity`], addressed to the human/orchestrator.
+    ///
+    /// The shape here is the merge refusal's, not a new mechanism: the finished turn
+    /// still ends on a terminal `Blocked` — appended FIRST, so nothing dangles and so
+    /// `next_pending` reads the hand-back below as unanswered rather than as already
+    /// completed — and the hand-back is then an ordinary addressed `Message`, which the
+    /// existing dispatch loop picks up with no new wiring.
+    ///
+    /// It is stamped `answers = assignment`, which is what keeps the quark on its OWN
+    /// branch (see [`Engine::continued_assignment`]). Without that the re-excited quark
+    /// resolves a fresh assignment ULID, `worktree::ensure` cuts a new branch off `base`,
+    /// and the failed branch is left behind for `run.rs`'s superseded-branch check to
+    /// re-gate and re-fail on every pass — the quark frozen forever, which is exactly
+    /// the bug this exists to fix.
+    ///
+    /// Bounded by [`MAX_GATE_HANDBACKS`] per assignment: a branch that will not heal
+    /// escalates to a human rather than burning a test run and a turn per pass.
+    pub(super) async fn hand_back_to_quark(
+        &self,
+        target: &QuarkId,
+        assignment: ulid::Ulid,
+        why: &str,
+    ) -> anyhow::Result<()> {
+        // Re-read rather than take the caller's snapshot: the gate's test run takes
+        // minutes, and a concurrent sibling may have moved the field since.
+        let events = read_events(&self.field_path)?;
+        let prior = events
+            .iter()
+            .filter(|e| Self::is_gate_handback(e, target, assignment))
+            .count();
+
+        if prior >= MAX_GATE_HANDBACKS {
+            return self
+                .reroute_blocked_with_severity(
+                    target,
+                    &format!(
+                        "{why}\n\n`@{}` has already had {prior} repair turn(s) on this branch and it \
+                         still cannot land, so the gate is escalating rather than spending another. \
+                         The branch is preserved — it needs a human.",
+                        target.as_str()
+                    ),
+                    hadron_lattice::Severity::Error,
+                )
+                .await;
+        }
+
+        self.park_blocked(target).await?;
+        let quoted_why = super::quote_paths(why);
+        let diag = extract_structured_diagnostics(why);
+        let remediation_section = if diag.primary_kind != DiagnosticErrorKind::Unknown {
+            format!("\n\n{}", format_remediation_instructions(&diag))
+        } else {
+            String::new()
+        };
+
+        let id_str = if self.is_orchestrator(target) {
+            crate::router::ORCHESTRATOR_ALIAS
+        } else {
+            target.as_str()
+        };
+
+        self.append(
+            Event::new(
+                Actor::Gluon,
+                Some(target.clone()),
+                Kind::Message {
+                    body: format!(
+                        "@{id} {GATE_HANDBACK_MARKER} Nothing was merged and nothing was lost.\n\n\
+                         {quoted_why}{remediation_section}\n\n\
+                         You are still on your own branch in your own worktree — fix it THERE and \
+                         end your turn as you normally would; the gate retries the merge on its own. \
+                         Do not touch the main checkout, and do not start new work until this lands. \
+                         If you cannot fix it, say so and hand back to a human rather than forcing it.",
+                        id = id_str,
+                    ),
+                },
+            )
+            .with_severity(hadron_lattice::Severity::Error)
+            .with_answers(assignment),
+        )
+        .await
+    }
+
+    /// The merge gate, fired when an assignment completes. Returns `true` if it parked
+    /// the quark (Waiting on a human, or Blocked on red tests), in which case the
+    /// caller must NOT append `Ground`.
+    ///
+    /// **Wraps [`Engine::merge_gate_body`] with a live heartbeat.** Both call sites
+    /// (`run.rs` and `turn.rs::finish_turn`) go through this one function, so the
+    /// heartbeat can't drift between them — see the Flight Recorder plan's Task A1.
+    /// The `_heartbeat` guard's `Drop` clears the gate's `live/gates/` file and aborts
+    /// the republishing task on EVERY exit path of the body below, including the `?`
+    /// early-returns and the error path — there is no explicit cleanup call to forget.
+    pub(super) async fn merge_gate(&self, target: &QuarkId, t: &TurnTree) -> anyhow::Result<bool> {
+        let heartbeat = self.start_gate_heartbeat(target, &t.wt.branch);
+        self.merge_gate_body(target, t, None, &heartbeat).await
+    }
+
+    /// Execute the slow pre-landing gate stages (`sync` + `runner.tests`) inside a
+    /// concurrent `gates` task so `run_until_quiesce` can continue polling the field
+    /// and dispatching sibling quarks while `cargo test` runs on `t.wt`.
+    ///
+    /// Acquires `gate_semaphore` before `sync` + `tests` and holds the permit in
+    /// [`PreGateOutcome::Ready`] until `merge_gate_body` finishes landing onto `base`.
+    /// That guarantees 50+ concurrent finishing branches queue cleanly without
+    /// stampeding `.cargo-lock`, `GATE_TEST_DEADLINE` only measures active test
+    /// execution (never queue wait), and each branch rebases onto the true latest
+    /// `base` (including earlier siblings that just landed) right before testing.
+    pub(super) async fn run_pre_gate(
+        runner: Arc<dyn crate::merge::MergeRunner>,
+        t: &TurnTree,
+        heartbeat: &GateHeartbeat,
+        shadow_gate: &tokio::sync::Mutex<crate::engine::shadow_gate::ShadowGate>,
+        gate_semaphore: &Arc<tokio::sync::Semaphore>,
+        fast_path_docs_only: bool,
+        rpc_dispatcher: Option<Arc<crate::rpc_server::RpcDispatcher>>,
+    ) -> anyhow::Result<PreGateOutcome> {
+        use hadron_gatekeeper::BranchState;
+        let initial_commits = crate::worktree::commits_ahead(&t.wt, &t.base)?;
+        if initial_commits == 0 {
+            return Ok(PreGateOutcome::NoCommits);
+        }
+
+        if gate_semaphore.available_permits() == 0 {
+            heartbeat.set_stage("queued for merge gate");
+        }
+        let permit = gate_semaphore.clone().acquire_owned().await.ok();
+
+        let state = BranchState {
+            commits: crate::worktree::commits_ahead(&t.wt, &t.base)?,
+            dirty: crate::worktree::is_dirty(&t.wt.path)?,
+            is_default_branch: t.wt.branch == t.base,
+        };
+        if state.commits == 0 {
+            return Ok(PreGateOutcome::NoCommits);
+        }
+
+        let state = if state.dirty {
+            state
+        } else {
+            heartbeat.set_stage(&format!("syncing branch onto {}", t.base));
+            match runner.sync(&t.wt, &t.base) {
+                crate::merge::Synced::Conflicted(err) => {
+                    return Ok(PreGateOutcome::Conflicted(err));
+                }
+                crate::merge::Synced::AlreadyCurrent => state,
+                crate::merge::Synced::Rebased => BranchState {
+                    commits: crate::worktree::commits_ahead(&t.wt, &t.base)?,
+                    ..state
+                },
+            }
+        };
+        if state.commits == 0 {
+            return Ok(PreGateOutcome::Emptied);
+        }
+
+        let head_sha = crate::worktree::head(&t.wt.path).unwrap_or_default();
+        let cached_result = {
+            let gate = shadow_gate.lock().await;
+            gate.get_speculative_result(&t.wt.branch, &head_sha)
+                .cloned()
+        };
+
+        let (passed, tail) = if let Some(spec) = cached_result {
+            heartbeat.set_stage("using cached speculative test result");
+            (spec.passed, spec.tail)
+        } else if fast_path_docs_only
+            && matches!(
+                crate::worktree::changed_files(&t.wt.path, &t.base),
+                Ok(ref files) if crate::engine::shadow_gate::ShadowGate::is_docs_or_asset_only_paths(files)
+            )
+        {
+            heartbeat.set_stage("fast-path: docs/asset verification");
+            (
+                true,
+                "fast-path: documentation/asset-only changes verified without full test suite"
+                    .to_string(),
+            )
+        } else {
+            heartbeat.set_stage("running test suite");
+            let sink = rpc_dispatcher.as_ref().map(|disp| {
+                build_gate_line_sink(t.wt.quark.as_str().to_string(), Arc::clone(disp))
+            });
+            let (passed, tail) = runner.tests_streaming(&t.wt, sink).await?;
+            if let Some(ref disp) = rpc_dispatcher {
+                disp.publish(hadron_lattice::wire::RpcPushEvent::GateUpdated {
+                    quark: t.wt.quark.as_str().to_string(),
+                    passed: Some(passed),
+                });
+            }
+            let mut gate = shadow_gate.lock().await;
+            gate.record_speculative_result(&t.wt.branch, &head_sha, passed, &tail);
+            (passed, tail)
+        };
+
+        Ok(PreGateOutcome::Ready {
+            state,
+            passed,
+            tail,
+            permit,
+        })
+    }
+
+    /// The decision + effects the gate actually performs. See [`Engine::merge_gate`]
+    /// for the heartbeat wrapper every caller goes through instead of this directly.
+    ///
+    /// The DECISION is pure and lives in `hadron-gatekeeper` (that crate is
+    /// side-effect-free by contract). Only the EFFECTS — `cargo test`, `git merge` —
+    /// live here, behind the [`MergeRunner`](crate::merge::MergeRunner) seam.
+    ///
+    /// Human approval reuses the EXISTING permission channel: a `PermissionReq` from
+    /// the quark, surfaced by `gatekeeper::pending_permission`, rendered by the chamber
+    /// the human already has, answered by the same `PermissionGrant`. No second
+    /// approval mechanism.
+    pub(super) async fn merge_gate_body(
+        &self,
+        target: &QuarkId,
+        t: &TurnTree,
+        pre_gate: Option<PreGateOutcome>,
+        heartbeat: &GateHeartbeat,
+    ) -> anyhow::Result<bool> {
+        use hadron_gatekeeper::{BlockReason, MergeVerdict};
+        let Some(runner) = &self.merge else {
+            return Ok(false);
+        };
+        let Some(root) = &self.repo_root else {
+            return Ok(false);
+        };
+
+        let outcome = match pre_gate {
+            Some(pre) => pre,
+            None => {
+                Self::run_pre_gate(
+                    Arc::clone(runner),
+                    t,
+                    heartbeat,
+                    &self.shadow_gate,
+                    &self.gate_semaphore,
+                    self.fast_path_docs_only,
+                    self.rpc_dispatcher.clone(),
+                )
+                .await?
+            }
+        };
+
+        let (state, tests_passed, tail, _gate_permit) = match outcome {
+            // Nothing to land (a pure-conversation turn): quiesce normally, silently.
+            PreGateOutcome::NoCommits => return Ok(false),
+            PreGateOutcome::Conflicted(err) => {
+                // A conflict a machine must not resolve *unattended* — but the quark
+                // whose branch it is may absolutely resolve it, in its own tree, with
+                // its own judgment. Hand it back rather than freezing it.
+                self.hand_back_to_quark(
+                    target,
+                    t.assignment,
+                    &crate::merge::Landed::Conflicted(err).describe(&t.wt.branch, &t.base),
+                )
+                .await?;
+                return Ok(true);
+            }
+            // The rebase emptied the branch: every commit was already on `base` by another
+            // route (a cherry-pick, a sibling branch). There is nothing to test and nothing
+            // to land — falling through here is what made an already-landed branch fail the
+            // gate on every single retry. It is NOT silent, unlike the pure-conversation
+            // early-out above: this branch has been visibly failing, and going quiet is
+            // indistinguishable from the gate breaking. `Actor::Gluon` + `to: None` + no
+            // line starting with `@` prints without waking a seat.
+            PreGateOutcome::Emptied => {
+                self.append(
+                    Event::new(
+                        Actor::Gluon,
+                        None,
+                        Kind::Message {
+                            body: crate::merge::Landed::AlreadyLanded
+                                .describe(&t.wt.branch, &t.base),
+                        },
+                    )
+                    .with_severity(hadron_lattice::Severity::Info),
+                )
+                .await?;
+                let _ = crate::worktree::detach_at_base(&t.wt, &t.base);
+                if self.git_auto_prune_worktrees {
+                    let _ = crate::worktree::prune_merged_branches(root, &t.base);
+                }
+                return Ok(false);
+            }
+            PreGateOutcome::Ready {
+                state,
+                passed,
+                tail,
+                permit,
+            } => (state, passed, tail, permit),
+        };
+
+        let hadron_dir = hadron_lattice::hadron_dir_of(&self.field_path);
+        if crate::bakeoff::BakeOffManager::active_path(&hadron_dir).is_file() {
+            let duration_ms = chrono::Utc::now()
+                .signed_duration_since(heartbeat.started)
+                .num_milliseconds()
+                .max(0) as u64;
+            let diff_range = format!("{}...{}", t.base, t.wt.branch);
+            let (lines_added, lines_removed) =
+                crate::snapshot::git_ok(&t.wt.path, &["diff", "--numstat", &diff_range])
+                    .ok()
+                    .flatten()
+                    .map(|numstat| {
+                        let mut added = 0usize;
+                        let mut removed = 0usize;
+                        for line in numstat.lines() {
+                            let mut cols = line.split_whitespace();
+                            if let (Some(a), Some(r)) = (cols.next(), cols.next()) {
+                                added += a.parse::<usize>().unwrap_or(0);
+                                removed += r.parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                        (added, removed)
+                    })
+                    .unwrap_or((0, 0));
+            let tests_added = crate::snapshot::git_ok(&t.wt.path, &["diff", "-U0", &diff_range])
+                .ok()
+                .flatten()
+                .map(|patch| {
+                    patch
+                        .lines()
+                        .filter(|l| {
+                            l.starts_with('+')
+                                && !l.starts_with("+++")
+                                && (l.contains("#[test]") || l.contains("#[tokio::test]"))
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+
+            match crate::bakeoff::BakeOffManager::record_turn_if_active(
+                &hadron_dir,
+                target.as_str(),
+                &t.wt.branch,
+                lines_added,
+                lines_removed,
+                tests_added,
+                duration_ms,
+                tests_passed,
+            ) {
+                Ok(Some(summary_md)) => {
+                    self.append(
+                        Event::new(Actor::Gluon, None, Kind::Message { body: summary_md })
+                            .with_severity(hadron_lattice::Severity::Info),
+                    )
+                    .await?;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    term::warn(
+                        Source::Gluon,
+                        &format!("recording active bakeoff outcome failed (non-fatal): {e:#}"),
+                    );
+                }
+            }
+        }
+
+        let events = read_events(&self.field_path)?;
+
+        // Non-blocking Rule 1 Liveness & Evidence Claim advisories.
+        let advisory_diff_range = format!("{}...{}", t.base, t.wt.branch);
+        let liveness_report = crate::snapshot::git(&t.wt.path, &["diff", &advisory_diff_range])
+            .ok()
+            .filter(|d| !d.is_empty())
+            .map(|diff_str| hadron_gatekeeper::audit_diff_liveness(&t.wt.path, &diff_str));
+        let claim_report = events
+            .iter()
+            .rev()
+            .find_map(|e| {
+                if e.from == Actor::Quark(target.clone())
+                    && (e.answers == Some(t.assignment) || e.answers.is_none())
+                {
+                    if let Kind::Message { body } = &e.kind {
+                        return Some(body.as_str());
+                    }
+                }
+                None
+            })
+            .map(|body| {
+                let (prog, args) = crate::merge::detect_affected_runner(&t.wt.path, &t.base);
+                let gate_cmd = if args.is_empty() {
+                    prog.to_string()
+                } else {
+                    format!("{prog} {}", args.join(" "))
+                };
+                hadron_gatekeeper::audit_evidence_claims(body, tests_passed, &gate_cmd)
+            });
+        if let Some(advisory) = format_gate_advisory(
+            target.as_str(),
+            liveness_report.as_ref(),
+            claim_report.as_ref(),
+        ) {
+            self.append(
+                Event::new(Actor::Gluon, None, Kind::Message { body: advisory })
+                    .with_severity(hadron_lattice::Severity::Warning),
+            )
+            .await?;
+        }
+
+        let op = hadron_gatekeeper::merge_op(&t.wt.branch, &t.base);
+
+        // Approval: an explicit human grant for THIS branch, or the mode ladder saying
+        // the human already delegated it. A merge is BashExec-class, so `decide` gives
+        // Bypass ⇒ auto-merge for free, and Ask/Write/Auto ⇒ ask. (Auto never remembers
+        // a merge: the op string contains the assignment ULID, so it is never the same
+        // op twice — which is the right answer. You should not blanket-trust merges.)
+        let mode = hadron_gatekeeper::effective_mode(
+            &events,
+            target,
+            self.no_human,
+            self.is_orchestrator(target),
+        );
+        let global = hadron_gatekeeper::global_mode(&events);
+        let rules = hadron_gatekeeper::allow_rules(&events);
+        // Per-seat `commands` allow/deny is deliberately NOT folded here (review I1).
+        // The merge-gate `op` is a synthetic merge sentence carrying the assignment
+        // ULID (see the comment above), never a shell command — so a command-shaped
+        // `not_allowed` is dead against a merge, and a broad command `allowed`
+        // (e.g. `*`) must not silently auto-land one. Command authority governs
+        // BashExec, not merges; the merge stays on the base ladder + field grants.
+        let deny = hadron_gatekeeper::DenyRules::new();
+        // Under No-Human-Mode a non-delegated merge falls to `MergeVerdict::Block
+        // (NotApproved)` below, which parks the SAME PermissionReq/Waiting the
+        // permission-ask gate does — so a merge that escalates to AskOrchestrator
+        // is picked up by the very same auto-scheduler, with no separate wiring.
+        let delegated = matches!(
+            hadron_gatekeeper::decide(
+                mode,
+                global,
+                self.no_human,
+                hadron_gatekeeper::Risk::BashExec,
+                &op,
+                target,
+                &rules,
+                &deny
+            ),
+            hadron_gatekeeper::Decision::AutoApprove
+        );
+        let approved = delegated || hadron_gatekeeper::merge_approved(&events, target, &op);
+
+        match hadron_gatekeeper::merge_decision(tests_passed, approved, &state) {
+            MergeVerdict::Merge => {
+                if delegated {
+                    // Bypass: record req + grant for audit, exactly as the existing
+                    // permission path does, then land without asking.
+                    self.append(Event::new(
+                        Actor::Quark(target.clone()),
+                        None,
+                        Kind::PermissionReq {
+                            risk: hadron_gatekeeper::Risk::BashExec,
+                            description: op.clone(),
+                        },
+                    ))
+                    .await?;
+                    self.append(Event::new(
+                        Actor::Gluon,
+                        Some(target.clone()),
+                        Kind::PermissionGrant {
+                            approved: true,
+                            remember: false,
+                        },
+                    ))
+                    .await?;
+                }
+                // A `land` FAILURE is a git error, not a rebase conflict (that comes
+                // back as `Landed::Conflicted`, an `Ok`). The realistic cause is the
+                // target checkout being unmergeable — e.g. an uncommitted local change
+                // to a file this branch rewrites, so `git merge --ff-only` refuses. It
+                // MUST NOT propagate: the audit `PermissionReq`/`PermissionGrant` above
+                // are already in the field, and an `Err` here returns out of
+                // `run_until_quiesce` with no terminal status for the quark — so the
+                // daemon's re-invoke loop re-reads that dangling `PermissionGrant{→quark}`
+                // as an unanswered turn-request and re-dispatches the quark forever (a
+                // live hot loop: many `Excited`, never a `Ground`). Reroute it to
+                // `Blocked` instead — a turn-completion, which answers the grant and
+                // closes the loop — exactly as every other merge refusal already does.
+                heartbeat.set_stage("checking AST conflicts");
+                let conflicts = forge_block_conflicts(&root, &t.wt.path, root);
+                if !conflicts.is_empty() {
+                    let details = conflicts
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "- `{}` block `{}` [hash: {}]",
+                                c.file, c.block_name, c.base_hash
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.hand_back_to_quark(
+                        target,
+                        t.assignment,
+                        &format!(
+                            "AST block conflict detected landing `{}` onto `{}`:\n{}\n\nResolve block conflicts before merging.",
+                            t.wt.branch, t.base, details
+                        ),
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+
+                heartbeat.set_stage(&format!("landing branch onto {}", t.base));
+                let strategy = hadron_lattice::team_for_field(&self.field_path)
+                    .map(|p| hadron_lattice::load_team(&p).merge_strategy())
+                    .unwrap_or_default();
+                let landed = match runner.land_with_strategy(root, &t.wt, &t.base, strategy) {
+                    Ok(landed) => landed,
+                    Err(e) => {
+                        // **Deliberately NOT a hand-back.** This failure is in the TARGET
+                        // checkout, not the quark's worktree — the realistic cause is the
+                        // human's own tree carrying an uncommitted change to a file this
+                        // branch rewrites. The quark cannot fix that from its worktree, and
+                        // must not be invited to try: quarks run git in the human's actual
+                        // checkout, so one told "fix the merge" would `stash` or `add` work
+                        // the human never committed. A human resolves this one.
+                        self.reroute_blocked_with_severity(
+                            target,
+                            &format!(
+                                "`{}` could not be merged → `{}`: {e:#}. This is in the TARGET checkout, not `@{}`'s worktree, so the quark is not being asked to fix it — commit or stash the conflicting local changes there and the branch lands on this quark's next turn. The branch is preserved at `{}`.",
+                                t.wt.branch,
+                                t.base,
+                                target.as_str(),
+                                t.wt.path.display()
+                            ),
+                            hadron_lattice::Severity::Error,
+                        )
+                        .await?;
+                        return Ok(true);
+                    }
+                };
+
+                if matches!(landed, crate::merge::Landed::Conflicted(_)) {
+                    let desc = landed.describe(&t.wt.branch, &t.base);
+                    self.hand_back_to_quark(target, t.assignment, &desc).await?;
+                    return Ok(true);
+                }
+
+                let body = landed.describe(&t.wt.branch, &t.base);
+                self.append(
+                    Event::new(Actor::Gluon, None, Kind::Message { body })
+                        .with_severity(hadron_lattice::Severity::Info),
+                )
+                .await?;
+
+                // Release the gate semaphore as soon as `base` has been updated so the
+                // next queued branch can immediately start `sync` + `tests` against the
+                // newly-landed `base`.
+                drop(_gate_permit);
+
+                // A turn that visibly debugged something is the turn most likely to have
+                // learned something, and the moment it lands is the last moment anyone is
+                // still holding the context.
+                //
+                // Look back at most `NUDGE_LOOKBACK` events, stopping at the most recent
+                // `DEBUGGING_PASS_NUDGE_MARKER` so an earlier debugging pass that was
+                // already nudged cannot re-trigger on subsequent green merges, and never
+                // fire if this assignment itself was driven by a debugging-pass nudge.
+                let is_nudge_turn = events.iter().any(|e| {
+                    (e.id == t.assignment || e.answers == Some(t.assignment))
+                        && matches!(
+                            &e.kind,
+                            Kind::Message { body } | Kind::Assign { task: body, .. }
+                                if body.contains(DEBUGGING_PASS_NUDGE_MARKER)
+                        )
+                });
+                let saw_debugging_pass = !is_nudge_turn
+                    && (looks_like_a_debugging_turn(&tail)
+                        || events
+                            .iter()
+                            .rev()
+                            .take(NUDGE_LOOKBACK)
+                            .take_while(|e| {
+                                !matches!(
+                                    &e.kind,
+                                    Kind::Message { body } if body.contains(DEBUGGING_PASS_NUDGE_MARKER)
+                                )
+                            })
+                            .any(|e| {
+                                matches!(&e.kind, Kind::Message { body } if looks_like_a_debugging_turn(body))
+                            }));
+                if saw_debugging_pass {
+                    if let Ok(diff_str) = crate::snapshot::git(
+                        &t.wt.path,
+                        &["diff", &format!("{}...{}", t.base, t.wt.branch)],
+                    ) {
+                        if !diff_str.is_empty() {
+                            if let Some((lesson, path)) =
+                                hadron_gatekeeper::distill_failure_recovery_lesson(
+                                    root, &tail, &diff_str,
+                                )
+                            {
+                                term::info(
+                                    Source::Gluon,
+                                    &format!(
+                                        "Distilled failure recovery lesson `{}` to `{}`",
+                                        lesson.slug,
+                                        path.display()
+                                    ),
+                                );
+                                let existing =
+                                    crate::engine::nucleus::read_nucleus_lesson(root, &lesson.slug)
+                                        .await;
+                                if existing.is_err() {
+                                    let _ = crate::engine::nucleus::write_nucleus_lesson(
+                                        root,
+                                        &lesson.slug,
+                                        &lesson.fact_markdown,
+                                        &lesson.description,
+                                        "Apply fix pattern when compiler error pattern matches",
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+
+                    // When an orchestrator is seated and operating in Auto or Bypass mode
+                    // (or No-Human-Mode), an unaddressed `to: None` message is ignored by
+                    // the swarm and the lesson is lost. Route the nudge to `@orchestrator`
+                    // so it evaluates and distills any non-obvious lesson into
+                    // `.hadron/nucleus/`; otherwise emit the passive human `/learn` hint.
+                    let auto_orch = self.orchestrator_id().filter(|orch_id| {
+                        self.is_enabled(orch_id)
+                            && (self.no_human
+                                || matches!(
+                                    hadron_gatekeeper::effective_mode(
+                                        &events,
+                                        orch_id,
+                                        self.no_human,
+                                        true,
+                                    ),
+                                    hadron_gatekeeper::Mode::Auto | hadron_gatekeeper::Mode::Bypass
+                                ))
+                    });
+                    let (nudge_to, nudge_body) = match auto_orch {
+                        Some(orch_id) => (
+                            Some(orch_id),
+                            format!(
+                                "@{} {DEBUGGING_PASS_NUDGE_MARKER} If `{}`'s debugging pass \
+                                 taught a non-obvious lesson the swarm should not pay for twice, \
+                                 distill it directly into `.hadron/nucleus/notes/<slug>.md` and \
+                                 `.hadron/nucleus/index.md` (or use `/learn <lesson>`) and end \
+                                 your turn with no `@mention`; if nothing non-obvious was \
+                                 learned, reply briefly with no `@mention`.",
+                                crate::router::ORCHESTRATOR_ALIAS,
+                                target.as_str(),
+                            ),
+                        ),
+                        None => (
+                            None,
+                            format!(
+                                "{DEBUGGING_PASS_NUDGE_MARKER} If it taught something the swarm \
+                                 should not pay for twice, `/learn <lesson>` writes it to the \
+                                 nucleus without spending a turn."
+                            ),
+                        ),
+                    };
+
+                    self.append(Event::new(
+                        Actor::Gluon,
+                        nudge_to,
+                        Kind::Message { body: nudge_body },
+                    ))
+                    .await?;
+                }
+
+                // Detach `t.wt` onto `t.base` immediately upon landing so `t.wt.branch`
+                // is no longer held checked out by `t.wt`. That allows `prune_merged_branches`
+                // (or `archive_and_prune_branch` for squash merges) to delete this turn's
+                // `quark/<id>/<ulid>` branch on the very turn it lands, as well as any
+                // previously merged branches across the repo.
+                heartbeat.set_stage("pruning merged branches");
+                if let Err(e) = crate::worktree::detach_at_base(&t.wt, &t.base) {
+                    term::warn(
+                        Source::Gluon,
+                        &format!("detaching worktree after land failed (non-fatal): {e:#}"),
+                    );
+                }
+                if self.git_auto_prune_worktrees {
+                    if strategy == hadron_lattice::MergeStrategy::Squash {
+                        if let Err(e) =
+                            crate::worktree::archive_and_prune_branch(root, &t.wt.branch)
+                        {
+                            term::warn(
+                                Source::Gluon,
+                                &format!("squash branch archive-prune after land failed (non-fatal): {e:#}"),
+                            );
+                        }
+                    }
+                    if let Err(e) = crate::worktree::prune_merged_branches(root, &t.base) {
+                        term::warn(
+                            Source::Gluon,
+                            &format!("branch prune after land failed (non-fatal): {e:#}"),
+                        );
+                    }
+                }
+
+                Ok(false) // landed → the quark grounds normally
+            }
+            MergeVerdict::Block(BlockReason::NotApproved) => {
+                // Idempotent: if the ask is already outstanding for this branch, stay
+                // Waiting rather than appending a second request.
+                let already_asked = hadron_gatekeeper::pending_permission(&events, target)
+                    .is_some_and(|p| p.description == op);
+                if !already_asked {
+                    self.append(Event::new(
+                        Actor::Quark(target.clone()),
+                        None,
+                        Kind::PermissionReq {
+                            risk: hadron_gatekeeper::Risk::BashExec,
+                            description: op,
+                        },
+                    ))
+                    .await?;
+                }
+                self.append(Event::new(
+                    Actor::Quark(target.clone()),
+                    None,
+                    Kind::Status {
+                        state: QuarkState::Waiting,
+                    },
+                ))
+                .await?;
+                Ok(true)
+            }
+            MergeVerdict::Block(reason) => {
+                // Red tests / a dirty tree / a branch that is somehow the default one.
+                // The branch STAYS. Nothing is deleted — the work is evidence.
+                let why = format!(
+                    "merge of `{}` blocked: {}. The branch is preserved at `{}`.\n\n{tail}",
+                    t.wt.branch,
+                    reason.describe(),
+                    t.wt.path.display()
+                );
+                match reason {
+                    // Both live entirely inside the quark's own worktree: red tests are
+                    // its code, and an uncommitted tree is its uncommitted work. It is
+                    // already standing in the right place to fix them.
+                    BlockReason::TestsFailed | BlockReason::DirtyWorktree => {
+                        self.hand_back_to_quark(target, t.assignment, &why).await?;
+                    }
+                    // `BranchIsDefault` is a discipline violation the quark cannot undo
+                    // from inside (it is standing ON the branch it must never be on), and
+                    // `NoCommits` is unreachable here — the `commits == 0` early-outs above
+                    // catch it. Neither is a repair a quark should be handed.
+                    BlockReason::BranchIsDefault
+                    | BlockReason::NoCommits
+                    | BlockReason::NotApproved => {
+                        self.reroute_blocked_with_severity(
+                            target,
+                            &why,
+                            hadron_lattice::Severity::Error,
+                        )
+                        .await?;
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// Start republishing `Doing::Gating` to `live::gates_dir` every
+    /// [`GATE_HEARTBEAT_INTERVAL`] for as long as the returned guard lives. Keyed by
+    /// `branch`, never by `target` — see `live::gates_dir`'s own doc for why a gate
+    /// must not share a quark's `<id>.json`.
+    pub(super) fn start_gate_heartbeat(&self, target: &QuarkId, branch: &str) -> GateHeartbeat {
+        let dir = hadron_lattice::live::gates_dir(&self.field_path);
+        let quark = target.clone();
+        let branch = branch.to_string();
+        let started = chrono::Utc::now();
+        let stage = Arc::new(std::sync::Mutex::new("evaluating branch".to_string()));
+
+        let initial_detail = format!("evaluating branch · {branch}");
+        let initial_activity =
+            hadron_lattice::Activity::gating(quark.clone(), &initial_detail, started);
+        let _ = hadron_lattice::live::publish_gate(&dir, &branch, &initial_activity);
+
+        let task_dir = dir.clone();
+        let task_branch = branch.clone();
+        let task_quark = quark.clone();
+        let task_stage = stage.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(GATE_HEARTBEAT_INTERVAL).await;
+                let detail = {
+                    let s = task_stage.lock().unwrap();
+                    if s.is_empty() {
+                        task_branch.clone()
+                    } else {
+                        format!("{} · {}", *s, task_branch)
+                    }
+                };
+                let activity =
+                    hadron_lattice::Activity::gating(task_quark.clone(), &detail, started);
+                let _ = hadron_lattice::live::publish_gate(&task_dir, &task_branch, &activity);
+            }
+        });
+        GateHeartbeat {
+            dir,
+            branch,
+            quark,
+            started,
+            stage,
+            handle,
+        }
+    }
+}
+
+/// Well inside `live::STALE_AFTER_SECS` (120s) — same reasoning as `run.rs`'s
+/// `until_silent` poll: a single publish would read as stale long before a gate
+/// bounded by `GATE_TEST_DEADLINE` finishes.
+const GATE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// RAII guard for a running gate's heartbeat. Dropping it — on every return path of
+/// [`Engine::merge_gate_body`], `?` early-returns included — aborts the republishing
+/// task and removes the `live/gates/` file, so a gate never leaves behind a stale
+/// "still running" row.
+pub(super) struct GateHeartbeat {
+    dir: std::path::PathBuf,
+    branch: String,
+    quark: QuarkId,
+    started: chrono::DateTime<chrono::Utc>,
+    stage: Arc<std::sync::Mutex<String>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl GateHeartbeat {
+    pub fn set_stage(&self, stage_text: &str) {
+        if let Ok(mut g) = self.stage.lock() {
+            *g = stage_text.to_string();
+        }
+        let detail = if stage_text.is_empty() {
+            self.branch.clone()
+        } else {
+            format!("{stage_text} · {}", self.branch)
+        };
+        let activity = hadron_lattice::Activity::gating(self.quark.clone(), &detail, self.started);
+        let _ = hadron_lattice::live::publish_gate(&self.dir, &self.branch, &activity);
+    }
+}
+
+impl Drop for GateHeartbeat {
+    fn drop(&mut self) {
+        self.handle.abort();
+        let _ = hadron_lattice::live::clear_gate(&self.dir, &self.branch);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockConflict {
+    pub file: String,
+    pub block_name: String,
+    pub base_hash: String,
+}
+
+fn collect_code_files(
+    dir: &std::path::Path,
+    rel: &std::path::Path,
+    acc: &mut Vec<std::path::PathBuf>,
+) {
+    let current = if rel.as_os_str().is_empty() {
+        dir.to_path_buf()
+    } else {
+        dir.join(rel)
+    };
+    let Ok(entries) = std::fs::read_dir(&current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+            continue;
+        }
+        let child_rel = if rel.as_os_str().is_empty() {
+            std::path::PathBuf::from(&name)
+        } else {
+            rel.join(&name)
+        };
+        if let Ok(ft) = entry.file_type() {
+            if ft.is_dir() {
+                collect_code_files(dir, &child_rel, acc);
+            } else if ft.is_file() {
+                let rel_str = child_rel.to_str().unwrap_or("");
+                if hadron_forge::lang::lang_for_path(rel_str) != hadron_forge::lang::Lang::Opaque {
+                    acc.push(child_rel);
+                }
+            }
+        }
+    }
+}
+
+pub fn forge_block_conflicts(
+    base_wt: &std::path::Path,
+    branch_wt: &std::path::Path,
+    target_wt: &std::path::Path,
+) -> Vec<BlockConflict> {
+    let mut files = Vec::new();
+    collect_code_files(branch_wt, std::path::Path::new(""), &mut files);
+    collect_code_files(target_wt, std::path::Path::new(""), &mut files);
+    files.sort();
+    files.dedup();
+
+    let mut conflicts = Vec::new();
+
+    for rel in files {
+        let base_p = base_wt.join(&rel);
+        let branch_p = branch_wt.join(&rel);
+        let target_p = target_wt.join(&rel);
+
+        let rel_str = rel.to_str().unwrap_or("");
+        let lang = hadron_forge::lang::lang_for_path(rel_str);
+
+        let Ok(base_src) = std::fs::read_to_string(&base_p) else {
+            continue;
+        };
+        let Ok(branch_src) = std::fs::read_to_string(&branch_p) else {
+            continue;
+        };
+        let Ok(target_src) = std::fs::read_to_string(&target_p) else {
+            continue;
+        };
+
+        let base_blocks = hadron_forge::block::parse_blocks_lang(&base_src, lang);
+        let branch_blocks = hadron_forge::block::parse_blocks_lang(&branch_src, lang);
+        let target_blocks = hadron_forge::block::parse_blocks_lang(&target_src, lang);
+
+        for b_block in &base_blocks {
+            let h = &b_block.hash;
+            let in_branch = branch_blocks.iter().any(|b| &b.hash == h);
+            let in_target = target_blocks.iter().any(|b| &b.hash == h);
+
+            if !in_branch && !in_target {
+                let br_match = branch_blocks.iter().find(|b| b.name == b_block.name);
+                let tg_match = target_blocks.iter().find(|b| b.name == b_block.name);
+
+                let br_hash = br_match.map(|b| &b.hash);
+                let tg_hash = tg_match.map(|b| &b.hash);
+
+                if br_hash != tg_hash {
+                    conflicts.push(BlockConflict {
+                        file: rel.to_string_lossy().to_string(),
+                        block_name: b_block.name.clone(),
+                        base_hash: h.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    conflicts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forge_block_conflicts_detects_conflicting_edits_to_same_block() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let branch_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+
+        let base_code = "pub fn foo() -> i32 { 1 }\npub fn bar() -> i32 { 2 }\n";
+        let branch_code = "pub fn foo() -> i32 { 10 }\npub fn bar() -> i32 { 2 }\n";
+        let target_code = "pub fn foo() -> i32 { 20 }\npub fn bar() -> i32 { 2 }\n";
+
+        std::fs::write(base_dir.path().join("main.rs"), base_code).unwrap();
+        std::fs::write(branch_dir.path().join("main.rs"), branch_code).unwrap();
+        std::fs::write(target_dir.path().join("main.rs"), target_code).unwrap();
+
+        let conflicts =
+            forge_block_conflicts(base_dir.path(), branch_dir.path(), target_dir.path());
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].file, "main.rs");
+        assert_eq!(conflicts[0].block_name, "foo");
+    }
+
+    #[test]
+    fn forge_block_conflicts_allows_disjoint_edits_to_different_blocks() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let branch_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+
+        let base_code = "pub fn foo() -> i32 { 1 }\npub fn bar() -> i32 { 2 }\n";
+        let branch_code = "pub fn foo() -> i32 { 10 }\npub fn bar() -> i32 { 2 }\n";
+        let target_code = "pub fn foo() -> i32 { 1 }\npub fn bar() -> i32 { 20 }\n";
+
+        std::fs::write(base_dir.path().join("main.rs"), base_code).unwrap();
+        std::fs::write(branch_dir.path().join("main.rs"), branch_code).unwrap();
+        std::fs::write(target_dir.path().join("main.rs"), target_code).unwrap();
+
+        let conflicts =
+            forge_block_conflicts(base_dir.path(), branch_dir.path(), target_dir.path());
+        assert_eq!(conflicts.len(), 0);
+    }
+
+    #[test]
+    fn extracts_structured_diagnostics_for_compiler_and_test_failures() {
+        let rustc_error = r#"
+error[E0425]: cannot find function `calculate_sum` in this scope
+  --> crates/hadron-gluon/src/engine/calc.rs:42:15
+   |
+42 |     let res = calculate_sum(1, 2);
+   |               ^^^^^^^^^^^^^ not found in this scope
+"#;
+
+        let diag = extract_structured_diagnostics(rustc_error);
+        assert_eq!(diag.primary_kind, DiagnosticErrorKind::CompilerError);
+        assert_eq!(diag.items.len(), 1);
+        assert_eq!(
+            diag.items[0].location.as_deref(),
+            Some("crates/hadron-gluon/src/engine/calc.rs:42:15")
+        );
+        assert!(diag.items[0]
+            .message
+            .contains("cannot find function `calculate_sum`"));
+        assert!(diag.suggested_remediation.contains("cargo check"));
+
+        let test_error = r#"
+running 1 test
+test engine::dag::tests::sample_test ... FAILED
+
+failures:
+
+---- engine::dag::tests::sample_test stdout ----
+thread 'engine::dag::tests::sample_test' panicked at crates/hadron-gluon/src/engine/dag.rs:100:9:
+assertion `left == right` failed
+  left: 1
+ right: 2
+"#;
+
+        let diag_test = extract_structured_diagnostics(test_error);
+        assert_eq!(diag_test.primary_kind, DiagnosticErrorKind::TestFailure);
+        assert_eq!(diag_test.items.len(), 1);
+        assert_eq!(
+            diag_test.items[0].location.as_deref(),
+            Some("crates/hadron-gluon/src/engine/dag.rs:100:9")
+        );
+        assert!(diag_test.items[0]
+            .message
+            .contains("assertion `left == right` failed"));
+        assert!(diag_test.suggested_remediation.contains("cargo test"));
+        assert!(diag_test
+            .minimized_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("Test Failure Minimizer (1 failed)"));
+        assert_eq!(
+            diag_test
+                .synthesized_invariant
+                .as_ref()
+                .map(|inv| inv.slug.as_str()),
+            Some("prevent-test-assertion-regression")
+        );
+
+        let formatted = format_remediation_instructions(&diag_test);
+        assert!(formatted.contains("Test Failure Minimizer (1 failed)"));
+        assert!(
+            formatted.contains("Invariant Prevention Hint (`prevent-test-assertion-regression`)")
+        );
+        assert!(formatted.contains("**How to apply:**"));
+    }
+
+    #[test]
+    fn extracts_borrow_checker_and_conflict_synthesized_invariants() {
+        let borrow_err = r#"
+error[E0502]: cannot borrow `self.view` as mutable because it is also borrowed as immutable
+  --> crates/hadron-chamber/src/app/mod.rs:212:9
+   |
+212 |         self.view.messages.clear();
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+"#;
+        let diag_borrow = extract_structured_diagnostics(borrow_err);
+        assert_eq!(diag_borrow.primary_kind, DiagnosticErrorKind::CompilerError);
+        let inv = diag_borrow
+            .synthesized_invariant
+            .as_ref()
+            .expect("borrow checker invariant synthesized");
+        assert_eq!(inv.slug, "prevent-concurrent-mutable-borrow");
+        assert_eq!(
+            inv.category,
+            hadron_gatekeeper::InvariantCategory::BorrowChecker
+        );
+        let formatted = format_remediation_instructions(&diag_borrow);
+        assert!(formatted.contains("prevent-concurrent-mutable-borrow"));
+
+        let conflict_err =
+            "CONFLICT (content): Merge conflict in crates/hadron-gluon/src/daemon.rs\n";
+        let diag_conflict = extract_structured_diagnostics(conflict_err);
+        assert_eq!(
+            diag_conflict.primary_kind,
+            DiagnosticErrorKind::MergeConflict
+        );
+        assert_eq!(
+            diag_conflict
+                .synthesized_invariant
+                .as_ref()
+                .map(|i| i.category),
+            Some(hadron_gatekeeper::InvariantCategory::MergeConflict)
+        );
+    }
+
+    #[test]
+    fn priority_gate_lines_and_dispatcher_sink_publish_gate_output() {
+        use hadron_lattice::wire::{GateStream, RpcPushEvent};
+
+        assert!(is_priority_gate_line("test foo::bar ... ok"));
+        assert!(is_priority_gate_line("test foo::baz ... FAILED"));
+        assert!(is_priority_gate_line("test foo::ign ... ignored"));
+        assert!(is_priority_gate_line(
+            "test result: ok. 5 passed; 0 failed; 0 ignored;"
+        ));
+        assert!(is_priority_gate_line("error[E0425]: cannot find value"));
+        assert!(!is_priority_gate_line("   Compiling hadron-gluon v0.33.54"));
+
+        let bus = crate::actor::bus::ActorBus::new(8);
+        let dispatcher = Arc::new(crate::rpc_server::RpcDispatcher::new(bus));
+        let mut rx = dispatcher.subscribe();
+        let sink = build_gate_line_sink("cli-agy".to_string(), Arc::clone(&dispatcher));
+
+        // First verbose line passes; immediate second verbose line is throttled.
+        sink("stderr", "   Compiling hadron-gluon v0.33.54");
+        sink("stderr", "   Compiling hadron-chamber v0.33.54");
+        let first = rx
+            .try_recv()
+            .expect("first verbose line should emit GateOutput");
+        assert_eq!(
+            first,
+            RpcPushEvent::GateOutput {
+                quark: "cli-agy".to_string(),
+                stream: GateStream::Stderr,
+                line: "   Compiling hadron-gluon v0.33.54".to_string(),
+                passed: Some(0),
+                failed: Some(0),
+            }
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "immediate second verbose line must be throttled"
+        );
+
+        // Priority test lines bypass throttling and update running pass/fail counters.
+        sink("stdout", "test foo::bar ... ok");
+        sink("stdout", "test foo::baz ... FAILED");
+        sink(
+            "stdout",
+            "test result: FAILED. 10 passed; 2 failed; 0 ignored;",
+        );
+
+        let ev1 = rx.try_recv().expect("case ok should emit GateOutput");
+        assert_eq!(
+            ev1,
+            RpcPushEvent::GateOutput {
+                quark: "cli-agy".to_string(),
+                stream: GateStream::Stdout,
+                line: "test foo::bar ... ok".to_string(),
+                passed: Some(1),
+                failed: Some(0),
+            }
+        );
+        let ev2 = rx.try_recv().expect("case failed should emit GateOutput");
+        assert_eq!(
+            ev2,
+            RpcPushEvent::GateOutput {
+                quark: "cli-agy".to_string(),
+                stream: GateStream::Stdout,
+                line: "test foo::baz ... FAILED".to_string(),
+                passed: Some(1),
+                failed: Some(1),
+            }
+        );
+        let ev3 = rx.try_recv().expect("summary line should emit GateOutput");
+        assert_eq!(
+            ev3,
+            RpcPushEvent::GateOutput {
+                quark: "cli-agy".to_string(),
+                stream: GateStream::Stdout,
+                line: "test result: FAILED. 10 passed; 2 failed; 0 ignored;".to_string(),
+                passed: Some(10),
+                failed: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn format_gate_advisory_reports_unwired_and_contradicted_claims_only() {
+        let clean_liv = hadron_gatekeeper::LivenessReport {
+            checked_symbols: 2,
+            unwired: Vec::new(),
+        };
+        let verified_claim = hadron_gatekeeper::ClaimAuditReport {
+            verdict: hadron_gatekeeper::ClaimVerdict::Verified,
+            claimed_command: Some("cargo test".into()),
+            detail: "report claims a pass; gate passed".into(),
+        };
+        assert!(format_gate_advisory("q", Some(&clean_liv), Some(&verified_claim)).is_none());
+
+        let unwired_liv = hadron_gatekeeper::LivenessReport {
+            checked_symbols: 3,
+            unwired: vec![hadron_gatekeeper::UnwiredSymbol {
+                symbol: "dead_helper".into(),
+                kind: "fn".into(),
+                file_path: "crates/x/src/lib.rs".into(),
+                line_number: 42,
+                reexport_only: true,
+            }],
+        };
+        let bad_claim = hadron_gatekeeper::ClaimAuditReport {
+            verdict: hadron_gatekeeper::ClaimVerdict::Contradicted,
+            claimed_command: Some("cargo test -p x".into()),
+            detail: "report claims a pass but the gate FAILED".into(),
+        };
+        let msg = format_gate_advisory("q", Some(&unwired_liv), Some(&bad_claim))
+            .expect("advisory expected");
+        assert!(msg.contains("Rule 1 Liveness Advisory"));
+        assert!(msg.contains("dead_helper"));
+        assert!(msg.contains("(re-exported only)"));
+        assert!(msg.contains("Evidence Claim Advisory"));
+        assert!(msg.contains("gate FAILED"));
+    }
+}

@@ -2,6 +2,7 @@
 
 use crate::app::WorkbenchApp;
 use crate::state::{AppNav, AppState};
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -820,7 +821,7 @@ impl InspectorPane {
         let mut rows = Vec::new();
         let accent = cx.theme().accent;
         let muted = cx.theme().muted_foreground;
-        let surface = cx.theme().secondary;
+        let surface = style::card(cx);
         for entry in entries {
             let is_dir = entry.is_dir;
             let open = is_dir && self.expanded.contains(&entry.path);
@@ -1070,10 +1071,8 @@ impl Render for InspectorPane {
                             .py_1()
                             .rounded_md()
                             .text_xs()
-                            .when(active, |row| {
-                                row.bg(cx.theme().secondary).text_color(accent)
-                            })
-                            .hover(|row| row.bg(cx.theme().secondary))
+                            .when(active, |row| row.bg(style::hover(cx)).text_color(accent))
+                            .hover(|row| row.bg(style::hover(cx)))
                             .cursor_pointer()
                             .child(Icon::new(IconName::File).text_color(muted))
                             .child(div().flex_1().child(entry.relative))
@@ -1128,9 +1127,9 @@ impl Render for InspectorPane {
             .gap_1()
             .p_1()
             .rounded_full()
-            .bg(cx.theme().secondary)
+            .bg(style::card(cx))
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .flex_1()
             .min_w_0()
             .overflow_x_scrollbar()
@@ -1182,7 +1181,7 @@ impl Render for InspectorPane {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1220,8 +1219,8 @@ impl Render for InspectorPane {
                             .gap_2()
                             .items_center()
                             .border_b_1()
-                            .border_color(border)
-                            .bg(cx.theme().secondary)
+                            .border_color(style::hairline(cx))
+                            .bg(style::card(cx))
                             .child(
                                 div()
                                     .flex_1()
@@ -1302,7 +1301,7 @@ impl InspectorPane {
     ) -> impl IntoElement {
         let tab = self.agent_tab;
         let host = self.host.clone();
-        let surface = cx.theme().secondary;
+        let surface = style::card(cx);
         let accent = cx.theme().accent;
         let tabs = h_flex()
             .id("right-rail-capsule-tabs")
@@ -1312,7 +1311,7 @@ impl InspectorPane {
             .rounded_full()
             .bg(surface)
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .flex_1()
             .min_w_0()
             .overflow_x_scrollbar()
@@ -1365,7 +1364,7 @@ impl InspectorPane {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .child(
                 h_flex()
                     .id("inspector-header")
@@ -1395,9 +1394,7 @@ impl InspectorPane {
                 AgentRailTab::Terminal => self
                     .terminal_panel(root, muted, border, cx)
                     .into_any_element(),
-                AgentRailTab::Files => self
-                    .agent_files(file_body, muted, border, cx)
-                    .into_any_element(),
+                AgentRailTab::Files => self.agent_files(file_body, muted, cx).into_any_element(),
                 AgentRailTab::Git => self.git_panel(git, muted, cx).into_any_element(),
                 AgentRailTab::Mission => self.mission_panel(muted, cx).into_any_element(),
                 AgentRailTab::Visualizer => {
@@ -1448,7 +1445,7 @@ impl InspectorPane {
         let entity = cx.weak_entity();
         let root_open = root.clone();
         let accent = cx.theme().accent;
-        let surface = cx.theme().secondary;
+        let surface = style::card(cx);
         let screen_bg = cx.theme().background;
         let cwd_label = cwd.clone().unwrap_or_default();
         let sub_tab_bar = h_flex()
@@ -1459,7 +1456,7 @@ impl InspectorPane {
             .rounded_full()
             .bg(surface)
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .max_w_full()
             .overflow_x_scrollbar()
             .child(
@@ -1584,7 +1581,7 @@ impl InspectorPane {
                     .rounded_lg()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(border)
+                    .border_color(style::hairline(cx))
                     .bg(screen_bg)
                     .child(
                         v_flex()
@@ -1708,7 +1705,6 @@ impl InspectorPane {
         &mut self,
         file_body: AnyElement,
         muted: Hsla,
-        border: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some((path, content)) = self.file_preview.clone() {
@@ -1716,7 +1712,7 @@ impl InspectorPane {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or(path);
-            let raised = cx.theme().secondary;
+            let raised = style::raised(cx);
             return v_flex()
                 .flex_1()
                 .min_h_0()
@@ -1774,8 +1770,8 @@ impl InspectorPane {
                     .gap_2()
                     .items_center()
                     .border_b_1()
-                    .border_color(border)
-                    .bg(cx.theme().secondary)
+                    .border_color(style::hairline(cx))
+                    .bg(style::card(cx))
                     .child(
                         div()
                             .flex_1()
@@ -1825,7 +1821,7 @@ impl InspectorPane {
                         .items_center()
                         .border_b_1()
                         .border_color(accent)
-                        .bg(cx.theme().secondary)
+                        .bg(style::card(cx))
                         .child(
                             div()
                                 .flex_1()
@@ -1929,9 +1925,9 @@ impl InspectorPane {
             .gap_1()
             .p_1()
             .rounded_full()
-            .bg(cx.theme().secondary)
+            .bg(style::card(cx))
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .overflow_x_scrollbar()
             .children(
                 [
@@ -1980,8 +1976,8 @@ impl InspectorPane {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(border)
-                    .bg(cx.theme().secondary)
+                    .border_color(style::hairline(cx))
+                    .bg(style::card(cx))
                     .child(
                         div()
                             .text_xs()
@@ -2018,8 +2014,8 @@ impl InspectorPane {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(border)
-                    .bg(cx.theme().secondary);
+                    .border_color(style::hairline(cx))
+                    .bg(style::card(cx));
                 col = match goal {
                     Some(goal) => col.child(div().text_sm().child(goal.objective)).child(
                         div().text_xs().text_color(muted).child(format!(
@@ -2122,8 +2118,8 @@ impl InspectorPane {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary);
+            .border_color(style::hairline(cx))
+            .bg(style::card(cx));
         if rows.is_empty() {
             body = body.child(
                 div()
@@ -2160,8 +2156,8 @@ impl InspectorPane {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary);
+            .border_color(style::hairline(cx))
+            .bg(style::card(cx));
         match files {
             None => {
                 body = body.child(
@@ -2196,9 +2192,9 @@ impl InspectorPane {
             .items_center()
             .p_1()
             .rounded_full()
-            .bg(cx.theme().secondary)
+            .bg(style::card(cx))
             .border_1()
-            .border_color(border)
+            .border_color(style::hairline(cx))
             .children(
                 [(0u8, "蜂群三维"), (1, "依赖图"), (2, "核图谱")]
                     .into_iter()
@@ -2342,7 +2338,6 @@ impl InspectorPane {
             }
         };
         let filter_row = mode == 2;
-        let border = cx.theme().border;
         v_flex()
             .flex_1()
             .min_h_0()
@@ -2357,7 +2352,7 @@ impl InspectorPane {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(border)
+                    .border_color(style::hairline(cx))
                     .child(pills)
                     .child(div().text_xs().text_color(muted).child(summary))
                     .child(
@@ -2372,9 +2367,9 @@ impl InspectorPane {
                                     .py_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .bg(cx.theme().secondary)
+                                    .bg(style::card(cx))
                                     .border_1()
-                                    .border_color(border)
+                                    .border_color(style::hairline(cx))
                                     .text_xs()
                                     .text_color(muted)
                                     .hover(|item| item.text_color(accent))
@@ -2452,7 +2447,7 @@ impl InspectorPane {
                     .px_3()
                     .py_2()
                     .border_t_1()
-                    .border_color(border)
+                    .border_color(style::hairline(cx))
                     .text_xs()
                     .text_color(muted)
                     .child(detail),
@@ -2522,7 +2517,7 @@ impl InspectorPane {
                     .gap_3()
                     .items_center()
                     .border_b_1()
-                    .border_color(cx.theme().border)
+                    .border_color(style::hairline(cx))
                     .child(
                         div()
                             .id("timeline-older")
@@ -2623,8 +2618,8 @@ impl InspectorPane {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary);
+            .border_color(style::hairline(cx))
+            .bg(style::card(cx));
         if events.is_empty() {
             body = body.child(
                 div()
@@ -2725,9 +2720,9 @@ impl InspectorPane {
                             .gap_1()
                             .p_1()
                             .rounded_full()
-                            .bg(cx.theme().secondary)
+                            .bg(style::card(cx))
                             .border_1()
-                            .border_color(border)
+                            .border_color(style::hairline(cx))
                             .overflow_x_scrollbar()
                             .children(
                                 [
@@ -2779,9 +2774,9 @@ impl InspectorPane {
                                 .gap_1()
                                 .p_1()
                                 .rounded_full()
-                                .bg(cx.theme().secondary)
+                                .bg(style::card(cx))
                                 .border_1()
-                                .border_color(cx.theme().border)
+                                .border_color(style::hairline(cx))
                                 .children(
                                     [
                                         (BranchScope::All, "全部"),
@@ -3057,8 +3052,8 @@ impl InspectorPane {
                             .gap_2()
                             .rounded_lg()
                             .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
+                            .border_color(style::hairline(cx))
+                            .bg(style::card(cx))
                             .child(
                                 h_flex()
                                     .justify_between()
@@ -3119,7 +3114,7 @@ impl InspectorPane {
                             .rounded_md()
                             .text_xs()
                             .cursor_pointer()
-                            .hover(|row| row.bg(cx.theme().secondary))
+                            .hover(|row| row.bg(style::hover(cx)))
                             .child(div().w(px(28.)).text_color(muted).child(
                                 if change.status.is_empty() {
                                     "·".to_string()

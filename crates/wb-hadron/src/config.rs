@@ -1,0 +1,2240 @@
+//! Persistent chamber layout preferences — rail collapse state and panel widths.
+//! Stored at `~/.hadron/chamber.json` (cross-platform), loaded on start and saved
+//! whenever the layout changes, so the user's workspace is preserved across
+//! sessions. Pure (no GPUI) so it is unit-tested.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// A customizable identity for chat/roster display — the human's, or a quark's.
+/// All fields are optional overrides; unset fields fall back to code defaults
+/// (id-derived name, hue-derived color, initials avatar) at render time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    /// Shown name; falls back to the actor id (or "You" for the human).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Accent + avatar color as `#rrggbb`; falls back to the actor's hue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Path to an avatar image; when set, it wins over color + initials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowBoundsPrefs {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Current schema version for `chamber.json` payloads.
+pub const CHAMBER_SCHEMA_VERSION: u32 = 1;
+
+fn default_chamber_schema_version() -> u32 {
+    CHAMBER_SCHEMA_VERSION
+}
+
+/// The persisted chamber state: rail layout, plus per-actor display identities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChamberPrefs {
+    #[serde(default = "default_chamber_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_false")]
+    pub roster_collapsed: bool,
+    #[serde(default = "default_false")]
+    pub inspector_collapsed: bool,
+    /// Kill the auto-spawned `hadron-gluon` daemon when the chamber window closes.
+    /// Default `true` — the chamber spawns the daemon for you, so closing the window
+    /// is the natural end of the swarm; a daemon left running after its only viewer
+    /// is gone keeps burning tokens with nobody reading them. Turn it off in Settings
+    /// to keep a headless swarm alive across chamber restarts.
+    #[serde(default = "default_true")]
+    pub close_gluon_on_exit: bool,
+    #[serde(default = "default_roster_width")]
+    pub roster_width: f32,
+    #[serde(default = "default_inspector_width")]
+    pub inspector_width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_bounds: Option<WindowBoundsPrefs>,
+    /// The human's own chat identity.
+    #[serde(default)]
+    pub human: Identity,
+    /// Per-quark identity overrides, keyed by quark id.
+    #[serde(default)]
+    pub quarks: BTreeMap<String, Identity>,
+    /// Which program opens a source file the human clicks — both a chat message's
+    /// `file://` link and the file tree's "Open in editor". Defaults to
+    /// [`crate::sys::EditorChoice::System`], which is the pre-existing behaviour
+    /// (the desktop's own association, i.e. whatever `xdg-open` picks).
+    ///
+    /// Read leniently, because this is the one field whose docs invite a hand edit
+    /// (`Custom`, which the Settings ladder cannot offer). [`load_from`] does
+    /// `from_str(..).unwrap_or_default()`, so without [`lenient_editor`] a single
+    /// typo here — `"Vim"`, a malformed object — would fail the WHOLE `ChamberPrefs`
+    /// and silently reset the human's layout, widths and every quark identity.
+    #[serde(default, deserialize_with = "lenient_editor")]
+    pub editor: crate::sys::EditorChoice,
+    /// The global permission mode a **fresh field** starts on.
+    ///
+    /// The effective mode is folded from the field's `ModeSet` events
+    /// (`hadron_gatekeeper::global_mode`) and that stays the one source of
+    /// truth — but `/clear` truncates `field.jsonl`, which took every `ModeSet` with
+    /// it and dropped the swarm back to `Mode::Ask` on every new session. This is the
+    /// standing preference `/clear` re-seeds from, so a human who works in `Auto` does
+    /// not re-arm it by hand each time.
+    ///
+    /// Defaults to `Mode::Ask` — `Mode::default()` — so an existing `chamber.json`
+    /// with no such key behaves exactly as it always has.
+    #[serde(default)]
+    pub default_mode: hadron_lattice::Mode,
+    /// Optional custom UI font family (defaults to bundled Inter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_font_family: Option<String>,
+    /// Optional custom UI font size in pixels (defaults to 14.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_font_size: Option<f32>,
+    /// Optional custom monospace font family (defaults to bundled Cascadia Code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mono_font_family: Option<String>,
+    /// Optional custom monospace font size in pixels (defaults to 13.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mono_font_size: Option<f32>,
+    /// Optional color theme preset (defaults to Obsidian Neutral).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_preset: Option<ThemePreset>,
+    /// Optional primary accent color choice (defaults to Amethyst).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_choice: Option<AccentChoice>,
+    /// Optional custom theme definition override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_theme: Option<ThemeDefinition>,
+    /// Audio & haptics telemetry configuration.
+    #[serde(default)]
+    pub audio: crate::app::audio::AudioConfig,
+    /// Turn watchdog silence limit in seconds (default 900s / 15m).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_deadline_secs: Option<u64>,
+    /// Max turn wall-clock safety ceiling in seconds (default 14400s / 4h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turn_wall_clock_secs: Option<u64>,
+    /// Live activity stale threshold in seconds (default 120s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_after_secs: Option<i64>,
+    /// Custom terminal shell path override (defaults to $SHELL or platform default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_shell: Option<String>,
+    /// Terminal cursor rendering style (Beam, Block, Underline).
+    #[serde(default)]
+    pub terminal_cursor_style: TerminalCursorStyle,
+    /// Terminal scrollback buffer line depth (defaults to 5,000).
+    #[serde(default = "default_terminal_scrollback")]
+    pub terminal_scrollback: usize,
+    /// Chat row density (Comfortable vs Compact).
+    #[serde(default)]
+    pub chat_density: ChatDensity,
+    /// Whether markdown code blocks should wrap text instead of scrolling horizontally.
+    #[serde(default)]
+    pub code_block_word_wrap: bool,
+    /// Chat timestamp format (24h, 12h, Relative).
+    #[serde(default)]
+    pub timestamp_format: TimestampFormat,
+    /// Whether to auto-fold thinking/reasoning blocks in chat by default.
+    #[serde(default = "default_true")]
+    pub auto_fold_reasoning: bool,
+    /// Whether git worktrees should be automatically pruned on merge/abandonment.
+    #[serde(default = "default_true")]
+    pub git_auto_prune_worktrees: bool,
+    /// Custom Git author name override for commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_author_name: Option<String>,
+    /// Custom Git author email override for commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_author_email: Option<String>,
+    /// Native OS desktop notifications master toggle.
+    #[serde(default = "default_true")]
+    pub desktop_notifications: bool,
+    /// Show desktop notification when a quark is blocked on Mode::Ask.
+    #[serde(default = "default_true")]
+    pub notify_on_blocked: bool,
+    /// Show desktop notification when a quark finishes a turn.
+    #[serde(default = "default_true")]
+    pub notify_on_turn_finish: bool,
+    /// Whether periodic repository diagnostics (drift, stale trees, nucleus health) are enabled.
+    #[serde(default = "default_true")]
+    pub repo_monitor: bool,
+    /// Periodic repository diagnostics interval in seconds (default 300s / 5m).
+    #[serde(default = "default_repo_monitor_interval")]
+    pub repo_monitor_interval_secs: u64,
+    /// Global process sandbox confinement mode for command execution.
+    #[serde(default)]
+    pub sandbox_mode: hadron_lattice::SandboxMode,
+    /// Recently opened projects for the Project Selector.
+    #[serde(default)]
+    pub recent_projects: Vec<RecentProject>,
+    /// What to do when Hadron is launched without an explicit path argument.
+    #[serde(default)]
+    pub startup_behavior: StartupBehavior,
+    /// Whether to show the Windows console window (cmd/conhost) alongside the GUI window.
+    #[serde(default = "default_false")]
+    pub show_console_window: bool,
+}
+
+fn default_repo_monitor_interval() -> u64 {
+    300
+}
+
+/// Remote execution environment for a project workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProjectRemote {
+    Wsl {
+        distro: String,
+        linux_path: String,
+    },
+    Ssh {
+        host: String,
+        user: Option<String>,
+        remote_path: String,
+    },
+}
+
+/// What to do when Hadron launches without an explicit path argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupBehavior {
+    #[default]
+    ProjectSelector,
+    ReopenLast,
+    CurrentDir,
+}
+
+#[cfg(test)]
+impl StartupBehavior {
+    pub const ALL: [StartupBehavior; 3] = [
+        StartupBehavior::ProjectSelector,
+        StartupBehavior::ReopenLast,
+        StartupBehavior::CurrentDir,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            StartupBehavior::ProjectSelector => "Project Selector (Welcome screen)",
+            StartupBehavior::ReopenLast => "Reopen Last Project",
+            StartupBehavior::CurrentDir => "Current Working Directory",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "project_selector" | "project-selector" | "selector" => Some(Self::ProjectSelector),
+            "reopen_last" | "reopen-last" | "last" => Some(Self::ReopenLast),
+            "current_dir" | "current-dir" | "cwd" => Some(Self::CurrentDir),
+            _ => None,
+        }
+    }
+}
+
+/// A recently opened project workspace entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentProject {
+    /// Canonical workspace path (local filesystem or Windows UNC path).
+    pub path: String,
+    /// Display name (folder or repository name).
+    pub display_name: String,
+    /// Epoch timestamp in seconds when the project was last opened.
+    pub last_opened_secs: u64,
+    /// Remote execution environment tag, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<ProjectRemote>,
+    /// Last detected git branch (e.g. "main").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+}
+
+impl RecentProject {
+    pub fn new(path: impl Into<String>, display_name: impl Into<String>) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            path: path.into(),
+            display_name: display_name.into(),
+            last_opened_secs: now,
+            remote: None,
+            git_branch: None,
+        }
+    }
+
+    pub fn with_remote(mut self, remote: ProjectRemote) -> Self {
+        self.remote = Some(remote);
+        self
+    }
+
+    pub fn with_branch(mut self, branch: impl Into<String>) -> Self {
+        self.git_branch = Some(branch.into());
+        self
+    }
+}
+
+/// Sound themes and acoustic profiles for synthesized telemetry chimes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SoundTheme {
+    #[default]
+    Classic,
+    Synth,
+    Minimal,
+    Retro8Bit,
+}
+
+impl SoundTheme {
+    pub const ALL: [SoundTheme; 4] = [
+        SoundTheme::Classic,
+        SoundTheme::Synth,
+        SoundTheme::Minimal,
+        SoundTheme::Retro8Bit,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SoundTheme::Classic => "Classic (Harmonic Chimes)",
+            SoundTheme::Synth => "Synth (Electronic FM Blips)",
+            SoundTheme::Minimal => "Minimal (Soft Clicks & Pops)",
+            SoundTheme::Retro8Bit => "Retro 8-Bit (Arcade Bleeps)",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn id(self) -> &'static str {
+        match self {
+            SoundTheme::Classic => "classic",
+            SoundTheme::Synth => "synth",
+            SoundTheme::Minimal => "minimal",
+            SoundTheme::Retro8Bit => "retro-8bit",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        let clean = s.trim().to_ascii_lowercase();
+        if clean.starts_with("classic") || clean.contains("harmonic") || clean == "default" {
+            Some(SoundTheme::Classic)
+        } else if clean.starts_with("synth") || clean.contains("electronic") || clean.contains("fm")
+        {
+            Some(SoundTheme::Synth)
+        } else if clean.starts_with("minimal")
+            || clean.contains("click")
+            || clean.contains("soft")
+            || clean.contains("pop")
+        {
+            Some(SoundTheme::Minimal)
+        } else if clean.starts_with("retro")
+            || clean.contains("8bit")
+            || clean.contains("8-bit")
+            || clean.contains("arcade")
+        {
+            Some(SoundTheme::Retro8Bit)
+        } else {
+            None
+        }
+    }
+}
+
+/// Terminal cursor styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalCursorStyle {
+    #[default]
+    Beam,
+    Block,
+    Underline,
+}
+
+#[allow(dead_code)]
+impl TerminalCursorStyle {
+    pub const ALL: [TerminalCursorStyle; 3] = [
+        TerminalCursorStyle::Beam,
+        TerminalCursorStyle::Block,
+        TerminalCursorStyle::Underline,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TerminalCursorStyle::Beam => "Beam (Vertical Line)",
+            TerminalCursorStyle::Block => "Block (Full Rectangle)",
+            TerminalCursorStyle::Underline => "Underline (Bottom Bar)",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        let clean = s.trim().to_ascii_lowercase();
+        if clean.starts_with("beam") || clean.starts_with("line") || clean.starts_with("vertical") {
+            Some(TerminalCursorStyle::Beam)
+        } else if clean.starts_with("block")
+            || clean.starts_with("box")
+            || clean.starts_with("rectangle")
+        {
+            Some(TerminalCursorStyle::Block)
+        } else if clean.starts_with("underline")
+            || clean.starts_with("bar")
+            || clean.starts_with("bottom")
+        {
+            Some(TerminalCursorStyle::Underline)
+        } else {
+            None
+        }
+    }
+}
+
+/// Chat view row density and spacing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatDensity {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
+#[allow(dead_code)]
+impl ChatDensity {
+    pub const ALL: [ChatDensity; 2] = [ChatDensity::Comfortable, ChatDensity::Compact];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ChatDensity::Comfortable => "Comfortable (Standard Spacing)",
+            ChatDensity::Compact => "Compact (Dense View)",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        let clean = s.trim().to_ascii_lowercase();
+        if clean.starts_with("compact") || clean == "dense" || clean == "tight" {
+            Some(ChatDensity::Compact)
+        } else if clean.starts_with("comfortable") || clean == "standard" || clean == "default" {
+            Some(ChatDensity::Comfortable)
+        } else {
+            None
+        }
+    }
+}
+
+/// Timestamp formatting style for chat messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimestampFormat {
+    #[default]
+    Clock24h,
+    Clock12h,
+    Relative,
+}
+
+#[allow(dead_code)]
+impl TimestampFormat {
+    pub const ALL: [TimestampFormat; 3] = [
+        TimestampFormat::Clock24h,
+        TimestampFormat::Clock12h,
+        TimestampFormat::Relative,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Clock24h => "24-Hour (15:04:05)",
+            Self::Clock12h => "12-Hour (3:04:05 PM)",
+            Self::Relative => "Relative (2m ago)",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        let clean = s.trim().to_ascii_lowercase();
+        if clean.starts_with("24")
+            || clean.starts_with("clock24")
+            || clean.contains("24-hour")
+            || clean.contains("24_hour")
+        {
+            Some(TimestampFormat::Clock24h)
+        } else if clean.starts_with("12")
+            || clean.starts_with("clock12")
+            || clean.contains("12-hour")
+            || clean.contains("12_hour")
+        {
+            Some(TimestampFormat::Clock12h)
+        } else if clean.starts_with("relative")
+            || clean == "human"
+            || clean == "ago"
+            || clean.contains("relative")
+        {
+            Some(TimestampFormat::Relative)
+        } else {
+            None
+        }
+    }
+}
+
+/// Curated color theme presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemePreset {
+    #[default]
+    Obsidian,
+    Oled,
+    Midnight,
+    Tokyo,
+    Nord,
+    Catppuccin,
+    Gruvbox,
+}
+
+impl ThemePreset {
+    pub const ALL: [ThemePreset; 7] = [
+        ThemePreset::Obsidian,
+        ThemePreset::Oled,
+        ThemePreset::Midnight,
+        ThemePreset::Tokyo,
+        ThemePreset::Nord,
+        ThemePreset::Catppuccin,
+        ThemePreset::Gruvbox,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePreset::Obsidian => "Obsidian Neutral",
+            ThemePreset::Oled => "OLED True Black",
+            ThemePreset::Midnight => "Midnight Slate",
+            ThemePreset::Tokyo => "Tokyo Dark",
+            ThemePreset::Nord => "Nord Frost",
+            ThemePreset::Catppuccin => "Catppuccin Mocha",
+            ThemePreset::Gruvbox => "Gruvbox Dark",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ThemePreset::Obsidian => "obsidian",
+            ThemePreset::Oled => "oled",
+            ThemePreset::Midnight => "midnight",
+            ThemePreset::Tokyo => "tokyo",
+            ThemePreset::Nord => "nord",
+            ThemePreset::Catppuccin => "catppuccin",
+            ThemePreset::Gruvbox => "gruvbox",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "obsidian" | "obsidian neutral" | "obsidian-neutral" | "default" => {
+                Some(ThemePreset::Obsidian)
+            }
+            "oled" | "oled true black" | "oled-true-black" | "oled-black" | "black" => {
+                Some(ThemePreset::Oled)
+            }
+            "midnight" | "midnight slate" | "midnight-slate" | "slate" => {
+                Some(ThemePreset::Midnight)
+            }
+            "tokyo" | "tokyo dark" | "tokyo-dark" | "indigo" => Some(ThemePreset::Tokyo),
+            "nord" | "nord frost" | "nord-frost" | "arctic" => Some(ThemePreset::Nord),
+            "catppuccin" | "catppuccin mocha" | "catppuccin-mocha" | "mocha" => {
+                Some(ThemePreset::Catppuccin)
+            }
+            "gruvbox" | "gruvbox dark" | "gruvbox-dark" | "retro" => Some(ThemePreset::Gruvbox),
+            _ => None,
+        }
+    }
+}
+
+/// Primary accent color choices for highlights, focus borders, and active indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccentChoice {
+    #[default]
+    Amethyst,
+    Sapphire,
+    Emerald,
+    Amber,
+    Rose,
+    Coral,
+}
+
+impl AccentChoice {
+    pub const ALL: [AccentChoice; 6] = [
+        AccentChoice::Amethyst,
+        AccentChoice::Sapphire,
+        AccentChoice::Emerald,
+        AccentChoice::Amber,
+        AccentChoice::Rose,
+        AccentChoice::Coral,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AccentChoice::Amethyst => "Amethyst",
+            AccentChoice::Sapphire => "Sapphire",
+            AccentChoice::Emerald => "Emerald",
+            AccentChoice::Amber => "Amber",
+            AccentChoice::Rose => "Rose",
+            AccentChoice::Coral => "Coral",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn id(self) -> &'static str {
+        match self {
+            AccentChoice::Amethyst => "amethyst",
+            AccentChoice::Sapphire => "sapphire",
+            AccentChoice::Emerald => "emerald",
+            AccentChoice::Amber => "amber",
+            AccentChoice::Rose => "rose",
+            AccentChoice::Coral => "coral",
+        }
+    }
+
+    pub fn rgb(self) -> gpui_kit::Rgba {
+        match self {
+            AccentChoice::Amethyst => gpui_kit::rgb(0xa87ffb),
+            AccentChoice::Sapphire => gpui_kit::rgb(0xc778dd),
+            AccentChoice::Emerald => gpui_kit::rgb(0x62c073),
+            AccentChoice::Amber => gpui_kit::rgb(0xe5c07b),
+            AccentChoice::Rose => gpui_kit::rgb(0xf472b6),
+            AccentChoice::Coral => gpui_kit::rgb(0xe06c75),
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "amethyst" | "purple" | "veloceon" | "default" => Some(AccentChoice::Amethyst),
+            "sapphire" | "blue" | "orchid" => Some(AccentChoice::Sapphire),
+            "emerald" | "green" => Some(AccentChoice::Emerald),
+            "amber" | "yellow" => Some(AccentChoice::Amber),
+            "rose" | "pink" => Some(AccentChoice::Rose),
+            "coral" | "red" => Some(AccentChoice::Coral),
+            _ => None,
+        }
+    }
+}
+
+/// Frozen schema version for `~/.hadron/themes/*.json` custom theme files.
+pub const THEME_SCHEMA_VERSION: u32 = 1;
+
+fn default_theme_schema_version() -> u32 {
+    THEME_SCHEMA_VERSION
+}
+
+/// Comprehensive, serializable theme definition for custom colors and surfaces.
+///
+/// On-disk schema (`~/.hadron/themes/*.json`) is frozen at [`THEME_SCHEMA_VERSION`] (`1`).
+/// Legacy unversioned (`v0`) files omit `schema_version` (or set `0`) and are transparently
+/// migrated to `v1` on load via [`ThemeDefinition::from_versioned_json`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThemeDefinition {
+    #[serde(default = "default_theme_schema_version")]
+    pub schema_version: u32,
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub is_dark: bool,
+    #[serde(default)]
+    pub surfaces: SurfacePalette,
+    #[serde(default)]
+    pub accents: AccentPalette,
+    #[serde(default)]
+    pub text: TextPalette,
+    #[serde(default)]
+    pub syntax: SyntaxPalette,
+    #[serde(default)]
+    pub terminal: TerminalPalette,
+    #[serde(default)]
+    pub status: StatusPalette,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SurfacePalette {
+    #[serde(default = "default_canvas_base_hex")]
+    pub canvas_base: String,
+    #[serde(default = "default_surface_bg_hex")]
+    pub bg_base: String,
+    #[serde(default = "default_surface_bg_hex")]
+    pub bg_surface: String,
+    #[serde(default = "default_surface_raised_hex")]
+    pub bg_surface_raised: String,
+    #[serde(default = "default_surface_elevated_hex")]
+    pub bg_elevated: String,
+    #[serde(default = "default_surface_elevated_hex")]
+    pub input_bg: String,
+    #[serde(default = "default_surface_border_hex")]
+    pub border: String,
+    #[serde(default = "default_surface_bg_hex")]
+    pub popover: String,
+}
+
+fn default_canvas_base_hex() -> String {
+    "#0f0f0f".to_string()
+}
+fn default_surface_bg_hex() -> String {
+    "#171717".to_string()
+}
+fn default_surface_raised_hex() -> String {
+    "#262626".to_string()
+}
+fn default_surface_elevated_hex() -> String {
+    "#1f1f1f".to_string()
+}
+fn default_surface_border_hex() -> String {
+    "#2e2e2e".to_string()
+}
+
+impl Default for SurfacePalette {
+    fn default() -> Self {
+        Self {
+            canvas_base: default_canvas_base_hex(),
+            bg_base: default_surface_bg_hex(),
+            bg_surface: default_surface_bg_hex(),
+            bg_surface_raised: default_surface_raised_hex(),
+            bg_elevated: default_surface_elevated_hex(),
+            input_bg: default_surface_elevated_hex(),
+            border: default_surface_border_hex(),
+            popover: default_surface_bg_hex(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccentPalette {
+    #[serde(default = "default_glow_pink_hex")]
+    pub primary: String,
+    #[serde(default = "default_glow_blue_hex")]
+    pub glow_blue: String,
+    #[serde(default = "default_glow_pink_hex")]
+    pub glow_pink: String,
+    #[serde(default = "default_glow_green_hex")]
+    pub glow_green: String,
+    #[serde(default = "default_glow_amber_hex")]
+    pub glow_amber: String,
+    #[serde(default = "default_link_hex")]
+    pub link: String,
+    #[serde(default = "default_file_link_hex")]
+    pub file_link: String,
+}
+
+fn default_glow_blue_hex() -> String {
+    "#c778dd".to_string()
+}
+fn default_glow_pink_hex() -> String {
+    "#a87ffb".to_string()
+}
+fn default_glow_green_hex() -> String {
+    "#62c073".to_string()
+}
+fn default_glow_amber_hex() -> String {
+    "#e5c07b".to_string()
+}
+fn default_link_hex() -> String {
+    "#38bdf8".to_string()
+}
+fn default_file_link_hex() -> String {
+    "#e5c07b".to_string()
+}
+
+impl Default for AccentPalette {
+    fn default() -> Self {
+        Self {
+            primary: default_glow_pink_hex(),
+            glow_blue: default_glow_blue_hex(),
+            glow_pink: default_glow_pink_hex(),
+            glow_green: default_glow_green_hex(),
+            glow_amber: default_glow_amber_hex(),
+            link: default_link_hex(),
+            file_link: default_file_link_hex(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextPalette {
+    #[serde(default = "default_text_primary_hex")]
+    pub primary: String,
+    #[serde(default = "default_text_secondary_hex")]
+    pub secondary: String,
+    #[serde(default = "default_text_secondary_hex")]
+    pub muted: String,
+}
+
+fn default_text_primary_hex() -> String {
+    "#ededed".to_string()
+}
+fn default_text_secondary_hex() -> String {
+    "#8e8e8e".to_string()
+}
+
+impl Default for TextPalette {
+    fn default() -> Self {
+        Self {
+            primary: default_text_primary_hex(),
+            secondary: default_text_secondary_hex(),
+            muted: default_text_secondary_hex(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyntaxPalette {
+    #[serde(default = "default_syntax_keyword_hex")]
+    pub keyword: String,
+    #[serde(default = "default_syntax_function_hex")]
+    pub function: String,
+    #[serde(default = "default_syntax_type_hex")]
+    pub r#type: String,
+    #[serde(default = "default_syntax_string_hex")]
+    pub string: String,
+    #[serde(default = "default_syntax_type_hex")]
+    pub number: String,
+    #[serde(default = "default_syntax_comment_hex")]
+    pub comment: String,
+    #[serde(default = "default_syntax_keyword_hex")]
+    pub operator: String,
+    #[serde(default = "default_syntax_variable_hex")]
+    pub variable: String,
+    #[serde(default = "default_syntax_type_hex")]
+    pub constant: String,
+    #[serde(default = "default_syntax_function_hex")]
+    pub attribute: String,
+    #[serde(default = "default_syntax_tag_hex")]
+    pub tag: String,
+    #[serde(default = "default_syntax_type_hex")]
+    pub boolean: String,
+    #[serde(default = "default_syntax_keyword_hex")]
+    pub delimiter: String,
+    #[serde(default = "default_syntax_punctuation_hex")]
+    pub punctuation: String,
+}
+
+fn default_syntax_keyword_hex() -> String {
+    "#f97583".to_string()
+}
+fn default_syntax_function_hex() -> String {
+    "#b392f0".to_string()
+}
+fn default_syntax_type_hex() -> String {
+    "#79b8ff".to_string()
+}
+fn default_syntax_string_hex() -> String {
+    "#9ecbff".to_string()
+}
+fn default_syntax_comment_hex() -> String {
+    "#7e888c".to_string()
+}
+fn default_syntax_variable_hex() -> String {
+    "#e1e4e8".to_string()
+}
+fn default_syntax_tag_hex() -> String {
+    "#85e89d".to_string()
+}
+fn default_syntax_punctuation_hex() -> String {
+    "#bbbebf".to_string()
+}
+
+impl Default for SyntaxPalette {
+    fn default() -> Self {
+        Self::default_dark()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalPalette {
+    #[serde(default = "default_canvas_base_hex")]
+    pub bg: String,
+    #[serde(default = "default_text_primary_hex")]
+    pub fg: String,
+    #[serde(default = "default_glow_green_hex")]
+    pub prompt: String,
+}
+
+impl Default for TerminalPalette {
+    fn default() -> Self {
+        Self {
+            bg: default_canvas_base_hex(),
+            fg: default_text_primary_hex(),
+            prompt: default_glow_green_hex(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusPalette {
+    #[serde(default = "default_status_success")]
+    pub success: String,
+    #[serde(default = "default_status_warning")]
+    pub warning: String,
+    #[serde(default = "default_status_error")]
+    pub error: String,
+    #[serde(default = "default_status_info")]
+    pub info: String,
+}
+
+fn default_status_success() -> String {
+    "#62c073".to_string()
+}
+fn default_status_warning() -> String {
+    "#e5c07b".to_string()
+}
+fn default_status_error() -> String {
+    "#e06c75".to_string()
+}
+fn default_status_info() -> String {
+    "#c778dd".to_string()
+}
+
+impl Default for StatusPalette {
+    fn default() -> Self {
+        Self {
+            success: default_status_success(),
+            warning: default_status_warning(),
+            error: default_status_error(),
+            info: default_status_info(),
+        }
+    }
+}
+
+impl Default for ThemeDefinition {
+    fn default() -> Self {
+        Self::preset_obsidian()
+    }
+}
+
+impl ThemeDefinition {
+    /// Parse a custom theme JSON payload (`~/.hadron/themes/*.json`) with explicit
+    /// schema versioning and v0-to-v1 migration guarantees:
+    /// - Missing `"schema_version"` or `"schema_version": 0` (legacy `v0`) is upgraded to
+    ///   [`THEME_SCHEMA_VERSION`] (`1`) and returns `Ok((theme, true))` (`migrated = true`).
+    /// - `"schema_version": 1` returns `Ok((theme, false))` (`migrated = false`).
+    /// - `"schema_version" > THEME_SCHEMA_VERSION` is rejected with an error so newer
+    ///   incompatible files are never silently misparsed or overwritten.
+    pub fn from_versioned_json(content: &str) -> Result<(Self, bool), String> {
+        let value: serde_json::Value =
+            serde_json::from_str(content).map_err(|e| format!("invalid theme JSON: {e}"))?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "theme JSON root must be an object".to_string())?;
+        let (raw_version, migrated) = match obj.get("schema_version") {
+            None => (0u32, true),
+            Some(v) => {
+                let ver = v
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        "theme schema_version must be a non-negative integer".to_string()
+                    })?;
+                if ver == 0 {
+                    (0u32, true)
+                } else if ver > THEME_SCHEMA_VERSION {
+                    return Err(format!(
+                        "unsupported theme schema_version {ver} (max supported is {THEME_SCHEMA_VERSION})"
+                    ));
+                } else {
+                    (ver, false)
+                }
+            }
+        };
+        let _ = raw_version;
+        let mut theme: Self =
+            serde_json::from_value(value).map_err(|e| format!("invalid theme schema: {e}"))?;
+        theme.schema_version = THEME_SCHEMA_VERSION;
+        Ok((theme, migrated))
+    }
+
+    pub fn preset_obsidian() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "obsidian".into(),
+            name: "Obsidian Neutral".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#0f0f0f".into(),
+                bg_base: "#171717".into(),
+                bg_surface: "#171717".into(),
+                bg_surface_raised: "#262626".into(),
+                bg_elevated: "#1f1f1f".into(),
+                input_bg: "#1f1f1f".into(),
+                border: "#2e2e2e".into(),
+                popover: "#171717".into(),
+            },
+            accents: AccentPalette {
+                primary: "#a87ffb".into(),
+                glow_blue: "#c778dd".into(),
+                glow_pink: "#a87ffb".into(),
+                glow_green: "#62c073".into(),
+                glow_amber: "#e5c07b".into(),
+                link: "#38bdf8".into(),
+                file_link: "#e5c07b".into(),
+            },
+            text: TextPalette {
+                primary: "#ededed".into(),
+                secondary: "#8e8e8e".into(),
+                muted: "#8e8e8e".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#0f0f0f".into(),
+                fg: "#ededed".into(),
+                prompt: "#62c073".into(),
+            },
+            status: StatusPalette::default(),
+        }
+    }
+
+    pub fn preset_oled() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "oled".into(),
+            name: "OLED True Black".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#000000".into(),
+                bg_base: "#050505".into(),
+                bg_surface: "#0a0a0a".into(),
+                bg_surface_raised: "#141414".into(),
+                bg_elevated: "#1a1a1a".into(),
+                input_bg: "#101010".into(),
+                border: "#383838".into(),
+                popover: "#0a0a0a".into(),
+            },
+            accents: AccentPalette {
+                primary: "#a87ffb".into(),
+                glow_blue: "#c778dd".into(),
+                glow_pink: "#a87ffb".into(),
+                glow_green: "#62c073".into(),
+                glow_amber: "#e5c07b".into(),
+                link: "#38bdf8".into(),
+                file_link: "#e5c07b".into(),
+            },
+            text: TextPalette {
+                primary: "#ededed".into(),
+                secondary: "#8e8e8e".into(),
+                muted: "#8e8e8e".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#000000".into(),
+                fg: "#ededed".into(),
+                prompt: "#62c073".into(),
+            },
+            status: StatusPalette::default(),
+        }
+    }
+
+    pub fn preset_midnight() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "midnight".into(),
+            name: "Midnight Slate".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#090d16".into(),
+                bg_base: "#0f172a".into(),
+                bg_surface: "#1e293b".into(),
+                bg_surface_raised: "#283548".into(),
+                bg_elevated: "#334155".into(),
+                input_bg: "#172033".into(),
+                border: "#475569".into(),
+                popover: "#1e293b".into(),
+            },
+            accents: AccentPalette {
+                primary: "#38bdf8".into(),
+                glow_blue: "#38bdf8".into(),
+                glow_pink: "#9d7cd8".into(),
+                glow_green: "#62c073".into(),
+                glow_amber: "#e5c07b".into(),
+                link: "#38bdf8".into(),
+                file_link: "#e5c07b".into(),
+            },
+            text: TextPalette {
+                primary: "#f1f5f9".into(),
+                secondary: "#94a3b8".into(),
+                muted: "#64748b".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#0b1120".into(),
+                fg: "#f1f5f9".into(),
+                prompt: "#38bdf8".into(),
+            },
+            status: StatusPalette {
+                success: "#62c073".into(),
+                warning: "#e5c07b".into(),
+                error: "#e06c75".into(),
+                info: "#38bdf8".into(),
+            },
+        }
+    }
+
+    pub fn preset_tokyo() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "tokyo".into(),
+            name: "Tokyo Dark".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#0d0f18".into(),
+                bg_base: "#131622".into(),
+                bg_surface: "#1a1e2e".into(),
+                bg_surface_raised: "#24293e".into(),
+                bg_elevated: "#2f354f".into(),
+                input_bg: "#181c2b".into(),
+                border: "#414868".into(),
+                popover: "#1a1e2e".into(),
+            },
+            accents: AccentPalette {
+                primary: "#7aa2f7".into(),
+                glow_blue: "#7aa2f7".into(),
+                glow_pink: "#bb9af7".into(),
+                glow_green: "#73daca".into(),
+                glow_amber: "#e0af68".into(),
+                link: "#7aa2f7".into(),
+                file_link: "#e0af68".into(),
+            },
+            text: TextPalette {
+                primary: "#c0caf5".into(),
+                secondary: "#9aa5ce".into(),
+                muted: "#565f89".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#0f121d".into(),
+                fg: "#c0caf5".into(),
+                prompt: "#73daca".into(),
+            },
+            status: StatusPalette {
+                success: "#73daca".into(),
+                warning: "#e0af68".into(),
+                error: "#f7768e".into(),
+                info: "#7aa2f7".into(),
+            },
+        }
+    }
+
+    pub fn preset_nord() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "nord".into(),
+            name: "Nord Frost".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#242933".into(),
+                bg_base: "#2e3440".into(),
+                bg_surface: "#3b4252".into(),
+                bg_surface_raised: "#434c5e".into(),
+                bg_elevated: "#4c566a".into(),
+                input_bg: "#2e3440".into(),
+                border: "#4c566a".into(),
+                popover: "#3b4252".into(),
+            },
+            accents: AccentPalette {
+                primary: "#88c0d0".into(),
+                glow_blue: "#81a1c1".into(),
+                glow_pink: "#b48ead".into(),
+                glow_green: "#a3be8c".into(),
+                glow_amber: "#ebcb8b".into(),
+                link: "#88c0d0".into(),
+                file_link: "#ebcb8b".into(),
+            },
+            text: TextPalette {
+                primary: "#eceff4".into(),
+                secondary: "#e5e9f0".into(),
+                muted: "#d8dee9".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#2e3440".into(),
+                fg: "#eceff4".into(),
+                prompt: "#88c0d0".into(),
+            },
+            status: StatusPalette {
+                success: "#a3be8c".into(),
+                warning: "#ebcb8b".into(),
+                error: "#bf616a".into(),
+                info: "#81a1c1".into(),
+            },
+        }
+    }
+
+    pub fn preset_catppuccin() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "catppuccin".into(),
+            name: "Catppuccin Mocha".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#11111b".into(),
+                bg_base: "#181825".into(),
+                bg_surface: "#1e1e2e".into(),
+                bg_surface_raised: "#313244".into(),
+                bg_elevated: "#45475a".into(),
+                input_bg: "#181825".into(),
+                border: "#45475a".into(),
+                popover: "#1e1e2e".into(),
+            },
+            accents: AccentPalette {
+                primary: "#cba6f7".into(),
+                glow_blue: "#89b4fa".into(),
+                glow_pink: "#f5c2e7".into(),
+                glow_green: "#a6e3a1".into(),
+                glow_amber: "#f9e2af".into(),
+                link: "#89b4fa".into(),
+                file_link: "#f9e2af".into(),
+            },
+            text: TextPalette {
+                primary: "#cdd6f4".into(),
+                secondary: "#bac2de".into(),
+                muted: "#a6adc8".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#181825".into(),
+                fg: "#cdd6f4".into(),
+                prompt: "#a6e3a1".into(),
+            },
+            status: StatusPalette {
+                success: "#a6e3a1".into(),
+                warning: "#f9e2af".into(),
+                error: "#f38ba8".into(),
+                info: "#89b4fa".into(),
+            },
+        }
+    }
+
+    pub fn preset_gruvbox() -> Self {
+        Self {
+            schema_version: THEME_SCHEMA_VERSION,
+            id: "gruvbox".into(),
+            name: "Gruvbox Dark".into(),
+            is_dark: true,
+            surfaces: SurfacePalette {
+                canvas_base: "#1d2021".into(),
+                bg_base: "#282828".into(),
+                bg_surface: "#32302f".into(),
+                bg_surface_raised: "#3c3836".into(),
+                bg_elevated: "#504945".into(),
+                input_bg: "#282828".into(),
+                border: "#504945".into(),
+                popover: "#32302f".into(),
+            },
+            accents: AccentPalette {
+                primary: "#d79921".into(),
+                glow_blue: "#83a598".into(),
+                glow_pink: "#d3869b".into(),
+                glow_green: "#b8bb26".into(),
+                glow_amber: "#fabd2f".into(),
+                link: "#83a598".into(),
+                file_link: "#fabd2f".into(),
+            },
+            text: TextPalette {
+                primary: "#ebdbb2".into(),
+                secondary: "#d5c4a1".into(),
+                muted: "#a89984".into(),
+            },
+            syntax: SyntaxPalette::default_dark(),
+            terminal: TerminalPalette {
+                bg: "#282828".into(),
+                fg: "#ebdbb2".into(),
+                prompt: "#b8bb26".into(),
+            },
+            status: StatusPalette {
+                success: "#b8bb26".into(),
+                warning: "#fabd2f".into(),
+                error: "#fb4934".into(),
+                info: "#83a598".into(),
+            },
+        }
+    }
+
+    pub fn from_preset(preset: ThemePreset) -> Self {
+        match preset {
+            ThemePreset::Obsidian => Self::preset_obsidian(),
+            ThemePreset::Oled => Self::preset_oled(),
+            ThemePreset::Midnight => Self::preset_midnight(),
+            ThemePreset::Tokyo => Self::preset_tokyo(),
+            ThemePreset::Nord => Self::preset_nord(),
+            ThemePreset::Catppuccin => Self::preset_catppuccin(),
+            ThemePreset::Gruvbox => Self::preset_gruvbox(),
+        }
+    }
+}
+
+impl SyntaxPalette {
+    pub fn default_dark() -> Self {
+        Self {
+            keyword: "#f97583".into(),
+            function: "#b392f0".into(),
+            r#type: "#79b8ff".into(),
+            string: "#9ecbff".into(),
+            number: "#79b8ff".into(),
+            comment: "#7e888c".into(),
+            operator: "#f97583".into(),
+            variable: "#e1e4e8".into(),
+            constant: "#79b8ff".into(),
+            attribute: "#b392f0".into(),
+            tag: "#85e89d".into(),
+            boolean: "#79b8ff".into(),
+            delimiter: "#f97583".into(),
+            punctuation: "#bbbebf".into(),
+        }
+    }
+}
+
+/// Parses a hex color string (`#rrggbb` or `#rrggbbaa` or without `#`) into GPUI `Rgba`.
+pub fn parse_hex_color(s: &str) -> Option<gpui_kit::Rgba> {
+    let trimmed = s.trim().trim_start_matches('#');
+    if trimmed.len() == 6 {
+        let r = u8::from_str_radix(&trimmed[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&trimmed[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&trimmed[4..6], 16).ok()?;
+        Some(gpui_kit::Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        })
+    } else if trimmed.len() == 8 {
+        let r = u8::from_str_radix(&trimmed[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&trimmed[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&trimmed[4..6], 16).ok()?;
+        let a = u8::from_str_radix(&trimmed[6..8], 16).ok()?;
+        Some(gpui_kit::Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: a as f32 / 255.0,
+        })
+    } else {
+        None
+    }
+}
+
+/// Helper to format GPUI `Rgba` back to `#rrggbb` string.
+#[allow(dead_code)]
+pub fn format_rgba_hex(color: gpui_kit::Rgba) -> String {
+    let r = (color.r * 255.0).round() as u8;
+    let g = (color.g * 255.0).round() as u8;
+    let b = (color.b * 255.0).round() as u8;
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// An `editor` value we do not understand resolves to the default instead of
+/// poisoning the rest of the file. See [`ChamberPrefs::editor`].
+fn lenient_editor<'de, D>(d: D) -> Result<crate::sys::EditorChoice, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(raw).unwrap_or_default())
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_false() -> bool {
+    false
+}
+fn default_terminal_scrollback() -> usize {
+    5000
+}
+fn default_roster_width() -> f32 {
+    // Wide enough for effort + mode tags beside the name/model column, trimmed
+    // ~11% from the previous 450 default.
+    400.0
+}
+fn default_inspector_width() -> f32 {
+    300.0
+}
+
+impl ChamberPrefs {
+    /// Move per-quark identity (colour/name/avatar) to a renamed id, so the taxonomy
+    /// migration does not reset a quark's appearance. Reads the SAME map as the team.json
+    /// rename (`hadron_lattice::legacy_id_renames`) — passed in so the SSOT stays in lattice.
+    pub fn rename_quark_ids(&mut self, renames: &[(&str, &str)]) {
+        for (old, new) in renames {
+            if let Some(identity) = self.quarks.remove(*old) {
+                self.quarks.entry(new.to_string()).or_insert(identity);
+            }
+        }
+    }
+
+    /// Record a project in the recent projects LRU list.
+    /// If an entry with the same path already exists, moves it to the front and updates its metadata.
+    /// Ignores binary installation or OS system directories (e.g. `AppData\Local\Programs\Hadron`).
+    /// Caps the list at 50 entries.
+    pub fn record_project(&mut self, project: RecentProject) {
+        if is_install_or_system_dir(Path::new(&project.path), None) {
+            return;
+        }
+        self.recent_projects.retain(|p| p.path != project.path);
+        self.recent_projects.insert(0, project);
+        if self.recent_projects.len() > 50 {
+            self.recent_projects.truncate(50);
+        }
+    }
+
+    /// Remove a project by path from the recent projects list.
+    pub fn remove_project(&mut self, path: &str) {
+        self.recent_projects.retain(|p| p.path != path);
+    }
+
+    /// The most recently opened project, if any.
+    pub fn last_project(&self) -> Option<&RecentProject> {
+        self.recent_projects.first()
+    }
+}
+
+/// True when `path` is the Hadron binary installation directory or an OS system launch
+/// directory (e.g. `%LOCALAPPDATA%\Programs\Hadron`, `Program Files\Hadron`, `Windows\System32`,
+/// `~/.local/bin`, `~/.cargo/bin`, or `exe_dir`) that must never be treated as a project workspace.
+pub fn is_install_or_system_dir(path: &Path, exe_dir: Option<&Path>) -> bool {
+    if let Some(exe) = exe_dir {
+        if path == exe
+            || (path.exists()
+                && exe.exists()
+                && path.canonicalize().ok() == exe.canonicalize().ok())
+        {
+            return true;
+        }
+    }
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    normalized.ends_with("/appdata/local/programs/hadron")
+        || normalized.ends_with("/program files/hadron")
+        || normalized.ends_with("/program files (x86)/hadron")
+        || normalized.ends_with("/.local/bin")
+        || normalized.ends_with("/.cargo/bin")
+        || normalized.ends_with("/windows/system32")
+        || normalized.ends_with("/windows/syswow64")
+}
+
+impl Default for ChamberPrefs {
+    fn default() -> Self {
+        ChamberPrefs {
+            schema_version: CHAMBER_SCHEMA_VERSION,
+            roster_collapsed: default_false(),
+            inspector_collapsed: default_false(),
+            close_gluon_on_exit: default_true(),
+            roster_width: default_roster_width(),
+            inspector_width: default_inspector_width(),
+            default_mode: hadron_lattice::Mode::default(),
+            window_bounds: None,
+            human: Identity::default(),
+            quarks: BTreeMap::new(),
+            editor: crate::sys::EditorChoice::default(),
+            ui_font_family: None,
+            ui_font_size: None,
+            mono_font_family: None,
+            mono_font_size: None,
+            theme_preset: None,
+            accent_choice: None,
+            custom_theme: None,
+            audio: crate::app::audio::AudioConfig::default(),
+            turn_deadline_secs: None,
+            max_turn_wall_clock_secs: None,
+            stale_after_secs: None,
+            terminal_shell: None,
+            terminal_cursor_style: TerminalCursorStyle::default(),
+            terminal_scrollback: default_terminal_scrollback(),
+            chat_density: ChatDensity::default(),
+            code_block_word_wrap: false,
+            timestamp_format: TimestampFormat::default(),
+            auto_fold_reasoning: default_true(),
+            git_auto_prune_worktrees: default_true(),
+            git_author_name: None,
+            git_author_email: None,
+            desktop_notifications: default_true(),
+            notify_on_blocked: default_true(),
+            notify_on_turn_finish: default_true(),
+            repo_monitor: default_true(),
+            repo_monitor_interval_secs: default_repo_monitor_interval(),
+            sandbox_mode: hadron_lattice::SandboxMode::default(),
+            recent_projects: Vec::new(),
+            startup_behavior: StartupBehavior::default(),
+            show_console_window: default_false(),
+        }
+    }
+}
+
+impl ChamberPrefs {
+    /// Parse a `chamber.json` payload with explicit schema versioning and `v0 -> v1` migration:
+    /// - Missing `"schema_version"` or `"schema_version": 0` (legacy `v0`) is upgraded to
+    ///   [`CHAMBER_SCHEMA_VERSION`] (`1`), applies the legacy `roster_width` and `custom_theme`
+    ///   color migrations, and returns `Ok((prefs, true))` (`migrated = true`).
+    /// - `"schema_version": 1` returns `Ok((prefs, false))` without clobbering user-chosen
+    ///   `roster_width` or `custom_theme` values.
+    /// - `"schema_version" > 1` is rejected with an `InvalidData` error so an older binary never
+    ///   silently clobbers a newer config.
+    pub fn from_versioned_json(text: &str) -> std::io::Result<(Self, bool)> {
+        let raw: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let raw_version = raw
+            .get("schema_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        if raw_version > CHAMBER_SCHEMA_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "chamber.json schema_version {} is newer than supported version {}",
+                    raw_version, CHAMBER_SCHEMA_VERSION
+                ),
+            ));
+        }
+        let mut prefs: ChamberPrefs = serde_json::from_value(raw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let migrated = raw_version < CHAMBER_SCHEMA_VERSION;
+        if migrated {
+            // One-time v0 -> v1 migration: a chamber.json still pinned at an old default
+            // (≤410, 450 or 500) is bumped to the new default so the trimmed roster
+            // applies without a manual edit.
+            if prefs.roster_width <= 410.0
+                || prefs.roster_width == 450.0
+                || prefs.roster_width == 500.0
+            {
+                prefs.roster_width = default_roster_width();
+            }
+            // Migrate legacy pre-telemetry custom theme status/accent defaults so a saved
+            // chamber.json does not stay stuck on bright Tailwind greens/blues/reds.
+            if let Some(custom) = &mut prefs.custom_theme {
+                if custom.status.success.eq_ignore_ascii_case("#34d399") {
+                    custom.status.success = "#62c073".into();
+                }
+                if custom.status.warning.eq_ignore_ascii_case("#fbbf24") {
+                    custom.status.warning = "#e5c07b".into();
+                }
+                if custom.status.error.eq_ignore_ascii_case("#f87171") {
+                    custom.status.error = "#e06c75".into();
+                }
+                if custom.status.info.eq_ignore_ascii_case("#60a5fa")
+                    || custom.status.info.eq_ignore_ascii_case("#38bdf8")
+                {
+                    custom.status.info = "#c778dd".into();
+                }
+                if custom.accents.glow_green.eq_ignore_ascii_case("#34d399") {
+                    custom.accents.glow_green = "#62c073".into();
+                }
+                if custom.accents.glow_blue.eq_ignore_ascii_case("#60a5fa")
+                    || custom.accents.glow_blue.eq_ignore_ascii_case("#38bdf8")
+                {
+                    custom.accents.glow_blue = "#c778dd".into();
+                }
+                if custom.accents.glow_pink.eq_ignore_ascii_case("#c084fc")
+                    || custom.accents.glow_pink.eq_ignore_ascii_case("#a78bfa")
+                    || custom.accents.glow_pink.eq_ignore_ascii_case("#9d7cd8")
+                {
+                    custom.accents.glow_pink = "#a87ffb".into();
+                }
+                if custom.accents.primary.eq_ignore_ascii_case("#9d7cd8") {
+                    custom.accents.primary = "#a87ffb".into();
+                }
+                if custom.accents.glow_amber.eq_ignore_ascii_case("#fbbf24") {
+                    custom.accents.glow_amber = "#e5c07b".into();
+                }
+                if custom.text.primary.eq_ignore_ascii_case("#e6edf3") {
+                    custom.text.primary = "#ededed".into();
+                }
+                if custom.text.secondary.eq_ignore_ascii_case("#8a93a6") {
+                    custom.text.secondary = "#8e8e8e".into();
+                }
+                if custom.text.muted.eq_ignore_ascii_case("#8a93a6") {
+                    custom.text.muted = "#8e8e8e".into();
+                }
+            }
+        }
+        prefs.schema_version = CHAMBER_SCHEMA_VERSION;
+        // Prune any binary installation directory accidentally recorded by older Start Menu shortcuts.
+        prefs
+            .recent_projects
+            .retain(|p| !is_install_or_system_dir(Path::new(&p.path), None));
+        Ok((prefs, migrated))
+    }
+}
+
+/// Resolve the on-disk preferences path: `~/.hadron/chamber.json` (cross-platform).
+/// `None` if the home directory can't be resolved.
+pub fn config_path() -> Option<PathBuf> {
+    Some(hadron_lattice::user_hadron_dir()?.join("chamber.json"))
+}
+
+/// Read preferences from an explicit path; missing or malformed → defaults.
+pub fn load_from(path: &Path) -> ChamberPrefs {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match ChamberPrefs::from_versioned_json(&text) {
+            Ok((prefs, migrated)) => {
+                if migrated {
+                    let _ = save_to(path, &prefs);
+                }
+                prefs
+            }
+            Err(_) => ChamberPrefs::default(),
+        },
+        Err(_) => ChamberPrefs::default(),
+    }
+}
+
+/// Write preferences to an explicit path, creating parent dirs as needed.
+pub fn save_to(path: &Path, prefs: &ChamberPrefs) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(prefs).map_err(std::io::Error::other)?;
+    std::fs::write(path, json)
+}
+
+/// Load from the resolved config path (defaults if unresolved/missing).
+pub fn load() -> ChamberPrefs {
+    config_path().map(|p| load_from(&p)).unwrap_or_default()
+}
+
+/// Save to the resolved config path (no-op if the path can't be resolved).
+pub fn save(prefs: &ChamberPrefs) -> std::io::Result<()> {
+    match config_path() {
+        Some(p) => save_to(&p, prefs),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn prefs_round_trip() {
+        let mut quarks = BTreeMap::new();
+        quarks.insert(
+            "claude".to_string(),
+            Identity {
+                display_name: Some("Claude".into()),
+                color: Some("#a855f7".into()),
+                image_path: None,
+            },
+        );
+        let prefs = ChamberPrefs {
+            roster_collapsed: true,
+            inspector_collapsed: false,
+            close_gluon_on_exit: false,
+            roster_width: 180.5,
+            inspector_width: 320.0,
+            default_mode: hadron_lattice::Mode::Auto,
+            window_bounds: None,
+            human: Identity {
+                display_name: Some("Alice".into()),
+                color: Some("#ec4899".into()),
+                image_path: Some("/tmp/me.png".into()),
+            },
+            quarks,
+            editor: crate::sys::EditorChoice::Zed,
+            ui_font_family: Some("Inter".into()),
+            ui_font_size: Some(14.0),
+            mono_font_family: Some("Cascadia Code".into()),
+            mono_font_size: Some(13.0),
+            theme_preset: None,
+            accent_choice: None,
+            custom_theme: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let back: ChamberPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(prefs, back);
+    }
+
+    #[test]
+    fn old_config_without_identities_keeps_layout() {
+        // A config written by a pre-identity binary has only the four layout
+        // keys. Loading it must preserve them (not reset via unwrap_or_default)
+        // and yield empty identities.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        std::fs::write(
+            &path,
+            r#"{"roster_collapsed":true,"inspector_collapsed":true,"roster_width":175.0,"inspector_width":333.0}"#,
+        )
+        .unwrap();
+        let prefs = load_from(&path);
+        assert!(prefs.roster_collapsed);
+        assert!(prefs.inspector_collapsed);
+        // Wait, 175.0 <= 410.0, so this would migrate to 500.0! Let's update this assertion as well.
+        assert_eq!(prefs.roster_width, default_roster_width());
+        assert_eq!(prefs.inspector_width, 333.0);
+        assert_eq!(prefs.human, Identity::default());
+        assert!(prefs.quarks.is_empty());
+    }
+
+    #[test]
+    fn close_gluon_on_exit_defaults_to_true_and_round_trips() {
+        let prefs = ChamberPrefs::default();
+        assert!(prefs.close_gluon_on_exit, "default must be true");
+
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(json.contains("\"close_gluon_on_exit\":true"));
+
+        // The opposite value must still survive a round trip — the default is a
+        // starting point, not a forced value.
+        let custom = ChamberPrefs {
+            close_gluon_on_exit: false,
+            ..Default::default()
+        };
+        let json_custom = serde_json::to_string(&custom).unwrap();
+        let back: ChamberPrefs = serde_json::from_str(&json_custom).unwrap();
+        assert!(!back.close_gluon_on_exit);
+    }
+
+    /// A config written before the key existed gets the NEW default, but a config
+    /// that says `false` on purpose keeps saying `false`. Changing a default must
+    /// never overwrite a deliberate choice (unlike `roster_width`, which migrates
+    /// a *stale default* — not a user's own value).
+    #[test]
+    fn an_explicit_close_gluon_on_exit_false_survives_the_default_flip() {
+        let dir = tempdir().unwrap();
+
+        let absent = dir.path().join("absent.json");
+        std::fs::write(&absent, r#"{"roster_collapsed":false}"#).unwrap();
+        assert!(
+            load_from(&absent).close_gluon_on_exit,
+            "absent key → new default"
+        );
+
+        let explicit = dir.path().join("explicit.json");
+        std::fs::write(&explicit, r#"{"close_gluon_on_exit":false}"#).unwrap();
+        assert!(
+            !load_from(&explicit).close_gluon_on_exit,
+            "an explicit false is kept"
+        );
+    }
+
+    #[test]
+    fn window_bounds_round_trip_on_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        let prefs = ChamberPrefs {
+            window_bounds: Some(WindowBoundsPrefs {
+                x: 120.0,
+                y: 64.0,
+                width: 1600.0,
+                height: 1000.0,
+            }),
+            ..Default::default()
+        };
+        save_to(&path, &prefs).unwrap();
+        assert_eq!(load_from(&path), prefs);
+    }
+
+    #[test]
+    fn config_without_window_bounds_loads_as_unset() {
+        // A config written by a pre-persistence binary must still parse — it just
+        // has no remembered geometry, so the window centers on its default size.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        std::fs::write(&path, r#"{"roster_collapsed":false,"roster_width":240.0}"#).unwrap();
+        // 240.0 is <= 410.0, so it migrates to 500.0. Let's make sure it's 500.0.
+        assert_eq!(load_from(&path).roster_width, default_roster_width());
+        assert_eq!(load_from(&path).window_bounds, None);
+    }
+
+    /// A typo in the one field we tell people to hand-edit must not cost them the
+    /// rest of the file. Without `lenient_editor` this resets width AND identities.
+    #[test]
+    fn a_nonsense_editor_value_does_not_discard_the_rest_of_the_prefs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        std::fs::write(
+            &path,
+            r#"{"editor":"Vim","inspector_width":333.0,"human":{"display_name":"Alice"}}"#,
+        )
+        .unwrap();
+        let prefs = load_from(&path);
+        assert_eq!(prefs.editor, crate::sys::EditorChoice::System);
+        assert_eq!(prefs.inspector_width, 333.0);
+        assert_eq!(prefs.human.display_name.as_deref(), Some("Alice"));
+    }
+
+    /// The hand-edit the docs actually invite, and the reason the field exists.
+    #[test]
+    fn a_hand_written_custom_editor_is_honoured() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        std::fs::write(&path, r#"{"editor":{"Custom":"kate -l {line} {file}"}}"#).unwrap();
+        assert_eq!(
+            load_from(&path).editor,
+            crate::sys::EditorChoice::Custom("kate -l {line} {file}".into())
+        );
+    }
+
+    #[test]
+    fn load_from_missing_returns_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nope.json");
+        assert_eq!(load_from(&path), ChamberPrefs::default());
+    }
+
+    #[test]
+    fn a_stored_410_roster_width_migrates_to_the_new_default() {
+        let dir = tempdir().unwrap();
+        // A chamber.json pinned at any old default (410, 450, 500) is bumped on load...
+        for old_default in ["410.0", "450.0", "500.0"] {
+            let old = dir.path().join(format!("old-{old_default}.json"));
+            std::fs::write(&old, format!(r#"{{"roster_width":{old_default}}}"#)).unwrap();
+            assert_eq!(load_from(&old).roster_width, default_roster_width());
+        }
+        // ...but a width the user chose themselves is preserved exactly.
+        let chosen = dir.path().join("chosen.json");
+        std::fs::write(&chosen, r#"{"roster_width":460.0}"#).unwrap();
+        assert_eq!(load_from(&chosen).roster_width, 460.0);
+    }
+
+    #[test]
+    fn save_then_load_from_round_trips_on_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub").join("chamber.json"); // parent created by save
+        let prefs = ChamberPrefs {
+            roster_collapsed: true,
+            ..Default::default()
+        };
+        save_to(&path, &prefs).unwrap();
+        assert_eq!(load_from(&path), prefs);
+    }
+
+    #[test]
+    fn malformed_file_falls_back_to_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(load_from(&path), ChamberPrefs::default());
+    }
+
+    #[test]
+    fn rename_quark_ids_moves_identity_to_the_new_key() {
+        let mut prefs = ChamberPrefs::default();
+        prefs.quarks.insert("agy".to_string(), Identity::default());
+        prefs.rename_quark_ids(hadron_lattice::legacy_id_renames());
+        assert!(
+            prefs.quarks.contains_key("cli-agy"),
+            "identity moved to the new id"
+        );
+        assert!(!prefs.quarks.contains_key("agy"), "old key gone");
+        // Idempotent: a second run finds nothing to move.
+        prefs.rename_quark_ids(hadron_lattice::legacy_id_renames());
+        assert!(prefs.quarks.contains_key("cli-agy"));
+    }
+
+    #[test]
+    fn typography_preferences_round_trip_and_default_to_none() {
+        let prefs = ChamberPrefs::default();
+        assert_eq!(prefs.ui_font_family, None);
+        assert_eq!(prefs.ui_font_size, None);
+        assert_eq!(prefs.mono_font_family, None);
+        assert_eq!(prefs.mono_font_size, None);
+
+        let custom = ChamberPrefs {
+            ui_font_family: Some("Geist".to_string()),
+            ui_font_size: Some(15.0),
+            mono_font_family: Some("JetBrains Mono".to_string()),
+            mono_font_size: Some(12.5),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        let loaded: ChamberPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.ui_font_family.as_deref(), Some("Geist"));
+        assert_eq!(loaded.ui_font_size, Some(15.0));
+        assert_eq!(loaded.mono_font_family.as_deref(), Some("JetBrains Mono"));
+        assert_eq!(loaded.mono_font_size, Some(12.5));
+    }
+
+    #[test]
+    fn theme_and_accent_preferences_round_trip() {
+        let prefs = ChamberPrefs::default();
+        assert_eq!(prefs.theme_preset, None);
+        assert_eq!(prefs.accent_choice, None);
+
+        let custom = ChamberPrefs {
+            theme_preset: Some(ThemePreset::Tokyo),
+            accent_choice: Some(AccentChoice::Sapphire),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        let loaded: ChamberPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.theme_preset, Some(ThemePreset::Tokyo));
+        assert_eq!(loaded.accent_choice, Some(AccentChoice::Sapphire));
+
+        assert_eq!(ThemePreset::from_str("oled"), Some(ThemePreset::Oled));
+        assert_eq!(
+            ThemePreset::from_str("OLED True Black"),
+            Some(ThemePreset::Oled)
+        );
+        assert_eq!(
+            ThemePreset::from_str("tokyo-dark"),
+            Some(ThemePreset::Tokyo)
+        );
+        assert_eq!(
+            ThemePreset::from_str("Tokyo Dark"),
+            Some(ThemePreset::Tokyo)
+        );
+        assert_eq!(
+            ThemePreset::from_str("Midnight Slate"),
+            Some(ThemePreset::Midnight)
+        );
+        assert_eq!(
+            ThemePreset::from_str("Obsidian Neutral"),
+            Some(ThemePreset::Obsidian)
+        );
+        assert_eq!(ThemePreset::from_str("nord"), Some(ThemePreset::Nord));
+        assert_eq!(ThemePreset::from_str("Nord Frost"), Some(ThemePreset::Nord));
+        assert_eq!(
+            ThemePreset::from_str("catppuccin"),
+            Some(ThemePreset::Catppuccin)
+        );
+        assert_eq!(
+            ThemePreset::from_str("Catppuccin Mocha"),
+            Some(ThemePreset::Catppuccin)
+        );
+        assert_eq!(ThemePreset::from_str("gruvbox"), Some(ThemePreset::Gruvbox));
+        assert_eq!(
+            ThemePreset::from_str("Gruvbox Dark"),
+            Some(ThemePreset::Gruvbox)
+        );
+        assert_eq!(AccentChoice::from_str("blue"), Some(AccentChoice::Sapphire));
+        assert_eq!(
+            AccentChoice::from_str("Sapphire"),
+            Some(AccentChoice::Sapphire)
+        );
+        assert_eq!(
+            AccentChoice::from_str("emerald"),
+            Some(AccentChoice::Emerald)
+        );
+        assert_eq!(
+            AccentChoice::from_str("Amethyst"),
+            Some(AccentChoice::Amethyst)
+        );
+    }
+
+    #[test]
+    fn test_custom_theme_definition_serde_and_hex_parsing() {
+        let theme = ThemeDefinition::preset_tokyo();
+        let json = serde_json::to_string(&theme).unwrap();
+        let loaded: ThemeDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.name, "Tokyo Dark");
+        assert_eq!(loaded.surfaces.canvas_base, "#0d0f18");
+        assert_eq!(loaded.status.success, "#73daca");
+        assert_eq!(loaded.status.error, "#f7768e");
+
+        let c1 = parse_hex_color("#c084fc").unwrap();
+        assert_eq!((c1.r * 255.0).round() as u8, 0xc0);
+        assert_eq!((c1.g * 255.0).round() as u8, 0x84);
+        assert_eq!((c1.b * 255.0).round() as u8, 0xfc);
+
+        let c2 = parse_hex_color("050505").unwrap();
+        assert_eq!((c2.r * 255.0).round() as u8, 0x05);
+
+        let formatted = format_rgba_hex(c1);
+        assert_eq!(formatted, "#c084fc");
+
+        assert_eq!(parse_hex_color("invalid"), None);
+    }
+
+    #[test]
+    fn test_new_adjustable_preferences_serde_roundtrip() {
+        let prefs = ChamberPrefs {
+            audio: crate::app::audio::AudioConfig {
+                enabled: true,
+                volume: 0.85,
+                haptic_enabled: true,
+                cue_gate_approval: true,
+                cue_merge_collision: false,
+                cue_turn_finish: true,
+                cue_blocked_on_human: true,
+                cue_message_received: true,
+                cue_message_sent: true,
+                sound_theme: SoundTheme::Synth,
+            },
+            turn_deadline_secs: Some(3600),
+            stale_after_secs: Some(300),
+            terminal_shell: Some("/usr/bin/zsh".to_string()),
+            terminal_cursor_style: TerminalCursorStyle::Underline,
+            terminal_scrollback: 10000,
+            chat_density: ChatDensity::Compact,
+            code_block_word_wrap: true,
+            timestamp_format: TimestampFormat::Relative,
+            auto_fold_reasoning: false,
+            git_auto_prune_worktrees: true,
+            git_author_name: Some("Hadron Orchestrator".to_string()),
+            git_author_email: Some("swarm@hadron.internal".to_string()),
+            desktop_notifications: true,
+            notify_on_blocked: true,
+            notify_on_turn_finish: false,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&prefs).expect("serialize prefs");
+        let loaded: ChamberPrefs = serde_json::from_str(&json).expect("deserialize prefs");
+        assert_eq!(prefs, loaded);
+
+        assert_eq!(
+            TerminalCursorStyle::from_str("block"),
+            Some(TerminalCursorStyle::Block)
+        );
+        assert_eq!(
+            TerminalCursorStyle::from_str("beam"),
+            Some(TerminalCursorStyle::Beam)
+        );
+        assert_eq!(
+            TerminalCursorStyle::from_str("underline"),
+            Some(TerminalCursorStyle::Underline)
+        );
+        assert_eq!(
+            TerminalCursorStyle::from_str("Beam (Vertical Line)"),
+            Some(TerminalCursorStyle::Beam)
+        );
+        assert_eq!(
+            TerminalCursorStyle::from_str("Block (Full Rectangle)"),
+            Some(TerminalCursorStyle::Block)
+        );
+        assert_eq!(
+            TerminalCursorStyle::from_str("Underline (Bottom Bar)"),
+            Some(TerminalCursorStyle::Underline)
+        );
+
+        assert_eq!(ChatDensity::from_str("compact"), Some(ChatDensity::Compact));
+        assert_eq!(
+            ChatDensity::from_str("comfortable"),
+            Some(ChatDensity::Comfortable)
+        );
+        assert_eq!(
+            ChatDensity::from_str("Comfortable (Standard Spacing)"),
+            Some(ChatDensity::Comfortable)
+        );
+        assert_eq!(
+            ChatDensity::from_str("Compact (Dense View)"),
+            Some(ChatDensity::Compact)
+        );
+
+        assert_eq!(
+            TimestampFormat::from_str("24h"),
+            Some(TimestampFormat::Clock24h)
+        );
+        assert_eq!(
+            TimestampFormat::from_str("12h"),
+            Some(TimestampFormat::Clock12h)
+        );
+        assert_eq!(
+            TimestampFormat::from_str("relative"),
+            Some(TimestampFormat::Relative)
+        );
+        assert_eq!(
+            TimestampFormat::from_str("24-Hour (15:04:05)"),
+            Some(TimestampFormat::Clock24h)
+        );
+        assert_eq!(
+            TimestampFormat::from_str("12-Hour (3:04:05 PM)"),
+            Some(TimestampFormat::Clock12h)
+        );
+        assert_eq!(
+            TimestampFormat::from_str("Relative (2m ago)"),
+            Some(TimestampFormat::Relative)
+        );
+
+        assert_eq!(SoundTheme::from_str("classic"), Some(SoundTheme::Classic));
+        assert_eq!(SoundTheme::from_str("synth"), Some(SoundTheme::Synth));
+        assert_eq!(SoundTheme::from_str("minimal"), Some(SoundTheme::Minimal));
+        assert_eq!(
+            SoundTheme::from_str("retro-8bit"),
+            Some(SoundTheme::Retro8Bit)
+        );
+        assert_eq!(
+            SoundTheme::from_str("Classic (Harmonic Chimes)"),
+            Some(SoundTheme::Classic)
+        );
+        assert_eq!(
+            SoundTheme::from_str("Synth (Electronic FM Blips)"),
+            Some(SoundTheme::Synth)
+        );
+        assert_eq!(
+            SoundTheme::from_str("Minimal (Soft Clicks & Pops)"),
+            Some(SoundTheme::Minimal)
+        );
+        assert_eq!(
+            SoundTheme::from_str("Retro 8-Bit (Arcade Bleeps)"),
+            Some(SoundTheme::Retro8Bit)
+        );
+    }
+
+    #[test]
+    fn test_repo_monitor_preferences_default_and_roundtrip() {
+        let prefs = ChamberPrefs::default();
+        assert!(prefs.repo_monitor);
+        assert_eq!(prefs.repo_monitor_interval_secs, 300);
+
+        let json = serde_json::to_string(&prefs).expect("serialize");
+        let loaded: ChamberPrefs = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(prefs.repo_monitor, loaded.repo_monitor);
+        assert_eq!(
+            prefs.repo_monitor_interval_secs,
+            loaded.repo_monitor_interval_secs
+        );
+    }
+
+    #[test]
+    fn test_recent_projects_and_remoting_preferences() {
+        let mut prefs = ChamberPrefs::default();
+        assert_eq!(prefs.startup_behavior, StartupBehavior::ProjectSelector);
+        assert!(prefs.recent_projects.is_empty());
+        assert_eq!(prefs.last_project(), None);
+
+        // Record a project
+        let p1 = RecentProject::new("/home/user/dev/p1", "p1");
+        prefs.record_project(p1.clone());
+        assert_eq!(prefs.recent_projects.len(), 1);
+        assert_eq!(prefs.last_project().unwrap().path, "/home/user/dev/p1");
+
+        // Record a second project
+        let p2 = RecentProject::new(r"\\wsl.localhost\Ubuntu\home\user\p2", "p2")
+            .with_remote(ProjectRemote::Wsl {
+                distro: "Ubuntu".to_string(),
+                linux_path: "/home/user/p2".to_string(),
+            })
+            .with_branch("main");
+        prefs.record_project(p2.clone());
+        assert_eq!(prefs.recent_projects.len(), 2);
+        assert_eq!(
+            prefs.last_project().unwrap().path,
+            r"\\wsl.localhost\Ubuntu\home\user\p2"
+        );
+
+        // Record p1 again -> moves to front (LRU)
+        prefs.record_project(p1.clone());
+        assert_eq!(prefs.recent_projects.len(), 2);
+        assert_eq!(prefs.last_project().unwrap().path, "/home/user/dev/p1");
+        assert_eq!(
+            prefs.recent_projects[1].path,
+            r"\\wsl.localhost\Ubuntu\home\user\p2"
+        );
+
+        // Serde round-trip
+        let json = serde_json::to_string(&prefs).expect("serialize");
+        let loaded: ChamberPrefs = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(prefs.recent_projects, loaded.recent_projects);
+        assert_eq!(prefs.startup_behavior, loaded.startup_behavior);
+
+        // Remove project
+        prefs.remove_project("/home/user/dev/p1");
+        assert_eq!(prefs.recent_projects.len(), 1);
+        assert_eq!(
+            prefs.last_project().unwrap().path,
+            r"\\wsl.localhost\Ubuntu\home\user\p2"
+        );
+
+        // StartupBehavior labels and parsing
+        assert_eq!(StartupBehavior::ALL.len(), 3);
+        assert_eq!(
+            StartupBehavior::ProjectSelector.label(),
+            "Project Selector (Welcome screen)"
+        );
+        assert_eq!(
+            StartupBehavior::from_str("project_selector"),
+            Some(StartupBehavior::ProjectSelector)
+        );
+        assert_eq!(
+            StartupBehavior::from_str("reopen-last"),
+            Some(StartupBehavior::ReopenLast)
+        );
+        assert_eq!(
+            StartupBehavior::from_str("cwd"),
+            Some(StartupBehavior::CurrentDir)
+        );
+        assert_eq!(StartupBehavior::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_install_or_system_dir_rejected_and_pruned_from_recent_projects() {
+        let win_install = Path::new(r"C:\Users\User\AppData\Local\Programs\Hadron");
+        assert!(is_install_or_system_dir(win_install, None));
+        assert!(is_install_or_system_dir(
+            Path::new("/home/user/.local/bin"),
+            None
+        ));
+        assert!(is_install_or_system_dir(
+            Path::new("/home/user/.cargo/bin"),
+            None
+        ));
+        assert!(is_install_or_system_dir(
+            Path::new("/opt/hadron/bin"),
+            Some(Path::new("/opt/hadron/bin"))
+        ));
+        assert!(!is_install_or_system_dir(
+            Path::new("/home/user/dev/project"),
+            Some(Path::new("/opt/hadron/bin"))
+        ));
+
+        // Recording an install dir is ignored
+        let mut prefs = ChamberPrefs::default();
+        prefs.record_project(RecentProject::new(
+            r"C:\Users\User\AppData\Local\Programs\Hadron",
+            "Hadron",
+        ));
+        assert!(prefs.recent_projects.is_empty());
+
+        // A config on disk polluted by an older Start Menu launch prunes the install dir on load
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chamber.json");
+        std::fs::write(
+            &path,
+            r#"{"recent_projects":[{"path":"C:\\Users\\User\\AppData\\Local\\Programs\\Hadron","display_name":"Hadron","last_opened_secs":100},{"path":"C:\\Users\\User\\dev\\my-app","display_name":"my-app","last_opened_secs":90}]}"#,
+        )
+        .unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(loaded.recent_projects.len(), 1);
+        assert_eq!(loaded.recent_projects[0].display_name, "my-app");
+    }
+
+    #[test]
+    fn show_console_window_defaults_to_false_and_round_trips() {
+        let prefs = ChamberPrefs::default();
+        assert!(!prefs.show_console_window, "default must be false");
+
+        let custom = ChamberPrefs {
+            show_console_window: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        assert!(json.contains("\"show_console_window\":true"));
+        let back: ChamberPrefs = serde_json::from_str(&json).unwrap();
+        assert!(back.show_console_window);
+    }
+
+    #[test]
+    fn chamber_prefs_v0_to_v1_migration_v1_roundtrip_and_future_version_rejection() {
+        // v0 payload (missing schema_version) migrates roster_width <= 410 and upgrades to v1
+        let v0_json = r#"{"roster_width":410.0,"inspector_width":320.0}"#;
+        let (prefs, migrated) = ChamberPrefs::from_versioned_json(v0_json).unwrap();
+        assert!(migrated, "v0 payload must report migrated = true");
+        assert_eq!(prefs.schema_version, CHAMBER_SCHEMA_VERSION);
+        assert_eq!(prefs.roster_width, default_roster_width());
+        assert_eq!(prefs.inspector_width, 320.0);
+
+        // v1 payload preserves a deliberate user-chosen roster_width <= 410 without clobbering it
+        let v1_json = r#"{"schema_version":1,"roster_width":350.0,"inspector_width":320.0}"#;
+        let (v1_prefs, v1_migrated) = ChamberPrefs::from_versioned_json(v1_json).unwrap();
+        assert!(!v1_migrated, "v1 payload must report migrated = false");
+        assert_eq!(v1_prefs.schema_version, CHAMBER_SCHEMA_VERSION);
+        assert_eq!(
+            v1_prefs.roster_width, 350.0,
+            "v1 must not clobber user-chosen roster_width"
+        );
+
+        // Future schema_version > 1 is rejected
+        let future_json = r#"{"schema_version":99,"roster_width":400.0}"#;
+        assert!(
+            ChamberPrefs::from_versioned_json(future_json).is_err(),
+            "future schema_version must be rejected"
+        );
+    }
+}

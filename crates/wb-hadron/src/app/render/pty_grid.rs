@@ -1,0 +1,506 @@
+use super::*;
+use gpui_kit::component::ActiveTheme;
+
+/// Layout mode for tiling multiple PTY terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PtySplitMode {
+    #[default]
+    Single,
+    Horizontal,
+    Vertical,
+    Grid,
+}
+
+impl PtySplitMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Single => Self::Horizontal,
+            Self::Horizontal => Self::Vertical,
+            Self::Vertical => Self::Grid,
+            Self::Grid => Self::Single,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Single => "⊡ Single",
+            Self::Horizontal => "⬒ Horizontal",
+            Self::Vertical => "⬓ Vertical",
+            Self::Grid => "⊞ Grid",
+        }
+    }
+}
+
+impl Chamber {
+    fn render_pty_card(&self, tab_ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(tab) = self.terminals.get(tab_ix) else {
+            return div().into_any_element();
+        };
+
+        let is_active = tab_ix == self.active_terminal_index;
+        let (border, header_bg): (gpui_kit::Hsla, gpui_kit::Hsla) = if is_active {
+            (theme::accent().into(), theme::bg_elevated().into())
+        } else {
+            (theme::glass_highlight(), theme::bg_surface().into())
+        };
+        let bg: gpui_kit::Hsla = theme::term_bg().into();
+
+        let pty_content = if let Some(term) = &tab.term {
+            let snap = term.snapshot();
+            let mut lines_div = v_flex()
+                .flex_1()
+                .size_full()
+                .min_h_0()
+                .min_w_0()
+                .p_2()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(px(11.0))
+                .line_height(px(14.0))
+                .overflow_hidden();
+
+            let mut has_text = false;
+            for line in &snap.lines {
+                let mut line_row = h_flex()
+                    .h(px(14.0))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .min_w_0();
+                let mut line_empty = true;
+                for run in &line.runs {
+                    if !run.text.is_empty() {
+                        line_empty = false;
+                        has_text = true;
+                        let fg_color = theme::resolve_term_color(run.fg);
+                        let mut run_div = div().text_color(fg_color);
+                        if let Some(bg_color) = theme::resolve_term_cell_bg(run.bg) {
+                            run_div = run_div.bg(bg_color);
+                        }
+                        if run.has_cursor {
+                            match self.prefs.terminal_cursor_style {
+                                crate::config::TerminalCursorStyle::Beam => {
+                                    run_div = run_div.border_l(px(2.0)).border_color(fg_color);
+                                }
+                                crate::config::TerminalCursorStyle::Block => {
+                                    run_div = run_div
+                                        .text_color(theme::resolve_term_color(run.bg))
+                                        .bg(fg_color);
+                                }
+                                crate::config::TerminalCursorStyle::Underline => {
+                                    run_div = run_div.border_b(px(2.0)).border_color(fg_color);
+                                }
+                            }
+                        }
+                        line_row = line_row.child(run_div.child(run.text.clone()));
+                    }
+                }
+                if line_empty {
+                    line_row = line_row.child(div().child(" "));
+                }
+                lines_div = lines_div.child(line_row);
+            }
+
+            if has_text {
+                lines_div.into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .p_2()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child("Terminal ready (idle)")
+                    .into_any_element()
+            }
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .p_2()
+                .text_xs()
+                .text_color(theme::text_muted())
+                .child("Starting shell / PTY process...")
+                .into_any_element()
+        };
+
+        let tab_title = tab.title.clone();
+        let (status_label, status_color, dims_label) = if let Some(term) = &tab.term {
+            let (cols, rows) = term.size();
+            (
+                if is_active { "Active" } else { "Running" },
+                if is_active {
+                    theme::accent()
+                } else {
+                    theme::success()
+                },
+                Some(format!("{cols}×{rows}")),
+            )
+        } else if tab.error.is_some() {
+            ("Error", theme::error(), None)
+        } else {
+            ("Starting", theme::warning(), None)
+        };
+        let view_entity = cx.entity().clone();
+        v_flex()
+            .id(SharedString::from(format!("pty-grid-card-{tab_ix}")))
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .size_full()
+            .rounded_lg()
+            .border_1()
+            .border_color(border)
+            .bg(bg)
+            .overflow_hidden()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_terminal(tab_ix, cx);
+                window.focus(&this.terminal_focus, cx);
+            }))
+            .on_scroll_wheel(cx.listener(
+                move |this, ev: &gpui_kit::ScrollWheelEvent, _window, cx| {
+                    if let Some(tab) = this.terminals.get(tab_ix) {
+                        if let Some(term) = &tab.term {
+                            let lines = match ev.delta {
+                                gpui_kit::ScrollDelta::Lines(delta) => (delta.y * 3.0) as i32,
+                                gpui_kit::ScrollDelta::Pixels(delta) => {
+                                    (f32::from(delta.y) / 14.0 * 3.0) as i32
+                                }
+                            };
+                            if lines != 0 {
+                                term.scroll(lines);
+                                cx.notify();
+                            }
+                        }
+                    }
+                },
+            ))
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .justify_between()
+                    .items_center()
+                    .px_2p5()
+                    .py_1()
+                    .bg(header_bg)
+                    .border_b_1()
+                    .border_color(theme::glass_highlight())
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .min_w_0()
+                            .child(div().size(px(6.0)).rounded_full().flex_shrink_0().bg(
+                                if is_active {
+                                    theme::halo_active()
+                                } else {
+                                    theme::halo_idle()
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(if is_active {
+                                        theme::accent()
+                                    } else {
+                                        theme::text()
+                                    })
+                                    .truncate()
+                                    .child(tab_title),
+                            )
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme::bg_base())
+                                    .text_size(px(10.0))
+                                    .text_color(status_color)
+                                    .child(status_label),
+                            )
+                            .when_some(dims_label, |this, dims| {
+                                this.child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::bg_base())
+                                        .text_size(px(10.0))
+                                        .text_color(theme::text_muted())
+                                        .child(dims),
+                                )
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pty-grid-clear-{tab_ix}")))
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|s| {
+                                        s.bg(theme::glass_surface()).text_color(theme::text())
+                                    })
+                                    .text_color(theme::text_muted())
+                                    .text_size(px(10.0))
+                                    .child("Clear")
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        if let Some(term) = this
+                                            .terminals
+                                            .get_mut(tab_ix)
+                                            .and_then(|t| t.term.as_mut())
+                                        {
+                                            term.scroll_to_bottom();
+                                            term.send_input(&[0x0c]);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pty-grid-sigint-{tab_ix}")))
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|s| {
+                                        s.bg(theme::glass_surface()).text_color(theme::warning())
+                                    })
+                                    .text_color(theme::text_muted())
+                                    .text_size(px(10.0))
+                                    .child("^C")
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        if let Some(term) = this
+                                            .terminals
+                                            .get_mut(tab_ix)
+                                            .and_then(|t| t.term.as_mut())
+                                        {
+                                            term.scroll_to_bottom();
+                                            term.send_input(&[0x03]);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pty-grid-close-{tab_ix}")))
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .hover(|s| {
+                                        s.bg(theme::glass_surface()).text_color(theme::text())
+                                    })
+                                    .text_color(theme::text_muted())
+                                    .text_xs()
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.close_terminal(tab_ix, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(pty_content)
+            .context_menu(move |mut menu, _, _| {
+                let v1 = view_entity.clone();
+                menu = menu.item(PopupMenuItem::new("Copy").on_click(move |_, window, cx| {
+                    v1.update(cx, |this, cx| {
+                        this.copy_terminal_selection_or_screen(Some(tab_ix), cx);
+                    });
+                    window.refresh();
+                }));
+                let v2 = view_entity.clone();
+                menu = menu.item(PopupMenuItem::new("Copy Screen").on_click(
+                    move |_, window, cx| {
+                        v2.update(cx, |this, cx| {
+                            this.copy_terminal_screen(Some(tab_ix), cx);
+                        });
+                        window.refresh();
+                    },
+                ));
+                let v3 = view_entity.clone();
+                menu = menu.item(PopupMenuItem::new("Paste").on_click(move |_, window, cx| {
+                    v3.update(cx, |this, cx| {
+                        this.paste_to_terminal(Some(tab_ix), cx);
+                    });
+                    window.refresh();
+                }));
+                menu
+            })
+            .into_any_element()
+    }
+
+    /// Renders the Multi-Quark PTY Grid (Capability #17, extended with Horizontal/Vertical/Grid splits).
+    pub(super) fn multi_pty_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.terminals.is_empty() {
+            return div()
+                .p_4()
+                .text_xs()
+                .text_color(theme::text_muted())
+                .child("No active PTY terminals")
+                .into_any_element();
+        }
+
+        match self.terminal_split_mode {
+            PtySplitMode::Horizontal => {
+                let mut row = h_flex().gap_2().w_full().size_full().min_w_0().min_h_0();
+                for tab_ix in 0..self.terminals.len() {
+                    row = row.child(self.render_pty_card(tab_ix, cx));
+                }
+                div()
+                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .track_focus(&self.terminal_focus)
+                    .on_key_down(cx.listener(Self::on_terminal_key))
+                    .child(row)
+                    .into_any_element()
+            }
+            PtySplitMode::Vertical => {
+                let mut col = v_flex().gap_2().w_full().size_full().min_w_0().min_h_0();
+                for tab_ix in 0..self.terminals.len() {
+                    col = col.child(self.render_pty_card(tab_ix, cx));
+                }
+                div()
+                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .track_focus(&self.terminal_focus)
+                    .on_key_down(cx.listener(Self::on_terminal_key))
+                    .child(col)
+                    .into_any_element()
+            }
+            PtySplitMode::Grid | PtySplitMode::Single => {
+                let num_terms = self.terminals.len();
+                let cols = if num_terms <= 1 { 1 } else { 2 };
+                let num_rows = (num_terms + cols - 1) / cols;
+
+                let mut grid_items = v_flex().gap_2().w_full().min_w_0();
+                if num_rows <= 2 {
+                    grid_items = grid_items.flex_1().min_h_0().size_full();
+                }
+
+                for (row_ix, chunk) in self.terminals.chunks(cols).enumerate() {
+                    let mut row = h_flex().gap_2().w_full().min_w_0();
+                    if num_rows <= 2 {
+                        row = row.flex_1().min_h_0().size_full();
+                    } else {
+                        row = row.flex_shrink_0().min_h(px(160.0)).h(px(180.0));
+                    }
+
+                    for (col_ix, _) in chunk.iter().enumerate() {
+                        let tab_ix = row_ix * cols + col_ix;
+                        row = row.child(self.render_pty_card(tab_ix, cx));
+                    }
+
+                    // Fill empty columns in the last row to keep aligned grid columns
+                    if chunk.len() < cols {
+                        for _ in 0..(cols - chunk.len()) {
+                            row = row.child(div().flex_1().min_w_0().min_h_0().size_full());
+                        }
+                    }
+
+                    grid_items = grid_items.child(row);
+                }
+
+                if num_rows <= 2 {
+                    div()
+                        .size_full()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .track_focus(&self.terminal_focus)
+                        .on_key_down(cx.listener(Self::on_terminal_key))
+                        .child(grid_items)
+                        .into_any_element()
+                } else {
+                    let scroll_container = div()
+                        .id("multi-pty-grid-scroll")
+                        .size_full()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_x_hidden()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.terminal_grid_scroll)
+                        .track_focus(&self.terminal_focus)
+                        .on_key_down(cx.listener(Self::on_terminal_key))
+                        .child(grid_items);
+
+                    div()
+                        .relative()
+                        .flex_1()
+                        .size_full()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(scroll_container)
+                        .child(
+                            div().absolute().top_0().bottom_0().right_0().child(
+                                Scrollbar::vertical(&self.terminal_grid_scroll)
+                                    .mode(ScrollbarMode::Always),
+                            ),
+                        )
+                        .into_any_element()
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pty_split_mode_cycle() {
+        assert_eq!(PtySplitMode::Single.next(), PtySplitMode::Horizontal);
+        assert_eq!(PtySplitMode::Horizontal.next(), PtySplitMode::Vertical);
+        assert_eq!(PtySplitMode::Vertical.next(), PtySplitMode::Grid);
+        assert_eq!(PtySplitMode::Grid.next(), PtySplitMode::Single);
+
+        assert_eq!(PtySplitMode::default(), PtySplitMode::Single);
+        assert_eq!(PtySplitMode::Horizontal.label(), "⬒ Horizontal");
+        assert_eq!(PtySplitMode::Vertical.label(), "⬓ Vertical");
+        assert_eq!(PtySplitMode::Grid.label(), "⊞ Grid");
+        assert_eq!(PtySplitMode::Single.label(), "⊡ Single");
+    }
+
+    #[test]
+    fn test_multi_terminal_grid_chunking() {
+        let titles = vec!["term-1", "term-2", "term-3"];
+        let cols = if titles.len() <= 1 { 1 } else { 2 };
+        let chunks: Vec<&[&str]> = titles.chunks(cols).collect();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 2);
+        assert_eq!(chunks[1].len(), 1);
+
+        let num_rows = (titles.len() + cols - 1) / cols;
+        assert_eq!(num_rows, 2);
+
+        // 4 terminals: 2 rows of 2
+        let titles_4 = vec!["t1", "t2", "t3", "t4"];
+        let chunks_4: Vec<&[&str]> = titles_4.chunks(2).collect();
+        assert_eq!(chunks_4.len(), 2);
+        assert_eq!(chunks_4[0].len(), 2);
+        assert_eq!(chunks_4[1].len(), 2);
+
+        // 5 terminals: 3 rows
+        let titles_5 = vec!["t1", "t2", "t3", "t4", "t5"];
+        let chunks_5: Vec<&[&str]> = titles_5.chunks(2).collect();
+        assert_eq!(chunks_5.len(), 3);
+        assert_eq!(chunks_5[2].len(), 1);
+    }
+}

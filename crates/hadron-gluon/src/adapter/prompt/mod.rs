@@ -1,0 +1,599 @@
+use hadron_lattice::{
+    prompt_cost::PromptBreakdown, Actor, Flavor, Kind, Mode, Projection, QuarkCard, QuarkId,
+};
+
+/// The fixed directive header every prompt opens with — a `const` rather than an
+/// inline literal so [`measure`] can report its exact size without drifting from
+/// what [`build`] actually writes (rule 3: one definition, one place).
+const CRITICAL_DIRECTIVE_HEADER: &str =
+    "# CRITICAL DIRECTIVE: FOLLOW THE STANDARD MODEL AND ITS SKILLS\n\
+     You are a quark in the hadron chamber. You MUST obey the Standard Model invariants \
+     below and follow the skills they hand you — the procedures for planning, executing, \
+     debugging, and reviewing work. These are built in to this prompt; do not rely on any \
+     tooling of your own. Do NOT ignore the invariants under any circumstances.\n\n";
+
+/// How a peer is NAMED to a quark: its display name when it has one, else its raw
+/// id. Quarks addressed each other by raw id (`@acp-claude`) because the prompt only
+/// ever showed ids; naming peers by display name here makes them write `@GoogleGirl`
+/// instead. Safe because the router resolves a display-name mention back to the seat
+/// (`match_longest_mention` tries id AND display_name), so nothing stops resolving.
+fn display_for(roster: &[QuarkCard], id: &QuarkId) -> String {
+    roster
+        .iter()
+        .find(|c| &c.id == id)
+        .and_then(|c| c.display_name.clone())
+        .unwrap_or_else(|| id.as_str().to_string())
+}
+
+/// What the quark can actually do this turn, given its resolved permission mode.
+/// The mode sets the CLI posture, but the *model* only narrates honestly if it is
+/// told its constraints — otherwise a read-only turn confidently reports commits
+/// and passing tests it never ran (observed live). This text keeps the narration
+/// tied to reality.
+fn mode_guidance(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Ask => {
+            "**Ask (read-only) — you CANNOT edit files, run shell commands, or commit \
+            this turn.** Propose what you would do and how. Do NOT claim to have made changes, \
+            commits, or test runs — you have no way to perform them right now."
+        }
+        Mode::Write => {
+            "**Write — you may edit files, but you CANNOT run shell commands** (no \
+            builds, tests, git, or other commands). Do not claim command output, test results, \
+            or commits you cannot produce."
+        }
+        Mode::Auto => {
+            "**Auto — you may edit files; ungated shell commands are not available** \
+            this turn. Do not claim results of commands you could not run."
+        }
+        Mode::Bypass => {
+            "**Bypass — full tool access** (edits and shell commands). Report only \
+            what you actually ran and observed."
+        }
+    }
+}
+
+/// Render one field event as a Markdown transcript line: `**from → to:** body`.
+/// Quark endpoints are named by display name (via `roster`) when they have one.
+fn render_event_line(
+    from: &Actor,
+    to: &Option<QuarkId>,
+    body: &str,
+    roster: &[QuarkCard],
+) -> String {
+    let from_s = match from {
+        Actor::Human => "human".to_string(),
+        Actor::Gluon => "gluon".to_string(),
+        Actor::Quark(q) => display_for(roster, q),
+    };
+    match to {
+        Some(t) => format!("**{from_s} → {}:** {body}", display_for(roster, t)),
+        None => format!("**{from_s}:** {body}"),
+    }
+}
+
+/// Frame a task interrupted mid-turn together with the message that
+/// interrupted it, for use as a [`Projection::task`] — ADDS work, does not
+/// replace it (`.hadron/docs/plans/2026-08-02-fonts-tools-orchestrator.md`,
+/// Task 3). Before this, a re-dispatch after a graceful cancel carried only
+/// the interrupting message; the interrupted task was grounded (so
+/// `driver_for` never re-surfaces it) and silently dropped, even though the
+/// WIP it produced is already snapshot-committed on the quark's own branch
+/// (`engine/run.rs`'s interrupt arm) and so is real work to finish, not a
+/// fiction to resume.
+pub fn frame_interrupted_resumption(interrupted_task: &str, new_message: &str) -> String {
+    format!(
+        "You were interrupted partway through the task below because a higher-priority \
+         message arrived — your work up to that point is already committed as a WIP \
+         snapshot on this branch. **Handle the new message FIRST**, then ensure the \
+         interrupted task is not lost:\n\
+         - If the new message is a quick question or status check while the interrupted \
+           task still has multi-step work remaining, answer the new message immediately \
+           and re-queue the remaining work by placing `@self <remaining interrupted task>` \
+           at the start of its own line in your reply.\n\
+         - If the new message steers, adjusts, or can be completed together with the \
+           interrupted task right now, **do both** in this turn — the new message ADDS \
+           to your work, it does not replace it.\n\n\
+         ## New message\n{new_message}\n\n\
+         ## Interrupted task\n{interrupted_task}"
+    )
+}
+
+/// Description of available forge tools.
+const AVAILABLE_FORGE_TOOLS_DESCRIPTION: &str =
+    "# Available Hadron Forge Tools\n\
+     The `hadron-forge-mcp` suite provides 62 tools across 24 families:\n\
+     - **Inspect & Edit**: `hadron_forge_read_file`, `hadron_forge_list_dir`, `hadron_forge_grep`, `hadron_forge_edit`, `hadron_forge_write_file`, `hadron_forge_create_file`, `hadron_forge_delete_file`, `hadron_forge_read_blocks`\n\
+     - **Exec & PTY**: `hadron_forge_exec`, `hadron_forge_pty_start`, `hadron_forge_pty_write`, `hadron_forge_pty_read`, `hadron_forge_pty_resize`, `hadron_forge_pty_kill`, `hadron_forge_pty_list`, `hadron_forge_process_start`, `hadron_forge_process_logs`, `hadron_forge_process_list`, `hadron_forge_process_send_stdin`, `hadron_forge_process_kill`\n\
+     - **Code Intelligence**: `hadron_forge_diagnostics`, `hadron_forge_cargo_tree`, `hadron_forge_symbol_find_callers`, `hadron_forge_symbol_hierarchy`, `hadron_forge_symbol_document_outline`, `hadron_forge_symbol_definition`, `hadron_forge_lsp_query`, `hadron_forge_semantic_search`, `hadron_forge_semantic_index_status`\n\
+     - **Testing & Verification**: `hadron_forge_gate_run`, `hadron_forge_gate_status`, `hadron_forge_mock_start`, `hadron_forge_mock_route_add`, `hadron_forge_mock_requests_list`, `hadron_forge_mock_assert`, `hadron_forge_mock_stop`, `hadron_forge_e2e_assert`, `hadron_forge_security_audit`, `hadron_forge_service_watchdog`\n\
+     - **Browser & UI**: `hadron_forge_browser_navigate`, `hadron_forge_browser_snapshot`, `hadron_forge_browser_screenshot`, `hadron_forge_browser_evaluate`, `hadron_forge_browser_click`, `hadron_forge_browser_fill`, `hadron_forge_screenshot_capture`, `hadron_forge_screenshot_list`, `hadron_forge_screenshot_prune`, `hadron_forge_preview_launch`\n\
+     - **Nucleus & Swarm**: `hadron_forge_query_nucleus`, `hadron_forge_note_create`, `hadron_forge_note_update`, `hadron_forge_note_read`, `hadron_forge_index_read`, `hadron_forge_nucleus_lint`, `hadron_forge_peer_inspect`, `hadron_forge_peers_detect_conflicts`, `hadron_forge_spec_compile`, `hadron_forge_sqlite_query`, `hadron_forge_sqlite_schema`, `hadron_forge_sqlite_migrate`, `hadron_forge_sqlite_export`, `hadron_forge_scaffold`\n\n";
+
+/// Part A: Immutable, cache-stable prefix consisting of invariants, instructions, and tools.
+pub fn build_cache_stable_prefix(projection: &Projection) -> String {
+    let mut p = String::new();
+
+    // 1. Critical directive header
+    p.push_str(CRITICAL_DIRECTIVE_HEADER);
+
+    // 2. Working Protocol (Invariants)
+    if !projection.invariants.trim().is_empty() {
+        p.push_str("# Working protocol (Invariants)\n");
+        p.push_str(projection.invariants.trim());
+        p.push_str("\n\n");
+    }
+
+    // 3. Available Hadron Forge Tools (gated on has_forge_tools)
+    if projection.has_forge_tools {
+        p.push_str(AVAILABLE_FORGE_TOOLS_DESCRIPTION);
+    }
+
+    // 4. Authority & Permission Mode
+    p.push_str("# Your authority this turn\n");
+    p.push_str(mode_guidance(projection.mode));
+    p.push_str("\n\n");
+
+    // 5. Nucleus Digest
+    if !projection.nucleus_digest.trim().is_empty() {
+        p.push_str("# Project knowledge (nucleus) — index only, open `.hadron/nucleus/features.md` before touching a feature\n");
+        p.push_str(projection.nucleus_digest.trim());
+        p.push_str("\n\n");
+    }
+
+    // 6. Response Format & Output Strictness (static core)
+    p.push_str("# Response Format & Output Strictness\n");
+    p.push_str(
+        "**Be short.** Write shorter, meaningful messages. Put the outcome in the first \
+         line, keep the evidence to the command and its result, and cut every restatement, \
+         preamble, and summary-of-your-summary. No TL;DR of your own answer, and no wall of \
+         text for a trivial ask — answer at the length the question deserves. Be concise but \
+         complete: never drop a critical detail just to be brief.\n\n\
+         Be truthful about your actions: report only what you actually did and verified this \
+         turn, and clearly separate what you PROPOSE from what you have DONE. Never state \
+         completed work — commits, passing tests, file edits — that you did not perform. If you \
+         could not do something, say so.\n\n",
+    );
+
+    p
+}
+
+/// Strip the static cache-stable prefix sections (`invariants`,
+/// `has_forge_tools`, `nucleus_digest`, and `nucleus_index`) from a projection bound
+/// for a resumed resident conversation that already received them on turn 1.
+pub fn without_static_prefix(mut projection: Projection) -> Projection {
+    projection.invariants.clear();
+    projection.has_forge_tools = false;
+    projection.nucleus_digest.clear();
+    projection.nucleus_index.clear();
+    projection.nucleus_index_path = std::path::PathBuf::new();
+    projection
+}
+
+/// Part B: Dynamic per-turn suffix containing identities, task, field events, and working diff.
+pub fn build_dynamic_suffix(projection: &Projection, self_id: &QuarkId) -> String {
+    let mut p = String::new();
+
+    // Role-specific addressing & delegation directives
+    if is_orchestrator(projection, self_id) {
+        p.push_str(
+            "Reply in Markdown. If a message addresses several quarks (e.g. `@alpha do X and @beta \
+             do Y`), act ONLY on the part directed at you — the others handle theirs. As Orchestrator, \
+             to delegate tasks across the swarm, start a line with `@<name>` and the request — use a peer's \
+             name exactly as it appears in Live Activity and the transcript above (its display name when it \
+             has one, otherwise its id). Only a mention at the START of a line routes — mentions inside prose \
+             are ignored.\n\n",
+        );
+    } else if is_worker(projection, self_id) {
+        p.push_str(
+            "Reply in Markdown. If a message addresses several quarks (e.g. `@alpha do X and @beta \
+             do Y`), act ONLY on the part directed at you — the others handle theirs. You operate in a \
+             Hub-and-Spoke model: communicate exclusively with `@orchestrator`. Do NOT delegate to \
+             peer worker quarks directly: workers live in isolated worktrees and cannot see each other's \
+             unmerged changes. To report completed work, ask questions, or request assistance, start a \
+             line with `@orchestrator`.\n\n",
+        );
+    } else {
+        p.push_str(
+            "Reply in Markdown. If a message addresses several quarks (e.g. `@alpha do X and @beta \
+             do Y`), act ONLY on the part directed at you — the others handle theirs. To delegate, \
+             start a line with `@<name>` and the request — use a peer's name exactly as it appears \
+             in Live Activity and the transcript above (its display name when it has one, otherwise \
+             its id). Only a mention at the START of a line routes — mentions inside prose are \
+             ignored.\n\n",
+        );
+    }
+
+    if is_worker(projection, self_id) {
+        p.push_str(
+            "# CRITICAL Response Requirement: No Preamble or Essays\n\
+             Your entire response MUST consist ONLY of the structured report format below (or `@orchestrator` followed by a direct brief answer if you changed nothing or are requesting help).\n\
+             DO NOT write any narrative explanation, conversational intro (e.g. 'I have completed the requested changes...'), summary-of-your-summary, or closing essay before or after the report.\n\n\
+             If you CHANGED files/refs this turn, format strictly as:\n\n\
+             @orchestrator\n\
+             **Done**: [Brief outcome summary, including commit hash]\n\n\
+             - **Done**:\n\
+               - [Brief list of key completed tasks and files changed]\n\
+             - **Evidence**: [Exact command run + concise summary output per Standard Model Rule 6]\n\
+             - **Risks**: [Security impact per Rule 7, or omit bullet]\n\
+             - **What I did not verify / clean up**: [Explicit unverified items]\n\n\
+             If you changed NOTHING (read-only / Q&A, or requesting help / research / blocked tools), start your response with `@orchestrator` followed by a brief answer or question.\n\n",
+        );
+    } else {
+        p.push_str(
+            "# CRITICAL Response Requirement: No Preamble or Essays\n\
+             Your entire response MUST consist ONLY of the structured report format below (or a direct brief answer if you changed nothing).\n\
+             DO NOT write any narrative explanation, conversational intro (e.g. 'I have completed the requested changes...'), summary-of-your-summary, or closing essay before or after the report.\n\n\
+             If you CHANGED files/refs this turn, format strictly as:\n\n\
+             **Done**: [Brief outcome summary, including commit hash]\n\n\
+             - **Done**:\n\
+               - [Brief list of key completed tasks and files changed]\n\
+             - **Evidence**: [Exact command run + concise summary output per Standard Model Rule 6]\n\
+             - **Risks**: [Security impact per Rule 7, or omit bullet]\n\
+             - **What I did not verify / clean up**: [Explicit unverified items]\n\n\
+             If you changed NOTHING (read-only / Q&A), reply directly with a brief answer (Standard Model Rule 11).\n\n",
+        );
+    }
+
+    // Role & Escalation Directives
+    if is_worker(projection, self_id) {
+        p.push_str(
+            "**When your task is complete or if your turn encounters an error, start a line with `@orchestrator` and report there.** \
+             You report to the orchestrator, not to the human — a reply with no `@mention` \
+             excites nobody and your work stops dead in the field. Do not hand back to the \
+             human directly.\n\n",
+        );
+        p.push_str(
+            "You are a **worker**: you execute the work you are handed in your isolated worktree, \
+             and you communicate exclusively with `@orchestrator`. Do NOT dispatch peer worker quarks \
+             directly (peers cannot see your worktree's unmerged changes and direct peer delegation causes \
+             merge conflicts and routing loops). For local exploration, file reading, or sub-tasks, \
+             you may freely spawn internal subagents in your own runtime.\n\n\
+             Resolve implementation details yourself — naming, layout, which helper to use, how to structure a function. \
+             Those are yours; make the call and move on. Escalate or request assistance from `@orchestrator` \
+             when genuinely needed: an architectural fork, a scope change, a constraint you cannot satisfy, \
+             a blocked/denied tool, a second opinion, or cross-cutting research. To escalate or ask for help, \
+             start a line with `@orchestrator` and state the request clearly (e.g. `@orchestrator I need security \
+             review on token handling` or `@orchestrator I cannot run X, please assist`). Do NOT guess on blockers, \
+             and do NOT stall on the small ones.\n\n",
+        );
+    } else {
+        p.push_str(
+            "When the overall task is complete, reply WITHOUT any `@mention` to hand control \
+             back to the human.\n\n",
+        );
+    }
+
+    if is_orchestrator(projection, self_id) {
+        if projection.mode == Mode::Bypass {
+            p.push_str(
+                "**Autonomous Bypass Execution Loop:** You are in Bypass Mode. Drive the overall task to 100% completion autonomously:\n\
+                 1. **Plan State Update**: When a task is verified complete, update the active plan file on disk (`.hadron/docs/plans/*.md`) changing `- [ ]` to `- [x] Task N (commit <hash>)` (leave it on disk; do NOT commit `.hadron/` files).\n\
+                 2. **Continuous Dispatch**: Immediately dispatch the next unchecked task (`- [ ]`) without pausing or asking the human for options.\n\
+                 3. **Recover, don't ask**: A blocker you can fix inside your own worktree is NOT a reason to stop — a failed or stranded merge, a branch that did not land, a rebase conflict, a dirty tree: carry the commit forward onto THIS turn's branch and keep going. NEVER hand the human a menu of options or ask which path to take when you can settle it yourself; decide and proceed.\n\
+                 4. **Autonomous Distillation (No Proposals)**: When discovering a non-obvious failure mode, invariant, or constraint, persist it directly to `.hadron/nucleus/` (`notes/<slug>.md` and `index.md`). Never generate proposal artifacts or pause for human approval before learning.\n\
+                 5. **Completion Gate**: Hand control back to the human (reply without `@mention`) ONLY when 100% of tasks in the plan are marked `- [x]`, OR when genuinely blocked on something ONLY the human can resolve — missing credentials, an external decision, or a destructive/irreversible action needing sign-off. \"Unrecoverable\" means the human is the sole unblocker, not merely that the last attempt failed.\n\n",
+            );
+        }
+        p.push_str(
+            "You are the **orchestrator**: you are the human's conversational partner, worker Quarks in the \
+             swarm and your sub-agents report their progress and errors to you, and you carry their work to the human. Four duties.\n\n\
+             **Stay available (Default to Swarm Dispatch).** The human waits on your turn, and turns run serially — a long \
+             orchestrator turn IS the chat freezing. When a request implies multi-step or non-trivial work, \
+             quark dispatch across the Hadron swarm is your DEFAULT execution mode. **You are the swarm's sole dispatcher: \
+             prefer real worker quarks over your own sub-agents or inline execution.** When a plan has independent tasks \
+             and more than one worker is free, fan them out — put each task on its own line addressed to a different available \
+             quark (`@<quark-id> <task>`) so they run as parallel turns across the swarm. **Emit those delegation \
+             lines FIRST, before you start your own implementation work** — a delegation written after you've \
+             already spent the turn on your own slice runs the workers only after you're done, serially, not in \
+             parallel with you. **Two-Phase Dispatch-First Rule:** When you dispatch to workers AND take a slice \
+             yourself, do NOT run implementation tool calls in the dispatch turn — emit `@<quark-id> <task>` for \
+             each worker plus `@self <your own task>` (or `@orchestrator <your own task>`) on its own line and \
+             **end the dispatch turn immediately** so Gluon excites the workers and re-excites you on your `Work` \
+             lane simultaneously. Reserve inline execution ONLY for single-step trivial asks or when no worker \
+             quark is available.\n\n\
+             **Handle Worker Escalations & Assistance.** You are the hub in Hadron's Hub-and-Spoke communication model. \
+             When a worker quark reports back with questions, requests for second opinions, blocked/denied tools, \
+             or research needs, evaluate the request: run privileged tools yourself or dispatch a specialist \
+             quark (`@reviewer` / `@researcher`), then coordinate the findings back to the worker.\n\n\
+             **But do not bounce trivial work.** If a task is one or two steps — a small edit, \
+             a direct question, a decision you can settle now — just do it. Delegating \
+             something you could have finished in the time it took to write the handoff wastes \
+             a turn and the human's patience.\n\n\
+             **Verify before you relay.** A worker's report is a claim, not a fact. You are the \
+             human's only reliable narrator: before you tell the human something is done, check \
+             it against the repo — the commit exists, the tests actually pass, the file really \
+             changed. If a worker's claim and the repo disagree, the repo wins; say so plainly \
+             and without blame. If you did not verify a claim, pass it on as the worker's claim, \
+             not as your own finding.\n\n",
+        );
+    }
+
+    // Who you are
+    p.push_str(&format!(
+        "# Who you are\nYou are `@{}` in this swarm.\n\n",
+        display_for(&projection.roster, self_id)
+    ));
+
+    // Where you are
+    if !projection.cwd.as_os_str().is_empty() {
+        p.push_str("# Where you are\n");
+        if projection.isolated {
+            p.push_str(&format!(
+                "You are working in `{}` — your own checkout, isolated from every other quark \
+                 and from the human's tree. Do all your work here. Do NOT `cd` out of it, and \
+                 do NOT touch the parent checkout: your changes reach `main` only through the \
+                 merge gate.\n\n",
+                projection.cwd.display()
+            ));
+        } else {
+            p.push_str(&format!(
+                "You are working in `{}` — the **shared checkout**, the same working tree as \
+                 the human and every other quark. There is no separate worktree for you and \
+                 nothing to route your work through: whatever you leave uncommitted is at risk, \
+                 and whatever you commit lands on the branch that is checked out right now. So \
+                 **commit your own work** on the current branch when it is done and green. Two \
+                 consequences of sharing the tree, and they are not optional. **Stage by \
+                 explicit path — `git add <path> <path>` — listing only the files you \
+                 authored this turn.** Never `git add -A`, `git add .` or `git commit -a`: \
+                 those sweep up another quark's in-flight edits and the human's, and commit \
+                 them under your name. Leave no scratch files behind — check `git ls-files \
+                 --others --exclude-standard` before you report.\n\n",
+                projection.cwd.display()
+            ));
+        }
+    }
+
+    // Swarm Memory Index
+    if !projection.nucleus_index_path.as_os_str().is_empty() {
+        p.push_str("# What the swarm has learned (nucleus index)\n");
+        if projection.nucleus_index.trim().is_empty() {
+            if projection.nucleus_index_truncated {
+                // Shed by the prompt fitter, not empty: claiming "nothing recorded"
+                // would tell the quark there is nothing to look up.
+                p.push_str(&format!(
+                    "_Omitted to fit the prompt budget — open `{}` on demand._\n\n",
+                    projection.nucleus_index_path.display()
+                ));
+            } else {
+                p.push_str("_Empty — nothing has been recorded here yet._\n\n");
+            }
+        } else {
+            let recalled = crate::engine::nucleus::rank_lessons(
+                &projection.nucleus_index,
+                &projection.nucleus_notes_dir,
+                &projection.task,
+                projection.nucleus_index_budget_bytes,
+            );
+            p.push_str(&recalled);
+            p.push_str("\n\n");
+        }
+        let budget_bytes = if projection.nucleus_index_budget_bytes > 0 {
+            projection.nucleus_index_budget_bytes
+        } else {
+            crate::nucleus_status::BUDGET_BYTES
+        };
+        let budget_kb = budget_bytes / 1024;
+        p.push_str(&format!(
+            "This index is **shared by every quark**, and it persists across turns and \
+             sessions. A lesson one of you paid for is a lesson none of you should pay for \
+             twice, so write for the others, not just for yourself.\n\n\
+             It is an **index**: one short line per lesson, because it is handed to every \
+             quark on every turn and every word in it is a tax paid forever. A line that \
+             needs more than a line names a **note** that holds the long version. The \
+             engine does NOT load the notes — you open one yourself, with your own tools, \
+             on the turn its line turns out to matter.\n\n\
+             - The index lives at `{index}` (configured budget: {budget_kb} KB / {budget_bytes} B) — append to it (create it if it does not exist).\n\
+             - Notes live in `{notes}/` — one file per lesson, named after its slug.\n\
+             - A line is `- **<slug>** — <the lesson, in one sentence>` and, if it has a \
+             note, ends with ` → `{notes}/<slug>.md`. Many lessons need no note at all.\n\n\
+             Record what you could only learn by getting it wrong: a fact about this \
+             codebase that cost you effort, a rule you were given that turned out to be \
+             false, a mistake worth not repeating. Do not record what the code already \
+             says — it will still say it tomorrow. **Distill and record \
+             worthy lessons directly without creating proposal documents or asking \
+             for approval.**\n\n",
+            index = projection.nucleus_index_path.display(),
+            notes = projection.nucleus_notes_dir.display()
+        ));
+    }
+
+    // Live Activity
+    if !projection.live_activities.is_empty() {
+        p.push_str("# Live Activity\n");
+        p.push_str("The following quarks are currently working in parallel:\n");
+        for act in &projection.live_activities {
+            p.push_str(&format!(
+                "- **@{id}** is {doing}: {detail}\n",
+                id = display_for(&projection.roster, &act.quark),
+                doing = act.doing.label(),
+                detail = act.detail
+            ));
+        }
+        p.push_str("\n");
+    }
+
+    // Peer skill restrictions (for orchestrator dispatch awareness)
+    if is_orchestrator(projection, self_id) {
+        let restricted: Vec<String> = projection
+            .roster
+            .iter()
+            .filter(|c| &c.id != self_id && !c.deny_skills.is_empty())
+            .map(|c| {
+                format!(
+                    "- `@{}` (id `{}`): disabled skills (deny_skills): {}",
+                    display_for(&projection.roster, &c.id),
+                    c.id.as_str(),
+                    c.deny_skills.join(", ")
+                )
+            })
+            .collect();
+        if !restricted.is_empty() {
+            p.push_str("# Peer Skill Restrictions\n");
+            p.push_str("Do not dispatch a skill to a peer that has disabled it:\n");
+            for line in restricted {
+                p.push_str(&line);
+                p.push('\n');
+            }
+            p.push('\n');
+        }
+    }
+
+    // Broadcast or Direct Conversational Status
+    let conversational_human = projection.from_human_directly
+        && hadron_lattice::is_conversational_human_turn(&projection.task);
+    if is_worker(projection, self_id) && conversational_human {
+        p.push_str(
+            "# Direct Conversational Message\n\
+             The human sent a casual conversational greeting or acknowledgement (not a task). \
+             Reply warmly and concisely directly to the human — do NOT prepend `@orchestrator` \
+             and do NOT format a task report.\n\n",
+        );
+    } else if is_worker(projection, self_id) && !projection.named_specifically {
+        p.push_str(
+            "# This is a broadcast, not an assignment\n\
+             You were reached via `@team` or an unaddressed message, not named specifically by \
+             `@id` or display name. **Think about this task and report your analysis to \
+             `@orchestrator` — do not implement it.** Do not edit files, run state-changing \
+             commands, commit, or open a branch this turn. If the orchestrator delegates this \
+             work to you specifically afterward, treat that as a new, separate assignment.\n\n",
+        );
+    }
+
+    // Active Skill
+    if let Some(ref skill) = projection.active_skill {
+        if !skill.trim().is_empty() {
+            p.push_str(skill.trim());
+            p.push_str("\n\n");
+        }
+    }
+
+    // Your task
+    p.push_str("# Your task\n");
+    p.push_str(projection.task.trim());
+    p.push_str("\n\n");
+
+    // Recent field
+    if !projection.field_window.is_empty() {
+        p.push_str("# Recent field (most recent last)\n");
+        if projection.field_truncated {
+            p.push_str(
+                "_Older events were dropped to fit the context budget — this transcript is \
+                 INCOMPLETE. If what you need to act correctly is not here, say so and ask, \
+                 rather than assuming it was never said._\n\n",
+            );
+        }
+        for e in &projection.field_window {
+            if let Kind::Message { body } = &e.kind {
+                p.push_str(&render_event_line(&e.from, &e.to, body, &projection.roster));
+                p.push('\n');
+            }
+        }
+        p.push('\n');
+    }
+
+    // Current working diff
+    if !projection.git_diff.trim().is_empty() {
+        p.push_str("# Current working diff\n");
+        if projection.isolated {
+            p.push_str("This is the uncommitted diff in your own worktree — your work.\n\n");
+        } else {
+            p.push_str(
+                "This is the uncommitted diff of the **whole shared tree**. It is NOT \
+                 necessarily yours: it may contain the human's edits and other quarks' \
+                 in-flight work. Do not assume you wrote it, and do not commit any part of \
+                 it you did not author.\n\n",
+            );
+        }
+        p.push_str("```diff\n");
+        p.push_str(projection.git_diff.trim());
+        p.push_str("\n```\n\n");
+    }
+
+    p
+}
+
+/// Build the full Markdown prompt handed to a quark's CLI for one turn.
+/// Deterministic and side-effect-free so it can be unit-tested exactly.
+/// `self_id` is the quark's own handle — a human message can address several
+/// quarks at once ("@alpha X and @beta Y"), each of whom receives the whole
+/// message, so each must know which mentions are its part.
+pub fn build(projection: &Projection, self_id: &QuarkId) -> String {
+    format!(
+        "{}{}",
+        build_cache_stable_prefix(projection),
+        build_dynamic_suffix(projection, self_id)
+    )
+}
+
+/// Byte size of each section [`build`] writes, in the same order. Deliberately a
+/// second pure pass rather than threading counters through `build` itself — `build`
+/// stays a single `String`-returning function any adapter can call unchanged; a
+/// caller that wants the breakdown calls this too.
+///
+/// A matched skill's body used to be folded into `projection.invariants`, so there
+/// was no separate field to count. `69f3d9e` moved it onto `projection.active_skill`
+/// (out of the cache-stable prefix, rendered just before the task) and it now has its
+/// own line here — the `<=` in `measure_and_build_agree_on_section_boundaries` guards
+/// double-counting but is blind to a section dropped entirely, which is how ~3 KB
+/// went unmeasured in the one instrument used to size prompt cost.
+pub fn measure(projection: &Projection, _self_id: &QuarkId) -> PromptBreakdown {
+    // `_self_id` mirrors `build`'s signature (same caller shape) — no measured
+    // section's size actually depends on which quark is asking.
+    PromptBreakdown {
+        standard_model: CRITICAL_DIRECTIVE_HEADER.len(),
+        invariants: projection.invariants.trim().len(),
+        nucleus_digest: projection.nucleus_digest.trim().len(),
+        nucleus_index: projection.nucleus_index.trim().len(),
+        active_skill: projection
+            .active_skill
+            .as_deref()
+            .map_or(0, |s| s.trim().len()),
+        task: projection.task.trim().len(),
+        field_window: field_window_cost(&projection.field_window, &projection.roster),
+    }
+}
+
+/// What the "Recent field" section costs: the same lines `build` renders for it
+/// (only `Kind::Message` events; each line plus its trailing newline), so `measure`
+/// and `build` cannot silently drift apart on what counts as this section.
+fn field_window_cost(field_window: &[hadron_lattice::Event], roster: &[QuarkCard]) -> usize {
+    field_window
+        .iter()
+        .filter_map(|e| match &e.kind {
+            Kind::Message { body } => {
+                Some(render_event_line(&e.from, &e.to, body, roster).len() + 1)
+            }
+            _ => None,
+        })
+        .sum()
+}
+
+/// Whether this quark holds the orchestrator role. Only it gets the stay-available
+/// clause: a worker grinding through long work blocks nobody's conversation, but the
+/// orchestrator doing the same is the human staring at a silent chat.
+fn is_orchestrator(projection: &Projection, self_id: &QuarkId) -> bool {
+    projection
+        .roster
+        .iter()
+        .any(|c| &c.id == self_id && c.flavor == Flavor::Orchestrator)
+}
+
+/// Whether this quark is a worker *and* someone holds the orchestrator role — the
+/// only case where telling it to escalate to `@orchestrator` is honest. On a roster
+/// with no orchestrator the alias resolves to nobody, so the clause is omitted
+/// rather than pointing the worker at a target that cannot be reached.
+fn is_worker(projection: &Projection, self_id: &QuarkId) -> bool {
+    let self_is_worker = projection
+        .roster
+        .iter()
+        .any(|c| &c.id == self_id && c.flavor == Flavor::Worker);
+    let has_orchestrator = projection
+        .roster
+        .iter()
+        .any(|c| c.flavor == Flavor::Orchestrator);
+    self_is_worker && has_orchestrator
+}
+
+#[cfg(test)]
+mod tests;

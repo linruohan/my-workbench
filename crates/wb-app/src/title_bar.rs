@@ -45,9 +45,10 @@ pub fn workbench_title_bar(
             div()
                 .flex()
                 .items_center()
-                .gap_1()
+                .gap_2()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
+                .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary))
                 .child("个人工作台")
                 .child(
                     div()

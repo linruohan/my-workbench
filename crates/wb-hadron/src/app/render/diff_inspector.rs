@@ -1,0 +1,618 @@
+use super::*;
+use gpui_kit::component::ActiveTheme;
+
+/// Alignment status of a 3-way diff hunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreeWayStatus {
+    Same,
+    OursModified,
+    TheirsModified,
+    Conflict,
+}
+
+/// A hunk comparing Base (ancestor), Ours (current worktree), and Theirs (target/incoming).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreeWayHunk {
+    pub line_number: usize,
+    pub base: String,
+    pub ours: String,
+    pub theirs: String,
+    pub status: ThreeWayStatus,
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedDiffFile {
+    pub file_path: String,
+    pub changed_hunks: Vec<ThreeWayHunk>,
+}
+
+pub(crate) struct CachedDiffInspector {
+    pub key: (std::path::PathBuf, String, String, Vec<String>),
+    pub files: Vec<CachedDiffFile>,
+}
+
+/// A file diff containing 3-way comparison hunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct ThreeWayFileDiff {
+    pub path: String,
+    pub hunks: Vec<ThreeWayHunk>,
+}
+
+/// Computes a line-by-line 3-way diff between base, ours, and theirs.
+pub fn compute_three_way_diff(base: &str, ours: &str, theirs: &str) -> Vec<ThreeWayHunk> {
+    let base_lines: Vec<&str> = base.lines().collect();
+    let ours_lines: Vec<&str> = ours.lines().collect();
+    let theirs_lines: Vec<&str> = theirs.lines().collect();
+
+    let max_len = base_lines
+        .len()
+        .max(ours_lines.len())
+        .max(theirs_lines.len());
+    let mut hunks = Vec::with_capacity(max_len);
+
+    for i in 0..max_len {
+        let b = base_lines.get(i).copied().unwrap_or("");
+        let o = ours_lines.get(i).copied().unwrap_or("");
+        let t = theirs_lines.get(i).copied().unwrap_or("");
+
+        let status = if o == b && t == b {
+            ThreeWayStatus::Same
+        } else if o != b && t == b {
+            ThreeWayStatus::OursModified
+        } else if o == b && t != b {
+            ThreeWayStatus::TheirsModified
+        } else if o == t {
+            ThreeWayStatus::OursModified // both made identical change
+        } else {
+            ThreeWayStatus::Conflict
+        };
+
+        hunks.push(ThreeWayHunk {
+            line_number: i + 1,
+            base: b.to_string(),
+            ours: o.to_string(),
+            theirs: t.to_string(),
+            status,
+        });
+    }
+
+    hunks
+}
+
+impl Chamber {
+    /// Renders the 3-Way Visual Diff Inspector section (Capability #12).
+    pub(super) fn git_diff_inspector_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mono_font = cx.theme().mono_font_family.clone();
+        let repo = crate::vcs::repo_root_of(&self.path);
+
+        // Determine which files to inspect:
+        // 1. If a branch is selected in Git view, inspect files changed in that branch relative to main.
+        // 2. Otherwise if working tree has changes, inspect working tree vs main/HEAD.
+        let (base_ref, theirs_ref, files_to_check): (&str, &str, Vec<String>) =
+            if let Some(ref branch) = self.git_selected_branch {
+                let files = match &self.git_branch_diff {
+                    Some(diffs) => diffs.iter().map(|d| d.path.clone()).collect(),
+                    None => Vec::new(),
+                };
+                ("main", branch.as_str(), files)
+            } else if let Some(ref diffs) = self.working_diff {
+                let files = diffs.iter().map(|d| d.path.clone()).collect();
+                ("main", "HEAD", files)
+            } else {
+                ("main", "HEAD", Vec::new())
+            };
+
+        if files_to_check.is_empty() {
+            return v_flex()
+                .size_full()
+                .p_6()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(theme::text())
+                        .child("No 3-Way Differences"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .text_center()
+                        .child("The working tree is clean relative to base `main`.\nSelect a branch in the Branches tab to compare 3-way alignment."),
+                )
+                .into_any_element();
+        }
+
+        let mut list = v_flex().gap_3().w_full();
+
+        let staged_count = self.diff_steering.staged_hunks().len();
+        let rejected_count = self.diff_steering.rejected_hunks().len();
+        let primary_file = files_to_check.first().cloned().unwrap_or_default();
+        let default_steer_quark = self
+            .view
+            .roster
+            .iter()
+            .find(|r| r.flavor == Some(hadron_lattice::Flavor::Orchestrator))
+            .or_else(|| self.view.roster.first())
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| "cli-agy".to_string());
+
+        if staged_count > 0 || rejected_count > 0 {
+            let file_for_directive = primary_file.clone();
+            let quark_for_directive = default_steer_quark.clone();
+            list = list.child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::bg_elevated())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .text_xs()
+                    .child(
+                        div()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(theme::accent())
+                            .child(format!(
+                                "Diff Steering Active: {} staged, {} rejected",
+                                staged_count, rejected_count
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id("diff-steer-dispatch-btn")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .bg(theme::accent())
+                                    .text_color(theme::field_base())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .child("Dispatch Directive")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let directive = this.diff_steering.dispatch_steering_directive(
+                                            &quark_for_directive,
+                                            &file_for_directive,
+                                        );
+                                        let draft_msg = this.diff_steering.draft_commit_message(
+                                            &format!("chore(steer): partial staging for {file_for_directive}"),
+                                        );
+                                        this.post_chat_message(
+                                            Actor::Human,
+                                            format!("{directive}\n{draft_msg}"),
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("diff-steer-clear-btn")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .bg(theme::bg_surface())
+                                    .border_1()
+                                    .border_color(theme::glass_highlight())
+                                    .text_color(theme::text_muted())
+                                    .hover(|s| s.text_color(theme::text()))
+                                    .child("Clear")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.diff_steering.clear();
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            );
+        }
+
+        // 3-Way Column Headers
+        list = list.child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded_md()
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::glass_highlight())
+                .text_xs()
+                .font_weight(gpui_kit::FontWeight::BOLD)
+                .child(
+                    div()
+                        .w(px(35.0))
+                        .text_color(theme::syntax_comment())
+                        .child("Line"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::syntax_comment())
+                        .child(format!("Base ({base_ref})")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::syntax_type())
+                        .child("Ours (Worktree)"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::syntax_literal())
+                        .child(format!("Theirs ({theirs_ref})")),
+                )
+                .child(
+                    div()
+                        .w(px(90.0))
+                        .text_right()
+                        .text_color(theme::text_muted())
+                        .child("Steer"),
+                ),
+        );
+
+        let cache_key = (
+            repo.to_path_buf(),
+            base_ref.to_string(),
+            theirs_ref.to_string(),
+            files_to_check.clone(),
+        );
+        let cached_files = self
+            .cached_three_way_diff
+            .borrow()
+            .as_ref()
+            .filter(|c| c.key == cache_key)
+            .map(|c| c.files.clone());
+
+        let Some(cached_files) = cached_files else {
+            if !self.cached_three_way_diff_loading.get() {
+                self.cached_three_way_diff_loading.set(true);
+                let repo_bg = repo.to_path_buf();
+                let base_bg = base_ref.to_string();
+                let theirs_bg = theirs_ref.to_string();
+                let files_bg = files_to_check.clone();
+                let key_bg = cache_key;
+                cx.spawn(async move |this, cx| {
+                    let files = cx
+                        .background_executor()
+                        .spawn(async move {
+                            files_bg
+                                .iter()
+                                .take(5)
+                                .map(|file_path| {
+                                    let base_content =
+                                        crate::vcs::show_file_at_ref(&repo_bg, &base_bg, file_path)
+                                            .unwrap_or_default();
+                                    let ours_content =
+                                        std::fs::read_to_string(repo_bg.join(file_path))
+                                            .unwrap_or_default();
+                                    let theirs_content = crate::vcs::show_file_at_ref(
+                                        &repo_bg, &theirs_bg, file_path,
+                                    )
+                                    .unwrap_or_default();
+                                    let all_hunks = compute_three_way_diff(
+                                        &base_content,
+                                        &ours_content,
+                                        &theirs_content,
+                                    );
+                                    let changed_hunks = all_hunks
+                                        .into_iter()
+                                        .filter(|h| h.status != ThreeWayStatus::Same)
+                                        .collect();
+                                    CachedDiffFile {
+                                        file_path: file_path.clone(),
+                                        changed_hunks,
+                                    }
+                                })
+                                .collect::<Vec<CachedDiffFile>>()
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.cached_three_way_diff_loading.set(false);
+                        *this.cached_three_way_diff.borrow_mut() =
+                            Some(CachedDiffInspector { key: key_bg, files });
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+
+            return v_flex()
+                .size_full()
+                .p_6()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(theme::text())
+                        .child("Loading 3-Way Diff…"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(format!(
+                            "Computing 3-way alignment for {theirs_ref} ⟷ {base_ref}"
+                        )),
+                )
+                .into_any_element();
+        };
+
+        let mut global_hunk_idx = 0usize;
+        for cached_file in &cached_files {
+            let file_path = &cached_file.file_path;
+            let changed_hunks = &cached_file.changed_hunks;
+            let changed_count = changed_hunks.len();
+
+            let mut file_card = v_flex()
+                .w_full()
+                .p_2()
+                .rounded_lg()
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::glass_highlight())
+                .gap_1p5();
+
+            file_card = file_card.child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(
+                                gpui_kit::img(crate::symbols::file_icon_path(file_path))
+                                    .size_3()
+                                    .flex_none(),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family(mono_font.clone())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::accent())
+                                    .child(file_path.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(mono_font.clone())
+                            .text_color(theme::text_muted())
+                            .child(format!("{} diff hunks", changed_count)),
+                    ),
+            );
+
+            let mut hunks_list = v_flex().gap_0p5().w_full();
+            let display_hunks: Vec<ThreeWayHunk> = changed_hunks.clone();
+
+            for hunk in display_hunks {
+                let hunk_idx = global_hunk_idx;
+                global_hunk_idx += 1;
+                let is_staged = self.diff_steering.is_staged(hunk_idx);
+                let is_rejected = self.diff_steering.is_rejected(hunk_idx);
+                let hunk_comment = self.diff_steering.get_hunk_comment(hunk_idx).cloned();
+
+                let bg_color = match hunk.status {
+                    ThreeWayStatus::Same => theme::term_bg(),
+                    ThreeWayStatus::OursModified => theme::info().opacity(0.10),
+                    ThreeWayStatus::TheirsModified => theme::git_added().opacity(0.10),
+                    ThreeWayStatus::Conflict => theme::git_deleted().opacity(0.15),
+                };
+
+                let base_str = if hunk.base.is_empty() {
+                    " ".to_string()
+                } else {
+                    hunk.base
+                };
+                let ours_str = if hunk.ours.is_empty() {
+                    " ".to_string()
+                } else {
+                    hunk.ours
+                };
+                let theirs_str = if hunk.theirs.is_empty() {
+                    " ".to_string()
+                } else {
+                    hunk.theirs
+                };
+
+                let steer_controls = h_flex()
+                    .w(px(90.0))
+                    .justify_end()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("steer-stage-{hunk_idx}")))
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .bg(if is_staged {
+                                theme::success().opacity(0.25)
+                            } else {
+                                theme::bg_elevated()
+                            })
+                            .border_1()
+                            .border_color(if is_staged {
+                                theme::success().into()
+                            } else {
+                                theme::glass_highlight()
+                            })
+                            .text_color(if is_staged {
+                                theme::success()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .child("✓")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.diff_steering.is_staged(hunk_idx) {
+                                    this.diff_steering.unstage_hunk(hunk_idx);
+                                } else {
+                                    this.diff_steering.stage_hunk(hunk_idx);
+                                    let _ = this.diff_steering.toggle_hunk(hunk_idx);
+                                    this.diff_steering.stage_hunk(hunk_idx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("steer-reject-{hunk_idx}")))
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .bg(if is_rejected {
+                                theme::error().opacity(0.25)
+                            } else {
+                                theme::bg_elevated()
+                            })
+                            .border_1()
+                            .border_color(if is_rejected {
+                                theme::error().into()
+                            } else {
+                                theme::glass_highlight()
+                            })
+                            .text_color(if is_rejected {
+                                theme::error()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .child("✕")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.diff_steering.is_rejected(hunk_idx) {
+                                    this.diff_steering.unstage_hunk(hunk_idx);
+                                } else {
+                                    this.diff_steering.reject_hunk(hunk_idx);
+                                    this.diff_steering
+                                        .set_hunk_comment(hunk_idx, "Revise or revert this hunk");
+                                }
+                                cx.notify();
+                            })),
+                    );
+
+                hunks_list = hunks_list.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(bg_color)
+                        .text_xs()
+                        .font_family(mono_font.clone())
+                        .child(
+                            div()
+                                .w(px(35.0))
+                                .text_color(theme::syntax_comment())
+                                .child(hunk.line_number.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .text_color(theme::text_muted())
+                                .child(crate::syntax::highlight_code_line_element(
+                                    &base_str,
+                                    Some(file_path),
+                                )),
+                        )
+                        .child(div().flex_1().truncate().text_color(theme::text()).child(
+                            crate::syntax::highlight_code_line_element(&ours_str, Some(file_path)),
+                        ))
+                        .child(div().flex_1().truncate().text_color(theme::text()).child(
+                            crate::syntax::highlight_code_line_element(
+                                &theirs_str,
+                                Some(file_path),
+                            ),
+                        ))
+                        .child(steer_controls)
+                        .when_some(hunk_comment, |row, comment| {
+                            row.child(
+                                div()
+                                    .max_w(px(120.0))
+                                    .truncate()
+                                    .text_color(theme::warning())
+                                    .child(comment),
+                            )
+                        }),
+                );
+            }
+
+            file_card = file_card.child(hunks_list);
+            list = list.child(file_card);
+        }
+
+        v_flex()
+            .gap_2()
+            .w_full()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(theme::text())
+                            .child("3-Way Visual Diff Inspector (Base · Ours · Theirs)"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(mono_font.clone())
+                            .text_color(theme::accent())
+                            .child(format!("{theirs_ref} ⟷ {base_ref}")),
+                    ),
+            )
+            .child(list)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_three_way_diff_clean_and_conflict() {
+        let base = "line1\nline2\nline3";
+        let ours = "line1\nline2_ours\nline3";
+        let theirs = "line1\nline2_theirs\nline3";
+
+        let hunks = compute_three_way_diff(base, ours, theirs);
+        assert_eq!(hunks.len(), 3);
+        assert_eq!(hunks[0].status, ThreeWayStatus::Same);
+        assert_eq!(hunks[1].status, ThreeWayStatus::Conflict);
+        assert_eq!(hunks[2].status, ThreeWayStatus::Same);
+    }
+
+    #[test]
+    fn test_compute_three_way_diff_ours_only() {
+        let base = "a\nb";
+        let ours = "a_mod\nb";
+        let theirs = "a\nb";
+
+        let hunks = compute_three_way_diff(base, ours, theirs);
+        assert_eq!(hunks[0].status, ThreeWayStatus::OursModified);
+        assert_eq!(hunks[1].status, ThreeWayStatus::Same);
+    }
+}

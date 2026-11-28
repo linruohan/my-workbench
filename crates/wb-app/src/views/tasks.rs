@@ -1,5 +1,6 @@
 use super::task_form::TaskForm;
 use crate::state::{AppNav, AppState};
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -1546,15 +1547,23 @@ impl TasksPane {
     }
 
     /// Title stays on one line so the view buttons beside it are not pushed off.
-    fn header_title(&self, title: String) -> impl IntoElement {
-        div()
+    /// 前面加一根 3px 强调色竖条，作为 Hadron 风格的页面标识。
+    fn header_title(&self, title: String, accent: Hsla) -> impl IntoElement {
+        h_flex()
             .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_xl()
-            .font_bold()
-            .child(title)
+            .items_center()
+            .gap_2()
+            .child(div().w(px(3.)).h(px(18.)).rounded_full().bg(accent))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_xl()
+                    .font_bold()
+                    .child(title),
+            )
     }
 
     /// Title, count, and view switcher that used to sit under the page bar.
@@ -1584,7 +1593,7 @@ impl TasksPane {
                 .min_w_0()
                 .items_center()
                 .gap_2()
-                .child(self.header_title(title))
+                .child(self.header_title(title, cx.theme().primary))
                 .child(div().flex_1())
                 .child(
                     Button::new("project-new-task")
@@ -1635,7 +1644,7 @@ impl TasksPane {
             .min_w_0()
             .items_center()
             .gap_2()
-            .child(self.header_title(title))
+            .child(self.header_title(title, cx.theme().primary))
             .child(
                 Tag::secondary()
                     .small()
@@ -1714,8 +1723,8 @@ impl Render for TasksPane {
         let today = self.state.today();
         let stats = compute_task_stats(&self.task_cache, &today);
         let projects = self.state.with(|s| s.repo.list_projects());
-        let radius = cx.theme().radius;
-        let border = cx.theme().border;
+        let radius = style::card_radius(cx);
+        let border = style::hairline(cx);
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
         let (focus_mode, proactive, nav) = self.state.with(|s| {
@@ -1977,7 +1986,7 @@ impl Render for TasksPane {
                             .rounded(radius)
                             .border_1()
                             .border_color(border)
-                            .bg(cx.theme().secondary.opacity(0.28))
+                            .bg(style::card(cx).opacity(0.55))
                             .overflow_y_scrollbar()
                             .child(
                                 h_flex()
@@ -2212,7 +2221,7 @@ impl Render for TasksPane {
                             .bg(if alert {
                                 cx.theme().danger.opacity(0.12)
                             } else {
-                                cx.theme().secondary.opacity(0.35)
+                                style::card(cx).opacity(0.7)
                             })
                             .child(div().text_xs().text_color(muted).child(k))
                             .child(div().text_xl().font_bold().child(v))

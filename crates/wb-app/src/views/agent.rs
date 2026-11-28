@@ -1,5 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::state::{AppNav, AppState};
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{
@@ -2715,10 +2716,11 @@ impl AgentPane {
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
         let primary = cx.theme().primary;
-        let secondary = cx.theme().secondary;
+        let secondary = style::card(cx);
         let success = cx.theme().success;
         let danger_theme = cx.theme().danger;
         let border = cx.theme().border;
+        let hairline = style::hairline(cx);
         let danger = cx.theme().danger;
         let foreground = cx.theme().foreground;
         let background = cx.theme().background;
@@ -2839,7 +2841,7 @@ impl AgentPane {
                     .py_0p5()
                     .rounded_full()
                     .border_1()
-                    .border_color(border)
+                    .border_color(hairline)
                     .child(
                         div()
                             .text_xs()
@@ -2868,7 +2870,7 @@ impl AgentPane {
                     .p_2()
                     .rounded(radius)
                     .border_1()
-                    .border_color(border)
+                    .border_color(hairline)
                     .items_center()
                     .child(
                         v_flex()
@@ -3014,7 +3016,7 @@ impl AgentPane {
                     .w(px(240.))
                     .h_full()
                     .border_r_1()
-                    .border_color(border)
+                    .border_color(hairline)
                     .p_3()
                     .gap_2()
                     .child(
@@ -3142,7 +3144,7 @@ impl AgentPane {
                                         .py_0p5()
                                         .rounded_full()
                                         .border_1()
-                                        .border_color(border)
+                                        .border_color(hairline)
                                         .child(
                                             div()
                                                 .text_xs()
@@ -3301,7 +3303,7 @@ impl AgentPane {
                                 .p_2()
                                 .rounded(radius)
                                 .border_1()
-                                .border_color(border)
+                                .border_color(hairline)
                                 .children(todos_all.iter().map(|todo| {
                                     let mark = match todo.status.as_str() {
                                         "completed" => "✓",
@@ -3337,7 +3339,7 @@ impl AgentPane {
                                 .w_full()
                                 .rounded(radius)
                                 .border_1()
-                                .border_color(border)
+                                .border_color(hairline)
                                 .overflow_hidden()
                                 .child(webview_el.expect("webview when has_web")),
                         )
@@ -3364,7 +3366,7 @@ impl AgentPane {
                                 .p_2()
                                 .rounded(radius)
                                 .border_1()
-                                .border_color(border)
+                                .border_color(hairline)
                                 .max_h(px(180.))
                                 .child(
                                     h_flex()
@@ -3535,7 +3537,7 @@ impl AgentPane {
                                         .p_1()
                                         .rounded(radius)
                                         .border_1()
-                                        .border_color(border)
+                                        .border_color(hairline)
                                         .child(
                                             div()
                                                 .flex_1()
@@ -3596,7 +3598,7 @@ impl AgentPane {
                                 .p_2()
                                 .rounded(radius)
                                 .border_1()
-                                .border_color(border)
+                                .border_color(hairline)
                                 .bg(secondary)
                                 // Cap the list so a long catalogue scrolls instead of
                                 // pushing the composer off screen.
@@ -3652,7 +3654,7 @@ impl AgentPane {
                                 .p_2()
                                 .rounded(radius)
                                 .border_1()
-                                .border_color(border)
+                                .border_color(hairline)
                                 .bg(secondary)
                                 .max_h(px(220.))
                                 .overflow_y_scrollbar()
@@ -3873,7 +3875,7 @@ impl AgentPane {
                                             .gap_1()
                                             .pb_1p5()
                                             .border_b_1()
-                                            .border_color(border)
+                                            .border_color(hairline)
                                             .child(
                                                 div()
                                                     .text_xs()

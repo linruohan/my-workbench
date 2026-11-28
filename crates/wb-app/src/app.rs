@@ -1,9 +1,10 @@
 use crate::command_palette::CommandPalette;
 use crate::state::{AppNav, AppState};
+use crate::style;
 use crate::themes;
 use crate::title_bar::workbench_title_bar;
 use crate::tray::{self, TrayAction};
-use crate::views::{AgentPane, InspectorPane, KnowledgePane, SettingsPane, TasksPane, TimedPane};
+use crate::views::{KnowledgePane, SettingsPane, TasksPane, TimedPane};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::sidebar::{
@@ -47,38 +48,7 @@ fn recording_chip(bg: Hsla, fg: Hsla) -> impl IntoElement {
         )
 }
 
-/// Corner washes in the same hues Hadron keeps on the black field: violet and green
-/// at low alpha, so the canvas stays dark but is not a flat fill.
-fn field_wash(dark: bool) -> impl IntoElement {
-    div().absolute().size_full().when(dark, |layer| {
-        layer
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size(px(520.))
-                    .bg(linear_gradient(
-                        135.,
-                        linear_color_stop(rgba(0xa87ffb24), 0.),
-                        linear_color_stop(rgba(0x00000000), 1.),
-                    )),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .right_0()
-                    .size(px(480.))
-                    .bg(linear_gradient(
-                        315.,
-                        linear_color_stop(rgba(0x62c07318), 0.),
-                        linear_color_stop(rgba(0x00000000), 1.),
-                    )),
-            )
-    })
-}
-
+/// 导航缓存的键：仓库修订号 + 今天日期。
 struct NavCache {
     revision: u64,
     today: String,
@@ -96,9 +66,12 @@ pub struct WorkbenchApp {
     tasks: Entity<TasksPane>,
     timed: Entity<TimedPane>,
     knowledge: Entity<KnowledgePane>,
-    agent: Entity<AgentPane>,
+    /// Hadron 聊天区与右侧栏（替代原 AgentPane + InspectorPane）。
+    chamber: Entity<wb_hadron::app::Chamber>,
+    /// 首次启动时由本进程拉起的 gluon 守护进程句柄（已有守护进程时为 None）。
+    /// 仅用于持有子进程，避免提前回收。
+    _gluon: Option<std::process::Child>,
     settings: Entity<SettingsPane>,
-    inspector: Entity<InspectorPane>,
     palette: Entity<CommandPalette>,
     /// Sidebar counts and project names for the current repo revision and day.
     nav_cache: Option<NavCache>,
@@ -107,10 +80,6 @@ pub struct WorkbenchApp {
 }
 
 impl WorkbenchApp {
-    pub fn refresh_agent_branch(&mut self, cx: &mut Context<Self>) {
-        self.agent.update(cx, |pane, cx| pane.invalidate_branch(cx));
-    }
-
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::load();
         let collapsed = state.with(|s| s.prefs.sidebar_collapsed);
@@ -120,12 +89,19 @@ impl WorkbenchApp {
         let tasks = cx.new(|cx| TasksPane::new(state.clone(), window, cx));
         let timed = cx.new(|cx| TimedPane::new(state.clone(), window, cx));
         let knowledge = cx.new(|cx| KnowledgePane::new(state.clone(), window, cx));
-        let agent = cx.new(|cx| AgentPane::new(state.clone(), window, cx));
-        let host = cx.weak_entity();
-        agent.update(cx, |pane, _| pane.bind_host(host.clone()));
-        timed.update(cx, |timed, _| timed.bind_agent(agent.clone()));
         let settings = cx.new(|cx| SettingsPane::new(state.clone(), window, cx));
-        let inspector = cx.new(|cx| InspectorPane::new(state.clone(), host.clone(), window, cx));
+
+        // Hadron 聊天区 + 右侧栏：初始化字体/快捷键并构建嵌入式 Chamber。
+        // 工作目录取自启动目录（即当前工作台仓库根），field 落在 `.hadron/field.jsonl`。
+        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        wb_hadron::app::init_embedded(cx, &repo_root);
+        wb_hadron::app::bind_embedded_keys(cx);
+        let chamber_init = wb_hadron::app::prepare_embedded(&repo_root);
+        let chamber = cx.new(|cx| wb_hadron::app::Chamber::embedded(chamber_init, window, cx));
+        // 确保守护进程在跑，否则聊天只写 field、收不到回复。
+        let gluon = wb_hadron::app::ensure_daemon_for_repo(&repo_root);
+
+        let host = cx.weak_entity();
         let tasks_for_palette = tasks.downgrade();
         let palette = cx.new(|cx| {
             CommandPalette::new(state.clone(), host.clone(), tasks_for_palette, window, cx)
@@ -229,9 +205,9 @@ impl WorkbenchApp {
             tasks,
             timed,
             knowledge,
-            agent,
+            chamber,
+            _gluon: gluon,
             settings,
-            inspector,
             palette,
             nav_cache: None,
             _tray: tray_icon,
@@ -307,9 +283,8 @@ impl WorkbenchApp {
         });
     }
 
-    fn flush_persistent_state(&mut self, cx: &mut Context<Self>) {
+    fn flush_persistent_state(&mut self, _cx: &mut Context<Self>) {
         self.checkpoint_timer();
-        self.agent.update(cx, |pane, cx| pane.flush_composer(cx));
         self.state.remember_session();
         self.state.persist_blocking();
     }
@@ -317,7 +292,6 @@ impl WorkbenchApp {
     fn on_tick(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
         self.checkpoint_timer();
-        self.agent.update(cx, |pane, cx| pane.flush_composer(cx));
         self.timed.update(cx, |timed, cx| timed.tick_due(cx));
         // Keep timer UI fresh while a timer is running.
         let timing = self.state.with(|s| s.active_timer.is_some());
@@ -416,9 +390,6 @@ impl WorkbenchApp {
     }
 
     fn set_nav(&mut self, nav: AppNav, cx: &mut Context<Self>) {
-        if nav != AppNav::Agent {
-            self.agent.update(cx, |pane, cx| pane.hide_webview(cx));
-        }
         self.state.with_mut(|s| {
             if nav == AppNav::Settings && s.nav != AppNav::Settings {
                 s.nav_before_settings = s.nav;
@@ -482,10 +453,6 @@ impl WorkbenchApp {
         cx.notify();
     }
 
-    pub(crate) fn toggle_right_collapsed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_right_collapsed(!self.right_collapsed, window, cx);
-    }
-
     /// Show or hide the Agent right rail. Hidden means the panel is gone, not a thin strip.
     pub(crate) fn set_right_collapsed(
         &mut self,
@@ -531,7 +498,7 @@ impl WorkbenchApp {
 }
 
 impl Render for WorkbenchApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = self.state.with(|s| s.nav);
         let width = self
             .state
@@ -707,7 +674,10 @@ impl Render for WorkbenchApp {
         let main_view = match nav {
             AppNav::Timed => self.timed.clone().into_any_element(),
             AppNav::Knowledge => self.knowledge.clone().into_any_element(),
-            AppNav::Agent => self.agent.clone().into_any_element(),
+            // Agent 主区：hadron 聊天区（消息流 + 搜索 + 输入框）。
+            AppNav::Agent => self.chamber.update(cx, |chamber, cx| {
+                chamber.render_chat_surface(window, cx).into_any_element()
+            }),
             AppNav::Settings => self.settings.clone().into_any_element(),
             _ => self.tasks.clone().into_any_element(),
         };
@@ -718,14 +688,13 @@ impl Render for WorkbenchApp {
             Vec::new()
         };
 
-        let dark = cx.theme().mode.is_dark();
         div()
             .id("workbench-root")
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(cx.theme().background)
-            .child(field_wash(dark))
+            .bg(style::canvas(cx))
+            .child(style::field_wash(cx))
             .track_focus(&cx.focus_handle())
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(window, cx);
@@ -741,8 +710,8 @@ impl Render for WorkbenchApp {
                 let nav = this.state.with(|s| s.nav);
                 match nav {
                     AppNav::Agent => {
-                        this.agent
-                            .update(cx, |agent, cx| agent.focus_composer(window, cx));
+                        this.chamber
+                            .update(cx, |chamber, cx| chamber.focus_chat_input(window, cx));
                     }
                     AppNav::Today
                     | AppNav::Inbox
@@ -761,8 +730,9 @@ impl Render for WorkbenchApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &EditLastMessage, window, cx| {
-                this.agent
-                    .update(cx, |agent, cx| agent.edit_last_user_message(window, cx));
+                // hadron 输入框没有「编辑上一条」语义，退化为聚焦输入框。
+                this.chamber
+                    .update(cx, |chamber, cx| chamber.focus_chat_input(window, cx));
             }))
             .child(
                 v_flex()
@@ -774,12 +744,18 @@ impl Render for WorkbenchApp {
                         cx,
                     ))
                     .child(
-                        div().h(px(1.)).w_full().flex().justify_center().child(
-                            div()
-                                .h_full()
-                                .w(px(180.))
-                                .bg(cx.theme().primary.opacity(0.45)),
-                        ),
+                        div()
+                            .h(px(1.))
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .bg(style::hairline(cx))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(220.))
+                                    .bg(cx.theme().primary.opacity(0.35)),
+                            ),
                     )
                     .child(
                         div()
@@ -790,10 +766,10 @@ impl Render for WorkbenchApp {
                                 div()
                                     .size_full()
                                     .overflow_hidden()
-                                    .rounded(cx.theme().radius_lg)
+                                    .rounded(style::panel_radius(cx))
                                     .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
+                                    .border_color(style::hairline(cx))
+                                    .bg(style::panel(cx))
                                     .child(self.settings.clone())
                                     .into_any_element()
                             } else {
@@ -894,8 +870,8 @@ impl Render for WorkbenchApp {
                                 };
                                 let recording_bg = cx.theme().danger;
                                 let recording_fg = cx.theme().danger_foreground;
-                                let panel_radius = cx.theme().radius_lg;
-                                let panel_border = cx.theme().border;
+                                let panel_radius = style::panel_radius(cx);
+                                let panel_border = style::hairline(cx);
                                 let main =
                                     v_flex()
                                         .flex_1()
@@ -905,7 +881,7 @@ impl Render for WorkbenchApp {
                                         .rounded(panel_radius)
                                         .border_1()
                                         .border_color(panel_border)
-                                        .bg(cx.theme().secondary)
+                                        .bg(style::panel(cx))
                                         .when_some(page_header, |col, header| {
                                             col.child(
                                                 h_flex()
@@ -915,7 +891,7 @@ impl Render for WorkbenchApp {
                                                     .items_center()
                                                     .gap_2()
                                                     .border_b_1()
-                                                    .border_color(cx.theme().border)
+                                                    .border_color(style::hairline(cx))
                                                     .child(header)
                                                     .when(ptt_held, |row| {
                                                         row.child(recording_chip(
@@ -935,10 +911,62 @@ impl Render for WorkbenchApp {
                                         .child(div().flex_1().min_h_0().child(main_view));
 
                                 let entity = entity.clone();
-                                let inspector = self.inspector.clone();
                                 let right_collapsed = self.right_collapsed;
-                                let show_right = nav == AppNav::Agent
-                                    && self.state.with(|s| s.active_thread_id.is_some());
+                                let show_right = nav == AppNav::Agent;
+                                // 右侧栏内容：展开态是 hadron 右栏（终端/文件/Git/Mission/可视化），
+                                // 收起态只留一条窄条与展开按钮，保证随时能收放。
+                                let rail_panel = if !show_right {
+                                    div().into_any_element()
+                                } else if right_collapsed {
+                                    v_flex()
+                                        .size_full()
+                                        .items_center()
+                                        .pt_2()
+                                        .child(
+                                            Button::new("rail-expand")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(IconName::PanelRightOpen)
+                                                .tooltip("展开检查器")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.set_right_collapsed(false, window, cx)
+                                                })),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    let rail = self.chamber.update(cx, |chamber, cx| {
+                                        chamber.render_rail_surface(cx).into_any_element()
+                                    });
+                                    v_flex()
+                                        .size_full()
+                                        .child(
+                                            h_flex()
+                                                .h(px(34.))
+                                                .px_2()
+                                                .items_center()
+                                                .gap_2()
+                                                .border_b_1()
+                                                .border_color(panel_border)
+                                                .child(div().text_xs().child("检查器"))
+                                                .child(div().flex_1())
+                                                .child(
+                                                    Button::new("rail-collapse")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .icon(IconName::PanelRightClose)
+                                                        .tooltip("收起检查器")
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.set_right_collapsed(
+                                                                    true, window, cx,
+                                                                )
+                                                            },
+                                                        )),
+                                                ),
+                                        )
+                                        .child(div().flex_1().min_h_0().child(rail))
+                                        .into_any_element()
+                                };
                                 let left_width = if collapsed { 48.0 } else { width };
                                 let left_range = if collapsed {
                                     px(48.)..px(48.)
@@ -990,10 +1018,18 @@ impl Render for WorkbenchApp {
                                                 resizable_panel()
                                                     .child(div().size_full().p_1().child(main)),
                                             )
-                                            .when(show_right && !right_collapsed, |row| {
-                                                let right_size = right_width;
-                                                let right_range = px(RIGHT_SIDEBAR_WIDTH_MIN)
-                                                    ..px(RIGHT_SIDEBAR_WIDTH_MAX);
+                                            .when(show_right, move |row| {
+                                                let right_size = if right_collapsed {
+                                                    36.0
+                                                } else {
+                                                    right_width
+                                                };
+                                                let right_range = if right_collapsed {
+                                                    px(36.)..px(36.)
+                                                } else {
+                                                    px(RIGHT_SIDEBAR_WIDTH_MIN)
+                                                        ..px(RIGHT_SIDEBAR_WIDTH_MAX)
+                                                };
                                                 row.child(
                                                     resizable_panel()
                                                         .size(px(right_size))
@@ -1007,7 +1043,7 @@ impl Render for WorkbenchApp {
                                                                     .rounded(panel_radius)
                                                                     .border_1()
                                                                     .border_color(panel_border)
-                                                                    .child(inspector),
+                                                                    .child(rail_panel),
                                                             ),
                                                         ),
                                                 )
@@ -1039,13 +1075,12 @@ impl Render for WorkbenchApp {
                         .right(px(12.))
                         .w(px(320.))
                         .max_h(px(420.))
-                        .rounded(cx.theme().radius)
+                        .rounded(style::panel_radius(cx))
                         .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().popover)
+                        .border_color(style::hairline(cx))
+                        .bg(style::card(cx))
                         .text_color(cx.theme().popover_foreground)
                         .p_3()
-                        .shadow_lg()
                         .with_animation(
                             "notifications-in",
                             Animation::new(Duration::from_millis(160)),
@@ -1095,8 +1130,10 @@ impl Render for WorkbenchApp {
                                     v_flex()
                                         .gap_1()
                                         .p_2()
-                                        .rounded(cx.theme().radius)
-                                        .bg(cx.theme().secondary)
+                                        .rounded(style::card_radius(cx))
+                                        .border_1()
+                                        .border_color(style::hairline(cx))
+                                        .bg(style::raised(cx))
                                         .child(div().font_bold().child(n.title))
                                         .child(
                                             div()

@@ -1,0 +1,2690 @@
+use super::*;
+use crate::app::widgets::task_state_info;
+use gpui_kit::component::ActiveTheme;
+
+impl super::Chamber {
+    /// The right rail: the swappable Terminal / File Tree / Changes pane.
+    /// (Internally still `Rail::Inspector` for collapse/size.)
+    pub(super) fn terminal_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.right_rail_tab;
+        let tabs = h_flex()
+            .id("right-rail-capsule-tabs")
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(theme::tab_bar_bg())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .max_w_full()
+            .overflow_x_scroll()
+            .children(RightRailTab::ALL.map(|t| {
+                let is_selected = t.index() == selected.index();
+                let label = t.label();
+                let ix = t.index();
+                div()
+                    .id(("right-rail-tab-pill", ix))
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .when(is_selected, |s| {
+                        s.bg(theme::glass_highlight())
+                            .text_color(theme::accent())
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                    })
+                    .when(!is_selected, |s| {
+                        s.text_color(theme::text_muted())
+                            .hover(|h| h.text_color(theme::text()))
+                    })
+                    .text_xs()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.right_rail_tab = RightRailTab::from_index(ix);
+                        if this.right_rail_tab == RightRailTab::Terminal {
+                            window.focus(&this.terminal_focus, cx);
+                        }
+                        if this.right_rail_tab == RightRailTab::Git {
+                            let root = crate::vcs::repo_root_of(&this.path).to_path_buf();
+                            cx.spawn(async move |this, cx| {
+                                let (fp, branches, remote_branches, worktrees, graph, diff) = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        let fp = crate::vcs::branch_fingerprint(&root);
+                                        let branches = crate::vcs::list_branches(&root, "main");
+                                        let remote_branches =
+                                            crate::vcs::list_remote_branches(&root, "main");
+                                        let worktrees = crate::vcs::list_worktrees(&root);
+                                        let graph = crate::vcs::commit_graph(&root);
+                                        let diff = crate::vcs::working_diff(&root);
+                                        (fp, branches, remote_branches, worktrees, graph, diff)
+                                    })
+                                    .await;
+                                let _ = this.update(cx, |chamber, cx| {
+                                    chamber.git_branch_fingerprint = Some(fp);
+                                    chamber.git_branches = Some(branches);
+                                    chamber.git_remote_branches = Some(remote_branches);
+                                    chamber.git_worktrees = Some(worktrees);
+                                    chamber.git_log_graph = graph;
+                                    chamber.working_diff = diff;
+                                    chamber.rebuild_graph_rows();
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        } else if this.right_rail_tab == RightRailTab::Mission {
+                            this.refresh_mission_plan(cx);
+                        } else if this.right_rail_tab == RightRailTab::Visualizer {
+                            this.warm_visualizer_graphs(cx);
+                        }
+                        cx.notify();
+                    }))
+            }));
+
+        let close_btn = div()
+            .id("inspector-close-btn")
+            .cursor_pointer()
+            .active(|s| s.opacity(0.6))
+            .child(Icon::new(IconName::PanelRightClose).small())
+            .on_click(
+                cx.listener(|this, _, window, cx| this.toggle_rail(Rail::Inspector, window, cx)),
+            );
+
+        let header = h_flex()
+            .id("inspector-header")
+            .w_full()
+            .justify_between()
+            .items_center()
+            .px_3()
+            .py_2()
+            .text_sm()
+            .text_color(theme::text_muted())
+            .child(tabs)
+            .child(close_btn);
+
+        let tab_start = std::env::var_os("HADRON_FRAME_TIMING")
+            .is_some()
+            .then(std::time::Instant::now);
+
+        let content = match selected {
+            RightRailTab::Terminal => {
+                let sub_tab_bar = h_flex()
+                    .id("terminal-capsule-tabs")
+                    .items_center()
+                    .justify_between()
+                    .gap_1()
+                    .p_1()
+                    .rounded_full()
+                    .bg(theme::tab_bar_bg())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .max_w_full()
+                    .overflow_x_scroll()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .overflow_x_scrollbar()
+                            .children(self.terminals.iter().enumerate().map(|(ix, tab)| {
+                                let is_active = ix == self.active_terminal_index;
+                                h_flex()
+                                    .id(SharedString::from(format!("terminal-tab-{ix}")))
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap_1()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .when(is_active, |s| {
+                                        s.bg(theme::glass_highlight())
+                                            .text_color(theme::accent())
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                    })
+                                    .when(!is_active, |s| {
+                                        s.text_color(theme::text_muted())
+                                            .hover(|h| h.text_color(theme::text()))
+                                    })
+                                    .text_xs()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.select_terminal(ix, cx);
+                                    }))
+                                    .child(tab.title.clone())
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "close-terminal-tab-{ix}"
+                                            )))
+                                            .px_1()
+                                            .rounded_full()
+                                            .hover(|s| s.bg(theme::glass_surface()))
+                                            .text_color(theme::text_muted())
+                                            .child("×")
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                this.close_terminal(ix, cx);
+                                            })),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("add-terminal-tab")
+                            .flex_shrink_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .hover(|s| s.bg(theme::glass_highlight()).text_color(theme::text()))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.add_terminal(cx);
+                            }))
+                            .child("+"),
+                    )
+                    .child(
+                        div()
+                            .id("toggle-terminal-grid")
+                            .flex_shrink_0()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_xs()
+                            .bg(
+                                if self.terminal_split_mode
+                                    != render::pty_grid::PtySplitMode::Single
+                                {
+                                    theme::accent().opacity(0.2)
+                                } else {
+                                    theme::bg_surface()
+                                },
+                            )
+                            .text_color(
+                                if self.terminal_split_mode
+                                    != render::pty_grid::PtySplitMode::Single
+                                {
+                                    theme::accent()
+                                } else {
+                                    theme::text_muted()
+                                },
+                            )
+                            .hover(|s| s.text_color(theme::text()))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.terminal_split_mode = this.terminal_split_mode.next();
+                                this.terminal_grid_mode = this.terminal_split_mode
+                                    != render::pty_grid::PtySplitMode::Single;
+                                cx.notify();
+                            }))
+                            .child(self.terminal_split_mode.label()),
+                    );
+
+                if self.terminal_split_mode != render::pty_grid::PtySplitMode::Single {
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .p_3()
+                        .gap_2()
+                        .child(sub_tab_bar)
+                        .child(self.multi_pty_grid(cx))
+                        .into_any_element()
+                } else {
+                    let active_term = self.active_terminal();
+                    let active_err = self.active_terminal_error();
+
+                    let grid: gpui_kit::AnyElement = if let Some(term) = active_term {
+                        let snap = term.snapshot();
+                        let mut lines = v_flex()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(TERM_FONT))
+                            .line_height(px(TERM_CELL_H))
+                            .size_full()
+                            .p_3();
+                        for line in &snap.lines {
+                            let mut row = h_flex().h(px(TERM_CELL_H)).whitespace_nowrap().min_w_0();
+                            let mut line_empty = true;
+                            for run in &line.runs {
+                                if !run.text.is_empty() {
+                                    line_empty = false;
+                                    let fg_color = theme::resolve_term_color(run.fg);
+                                    let mut run_div = div().text_color(fg_color);
+                                    if let Some(bg_color) = theme::resolve_term_cell_bg(run.bg) {
+                                        run_div = run_div.bg(bg_color);
+                                    }
+                                    if run.has_cursor {
+                                        match self.prefs.terminal_cursor_style {
+                                            crate::config::TerminalCursorStyle::Beam => {
+                                                run_div = run_div
+                                                    .border_l(px(2.0))
+                                                    .border_color(fg_color);
+                                            }
+                                            crate::config::TerminalCursorStyle::Block => {
+                                                run_div = run_div
+                                                    .text_color(theme::resolve_term_color(run.bg))
+                                                    .bg(fg_color);
+                                            }
+                                            crate::config::TerminalCursorStyle::Underline => {
+                                                run_div = run_div
+                                                    .border_b(px(2.0))
+                                                    .border_color(fg_color);
+                                            }
+                                        }
+                                    }
+                                    row = row.child(run_div.child(run.text.clone()));
+                                }
+                            }
+                            if line_empty {
+                                row = row.child(div().child(" "));
+                            }
+                            lines = lines.child(row);
+                        }
+                        lines.into_any_element()
+                    } else {
+                        let msg = active_err.unwrap_or("starting shell…");
+                        div()
+                            .flex_1()
+                            .p_3()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(TERM_FONT))
+                            .text_color(theme::text_muted())
+                            .child(msg.to_string())
+                            .into_any_element()
+                    };
+
+                    let px_cell = self.terminal_px.clone();
+                    let size_probe = gpui_kit::canvas(
+                        move |bounds, _, _| {
+                            px_cell.set(Some((
+                                f32::from(bounds.origin.x),
+                                f32::from(bounds.origin.y),
+                                f32::from(bounds.size.width),
+                                f32::from(bounds.size.height),
+                            )));
+                        },
+                        |_, _: (), _, _| {},
+                    )
+                    .absolute()
+                    .size_full();
+
+                    let view_entity = cx.entity().clone();
+                    let screen = div()
+                        .id("terminal-screen")
+                        .track_focus(&self.terminal_focus)
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .relative()
+                        .rounded_lg()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme::glass_highlight())
+                        .bg(theme::term_bg())
+                        .on_action(cx.listener(|this, _: &Dismiss, _window, cx| {
+                            this.on_terminal_escape(cx);
+                        }))
+                        .on_action(cx.listener(|this, _: &Paste, _window, cx| {
+                            this.paste_to_terminal(None, cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &gpui_kit::MouseDownEvent, window, cx| {
+                                window.focus(&this.terminal_focus, cx);
+                                if let (Some(term), Some((row, col, right))) =
+                                    (this.active_terminal(), this.terminal_cell_at(ev.position))
+                                {
+                                    term.selection_start(row, col, right, ev.click_count);
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            |this, ev: &gpui_kit::MouseMoveEvent, _window, cx| {
+                                if ev.pressed_button == Some(MouseButton::Left) {
+                                    if let (Some(term), Some((row, col, right))) =
+                                        (this.active_terminal(), this.terminal_cell_at(ev.position))
+                                    {
+                                        term.selection_update(row, col, right);
+                                        cx.notify();
+                                    }
+                                }
+                            },
+                        ))
+                        .on_scroll_wheel(cx.listener(
+                            |this, ev: &gpui_kit::ScrollWheelEvent, _window, cx| {
+                                if let Some(term) = this.active_terminal() {
+                                    let lines = match ev.delta {
+                                        gpui_kit::ScrollDelta::Lines(delta) => {
+                                            (delta.y * 3.0) as i32
+                                        }
+                                        gpui_kit::ScrollDelta::Pixels(delta) => {
+                                            (f32::from(delta.y) / TERM_CELL_H * 3.0) as i32
+                                        }
+                                    };
+                                    if lines != 0 {
+                                        term.scroll(lines);
+                                        cx.notify();
+                                    }
+                                }
+                            },
+                        ))
+                        .on_key_down(cx.listener(Self::on_terminal_key))
+                        .child(size_probe)
+                        .child(grid)
+                        .context_menu(move |mut menu, _, _| {
+                            let v1 = view_entity.clone();
+                            menu = menu.item(PopupMenuItem::new("Copy").on_click(
+                                move |_, window, cx| {
+                                    v1.update(cx, |this, cx| {
+                                        this.copy_terminal_selection_or_screen(None, cx);
+                                    });
+                                    window.refresh();
+                                },
+                            ));
+                            let v2 = view_entity.clone();
+                            menu = menu.item(PopupMenuItem::new("Copy Screen").on_click(
+                                move |_, window, cx| {
+                                    v2.update(cx, |this, cx| {
+                                        this.copy_terminal_screen(None, cx);
+                                    });
+                                    window.refresh();
+                                },
+                            ));
+                            let v3 = view_entity.clone();
+                            menu = menu.item(PopupMenuItem::new("Paste").on_click(
+                                move |_, window, cx| {
+                                    v3.update(cx, |this, cx| {
+                                        this.paste_to_terminal(None, cx);
+                                    });
+                                    window.refresh();
+                                },
+                            ));
+                            menu
+                        });
+
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .p_3()
+                        .gap_2()
+                        .child(sub_tab_bar)
+                        .child(screen)
+                        .into_any_element()
+                }
+            }
+            RightRailTab::FileTree => {
+                let mut list = v_flex().size_full().min_h_0().min_w_0();
+                if let Some((path, content)) = &self.file_tree_open {
+                    list = list
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .p_2()
+                                .bg(theme::bg_surface_raised())
+                                .child(div().text_color(theme::text()).child(path.clone()))
+                                .child(text_button("close-file", "Close").on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.close_open_file(cx);
+                                    },
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .id("file-tree-open-container")
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .size_full()
+                                .relative()
+                                .child(
+                                    div()
+                                        .id("file-tree-open")
+                                        .size_full()
+                                        .min_w_0()
+                                        .overflow_x_hidden()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.file_tree_open_scroll)
+                                        .p_3()
+                                        .pb_16()
+                                        .bg(theme::input_bg())
+                                        .text_color(theme::text())
+                                        // Use a fixed index like usize::MAX for the file tree markdown cache
+                                        .child(self.markdown_body(
+                                            "file-tree-open",
+                                            usize::MAX,
+                                            &crate::sys::format_file_preview(path, content),
+                                            &[],
+                                        )),
+                                )
+                                .child(
+                                    div().absolute().top_0().bottom_0().right_0().child(
+                                        Scrollbar::vertical(&self.file_tree_open_scroll)
+                                            .mode(ScrollbarMode::Always),
+                                    ),
+                                ),
+                        );
+
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .size_full()
+                        .w_full()
+                        .min_w_0()
+                        .child(list)
+                        .into_any_element()
+                } else {
+                    use crate::sys::{sorted_children, FileTreeNode};
+
+                    let filter_query = self
+                        .file_tree_filter_input
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_lowercase();
+                    let hide_ignored = self.file_tree_hide_ignored;
+                    let has_clipboard = self.file_tree_clipboard.is_some();
+
+                    let mut root_node = FileTreeNode::default();
+                    for (file, is_ignored) in &self.file_tree_paths {
+                        if hide_ignored && *is_ignored {
+                            continue;
+                        }
+                        if !filter_query.is_empty() && !file.to_lowercase().contains(&filter_query)
+                        {
+                            continue;
+                        }
+                        root_node.insert(file, *is_ignored, file.ends_with('/'));
+                    }
+                    root_node.resolve_ignores();
+
+                    let repo_root =
+                        crate::vcs::repo_root_of(std::path::Path::new(&self.path)).to_path_buf();
+
+                    let toolbar =
+                        h_flex()
+                            .id("file-tree-toolbar")
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_1p5()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme::border())
+                            .bg(theme::bg_surface())
+                            .child(
+                                div().flex_1().min_w(px(80.0)).child(
+                                    Input::new(&self.file_tree_filter_input).xsmall().w_full(),
+                                ),
+                            )
+                            .child(text_button("file-tree-new-file", "+ File").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.start_file_tree_pending_op(
+                                        FileTreePendingOp::NewFile {
+                                            parent_dir: String::new(),
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            ))
+                            .child(text_button("file-tree-new-folder", "+ Folder").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.start_file_tree_pending_op(
+                                        FileTreePendingOp::NewFolder {
+                                            parent_dir: String::new(),
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            ))
+                            .child(text_button("file-tree-collapse-all", "Collapse").on_click(
+                                cx.listener(|this, _, _window, cx| {
+                                    this.file_tree_expanded.clear();
+                                    this.refresh_file_tree();
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(
+                                text_button(
+                                    "file-tree-toggle-ignored",
+                                    if hide_ignored {
+                                        "Show Ignored"
+                                    } else {
+                                        "Hide Ignored"
+                                    },
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.file_tree_hide_ignored = !this.file_tree_hide_ignored;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(text_button("file-tree-refresh", "Refresh").on_click(
+                                cx.listener(|this, _, _window, cx| {
+                                    this.refresh_file_tree();
+                                    cx.notify();
+                                }),
+                            ));
+
+                    let pending_bar = self.file_tree_pending_op.as_ref().map(|op| {
+                        let label = match op {
+                            FileTreePendingOp::NewFile { parent_dir } => {
+                                if parent_dir.is_empty() {
+                                    "New File at root:".to_string()
+                                } else {
+                                    format!("New File in {parent_dir}/:")
+                                }
+                            }
+                            FileTreePendingOp::NewFolder { parent_dir } => {
+                                if parent_dir.is_empty() {
+                                    "New Folder at root:".to_string()
+                                } else {
+                                    format!("New Folder in {parent_dir}/:")
+                                }
+                            }
+                            FileTreePendingOp::Rename { target_path } => {
+                                format!("Rename {target_path}:")
+                            }
+                        };
+                        v_flex()
+                            .id("file-tree-pending-op-bar")
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_1p5()
+                            .border_b_1()
+                            .border_color(theme::accent())
+                            .bg(theme::bg_surface_raised())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .text_color(theme::accent())
+                                    .truncate()
+                                    .child(label),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(div().flex_1().min_w(px(100.0)).child(
+                                        Input::new(&self.file_tree_op_input).xsmall().w_full(),
+                                    ))
+                                    .child(text_button("file-tree-op-save", "Save").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.commit_file_tree_pending_op(window, cx);
+                                        }),
+                                    ))
+                                    .child(text_button("file-tree-op-cancel", "Cancel").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.file_tree_pending_op = None;
+                                            this.file_tree_op_input.update(cx, |s, cx| {
+                                                s.set_value(String::new(), window, cx)
+                                            });
+                                            cx.notify();
+                                        }),
+                                    )),
+                            )
+                    });
+
+                    let force_expand_all = !filter_query.is_empty();
+
+                    fn render_node(
+                        name: &str,
+                        node: &FileTreeNode,
+                        depth: usize,
+                        cx: &mut Context<Chamber>,
+                        repo_root: &std::path::PathBuf,
+                        current_path: String,
+                        expanded_set: &std::collections::HashSet<String>,
+                        git_statuses: &std::collections::HashMap<String, crate::vcs::GitStatus>,
+                        has_clipboard: bool,
+                        force_expand_all: bool,
+                    ) -> gpui_kit::AnyElement {
+                        let mut list = v_flex().w_full();
+                        // root node has empty name and we don't render it directly
+                        if name.is_empty() {
+                            for (child_name, child_node) in sorted_children(node) {
+                                let child_path = child_name.clone();
+                                list = list.child(render_node(
+                                    child_name,
+                                    child_node,
+                                    depth,
+                                    cx,
+                                    repo_root,
+                                    child_path,
+                                    expanded_set,
+                                    git_statuses,
+                                    has_clipboard,
+                                    force_expand_all,
+                                ));
+                            }
+                            return list.into_any_element();
+                        }
+
+                        let is_expanded = force_expand_all || expanded_set.contains(&current_path);
+
+                        let git_status = git_statuses.get(&node.full_path);
+
+                        let text_color = if node.is_ignored {
+                            theme::text_muted()
+                        } else {
+                            match git_status {
+                                Some(crate::vcs::GitStatus::Modified) => theme::git_modified(),
+                                Some(crate::vcs::GitStatus::Added) => theme::git_added(),
+                                Some(crate::vcs::GitStatus::Deleted) => theme::git_deleted(),
+                                None => theme::text(),
+                            }
+                        };
+
+                        let git_badge = if !node.is_ignored {
+                            match git_status {
+                                Some(crate::vcs::GitStatus::Modified) => Some(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(theme::git_modified())
+                                        .child("M"),
+                                ),
+                                Some(crate::vcs::GitStatus::Added) => Some(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(theme::git_added())
+                                        .child("+"),
+                                ),
+                                Some(crate::vcs::GitStatus::Deleted) => Some(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(theme::git_deleted())
+                                        .child("D"),
+                                ),
+                                None => None,
+                            }
+                        } else {
+                            None
+                        };
+
+                        // Stable per-path id — see the roster row: a context menu on
+                        // an id-less element shares its state with every sibling.
+                        let row = h_flex()
+                            .id(SharedString::from(format!("tree-row-{}", node.full_path)))
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .pl(gpui_kit::px(depth as f32 * 12.0 + 8.0))
+                            .rounded_sm()
+                            .hover(|s| s.bg(theme::bg_surface_raised()))
+                            .cursor_pointer()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .child(if node.is_file {
+                                        let icon_path =
+                                            crate::symbols::file_icon_path(&node.full_path);
+                                        let mut el =
+                                            gpui_kit::img(icon_path).size_3p5().flex_none();
+                                        if node.is_ignored {
+                                            el = el.opacity(0.4);
+                                        }
+                                        el.into_any_element()
+                                    } else {
+                                        let folder_name = std::path::Path::new(&node.full_path)
+                                            .file_name()
+                                            .and_then(|f| f.to_str())
+                                            .unwrap_or(&name);
+                                        let icon_path = crate::symbols::folder_icon_path(
+                                            folder_name,
+                                            is_expanded,
+                                        );
+                                        let mut el =
+                                            gpui_kit::img(icon_path).size_3p5().flex_none();
+                                        if node.is_ignored {
+                                            el = el.opacity(0.4);
+                                        }
+                                        el.into_any_element()
+                                    })
+                                    .child(
+                                        div()
+                                            .text_color(text_color)
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .text_size(cx.theme().mono_font_size)
+                                            .truncate()
+                                            .child(name.to_string()),
+                                    ),
+                            )
+                            .children(git_badge);
+
+                        if node.is_file {
+                            let file_name = node.full_path.clone();
+                            let file_path = node.full_path.clone();
+                            let repo = repo_root.clone();
+                            let on_dbl_click = cx.listener(
+                                move |this, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                                    if event.button == gpui_kit::MouseButton::Left
+                                        && event.click_count == 2
+                                    {
+                                        if let Some(content) =
+                                            crate::sys::read_workspace_file(&repo, &file_name)
+                                        {
+                                            this.parsed_markdown.borrow_mut().remove(&usize::MAX);
+                                            this.file_tree_open =
+                                                Some((file_name.clone(), content));
+                                            cx.notify();
+                                        }
+                                    }
+                                },
+                            );
+
+                            let path_clone = file_path.clone();
+                            let parent_dir = std::path::Path::new(&file_path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                .unwrap_or_default();
+                            let view = cx.entity().clone();
+
+                            list = list.child(
+                                row.on_mouse_down(gpui_kit::MouseButton::Left, on_dbl_click)
+                                    .context_menu(move |mut menu, _, _| {
+                                        let actions: Vec<(&str, ContextMenuAction)> = vec![
+                                            (
+                                                "Open File",
+                                                ContextMenuAction::OpenFile(path_clone.clone()),
+                                            ),
+                                            (
+                                                "Open in Editor",
+                                                ContextMenuAction::OpenInEditor(path_clone.clone()),
+                                            ),
+                                            (
+                                                "Open in Folder",
+                                                ContextMenuAction::OpenInFolder(path_clone.clone()),
+                                            ),
+                                            (
+                                                "Mention @path in Chat",
+                                                ContextMenuAction::InsertFileMention(
+                                                    path_clone.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Copy Path",
+                                                ContextMenuAction::CopyPath(path_clone.clone()),
+                                            ),
+                                            (
+                                                "Copy Relative Path",
+                                                ContextMenuAction::CopyRelativePath(
+                                                    path_clone.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "New File…",
+                                                ContextMenuAction::NewFileIn(parent_dir.clone()),
+                                            ),
+                                            (
+                                                "New Folder…",
+                                                ContextMenuAction::NewFolderIn(parent_dir.clone()),
+                                            ),
+                                            (
+                                                "Copy",
+                                                ContextMenuAction::CopyFileItem(path_clone.clone()),
+                                            ),
+                                            (
+                                                "Cut",
+                                                ContextMenuAction::CutFileItem(path_clone.clone()),
+                                            ),
+                                        ];
+                                        for (label, act) in actions {
+                                            let v = view.clone();
+                                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                                move |_, window, cx| {
+                                                    let a = act.clone();
+                                                    v.update(cx, |this, cx| {
+                                                        this.handle_file_tree_context_action(
+                                                            a, window, cx,
+                                                        );
+                                                    });
+                                                    window.refresh();
+                                                },
+                                            ));
+                                        }
+                                        if has_clipboard {
+                                            let v = view.clone();
+                                            let dest = parent_dir.clone();
+                                            menu = menu.item(PopupMenuItem::new("Paste").on_click(
+                                                move |_, window, cx| {
+                                                    v.update(cx, |this, cx| {
+                                                        this.handle_file_tree_context_action(
+                                                            ContextMenuAction::PasteFileItem(
+                                                                dest.clone(),
+                                                            ),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                    window.refresh();
+                                                },
+                                            ));
+                                        }
+                                        let tail_actions: Vec<(&str, ContextMenuAction)> = vec![
+                                            (
+                                                "Duplicate",
+                                                ContextMenuAction::DuplicateFileItem(
+                                                    path_clone.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Rename…",
+                                                ContextMenuAction::RenameFileItem(
+                                                    path_clone.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Delete",
+                                                ContextMenuAction::DeleteFileItem(
+                                                    path_clone.clone(),
+                                                ),
+                                            ),
+                                        ];
+                                        for (label, act) in tail_actions {
+                                            let v = view.clone();
+                                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                                move |_, window, cx| {
+                                                    let a = act.clone();
+                                                    v.update(cx, |this, cx| {
+                                                        this.handle_file_tree_context_action(
+                                                            a, window, cx,
+                                                        );
+                                                    });
+                                                    window.refresh();
+                                                },
+                                            ));
+                                        }
+                                        menu
+                                    }),
+                            );
+                        } else {
+                            let toggle_path = current_path.clone();
+                            let on_click = cx.listener(
+                                move |this, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                                    if event.button == gpui_kit::MouseButton::Left {
+                                        if this.file_tree_expanded.contains(&toggle_path) {
+                                            this.file_tree_expanded.remove(&toggle_path);
+                                        } else {
+                                            this.file_tree_expanded.insert(toggle_path.clone());
+                                        }
+                                        this.refresh_file_tree();
+                                        cx.notify();
+                                    }
+                                },
+                            );
+
+                            let folder_path = node.full_path.clone();
+                            let view = cx.entity().clone();
+
+                            list = list.child(
+                                row.on_mouse_down(gpui_kit::MouseButton::Left, on_click)
+                                    .context_menu(move |mut menu, _, _| {
+                                        let actions: Vec<(&str, ContextMenuAction)> = vec![
+                                            (
+                                                "New File…",
+                                                ContextMenuAction::NewFileIn(folder_path.clone()),
+                                            ),
+                                            (
+                                                "New Folder…",
+                                                ContextMenuAction::NewFolderIn(folder_path.clone()),
+                                            ),
+                                            (
+                                                "Open in Editor",
+                                                ContextMenuAction::OpenInEditor(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Open in Folder",
+                                                ContextMenuAction::OpenInFolder(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Mention @path in Chat",
+                                                ContextMenuAction::InsertFileMention(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Copy Path",
+                                                ContextMenuAction::CopyPath(folder_path.clone()),
+                                            ),
+                                            (
+                                                "Copy Relative Path",
+                                                ContextMenuAction::CopyRelativePath(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Copy",
+                                                ContextMenuAction::CopyFileItem(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Cut",
+                                                ContextMenuAction::CutFileItem(folder_path.clone()),
+                                            ),
+                                        ];
+                                        for (label, act) in actions {
+                                            let v = view.clone();
+                                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                                move |_, window, cx| {
+                                                    let a = act.clone();
+                                                    v.update(cx, |this, cx| {
+                                                        this.handle_file_tree_context_action(
+                                                            a, window, cx,
+                                                        );
+                                                    });
+                                                    window.refresh();
+                                                },
+                                            ));
+                                        }
+                                        if has_clipboard {
+                                            let v = view.clone();
+                                            let dest = folder_path.clone();
+                                            menu = menu.item(PopupMenuItem::new("Paste").on_click(
+                                                move |_, window, cx| {
+                                                    v.update(cx, |this, cx| {
+                                                        this.handle_file_tree_context_action(
+                                                            ContextMenuAction::PasteFileItem(
+                                                                dest.clone(),
+                                                            ),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                    window.refresh();
+                                                },
+                                            ));
+                                        }
+                                        let tail_actions: Vec<(&str, ContextMenuAction)> = vec![
+                                            (
+                                                "Duplicate",
+                                                ContextMenuAction::DuplicateFileItem(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Rename…",
+                                                ContextMenuAction::RenameFileItem(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                            (
+                                                "Delete",
+                                                ContextMenuAction::DeleteFileItem(
+                                                    folder_path.clone(),
+                                                ),
+                                            ),
+                                        ];
+                                        for (label, act) in tail_actions {
+                                            let v = view.clone();
+                                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                                move |_, window, cx| {
+                                                    let a = act.clone();
+                                                    v.update(cx, |this, cx| {
+                                                        this.handle_file_tree_context_action(
+                                                            a, window, cx,
+                                                        );
+                                                    });
+                                                    window.refresh();
+                                                },
+                                            ));
+                                        }
+                                        menu
+                                    }),
+                            );
+
+                            if is_expanded {
+                                for (child_name, child_node) in sorted_children(node) {
+                                    let child_path = format!("{}/{}", current_path, child_name);
+                                    list = list.child(render_node(
+                                        child_name,
+                                        child_node,
+                                        depth + 1,
+                                        cx,
+                                        repo_root,
+                                        child_path,
+                                        expanded_set,
+                                        git_statuses,
+                                        has_clipboard,
+                                        force_expand_all,
+                                    ));
+                                }
+                            }
+                        }
+                        list.into_any_element()
+                    }
+
+                    v_flex()
+                        .id("file-tree-list")
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .size_full()
+                        .child(toolbar)
+                        .when_some(pending_bar, |v, bar| v.child(bar))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .min_w_0()
+                                .relative()
+                                .child(
+                                    div()
+                                        .id("file-tree-scroll-content")
+                                        .size_full()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.file_tree_scroll)
+                                        .p_2()
+                                        .pb_8()
+                                        .child(render_node(
+                                            "",
+                                            &root_node,
+                                            0,
+                                            cx,
+                                            &repo_root,
+                                            String::new(),
+                                            &self.file_tree_expanded,
+                                            &self.git_statuses,
+                                            has_clipboard,
+                                            force_expand_all,
+                                        )),
+                                )
+                                .child(
+                                    div().absolute().top_0().bottom_0().right_0().child(
+                                        Scrollbar::vertical(&self.file_tree_scroll)
+                                            .mode(ScrollbarMode::Always),
+                                    ),
+                                ),
+                        )
+                        .into_any_element()
+                }
+            }
+            RightRailTab::Git => self.git_tab_content(cx).into_any_element(),
+            RightRailTab::Mission => {
+                let selected_subtab = self.mission_subtab;
+                let working_task_count = self
+                    .view
+                    .tasks
+                    .iter()
+                    .filter(|t| t.state == crate::model::TaskState::Working)
+                    .count()
+                    + model::tasks::live_rows_from_activities(&self.last_gate_activities).len();
+
+                let mission_subtabs = h_flex()
+                    .id("mission-capsule-subtabs")
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .rounded_full()
+                    .bg(theme::tab_bar_bg())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .max_w_full()
+                    .overflow_x_scroll()
+                    .children(MissionSubtab::ALL.map(|t| {
+                        let is_selected = t.index() == selected_subtab.index();
+                        let ix = t.index();
+                        let active_gate_count =
+                            self.gate_streams.values().filter(|s| s.active).count();
+                        let failed_gate_count = self
+                            .gate_streams
+                            .values()
+                            .filter(|s| !s.active && s.last_verdict == Some(false))
+                            .count();
+                        let label = if t == MissionSubtab::Tasks && working_task_count > 0 {
+                            format!("{} ({working_task_count})", t.label())
+                        } else if t == MissionSubtab::Gate && active_gate_count > 0 {
+                            format!("{} ({active_gate_count} running)", t.label())
+                        } else if t == MissionSubtab::Gate && failed_gate_count > 0 {
+                            format!("{} ({failed_gate_count} failed)", t.label())
+                        } else {
+                            t.label().to_string()
+                        };
+                        div()
+                            .id(("mission-subtab-pill", ix))
+                            .flex_shrink_0()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .when(is_selected, |s| {
+                                s.bg(theme::glass_highlight())
+                                    .text_color(theme::accent())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                            })
+                            .when(!is_selected, |s| {
+                                s.text_color(theme::text_muted())
+                                    .hover(|h| h.text_color(theme::text()))
+                            })
+                            .text_xs()
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.mission_subtab = MissionSubtab::from_index(ix);
+                                if this.mission_subtab == MissionSubtab::Plan {
+                                    this.refresh_mission_plan(cx);
+                                }
+                                cx.notify();
+                            }))
+                    }));
+
+                let mission_body: gpui_kit::AnyElement = match selected_subtab {
+                    MissionSubtab::Plan => {
+                        let repo = crate::vcs::repo_root_of(&self.path).to_path_buf();
+
+                        // The active plan is the plan tracked by Chamber reload, or resolved from
+                        // recent field messages and `.hadron/docs/plans/` directory scan.
+                        let active_plan_path = self.last_plan_path.clone().or_else(|| {
+                            crate::app::reload::resolve_active_plan_with_plans(
+                                &repo,
+                                &self.view.messages,
+                                &self.cached_plan_paths,
+                            )
+                        });
+
+                        // Resolve the referenced plan to its cached in-memory content (preloaded off the UI thread).
+                        let resolved = active_plan_path.and_then(|rel_path| {
+                            self.cached_active_plan_content
+                                .as_ref()
+                                .filter(|(cached_rel, _)| cached_rel == &rel_path)
+                                .map(|(_, cached_body)| (rel_path, cached_body.clone()))
+                        });
+
+                        let plan_element = match resolved {
+                            Some((rel_path, content)) => {
+                                let cached_dag = self.resolve_cached_plan_dag(&content);
+                                let (total, landed_count, branch_count, _) =
+                                    cached_dag.progress.clone();
+                                let completed = landed_count + branch_count;
+                                let frac = if total > 0 {
+                                    completed as f32 / total as f32
+                                } else {
+                                    0.0
+                                };
+                                let pct = (frac * 100.0).round() as usize;
+
+                                let mut list = v_flex().gap_3().p_3().pb_16().w_full().min_w_0();
+                                list = list
+                                    .child(self.breadcrumb_bar_for_plan(&rel_path, &content, cx));
+
+                                // Sibling and suite plans across .hadron/docs/plans/
+                                let dropdown_items = crate::app::reload::build_plan_dropdown_items(
+                                    &self.cached_plan_paths,
+                                    &rel_path,
+                                );
+
+                                // Header card with plan path, sibling switcher, and progress
+                                let mut header_card = v_flex()
+                                    .w_full()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(theme::bg_surface())
+                                    .border_1()
+                                    .border_color(theme::glass_highlight())
+                                    .gap_2p5();
+
+                                let progress_badge_text = if branch_count > 0 {
+                                    format!("{landed_count} Landed · {branch_count} In Branch / {total} Total")
+                                } else if completed == total && total > 0 {
+                                    format!("{completed}/{total} Complete (100%)")
+                                } else {
+                                    format!("{completed}/{total} Complete ({pct}%)")
+                                };
+
+                                let title_row = h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_2()
+                                    .w_full()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::text())
+                                            .child("Implementation Plan"),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(theme::bg_base())
+                                                    .border_1()
+                                                    .border_color(
+                                                        if landed_count == total && total > 0 {
+                                                            theme::success().opacity(0.45).into()
+                                                        } else if branch_count > 0 {
+                                                            theme::info().opacity(0.45).into()
+                                                        } else {
+                                                            theme::glass_highlight()
+                                                        },
+                                                    )
+                                                    .text_xs()
+                                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                                    .text_color(
+                                                        if landed_count == total && total > 0 {
+                                                            theme::success()
+                                                        } else if branch_count > 0 {
+                                                            theme::info()
+                                                        } else {
+                                                            theme::accent()
+                                                        },
+                                                    )
+                                                    .child(progress_badge_text),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("mission-plan-refresh-btn")
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_md()
+                                                    .bg(theme::bg_base())
+                                                    .border_1()
+                                                    .border_color(theme::glass_highlight())
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .cursor_pointer()
+                                                    .hover(|s| {
+                                                        s.bg(theme::bg_elevated())
+                                                            .text_color(theme::text())
+                                                    })
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.refresh_mission_plan(cx);
+                                                    }))
+                                                    .child("↻"),
+                                            ),
+                                    );
+
+                                let path_row = div().w_full().min_w_0().child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(theme::bg_base())
+                                        .border_1()
+                                        .border_color(theme::glass_highlight())
+                                        .text_xs()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(theme::text_muted())
+                                        .truncate()
+                                        .child(rel_path.clone()),
+                                );
+
+                                header_card = header_card.child(title_row).child(path_row);
+
+                                let current_label = dropdown_items
+                                    .iter()
+                                    .find_map(|item| match item {
+                                        crate::app::reload::PlanDropdownItem::Plan {
+                                            label,
+                                            is_active: true,
+                                            ..
+                                        } => Some(label.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| {
+                                        let p = std::path::Path::new(&rel_path);
+                                        let fname = p
+                                            .file_name()
+                                            .and_then(|f| f.to_str())
+                                            .unwrap_or("master.md");
+                                        crate::app::reload::format_plan_step_label(fname)
+                                    });
+
+                                let total_selectable_plans = dropdown_items
+                                    .iter()
+                                    .filter(|item| {
+                                        matches!(
+                                            item,
+                                            crate::app::reload::PlanDropdownItem::Plan { .. }
+                                        )
+                                    })
+                                    .count();
+
+                                if total_selectable_plans > 1 {
+                                    let view = cx.entity().clone();
+                                    let current_btn_label = current_label.clone();
+                                    let items = dropdown_items.clone();
+
+                                    let select_button = Button::new("plan-select-dropdown")
+                                .w_full()
+                                .ghost()
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .justify_between()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    Icon::new(IconName::Folder)
+                                                        .xsmall()
+                                                        .flex_shrink_0()
+                                                        .text_color(theme::accent()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                        .text_color(theme::text())
+                                                        .child(format!("Plan: {current_btn_label}")),
+                                                ),
+                                        )
+                                        .child(
+                                            Icon::new(IconName::ChevronDown)
+                                                .xsmall()
+                                                .flex_shrink_0()
+                                                .text_color(theme::text_muted()),
+                                        ),
+                                )
+                                .dropdown_menu(move |mut menu, _, _cx| {
+                                    menu = menu
+                                        .scrollable(true)
+                                        .max_h(px(420.0))
+                                        .min_w(px(340.0))
+                                        .max_w(px(600.0));
+
+                                    for item in &items {
+                                        match item {
+                                            crate::app::reload::PlanDropdownItem::Header(title) => {
+                                                menu = menu.item(PopupMenuItem::label(title.clone()));
+                                            }
+                                            crate::app::reload::PlanDropdownItem::Separator => {
+                                                menu = menu.separator();
+                                            }
+                                            crate::app::reload::PlanDropdownItem::Plan { label, rel_path, is_active } => {
+                                                let is_sel = *is_active;
+                                                let target = rel_path.clone();
+                                                let item_label = if is_sel {
+                                                    format!("✓  {label}")
+                                                } else {
+                                                    format!("    {label}")
+                                                };
+                                                let view_click = view.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(item_label).on_click(
+                                                        move |_, window, cx| {
+                                                            view_click.update(cx, |this, cx| {
+                                                                this.last_plan_path = Some(target.clone());
+                                                                this.manual_plan_override_at_message_len = Some(this.view.messages.len());
+                                                                this.update_active_plan();
+                                                                this.refresh_mission_plan(cx);
+                                                                cx.notify();
+                                                            });
+                                                            window.refresh();
+                                                        },
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    menu
+                                });
+
+                                    header_card = header_card.child(select_button);
+                                }
+
+                                let progress_fill = if landed_count == total && total > 0 {
+                                    theme::success().opacity(0.85)
+                                } else if branch_count > 0 {
+                                    theme::info().opacity(0.85)
+                                } else {
+                                    theme::accent().opacity(0.85)
+                                };
+                                header_card =
+                                    header_card.child(progress_meter(frac, progress_fill));
+                                list = list.child(header_card);
+
+                                // Optional Plan Overview prose card
+                                if let Some(overview_text) = parse_plan_overview(&content) {
+                                    if !overview_text.is_empty() {
+                                        let is_collapsed = self.plan_overview_collapsed;
+                                        let header_row = h_flex()
+                                            .id("plan-overview-toggle")
+                                            .w_full()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .gap_2()
+                                            .items_center()
+                                            .justify_between()
+                                            .p_2p5()
+                                            .rounded_lg()
+                                            .bg(theme::bg_surface())
+                                            .border_1()
+                                            .border_color(theme::glass_highlight())
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme::bg_elevated()))
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.plan_overview_collapsed =
+                                                    !this.plan_overview_collapsed;
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                h_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        Icon::new(if is_collapsed {
+                                                            IconName::ChevronRight
+                                                        } else {
+                                                            IconName::ChevronDown
+                                                        })
+                                                        .small()
+                                                        .text_color(theme::text_muted()),
+                                                    )
+                                                    .child(
+                                                        Icon::new(IconName::Info)
+                                                            .small()
+                                                            .text_color(theme::accent()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                                            .text_sm()
+                                                            .text_color(theme::text())
+                                                            .truncate()
+                                                            .child("Plan Overview & Objectives"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(theme::bg_base())
+                                                    .border_1()
+                                                    .border_color(theme::glass_highlight())
+                                                    .text_xs()
+                                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                                    .text_color(theme::text_muted())
+                                                    .child("Overview"),
+                                            );
+
+                                        let mut overview_container =
+                                            v_flex().w_full().min_w_0().gap_2().child(header_row);
+
+                                        if !is_collapsed {
+                                            let body = div()
+                                                .w_full()
+                                                .min_w_0()
+                                                .p_3()
+                                                .rounded_lg()
+                                                .bg(theme::glass_card())
+                                                .border_1()
+                                                .border_color(theme::glass_highlight())
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .line_height(gpui_kit::relative(1.4))
+                                                .child(overview_text);
+                                            overview_container = overview_container.child(body);
+                                        }
+                                        list = list.child(overview_container);
+                                    }
+                                }
+
+                                // Interactive Plan DAG & Wave Visualizer
+                                list = list.child(self.plan_dag_visualizer(&content, cx));
+
+                                // Task groups checklist
+                                let task_groups = cached_dag.task_groups;
+                                for (task_name, steps) in task_groups {
+                                    if steps.is_empty() {
+                                        continue;
+                                    }
+                                    let is_collapsed =
+                                        self.plan_collapsed_tasks.contains(&task_name);
+                                    let name_clone = task_name.clone();
+
+                                    let header_title = if task_name.is_empty() {
+                                        "Task Checklist".to_string()
+                                    } else {
+                                        task_name.clone()
+                                    };
+
+                                    let id_str = if task_name.is_empty() {
+                                        "task-header-general".to_string()
+                                    } else {
+                                        format!(
+                                            "task-header-{}",
+                                            task_name.replace(['/', '.', '-', ' ', ':', '&'], "_")
+                                        )
+                                    };
+
+                                    let done_count =
+                                        steps.iter().filter(|(_, s)| s.is_completed()).count();
+                                    let landed_step_count =
+                                        steps.iter().filter(|(_, s)| s.is_main_landed()).count();
+                                    let branch_step_count = steps
+                                        .iter()
+                                        .filter(|(_, s)| s.is_branch_completed())
+                                        .count();
+                                    let total_count = steps.len();
+                                    let all_landed = landed_step_count == total_count;
+
+                                    let status_badge = if all_landed {
+                                        div()
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(theme::bg_base())
+                                            .border_1()
+                                            .border_color(theme::success().opacity(0.45))
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::success())
+                                            .child(format!(
+                                                "{landed_step_count}/{total_count} Complete"
+                                            ))
+                                            .into_any_element()
+                                    } else if branch_step_count > 0 {
+                                        div()
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(theme::bg_base())
+                                            .border_1()
+                                            .border_color(theme::info().opacity(0.45))
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::info())
+                                            .child(format!("{done_count}/{total_count} In Branch"))
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(theme::bg_base())
+                                            .border_1()
+                                            .border_color(theme::glass_highlight())
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::accent())
+                                            .child(format!("{done_count}/{total_count} Tasks"))
+                                            .into_any_element()
+                                    };
+
+                                    let header = h_flex()
+                                        .id(gpui_kit::SharedString::from(id_str))
+                                        .w_full()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .gap_2()
+                                        .items_center()
+                                        .justify_between()
+                                        .p_2p5()
+                                        .rounded_lg()
+                                        .bg(if all_landed {
+                                            theme::bg_surface()
+                                        } else {
+                                            theme::bg_elevated()
+                                        })
+                                        .border_1()
+                                        .border_color(theme::glass_highlight())
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::bg_elevated()))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.plan_collapsed_tasks.contains(&name_clone) {
+                                                this.plan_collapsed_tasks.remove(&name_clone);
+                                            } else {
+                                                this.plan_collapsed_tasks
+                                                    .insert(name_clone.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            h_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    Icon::new(if is_collapsed {
+                                                        IconName::ChevronRight
+                                                    } else {
+                                                        IconName::ChevronDown
+                                                    })
+                                                    .small()
+                                                    .text_color(theme::text_muted()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                                        .text_sm()
+                                                        .text_color(theme::text())
+                                                        .truncate()
+                                                        .child(header_title),
+                                                ),
+                                        )
+                                        .child(status_badge);
+
+                                    let mut task_container =
+                                        v_flex().w_full().min_w_0().gap_2().child(header);
+
+                                    if !is_collapsed {
+                                        let mut steps_list = v_flex()
+                                            .w_full()
+                                            .min_w_0()
+                                            .gap_1p5()
+                                            .p_2p5()
+                                            .rounded_lg()
+                                            .bg(theme::glass_card())
+                                            .border_1()
+                                            .border_color(theme::glass_highlight());
+
+                                        for (step_desc, status) in steps {
+                                            let marker = match status {
+                                                StepStatus::MainLanded => {
+                                                    Icon::new(IconName::CircleCheck)
+                                                        .small()
+                                                        .text_color(theme::success())
+                                                        .into_any_element()
+                                                }
+                                                StepStatus::BranchCompleted => {
+                                                    Icon::new(IconName::CircleCheck)
+                                                        .small()
+                                                        .text_color(theme::info())
+                                                        .into_any_element()
+                                                }
+                                                StepStatus::Pending => div()
+                                                    .size(px(14.0))
+                                                    .flex_shrink_0()
+                                                    .mt(px(2.0))
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(theme::text_muted())
+                                                    .into_any_element(),
+                                            };
+
+                                            let text_color = match status {
+                                                StepStatus::MainLanded => theme::text_muted(),
+                                                StepStatus::BranchCompleted => theme::text(),
+                                                StepStatus::Pending => theme::text(),
+                                            };
+
+                                            steps_list = steps_list.child(
+                                                h_flex()
+                                                    .w_full()
+                                                    .min_w_0()
+                                                    .gap_2()
+                                                    .items_start()
+                                                    .child(marker)
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .text_sm()
+                                                            .text_color(text_color)
+                                                            .child(step_desc),
+                                                    ),
+                                            );
+                                        }
+                                        task_container = task_container.child(steps_list);
+                                    }
+
+                                    list = list.child(task_container);
+                                }
+                                list.into_any_element()
+                            }
+                            None => {
+                                let dropdown_items = crate::app::reload::build_plan_dropdown_items(
+                                    &self.cached_plan_paths,
+                                    "",
+                                );
+                                let total_selectable_plans = dropdown_items
+                                    .iter()
+                                    .filter(|item| {
+                                        matches!(
+                                            item,
+                                            crate::app::reload::PlanDropdownItem::Plan { .. }
+                                        )
+                                    })
+                                    .count();
+
+                                if total_selectable_plans > 0 {
+                                    let view = cx.entity().clone();
+                                    let items = dropdown_items.clone();
+
+                                    let select_button = Button::new("plan-select-dropdown-empty")
+                                .w_full()
+                                .ghost()
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .justify_between()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    Icon::new(IconName::Folder)
+                                                        .xsmall()
+                                                        .flex_shrink_0()
+                                                        .text_color(theme::accent()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                        .text_color(theme::text())
+                                                        .child("Select an Implementation Plan…"),
+                                                ),
+                                        )
+                                        .child(
+                                            Icon::new(IconName::ChevronDown)
+                                                .xsmall()
+                                                .flex_shrink_0()
+                                                .text_color(theme::text_muted()),
+                                        ),
+                                )
+                                .dropdown_menu(move |mut menu, _, _cx| {
+                                    menu = menu
+                                        .scrollable(true)
+                                        .max_h(px(420.0))
+                                        .min_w(px(340.0))
+                                        .max_w(px(600.0));
+
+                                    for item in &items {
+                                        match item {
+                                            crate::app::reload::PlanDropdownItem::Header(title) => {
+                                                menu = menu.item(PopupMenuItem::label(title.clone()));
+                                            }
+                                            crate::app::reload::PlanDropdownItem::Separator => {
+                                                menu = menu.separator();
+                                            }
+                                            crate::app::reload::PlanDropdownItem::Plan { label, rel_path, is_active } => {
+                                                let is_sel = *is_active;
+                                                let target = rel_path.clone();
+                                                let item_label = if is_sel {
+                                                    format!("✓  {label}")
+                                                } else {
+                                                    format!("    {label}")
+                                                };
+                                                let view_click = view.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(item_label).on_click(
+                                                        move |_, window, cx| {
+                                                            view_click.update(cx, |this, cx| {
+                                                                this.last_plan_path = Some(target.clone());
+                                                                this.manual_plan_override_at_message_len = Some(this.view.messages.len());
+                                                                this.update_active_plan();
+                                                                this.refresh_mission_plan(cx);
+                                                                cx.notify();
+                                                            });
+                                                            window.refresh();
+                                                        },
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    menu
+                                });
+
+                                    v_flex()
+                                .gap_3()
+                                .p_3()
+                                .w_full()
+                                .min_w_0()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .p_3()
+                                        .rounded_lg()
+                                        .bg(theme::bg_surface())
+                                        .border_1()
+                                        .border_color(theme::glass_highlight())
+                                        .gap_2p5()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                                .text_color(theme::text())
+                                                .child("Select Implementation Plan"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child("Choose an existing plan from the workspace below:"),
+                                        )
+                                        .child(select_button),
+                                )
+                                .into_any_element()
+                                } else {
+                                    div()
+                                .p_4()
+                                .text_color(theme::text_muted())
+                                .child("No active implementation plan referenced in the field yet.")
+                                .into_any_element()
+                                }
+                            }
+                        };
+
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .size_full()
+                            .w_full()
+                            .min_w_0()
+                            .relative()
+                            .child(
+                                div()
+                                    .id("plan-scroll")
+                                    .size_full()
+                                    .w_full()
+                                    .min_w_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.plan_scroll)
+                                    .text_sm()
+                                    .text_color(theme::text())
+                                    .child(plan_element),
+                            )
+                            .child(div().absolute().top_0().bottom_0().right_0().child(
+                                Scrollbar::vertical(&self.plan_scroll).mode(ScrollbarMode::Always),
+                            ))
+                            .into_any_element()
+                    }
+                    MissionSubtab::Tasks => {
+                        let now = chrono::Utc::now();
+                        let render_now = now;
+                        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                        let schedule_reg =
+                            super::super::settings::overlay::cached_schedule_registry(&repo_root);
+                        let enabled_schedules =
+                            schedule_reg.jobs.iter().filter(|j| j.enabled).count();
+                        let total_schedules = schedule_reg.jobs.len();
+
+                        let mut schedules_card = v_flex()
+                            .w_full()
+                            .p_2p5()
+                            .gap_2()
+                            .rounded_lg()
+                            .bg(theme::bg_surface())
+                            .border_1()
+                            .border_color(theme::glass_highlight())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                                    .text_color(theme::text())
+                                                    .child("Scheduled Tasks"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(theme::bg_surface_raised())
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .child(format!("{enabled_schedules}/{total_schedules} active")),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("mission-manage-schedules-btn")
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(theme::accent_soft())
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .text_color(theme::accent())
+                                            .cursor_pointer()
+                                            .hover(|s| s.opacity(0.85))
+                                            .child(if total_schedules == 0 { "+ Add Schedule" } else { "Manage" })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.settings_open = true;
+                                                this.select_settings_target(
+                                                    crate::app::providers::SettingsTarget::Schedules,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
+                            );
+
+                        if schedule_reg.jobs.is_empty() {
+                            schedules_card = schedules_card.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child("No scheduled tasks configured (.hadron/schedules/schedules.json)."),
+                            );
+                        } else {
+                            let mut sched_rows = v_flex().gap_1p5().w_full();
+                            for (idx, job) in schedule_reg.jobs.iter().enumerate() {
+                                let job_id = job.id.clone();
+                                let freq_str = hadron_lattice::describe_cron(&job.cron);
+                                let cron_str = job.cron.clone();
+                                let target_str = job.target.clone();
+                                let enabled = job.enabled;
+                                let due = hadron_lattice::ScheduleRegistry::evaluate_job(
+                                    job, &repo_root, now, 3600,
+                                );
+                                let (status_text, status_color) = if !enabled {
+                                    ("Disabled", theme::text_muted())
+                                } else {
+                                    match due {
+                                        hadron_lattice::DueStatus::MissingTask { .. } => {
+                                            ("Missing TASK.md", theme::error())
+                                        }
+                                        hadron_lattice::DueStatus::OverdueAsk { .. } => {
+                                            ("Overdue", theme::warning())
+                                        }
+                                        hadron_lattice::DueStatus::Due { .. } => {
+                                            ("Due Now", theme::accent())
+                                        }
+                                        hadron_lattice::DueStatus::NotDue => {
+                                            ("Enabled", theme::success())
+                                        }
+                                    }
+                                };
+                                let last_run = job
+                                    .last_run_at
+                                    .map(|t| {
+                                        format!("Last run: {} UTC", t.format("%Y-%m-%d %H:%M"))
+                                    })
+                                    .unwrap_or_else(|| "Last run: Never".to_string());
+
+                                let run_id = job_id.clone();
+                                let run_root = repo_root.clone();
+                                let tog_id = job_id.clone();
+                                let tog_root = repo_root.clone();
+
+                                sched_rows = sched_rows.child(
+                                    v_flex()
+                                        .id(("mission-schedule-row", idx))
+                                        .w_full()
+                                        .gap_1()
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(theme::bg_surface_raised())
+                                        .border_1()
+                                        .border_color(theme::border())
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .gap_1p5()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                                                .text_color(theme::accent())
+                                                                .truncate()
+                                                                .child(job.name.clone()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(theme::bg_surface())
+                                                                .text_xs()
+                                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                                .text_color(status_color)
+                                                                .child(status_text),
+                                                        ),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .id(("mission-sched-run", idx))
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(theme::accent_soft())
+                                                                .text_xs()
+                                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                                .text_color(theme::accent())
+                                                                .cursor_pointer()
+                                                                .child("Run Now")
+                                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                                    this.run_scheduled_job(&run_id, &run_root, cx);
+                                                                    cx.notify();
+                                                                })),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id(("mission-sched-toggle", idx))
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(theme::bg_surface())
+                                                                .border_1()
+                                                                .border_color(theme::border())
+                                                                .text_xs()
+                                                                .text_color(theme::text_secondary())
+                                                                .cursor_pointer()
+                                                                .child(if enabled { "Disable" } else { "Enable" })
+                                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                                    if let Ok(mut reg) = hadron_lattice::ScheduleRegistry::load(&tog_root) {
+                                                                        if let Some(j) = reg.get_mut(&tog_id) {
+                                                                            j.enabled = !j.enabled;
+                                                                            let _ = reg.save(&tog_root);
+                                                                        }
+                                                                    }
+                                                                    cx.notify();
+                                                                })),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .flex_wrap()
+                                                .gap_2()
+                                                .items_center()
+                                                .text_xs()
+                                                .text_color(theme::text_muted())
+                                                .child(format!("{freq_str} ({cron_str})"))
+                                                .child(format!("• {target_str}"))
+                                                .child(format!("• {last_run}")),
+                                        ),
+                                );
+                            }
+                            schedules_card = schedules_card.child(sched_rows);
+                        }
+
+                        let tasks_to_render: Vec<&crate::model::SwarmTask> =
+                            self.view.tasks.iter().collect();
+
+                        let live_gate_rows: Vec<crate::model::SwarmTask> =
+                            model::tasks::live_rows_from_activities(&self.last_gate_activities);
+
+                        let swarm_list = if tasks_to_render.is_empty() && live_gate_rows.is_empty()
+                        {
+                            div()
+                                .p_2()
+                                .child(empty_hint("No swarm tasks yet."))
+                                .into_any_element()
+                        } else {
+                            let mono_font = cx.theme().mono_font_family.clone();
+                            let mut col = v_flex().gap_1().w_full();
+                            for t in &live_gate_rows {
+                                let to = self.resolve_identity(&t.to);
+                                let from = self.resolve_identity(&t.from);
+                                col = col.child(task_row(t, render_now, &to, &from, &mono_font));
+                            }
+                            for t in tasks_to_render {
+                                let to = self.resolve_identity(&t.to);
+                                let from = self.resolve_identity(&t.from);
+                                col = col.child(task_row(t, render_now, &to, &from, &mono_font));
+                            }
+                            col.into_any_element()
+                        };
+
+                        let list = v_flex()
+                            .gap_2()
+                            .p_2()
+                            .w_full()
+                            .child(schedules_card)
+                            .child(swarm_list)
+                            .into_any_element();
+
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(
+                                div()
+                                    .id("tasks-scroll")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.tasks_scroll)
+                                    .text_sm()
+                                    .text_color(theme::text())
+                                    .child(list),
+                            )
+                            .child(div().absolute().top_0().bottom_0().right_0().child(
+                                Scrollbar::vertical(&self.tasks_scroll).mode(ScrollbarMode::Always),
+                            ))
+                            .into_any_element()
+                    }
+                    MissionSubtab::Gate => self.render_gate_explorer(cx).into_any_element(),
+                    MissionSubtab::TimeTravel => self.time_travel_inspector(cx).into_any_element(),
+                    MissionSubtab::Artifacts => self.render_artifacts_rail(cx).into_any_element(),
+                };
+
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(h_flex().flex_none().px_3().py_2().child(mission_subtabs))
+                    .child(mission_body)
+                    .into_any_element()
+            }
+            RightRailTab::Visualizer => self.visualizer_view(cx).into_any_element(),
+        };
+
+        if let Some(start) = tab_start {
+            hadron_lattice::term::info(
+                hadron_lattice::term::Source::Chamber,
+                &format!(
+                    "frame render tab {}: {:?}",
+                    selected.label(),
+                    start.elapsed()
+                ),
+            );
+        }
+
+        let card = v_flex()
+            .flex_1()
+            .min_h_0()
+            .rounded(INNER_RADIUS)
+            .overflow_hidden()
+            // Glass, matching the chat card: faint sheen + hairline top highlight.
+            .bg(theme::glass_surface())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .child(header)
+            .child(content);
+
+        v_flex()
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .p_2()
+            // No fill here: the ambient field is the backdrop, so the card reads as a
+            // single pane of glass floating on it. A second fill would stack with the
+            // card's translucent glass and hide the field; the p_2 gutter shows it.
+            .child(card)
+    }
+
+    #[allow(dead_code)]
+    fn task_timeline_scrubber(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let span_bounds = model::tasks::span(&self.view.tasks, now);
+        let Some((start_time, end_time)) = span_bounds else {
+            return div().into_any_element();
+        };
+
+        let span_ms = (end_time - start_time).num_milliseconds().max(1) as f64;
+        let span_mins = (end_time - start_time).num_minutes().max(0);
+        let current_at = self.task_scrub.unwrap_or(now);
+        let is_scrubbing = self.task_scrub.is_some();
+
+        let live_pill = if is_scrubbing {
+            h_flex()
+                .id("task-scrub-live-pill")
+                .gap_1p5()
+                .items_center()
+                .px_2p5()
+                .py_1()
+                .rounded_full()
+                .cursor_pointer()
+                .bg(theme::bg_elevated())
+                .border_1()
+                .border_color(theme::halo_reasoning())
+                .hover(|s| s.bg(theme::accent()))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.task_scrub = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(theme::halo_reasoning()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(theme::halo_reasoning())
+                        .child("⏮ Rewound · Jump to Live ▶▶"),
+                )
+                .into_any_element()
+        } else {
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .px_2p5()
+                .py_1()
+                .rounded_full()
+                .bg(theme::bg_elevated())
+                .border_1()
+                .border_color(theme::success())
+                .child(div().size(px(6.0)).rounded_full().bg(theme::success()))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(theme::success())
+                        .child("● LIVE TASK FEED"),
+                )
+                .into_any_element()
+        };
+
+        let time_label = h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(theme::text())
+                    .child(current_at.format("%H:%M:%S UTC").to_string()),
+            )
+            .child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(theme::bg_base())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(format!(
+                        "Span: {span_mins}m · {} tasks",
+                        self.view.tasks.len()
+                    )),
+            );
+
+        let header = h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .px_3()
+            .py_1p5()
+            .child(live_pill)
+            .child(time_label);
+
+        let task_ticks: Vec<(f32, TaskState)> = self
+            .view
+            .tasks
+            .iter()
+            .map(|t| {
+                let ms = (t.asked_at - start_time).num_milliseconds() as f64;
+                (((ms / span_ms).clamp(0.0, 1.0)) as f32, t.state)
+            })
+            .collect();
+
+        let current_pct = (((current_at - start_time).num_milliseconds() as f64 / span_ms)
+            .clamp(0.0, 1.0)) as f32;
+
+        let track_bounds_cell = std::rc::Rc::new(std::cell::Cell::new(gpui_kit::Bounds::default()));
+        let track_paint = track_bounds_cell.clone();
+        let track_click = track_bounds_cell.clone();
+        let track_drag = track_bounds_cell.clone();
+
+        let track_canvas = gpui_kit::canvas(
+            move |bounds, _, _| bounds,
+            move |bounds, _, window, _cx| {
+                track_paint.set(bounds);
+                let w = bounds.size.width;
+                let h = bounds.size.height;
+
+                let bg_quad = gpui_kit::Bounds {
+                    origin: bounds.origin,
+                    size: bounds.size,
+                };
+                window.paint_quad(gpui_kit::fill(bg_quad, theme::bg_base()).corner_radii(px(6.0)));
+
+                for &(tick_pct, state) in &task_ticks {
+                    let (state_col, _) = task_state_info(state);
+                    let tx = bounds.origin.x + w * tick_pct;
+                    let tick_bounds = gpui_kit::Bounds {
+                        origin: gpui_kit::point(tx, bounds.origin.y + px(2.0)),
+                        size: gpui_kit::size(px(2.0), h - px(4.0)),
+                    };
+                    window.paint_quad(gpui_kit::fill(tick_bounds, state_col).corner_radii(px(1.0)));
+                }
+
+                let handle_x = bounds.origin.x + w * current_pct;
+                let handle_w = px(4.0);
+                let handle_bounds = gpui_kit::Bounds {
+                    origin: gpui_kit::point(handle_x - handle_w / 2.0, bounds.origin.y),
+                    size: gpui_kit::size(handle_w, h),
+                };
+                window.paint_quad(
+                    gpui_kit::fill(handle_bounds, theme::accent()).corner_radii(px(2.0)),
+                );
+            },
+        )
+        .size_full();
+
+        let track_interactive = div()
+            .id("task-scrub-track")
+            .w_full()
+            .h(px(16.0))
+            .cursor_pointer()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .child(track_canvas)
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(move |this, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                    this.seek_task_scrub(
+                        event.position.x,
+                        track_click.get(),
+                        start_time,
+                        end_time,
+                        cx,
+                    );
+                }),
+            )
+            // The press has to keep being tracked once the pointer leaves a 12px-tall
+            // strip, which it does immediately in any real drag. `on_mouse_move` on the
+            // track stops firing there; GPUI's drag system does not. Same mechanism the
+            // fork's own `Slider` uses (`gpui-component/src/slider.rs:691`).
+            .on_drag(TaskScrubDrag, |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_drag_move(cx.listener(
+                move |this, e: &gpui_kit::DragMoveEvent<TaskScrubDrag>, _window, cx| {
+                    this.seek_task_scrub(
+                        e.event.position.x,
+                        track_drag.get(),
+                        start_time,
+                        end_time,
+                        cx,
+                    );
+                },
+            ));
+
+        v_flex()
+            .w_full()
+            .px_3()
+            .pb_2p5()
+            .border_b_1()
+            .border_color(theme::glass_highlight())
+            .bg(theme::bg_surface())
+            .child(header)
+            .child(track_interactive)
+            .into_any_element()
+    }
+
+    /// Move the scrub head to the pixel `x` on a track of `bounds` spanning
+    /// `start`..`end`. The click path and the drag path both land here so they cannot
+    /// disagree about where a pixel is in time; the mapping itself is
+    /// [`model::tasks::instant_at_fraction`], which is where it is tested.
+    #[allow(dead_code)]
+    fn seek_task_scrub(
+        &mut self,
+        x: gpui_kit::Pixels,
+        bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) {
+        // Before the first paint the cell still holds a zero-width default: a press then
+        // names no instant rather than dividing by nothing.
+        if bounds.size.width <= px(0.0) {
+            return;
+        }
+        let fraction = ((x - bounds.origin.x) / bounds.size.width) as f64;
+        self.task_scrub = Some(model::tasks::instant_at_fraction(start, end, fraction));
+        cx.notify();
+    }
+}
+
+/// The drag payload for the Tasks-tab scrubber head. It renders nothing — the track
+/// paints its own head — and exists only because GPUI keys drag tracking on the type.
+#[allow(dead_code)]
+#[derive(Clone)]
+struct TaskScrubDrag;
+
+impl Render for TaskScrubDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTabState {
+    pub titles: Vec<String>,
+    pub active_index: usize,
+}
+
+impl Default for TerminalTabState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(dead_code)]
+impl TerminalTabState {
+    pub fn new() -> Self {
+        Self {
+            titles: Vec::new(),
+            active_index: 0,
+        }
+    }
+
+    pub fn add_tab(&mut self, title: impl Into<String>) -> usize {
+        self.titles.push(title.into());
+        self.active_index = self.titles.len().saturating_sub(1);
+        self.active_index
+    }
+
+    pub fn select_tab(&mut self, index: usize) -> bool {
+        if index < self.titles.len() {
+            self.active_index = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn close_tab(&mut self, closing_index: usize) -> Option<usize> {
+        if closing_index >= self.titles.len() {
+            return None;
+        }
+
+        self.titles.remove(closing_index);
+        if self.titles.is_empty() {
+            self.active_index = 0;
+        } else if closing_index < self.active_index {
+            self.active_index = self.active_index.saturating_sub(1);
+        } else if self.active_index >= self.titles.len() {
+            self.active_index = self.titles.len() - 1;
+        }
+        Some(self.active_index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_tab_addition_and_auto_focus() {
+        let mut state = TerminalTabState::new();
+        assert_eq!(state.titles.len(), 0);
+
+        let idx0 = state.add_tab("bash #1");
+        assert_eq!(idx0, 0);
+        assert_eq!(state.active_index, 0);
+
+        let idx1 = state.add_tab("bash #2");
+        assert_eq!(idx1, 1);
+        assert_eq!(
+            state.active_index, 1,
+            "Adding tab #2 must auto-focus index 1"
+        );
+        assert_eq!(state.titles.len(), 2);
+    }
+
+    #[test]
+    fn test_terminal_tab_selection_valid_and_out_of_bounds() {
+        let mut state = TerminalTabState::new();
+        state.add_tab("bash #1");
+        state.add_tab("bash #2");
+        state.add_tab("bash #3");
+
+        assert_eq!(state.active_index, 2);
+
+        // Select valid index 0
+        assert!(state.select_tab(0));
+        assert_eq!(state.active_index, 0);
+
+        // Select valid index 1
+        assert!(state.select_tab(1));
+        assert_eq!(state.active_index, 1);
+
+        // Select invalid index 99 -> must return false and preserve active_index=1
+        assert!(!state.select_tab(99));
+        assert_eq!(
+            state.active_index, 1,
+            "Out of bounds selection must not corrupt active_index"
+        );
+    }
+
+    #[test]
+    fn test_close_middle_active_tab_fallback() {
+        let mut state = TerminalTabState::new();
+        state.add_tab("tab 0");
+        state.add_tab("tab 1");
+        state.add_tab("tab 2");
+
+        state.select_tab(1); // Active tab is "tab 1"
+        let new_active = state.close_tab(1);
+
+        assert_eq!(new_active, Some(1));
+        assert_eq!(state.titles.len(), 2);
+        assert_eq!(state.titles[0], "tab 0");
+        assert_eq!(state.titles[1], "tab 2");
+        assert_eq!(
+            state.active_index, 1,
+            "Active index remains 1, now pointing to 'tab 2'"
+        );
+    }
+
+    #[test]
+    fn test_close_tail_active_tab_fallback() {
+        let mut state = TerminalTabState::new();
+        state.add_tab("tab 0");
+        state.add_tab("tab 1");
+        state.add_tab("tab 2");
+
+        state.select_tab(2); // Active tab is tail (index 2)
+        let new_active = state.close_tab(2);
+
+        assert_eq!(new_active, Some(1));
+        assert_eq!(state.titles.len(), 2);
+        assert_eq!(
+            state.active_index, 1,
+            "Closing tail tab decrements active_index to new tail (1)"
+        );
+    }
+
+    #[test]
+    fn test_close_preceding_tab_adjusts_active_index() {
+        let mut state = TerminalTabState::new();
+        state.add_tab("tab 0");
+        state.add_tab("tab 1");
+        state.add_tab("tab 2");
+
+        state.select_tab(2); // Active is "tab 2" at index 2
+        state.close_tab(0); // Close preceding tab "tab 0"
+
+        assert_eq!(state.titles.len(), 2);
+        assert_eq!(state.titles[1], "tab 2");
+        assert_eq!(
+            state.active_index, 1,
+            "Active index shifted from 2 to 1 to track 'tab 2'"
+        );
+    }
+
+    #[test]
+    fn test_close_following_tab_preserves_active_index() {
+        let mut state = TerminalTabState::new();
+        state.add_tab("tab 0");
+        state.add_tab("tab 1");
+        state.add_tab("tab 2");
+
+        state.select_tab(0); // Active is "tab 0" at index 0
+        state.close_tab(2); // Close following tab "tab 2"
+
+        assert_eq!(state.titles.len(), 2);
+        assert_eq!(state.active_index, 0, "Active index remains 0");
+    }
+
+    #[test]
+    fn test_close_last_remaining_tab_safe_fallback() {
+        let mut state = TerminalTabState::new();
+        state.add_tab("tab 0");
+
+        let new_active = state.close_tab(0);
+
+        assert_eq!(new_active, Some(0));
+        assert_eq!(state.titles.len(), 0);
+        assert_eq!(
+            state.active_index, 0,
+            "Active index remains 0 when vector becomes empty"
+        );
+    }
+}

@@ -1,0 +1,1275 @@
+use super::*;
+use hadron_lattice::{EnergyState, Event, Flavor, QuarkCard};
+
+fn projection(task: &str) -> Projection {
+    Projection {
+        task: task.into(),
+        invariants: "Snapshot before editing. Use @mentions.".into(),
+        available_invariants: vec![],
+        nucleus_digest: "## map.md\nauth lives in src/auth".into(),
+        live_activities: vec![],
+        roster: vec![QuarkCard {
+            id: QuarkId::new("agy"),
+            display_name: None,
+            flavor: Flavor::Worker,
+            energy: EnergyState::Available,
+            provider: String::new(),
+            model: String::new(),
+            commands: Default::default(),
+            energy_limit: None,
+            deny_skills: vec![],
+            has_forge_tools: false,
+        }],
+        field_window: vec![Event::new(
+            Actor::Human,
+            Some(QuarkId::new("claude")),
+            Kind::Message {
+                body: "start the auth work".into(),
+            },
+        )],
+        field_truncated: false,
+        nucleus_index: String::new(),
+        nucleus_index_path: std::path::PathBuf::new(),
+        nucleus_index_truncated: false,
+        nucleus_index_budget_bytes: hadron_lattice::DEFAULT_NUCLEUS_INDEX_BUDGET_BYTES,
+        nucleus_notes_dir: std::path::PathBuf::new(),
+        git_diff: String::new(),
+        isolated: true,
+        cwd: std::path::PathBuf::from("/repo/.hadron/trees/agy"),
+        mode: hadron_lattice::Mode::default(),
+        active_skill: None,
+        named_specifically: true,
+        from_human_directly: false,
+        has_forge_tools: false,
+    }
+}
+
+/// The quark must be TOLD where it is working, not just silently placed there.
+#[test]
+fn prompt_names_the_working_directory() {
+    let p = build(&projection("Build login"), &QuarkId::new("agy"));
+    assert!(p.contains("# Where you are"));
+    assert!(p.contains("/repo/.hadron/trees/agy"));
+    assert!(
+        p.contains("do NOT"),
+        "and told not to touch the parent checkout"
+    );
+}
+
+/// Peers are named to a quark by their DISPLAY NAME when they have one, not the
+/// raw seat id — so quarks address each other `@GoogleGirl`, not `@acp-claude`.
+/// (The router resolves either back to the seat, so routing is unaffected.)
+#[test]
+fn peers_are_named_by_display_name_not_raw_id() {
+    let mut proj = projection("coordinate");
+    // The self (agy) gets a display name too — "Who you are" must use it.
+    proj.roster[0].display_name = Some("Aggy".into());
+    // A peer with a display name, and a transcript line it authored.
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("acp-claude"),
+        display_name: Some("GoogleGirl".into()),
+        flavor: Flavor::Worker,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+    proj.field_window.push(Event::new(
+        Actor::Quark(QuarkId::new("acp-claude")),
+        Some(QuarkId::new("agy")),
+        Kind::Message {
+            body: "ping".into(),
+        },
+    ));
+    let p = build(&proj, &QuarkId::new("agy"));
+
+    assert!(
+        p.contains("You are `@Aggy`"),
+        "self named by display name:\n{p}"
+    );
+    assert!(
+        p.contains("**GoogleGirl → Aggy:** ping"),
+        "peer + recipient named by display name in the transcript:\n{p}"
+    );
+    assert!(
+        !p.contains("acp-claude"),
+        "the raw id must not leak anywhere once a display name exists:\n{p}"
+    );
+}
+
+/// The bug this pair of tests exists to stop recurring: for the whole of the
+/// live swarm's life the prompt asserted isolation unconditionally, while the
+/// engine actually placed every quark in the *shared* workspace root. A worker
+/// obeying "your changes reach `main` only through the merge gate" then refused
+/// to commit at all — and its work sat uncommitted in the human's tree, one
+/// `git checkout` away from being lost. A quark in the shared tree must be told
+/// to commit its own work, and must NOT be told a merge gate exists.
+#[test]
+fn a_quark_in_the_shared_tree_is_told_to_commit_its_own_work() {
+    let mut proj = projection("Build login");
+    proj.isolated = false;
+    proj.cwd = std::path::PathBuf::from("/home/user/project");
+    let p = build(&proj, &QuarkId::new("agy"));
+
+    assert!(
+        p.contains("shared checkout"),
+        "it must know it shares the tree"
+    );
+    assert!(
+        p.contains("commit your own work"),
+        "and that committing is ITS job"
+    );
+    assert!(
+        !p.contains("merge gate"),
+        "there is no merge gate in the shared tree — promising one is what made agy \
+         refuse to commit, every single time"
+    );
+    // Sharing a tree with in-flight quarks makes a blanket stage a footgun.
+    assert!(
+        p.contains("git add -A"),
+        "and is warned off the blanket stage"
+    );
+}
+
+/// The isolated arm must keep its old contract intact: a quark that really does
+/// have its own worktree still routes through the gate rather than committing
+/// onto whatever branch the human happens to have checked out.
+#[test]
+fn a_quark_in_its_own_worktree_still_routes_through_the_merge_gate() {
+    let p = build(&projection("Build login"), &QuarkId::new("agy"));
+    assert!(p.contains("merge gate"));
+    assert!(!p.contains("shared checkout"));
+}
+
+#[test]
+fn prompt_contains_all_sections() {
+    let p = build(&projection("Build login"), &QuarkId::new("agy"));
+    assert!(p.contains("# Working protocol (Invariants)"));
+    assert!(p.contains("Snapshot before editing"));
+    assert!(p.contains("# Project knowledge (nucleus)"));
+    assert!(p.contains("auth lives in src/auth"));
+    assert!(p.contains("# Your task"));
+    assert!(p.contains("Build login"));
+    assert!(p.contains("# Recent field"));
+    assert!(p.contains("**human → claude:** start the auth work"));
+    assert!(
+        p.contains("@<name>"),
+        "the addressing instruction is present"
+    );
+}
+
+#[test]
+fn prompt_states_the_quarks_own_identity_and_multi_addressee_rule() {
+    // A quark must know its handle to act on only its slice of a message that
+    // named several quarks (the multi-dispatch case).
+    let p = build(&projection("x"), &QuarkId::new("opus"));
+    assert!(p.contains("# Who you are"));
+    assert!(p.contains("You are `@opus`"));
+    assert!(p.contains("act ONLY on the part directed at you"));
+}
+
+#[test]
+fn prompt_states_mode_authority_and_demands_honesty() {
+    let mut proj = projection("x");
+    // Read-only mode tells the quark it cannot act…
+    proj.mode = hadron_lattice::Mode::Ask;
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(p.contains("# Your authority this turn"));
+    assert!(p.contains("Ask (read-only)"));
+    // …and every mode demands truthful reporting (the anti-confabulation rule).
+    assert!(p.contains("Never state completed work"));
+
+    proj.mode = hadron_lattice::Mode::Bypass;
+    assert!(build(&proj, &QuarkId::new("agy")).contains("Bypass — full tool access"));
+}
+
+/// A worker is told to escalate by ROLE; the orchestrator is not told to
+/// escalate at all (it *is* the escalation target — it hands back to the human).
+#[test]
+fn worker_is_told_to_escalate_to_the_orchestrator_role() {
+    let mut proj = projection("x");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let worker_prompt = build(&proj, &QuarkId::new("agy"));
+    assert!(worker_prompt.contains("You are a **worker**"));
+    assert!(worker_prompt.contains("`@orchestrator`"));
+
+    let orch_prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(!orch_prompt.contains("You are a **worker**"));
+}
+
+/// A finished worker turn must wake the orchestrator, not fall through to the
+/// human. An unaddressed reply excites nobody, so telling a worker both "you
+/// report to the orchestrator" and "drop the @mention when you are done" made it
+/// obey the second: it reported a completed task into the void and the
+/// orchestrator never acted on it. Observed live.
+#[test]
+fn a_finished_worker_reports_up_and_is_never_told_to_drop_the_mention() {
+    let mut proj = projection("x");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let worker = build(&proj, &QuarkId::new("agy"));
+    assert!(
+        worker.contains(
+            "When your task is complete or if your turn encounters an error, start a line with `@orchestrator`"
+        ),
+        "a worker must be told to report its completed work UP to the orchestrator"
+    );
+    assert!(
+        !worker.contains("reply WITHOUT any `@mention`"),
+        "a worker told to drop the mention hands its result to nobody"
+    );
+
+    // The orchestrator answers to the human, so it keeps the original rule.
+    let orch = build(&proj, &QuarkId::new("opus"));
+    assert!(orch.contains("reply WITHOUT any `@mention`"));
+    assert!(!orch.contains("start a line with `@orchestrator` and report there"));
+}
+
+/// With no orchestrator seated there is nobody to report to, so a lone quark must
+/// still hand back to the human rather than address a role that does not exist.
+#[test]
+fn with_no_orchestrator_a_quark_still_hands_back_to_the_human() {
+    let p = build(&projection("x"), &QuarkId::new("agy"));
+    assert!(p.contains("reply WITHOUT any `@mention`"));
+    assert!(!p.contains("start a line with `@orchestrator` and report there"));
+}
+
+/// The orchestrator is told to stay available and dispatch long work; a worker
+/// is not (a worker grinding away blocks nobody's conversation).
+#[test]
+fn only_the_orchestrator_is_told_to_stay_available() {
+    let mut proj = projection("x");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let orch_prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(orch_prompt.contains("You are the **orchestrator**"));
+    assert!(orch_prompt.contains("Stay available"));
+
+    let worker_prompt = build(&proj, &QuarkId::new("agy"));
+    assert!(!worker_prompt.contains("You are the **orchestrator**"));
+}
+
+/// **The "deploy first" property.** On a multi-task request the orchestrator's
+/// own guidance must tell it to emit `@worker <task>` delegation lines BEFORE
+/// starting its own implementation, so workers run in parallel instead of
+/// picking up sub-tasks only after the orchestrator has already spent the turn
+/// on its own slice.
+#[test]
+fn orchestrator_is_told_to_delegate_before_implementing() {
+    let mut proj = projection("x");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(
+        prompt.contains("before you start your own implementation work"),
+        "the orchestrator must be told to fan out delegations first:\n{prompt}"
+    );
+}
+
+#[test]
+fn worker_prompt_prescribes_hub_and_spoke_and_forbids_peer_delegation() {
+    let mut proj = projection("implement auth");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let worker_prompt = build(&proj, &QuarkId::new("agy"));
+    assert!(worker_prompt.contains("Hub-and-Spoke"));
+    assert!(worker_prompt.contains("Do NOT delegate to peer worker quarks directly"));
+    assert!(worker_prompt.contains("communicate exclusively with `@orchestrator`"));
+    assert!(worker_prompt.contains("freely spawn internal subagents"));
+
+    let orch_prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(orch_prompt.contains("You are the swarm's sole dispatcher"));
+    assert!(orch_prompt.contains("Handle Worker Escalations & Assistance"));
+    assert!(orch_prompt.contains("Hub-and-Spoke"));
+}
+
+/// **Broadcast means think, not do.** A worker reached only via `@team` (or any
+/// unaddressed message) — `named_specifically == false` — must be told to
+/// analyse and report to the orchestrator, not to implement, edit files, or
+/// commit. This is what stopped every worker independently implementing the
+/// same `@team` brainstorm ask.
+#[test]
+fn a_broadcast_reached_worker_is_told_to_think_not_do() {
+    let mut proj = projection("x");
+    proj.named_specifically = false;
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let worker_prompt = build(&proj, &QuarkId::new("agy"));
+    assert!(
+        worker_prompt.contains("do not implement it"),
+        "a broadcast-reached worker must be told to think, not do:\n{worker_prompt}"
+    );
+    assert!(worker_prompt.contains("Do not edit files"));
+    assert!(worker_prompt.contains("commit, or open a branch"));
+
+    // The orchestrator is never "broadcast-only" — an unaddressed message
+    // defaults to it — so it must never get this clause regardless of the flag.
+    let orch_prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(!orch_prompt.contains("do not implement it"));
+}
+
+/// A worker specifically named — by `@id`, display name, or role — gets the
+/// ordinary work directive; the broadcast-only clause is absent.
+#[test]
+fn a_specifically_named_worker_gets_no_broadcast_clause() {
+    let mut proj = projection("x");
+    proj.named_specifically = true;
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let worker_prompt = build(&proj, &QuarkId::new("agy"));
+    assert!(!worker_prompt.contains("do not implement it"));
+}
+
+#[test]
+fn bypass_orchestrator_gets_autonomous_loop_directives() {
+    let mut proj = projection("x");
+    proj.mode = hadron_lattice::Mode::Bypass;
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(prompt.contains("Autonomous Bypass Execution Loop"));
+    assert!(prompt.contains("update the active plan file on disk"));
+    assert!(prompt.contains("dispatch the next unchecked task"));
+}
+
+/// Task 5: in Bypass the orchestrator must recover worktree-fixable blockers
+/// itself and never hand the human a menu of options. The escalation exception
+/// is narrowed to "only the human can unblock", closing the loophole that turned
+/// a stranded merge (recoverable) into an option-menu handback.
+#[test]
+fn bypass_completion_gate_forbids_menus() {
+    let mut proj = projection("x");
+    proj.mode = hadron_lattice::Mode::Bypass;
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let prompt = build(&proj, &QuarkId::new("opus"));
+    assert!(prompt.contains("NEVER hand the human a menu"));
+    assert!(prompt.contains("carry the commit forward onto THIS turn's branch"));
+    assert!(prompt.contains("\"Unrecoverable\" means the human is the sole unblocker"));
+}
+
+/// No orchestrator on the roster → don't point the worker at a target that
+/// cannot be reached.
+#[test]
+fn no_escalation_clause_without_an_orchestrator() {
+    // The base projection's roster is a lone worker (`agy`).
+    let p = build(&projection("x"), &QuarkId::new("agy"));
+    assert!(!p.contains("You are a **worker**"));
+}
+
+/// A dropped event must be *announced*. Silent truncation is the merge-gate bug
+/// wearing a different hat: the quark cannot tell "never said" from "can't see it",
+/// so it acts on the partial field with full confidence.
+#[test]
+fn a_truncated_field_window_says_so() {
+    let mut proj = projection("x");
+    assert!(!build(&proj, &QuarkId::new("agy")).contains("INCOMPLETE"));
+
+    proj.field_truncated = true;
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(
+        p.contains("INCOMPLETE"),
+        "the quark must be told the transcript is partial"
+    );
+    assert!(p.contains("rather than assuming it was never said"));
+}
+
+/// In the shared tree the diff is the WHOLE tree's uncommitted state — the human's
+/// edits and other quarks' in-flight work. Unlabelled, a quark reads it as its own
+/// prior output and "continues" work it never did.
+#[test]
+fn the_working_diff_is_attributed_to_the_tree_it_came_from() {
+    let mut proj = projection("x");
+    proj.git_diff = "--- a/x\n+++ b/x".into();
+
+    proj.isolated = true;
+    let own = build(&proj, &QuarkId::new("agy"));
+    assert!(own.contains("your own worktree"));
+
+    proj.isolated = false;
+    let shared = build(&proj, &QuarkId::new("agy"));
+    assert!(shared.contains("whole shared tree"));
+    assert!(shared.contains("It is NOT necessarily yours"));
+    assert!(shared.contains("do not commit any part of it you did not author"));
+}
+
+/// Design requirement, made structural: the orchestrator is the human's narrator, so a
+/// worker's claim must be checked against the repo before it is relayed as fact.
+/// This was my habit; a habit is not architecture.
+#[test]
+fn the_orchestrator_must_verify_a_workers_claim_before_relaying_it() {
+    let mut proj = projection("x");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+
+    let orch = build(&proj, &QuarkId::new("opus"));
+    assert!(orch.contains("Verify before you relay"));
+    assert!(
+        orch.contains("the repo wins"),
+        "ground truth beats a self-report"
+    );
+    // …and the floor, so it doesn't become a lazy delegator.
+    assert!(orch.contains("do not bounce trivial work"));
+
+    // The worker is told to settle small calls itself rather than stalling.
+    let worker = build(&proj, &QuarkId::new("agy"));
+    assert!(worker.contains("Resolve implementation details yourself"));
+    assert!(worker.contains("do NOT stall on the small ones"));
+}
+
+/// The context asymmetry: one quark arrives with weeks of accumulated context,
+/// another with nothing, and we mistake persistence for intelligence. A quark must
+/// be shown the nucleus index AND told where to write it — "remember this" without
+/// a path is an instruction it cannot obey. It must also be told where the NOTES
+/// are, or the index's `→ path` lines point at something it was never told it may
+/// open.
+#[test]
+fn a_quark_is_shown_the_nucleus_index_and_told_where_to_write_it() {
+    let mut proj = projection("x");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj.nucleus_notes_dir = std::path::PathBuf::from("/repo/.hadron/nucleus/notes");
+
+    // Empty index still emits the section — otherwise the quark never learns it HAS one.
+    let empty = build(&proj, &QuarkId::new("agy"));
+    assert!(empty.contains("# What the swarm has learned (nucleus index)"));
+    assert!(empty.contains("nothing has been recorded here yet"));
+    assert!(
+        empty.contains("/repo/.hadron/nucleus/index.md"),
+        "it must know the path"
+    );
+    assert!(
+        empty.contains("/repo/.hadron/nucleus/notes"),
+        "and where notes live"
+    );
+    assert!(
+        empty.contains("shared by every quark"),
+        "and that it is not private"
+    );
+    assert!(
+        empty.contains("append to it"),
+        "and that writing is its job"
+    );
+
+    // A populated index with pinned lessons comes back in the prompt.
+    proj.nucleus_index = "## How we get things wrong\n\n- [forge-unwired](notes/forge-unwired.md) — the forge has zero consumers.".into();
+    let carried = build(&proj, &QuarkId::new("agy"));
+    assert!(carried.contains("forge-unwired"));
+    assert!(!carried.contains("nothing has been recorded here yet"));
+}
+
+/// An index the prompt fitter shed for budget (empty + truncated) is reported as
+/// omitted, with the path to open — not as "nothing recorded", which tells the quark
+/// there is nothing to look up.
+#[test]
+fn an_index_omitted_for_budget_is_not_reported_as_empty() {
+    let mut proj = projection("x");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj.nucleus_index_truncated = true;
+
+    let out = build(&proj, &QuarkId::new("agy"));
+    assert!(out.contains(
+        "_Omitted to fit the prompt budget — open `/repo/.hadron/nucleus/index.md` on demand._"
+    ));
+    assert!(!out.contains("nothing has been recorded here yet"));
+}
+
+/// No nucleus index path (a mock adapter, an old snapshot) → no section, rather
+/// than a section telling the quark to write to nowhere.
+#[test]
+fn no_nucleus_index_section_without_a_path() {
+    let p = build(&projection("x"), &QuarkId::new("agy"));
+    assert!(!p.contains("your memory"));
+}
+
+/// Prohibition alone did not stop a blanket stage; give the positive form too.
+#[test]
+fn the_shared_tree_prescribes_staging_by_explicit_path() {
+    let mut proj = projection("x");
+    proj.isolated = false;
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(
+        p.contains("git add <path>"),
+        "say what TO do, not only what not to"
+    );
+    assert!(p.contains("git add -A"), "and still name the footgun");
+}
+
+#[test]
+fn empty_optional_sections_are_omitted() {
+    let mut proj = projection("t");
+    proj.invariants = String::new();
+    proj.nucleus_digest = String::new();
+    proj.git_diff = String::new();
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(!p.contains("Invariants"));
+    assert!(!p.contains("Project knowledge"));
+    assert!(!p.contains("working diff"));
+    assert!(p.contains("# Your task"));
+}
+
+#[test]
+fn orchestrator_prompt_surfaces_peer_deny_skills() {
+    let mut proj = projection("dispatch review");
+    proj.roster[0].deny_skills = vec!["security-review".into()];
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("opus"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+    let orch = build(&proj, &QuarkId::new("opus"));
+    assert!(orch.contains("# Peer Skill Restrictions"));
+    assert!(orch.contains("security-review"));
+}
+
+#[test]
+fn measure_reports_nonzero_sizes_for_present_sections() {
+    let mut proj = projection("do the thing");
+    proj.invariants = "some rule".to_string();
+    proj.nucleus_digest = String::new();
+    let b = measure(&proj, &QuarkId::new("agy"));
+    assert!(b.standard_model > 0, "standard model is always present");
+    assert!(b.invariants > 0);
+    assert!(b.task > 0);
+    assert_eq!(b.nucleus_digest, 0, "empty digest measures as zero");
+}
+
+/// The sum of every measured section must not exceed `build()`'s total length —
+/// `measure` must not double-count a section `build` only writes once.
+#[test]
+fn measure_and_build_agree_on_section_boundaries() {
+    let proj = projection("do the thing");
+    let id = QuarkId::new("agy");
+    let built = build(&proj, &id);
+    let b = measure(&proj, &id);
+    let total = b.standard_model
+        + b.invariants
+        + b.nucleus_digest
+        + b.nucleus_index
+        + b.active_skill
+        + b.task
+        + b.field_window;
+    assert!(total <= built.len());
+}
+
+/// The test above is a `<=`, so a section `measure` forgets entirely passes it —
+/// which is what happened when `69f3d9e` moved the skill body off `invariants`:
+/// ~3 KB stopped being counted by the one instrument used to size prompt cost.
+#[test]
+fn measure_counts_the_active_skill_body() {
+    let mut proj = projection("do the thing");
+    proj.active_skill = Some("# systematic-debugging\nphase 1: read the error".to_string());
+    let id = QuarkId::new("agy");
+    let b = measure(&proj, &id);
+    assert!(
+        b.active_skill > 0,
+        "a matched skill's body must be measured, not dropped"
+    );
+    let total = b.standard_model
+        + b.invariants
+        + b.nucleus_digest
+        + b.nucleus_index
+        + b.active_skill
+        + b.task
+        + b.field_window;
+    assert!(
+        total <= build(&proj, &id).len(),
+        "and still not double-counted"
+    );
+}
+
+#[test]
+fn prompt_contains_hadron_forge_tools_section_when_enabled() {
+    let mut proj = projection("x");
+    proj.has_forge_tools = true;
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(p.contains("# Available Hadron Forge Tools"));
+    assert!(p.contains("hadron_forge_read_file"));
+    assert!(p.contains("hadron_forge_list_dir"));
+    assert!(p.contains("hadron_forge_grep"));
+    assert!(p.contains("hadron_forge_exec"));
+    assert!(p.contains("hadron_forge_diagnostics"));
+    assert!(p.contains("hadron_forge_cargo_tree"));
+    assert!(p.contains("hadron_forge_query_nucleus"));
+    assert!(p.contains("hadron_forge_read_blocks"));
+    assert!(p.contains("hadron_forge_edit"));
+}
+
+#[test]
+fn a_cli_transport_projection_does_not_contain_forge_tools_section() {
+    let proj = projection("x");
+    assert!(
+        !proj.has_forge_tools,
+        "CLI projection defaults to has_forge_tools = false"
+    );
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(!p.contains("# Available Hadron Forge Tools"));
+    assert!(!p.contains("hadron_forge_"));
+}
+
+#[test]
+fn prompt_renders_active_skill_immediately_before_your_task() {
+    let mut proj = projection("Build auth feature");
+    proj.active_skill =
+        Some("\n# Skill for this turn: executing-plans\n\nLoad plan and execute.".to_string());
+    let p = build(&proj, &QuarkId::new("agy"));
+
+    let skill_pos = p
+        .find("# Skill for this turn: executing-plans")
+        .expect("active skill header present");
+    let task_pos = p.find("# Your task").expect("task header present");
+    let inv_pos = p
+        .find("# Working protocol (Invariants)")
+        .expect("invariants header present");
+
+    assert!(inv_pos < skill_pos, "invariants precede active skill");
+    assert!(skill_pos < task_pos, "active skill precedes task");
+
+    let between = &p[skill_pos + "# Skill for this turn: executing-plans".len()..task_pos];
+    assert!(
+        !between.contains("\n# "),
+        "no intervening section header between active skill and task"
+    );
+}
+
+#[test]
+fn nucleus_recall_prompt_rendering() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let notes_dir = temp.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+
+    std::fs::write(
+        notes_dir.join("worktree-isolation.md"),
+        "---\ndescription: Git worktree management and checkout isolation\n---\nIsolation notes",
+    )
+    .unwrap();
+
+    let mut proj = projection("Need worktree isolation for task");
+    proj.nucleus_index_path = temp.path().join("index.md");
+    proj.nucleus_notes_dir = notes_dir;
+    proj.nucleus_index = r#"# Memory index
+
+## How we get things wrong
+
+- [compiled-is-not-running](notes/compiled-is-not-running.md) — Pinned lesson
+
+## The shared tree
+
+- [worktree-isolation](notes/worktree-isolation.md) — Git worktree management and checkout isolation
+"#
+    .to_string();
+
+    let p = build(&proj, &QuarkId::new("agy"));
+    assert!(p.contains("# What the swarm has learned (nucleus index)"));
+    assert!(p.contains("compiled-is-not-running"));
+    assert!(p.contains("worktree-isolation"));
+}
+
+#[test]
+fn nucleus_recall_cache_stability() {
+    let mut proj1 = projection("Task A: build login");
+    proj1.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj1.nucleus_index =
+        "- [compiled-is-not-running](notes/compiled-is-not-running.md) — Pinned lesson".to_string();
+
+    let mut proj2 = projection("Task B: fix database migration");
+    proj2.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj2.nucleus_index =
+        "- [compiled-is-not-running](notes/compiled-is-not-running.md) — Pinned lesson".to_string();
+
+    let p1 = build(&proj1, &QuarkId::new("agy"));
+    let p2 = build(&proj2, &QuarkId::new("agy"));
+
+    let idx_header = "# What the swarm has learned (nucleus index)";
+    let pos1 = p1.find(idx_header).expect("index header present in p1");
+    let pos2 = p2.find(idx_header).expect("index header present in p2");
+
+    assert_eq!(pos1, pos2);
+    assert_eq!(
+        &p1[..pos1],
+        &p2[..pos2],
+        "Prompt cache prefix prior to nucleus index MUST be identical across tasks"
+    );
+}
+
+#[test]
+fn prompt_cache_prefix_strictly_identical_across_dynamic_turn_variations() {
+    use hadron_lattice::{Actor, Kind};
+
+    let mut base_proj = projection("Base task");
+    base_proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    base_proj.nucleus_index =
+        "## How we get things wrong\n\n- [pinned](notes/pinned.md) — Pinned".to_string();
+
+    let mut proj1 = base_proj.clone();
+    proj1.task = "Task 1: implementing feature A".into();
+    proj1.active_skill = Some("# Skill for this turn: executing-plans\nDo step A".into());
+    proj1.git_diff = "--- a/file1.rs\n+++ b/file1.rs\n@@ -1 +1 @@\n-old\n+new".into();
+    proj1.field_window = vec![Event::new(
+        Actor::Human,
+        Some(QuarkId::new("agy")),
+        Kind::Message {
+            body: "Msg 1".into(),
+        },
+    )];
+
+    let mut proj2 = base_proj.clone();
+    proj2.task = "Task 2: fixing bug B".into();
+    proj2.active_skill = Some("# Skill for this turn: test-driven-development\nDo step B".into());
+    proj2.git_diff = "--- a/file2.rs\n+++ b/file2.rs\n@@ -1 +1 @@\n-foo\n+bar".into();
+    proj2.field_window = vec![Event::new(
+        Actor::Human,
+        Some(QuarkId::new("agy")),
+        Kind::Message {
+            body: "Msg 2".into(),
+        },
+    )];
+
+    let p1 = build(&proj1, &QuarkId::new("agy"));
+    let p2 = build(&proj2, &QuarkId::new("agy"));
+
+    let header = "# Who you are";
+    let pos1 = p1.find(header).expect("Who you are header present in p1");
+    let pos2 = p2.find(header).expect("Who you are header present in p2");
+
+    assert_eq!(pos1, pos2, "Header position must match exactly");
+    assert_eq!(
+        &p1[..pos1],
+        &p2[..pos2],
+        "Prompt cache prefix (Part A prior to '# Who you are') MUST be byte-identical despite task, skill, diff, and window changes"
+    );
+}
+
+#[test]
+fn prompt_build_nucleus_recall_negative_control_and_pinned_retention() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let notes_dir = temp.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+
+    std::fs::write(
+        notes_dir.join("pinned-mistake.md"),
+        "---\ndescription: Mistake note\n---\nPinned content",
+    )
+    .unwrap();
+    std::fs::write(
+        notes_dir.join("unrelated-topic.md"),
+        "---\ndescription: Database locking rules\n---\nDB locks content",
+    )
+    .unwrap();
+
+    let mut proj = projection("Task about frontend CSS layout");
+    proj.nucleus_index_path = temp.path().join("index.md");
+    proj.nucleus_notes_dir = notes_dir;
+    proj.nucleus_index = r#"# Memory index
+
+## How we get things wrong
+
+- [pinned-mistake](notes/pinned-mistake.md) — Always check callers first
+
+## Database
+
+- [unrelated-topic](notes/unrelated-topic.md) — Database locking rules
+"#
+    .to_string();
+
+    let p = build(&proj, &QuarkId::new("agy"));
+
+    assert!(
+        p.contains("## How we get things wrong"),
+        "Pinned section must always be rendered"
+    );
+    assert!(
+        p.contains("pinned-mistake"),
+        "Pinned lesson must be rendered"
+    );
+    assert!(
+        !p.contains("unrelated-topic"),
+        "Unrelated non-pinned lesson must be filtered out by rank_lessons"
+    );
+    assert!(
+        p.contains("This index is **shared by every quark**"),
+        "Instructions footer must be preserved"
+    );
+}
+
+#[test]
+fn prompt_build_respects_nucleus_index_budget_bytes() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let notes_dir = temp.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+
+    std::fs::write(
+        notes_dir.join("pinned-mistake.md"),
+        "---\ndescription: Mistake note\n---\nPinned content",
+    )
+    .unwrap();
+    std::fs::write(
+        notes_dir.join("auth-rule.md"),
+        "---\ndescription: Authentication token handling and session security\n---\nAuth details",
+    )
+    .unwrap();
+
+    let mut proj = projection("Authentication task token security");
+    proj.nucleus_index_path = temp.path().join("index.md");
+    proj.nucleus_notes_dir = notes_dir;
+    proj.nucleus_index = r#"# Memory index
+
+## How we get things wrong
+
+- [pinned-mistake](notes/pinned-mistake.md) — Always check callers first
+
+## Auth
+
+- [auth-rule](notes/auth-rule.md) — Authentication token handling and session security
+"#
+    .to_string();
+
+    // Set budget to 2000 bytes -> max output 250 bytes.
+    // Pinned section consumes output bytes, capping auth-rule.
+    proj.nucleus_index_budget_bytes = 2000;
+
+    let p = build(&proj, &QuarkId::new("agy"));
+
+    assert!(p.contains("pinned-mistake"), "Pinned lesson must fit");
+    assert!(
+        !p.contains("auth-rule"),
+        "Matched lesson must be excluded due to budget limit"
+    );
+}
+
+#[test]
+fn active_skill_is_rendered_after_nucleus_index_and_before_task() {
+    let mut proj = projection("Do auth task");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj.nucleus_index = "- [lesson](notes/lesson.md) — Lesson line".to_string();
+    proj.active_skill =
+        Some("# Skill for this turn: test-driven-development\nWrite test first.".to_string());
+
+    let p = build(&proj, &QuarkId::new("agy"));
+
+    let idx_pos = p
+        .find("# What the swarm has learned (nucleus index)")
+        .expect("nucleus index header");
+    let skill_pos = p
+        .find("# Skill for this turn: test-driven-development")
+        .expect("active skill content");
+    let task_pos = p.find("# Your task").expect("task header");
+
+    assert!(
+        idx_pos < skill_pos,
+        "Nucleus index (2b) must precede active skill (2c) for cache stability"
+    );
+    assert!(
+        skill_pos < task_pos,
+        "Active skill (2c) must precede task (3)"
+    );
+}
+
+#[test]
+fn stress_test_huge_inputs_and_context_items() {
+    let mut proj = projection("huge task");
+
+    // Huge task, invariants, git diff, active skill
+    proj.task = "A".repeat(1_000_000);
+    proj.invariants = "B".repeat(500_000);
+    proj.git_diff = "C".repeat(500_000);
+    proj.active_skill = Some("E".repeat(500_000));
+    proj.nucleus_digest = "F".repeat(500_000);
+
+    // Large number of field window events
+    let mut events = Vec::new();
+    for i in 0..1000 {
+        events.push(Event::new(
+            Actor::Quark(QuarkId::new("agy")),
+            Some(QuarkId::new("claude")),
+            Kind::Message {
+                body: format!("Message {} {}", i, "X".repeat(500)),
+            },
+        ));
+    }
+    proj.field_window = events;
+
+    let id = QuarkId::new("agy");
+    let built = build(&proj, &id);
+    let measured = measure(&proj, &id);
+
+    assert!(built.len() > 3_500_000);
+    let total_measured = measured.standard_model
+        + measured.invariants
+        + measured.nucleus_digest
+        + measured.nucleus_index
+        + measured.active_skill
+        + measured.task
+        + measured.field_window;
+    assert!(total_measured <= built.len());
+}
+
+#[test]
+fn stress_test_special_regex_and_format_template_characters() {
+    let mut proj = projection("Task with format strings {0} {} %s %d %x #{foo} {self} {:?}");
+    proj.invariants =
+        "Invariants with regex .*+?^$()|[]{}\\ \\d+ \\b (?i) (?m) and format {val}".to_string();
+    proj.nucleus_digest =
+        "Digest with format string {0} and markdown <h1>html</h1> ```rust code``` \0 \r \n"
+            .to_string();
+    proj.active_skill = Some("Skill with format strings {x} and regex [a-z]+".to_string());
+    proj.git_diff = "--- a/file\n+++ b/file\n@@ {line} @@\n- old {val}\n+ new {val}".to_string();
+
+    proj.roster[0].display_name = Some("Quark{0}%s$1".to_string());
+    proj.field_window = vec![Event::new(
+        Actor::Quark(QuarkId::new("agy")),
+        Some(QuarkId::new("claude")),
+        Kind::Message {
+            body: "Msg with {key} and regex ^[0-9]+$ %s %d \0".to_string(),
+        },
+    )];
+
+    let id = QuarkId::new("agy");
+    let built = build(&proj, &id);
+    let measured = measure(&proj, &id);
+
+    assert!(built.contains("{0}"));
+    assert!(built.contains("%s"));
+    assert!(built.contains(".*+?^$()|[]{}\\"));
+    assert!(built.contains("Quark{0}%s$1"));
+
+    let resumed = frame_interrupted_resumption(
+        "Interrupted task with {0} %s regex .*+",
+        "New msg with {1} %d regex \\d+",
+    );
+    assert!(resumed.contains("{0}"));
+    assert!(resumed.contains("{1}"));
+
+    let total_measured = measured.standard_model
+        + measured.invariants
+        + measured.nucleus_digest
+        + measured.nucleus_index
+        + measured.active_skill
+        + measured.task
+        + measured.field_window;
+    assert!(total_measured <= built.len());
+}
+
+#[test]
+fn stress_test_unicode_and_multibyte_sequences() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let notes_dir = temp.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+
+    std::fs::write(
+        notes_dir.join("unicode-lesson.md"),
+        "---\ndescription: 🦀 Rust 🚀 Unicode 测试 测试 测试\n---\nMulti-byte content 你好世界",
+    )
+    .unwrap();
+
+    let mut proj =
+        projection("Task with multi-byte unicode: 🦀🔥💻🚀 你好世界  الكلمة e\u{0301} 👨‍👩‍👧‍👦");
+    proj.invariants = "Invariant: 🦝 ñoño 🌍".to_string();
+    proj.active_skill = Some("Skill: 🪄 Wizardry ✨".to_string());
+    proj.git_diff = "--- a/unicode.rs\n+++ b/unicode.rs\n+ // 🦀 Rust emoji and CJK 🎉".to_string();
+
+    proj.nucleus_index_path = temp.path().join("index.md");
+    proj.nucleus_notes_dir = notes_dir;
+    proj.nucleus_index = r#"# Memory index
+
+## 🦀 Unicode section
+
+- [unicode-lesson](notes/unicode-lesson.md) — 🦀 Rust 🚀 Unicode 测试 测试 测试
+"#
+    .to_string();
+
+    proj.roster[0].display_name = Some("Quark 🚀 ⚛️".to_string());
+    proj.field_window = vec![Event::new(
+        Actor::Quark(QuarkId::new("agy")),
+        Some(QuarkId::new("claude")),
+        Kind::Message {
+            body: "Unicode field message: 🥳 🤹‍♀️ 💻 🎉".to_string(),
+        },
+    )];
+
+    let id = QuarkId::new("agy");
+    let built = build(&proj, &id);
+    let measured = measure(&proj, &id);
+
+    assert!(built.contains("Quark 🚀 ⚛️"));
+    assert!(built.contains("🦀🔥💻🚀"));
+    assert!(built.contains("你好世界"));
+
+    let total_measured = measured.standard_model
+        + measured.invariants
+        + measured.nucleus_digest
+        + measured.nucleus_index
+        + measured.active_skill
+        + measured.task
+        + measured.field_window;
+    assert!(total_measured <= built.len());
+}
+
+#[test]
+fn stress_test_malformed_notes_and_empty_input_list() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let notes_dir = temp.path().join("notes");
+
+    let mut proj = projection("");
+    proj.invariants = String::new();
+    proj.nucleus_digest = String::new();
+    proj.git_diff = String::new();
+    proj.active_skill = None;
+    proj.roster = vec![]; // Empty roster
+    proj.field_window = vec![]; // Empty field window
+    proj.live_activities = vec![]; // Empty live activities
+
+    proj.nucleus_index_path = temp.path().join("index.md");
+    proj.nucleus_notes_dir = notes_dir;
+    // Malformed markdown index
+    proj.nucleus_index =
+        "### [unclosed bracket link(notes/foo.md\n- broken markdown table | |\n][[[bad link"
+            .to_string();
+
+    let id = QuarkId::new("non_existent_quark");
+    let built = build(&proj, &id);
+    let measured = measure(&proj, &id);
+
+    assert!(built.contains("# Who you are"));
+    assert!(built.contains("You are `@non_existent_quark`"));
+
+    let total_measured = measured.standard_model
+        + measured.invariants
+        + measured.nucleus_digest
+        + measured.nucleus_index
+        + measured.active_skill
+        + measured.task
+        + measured.field_window;
+    assert!(total_measured <= built.len());
+}
+
+#[test]
+fn stress_test_zero_and_extreme_budget_restrictions() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let notes_dir = temp.path().join("notes");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+
+    std::fs::write(
+        notes_dir.join("note1.md"),
+        "---\ndescription: Budget stress test note\n---\nContent 1",
+    )
+    .unwrap();
+
+    let mut proj = projection("Budget stress test task");
+    proj.nucleus_index_path = temp.path().join("index.md");
+    proj.nucleus_notes_dir = notes_dir;
+    proj.nucleus_index =
+        "## How we get things wrong\n\n- [note1](notes/note1.md) — Budget stress test note"
+            .to_string();
+
+    let id = QuarkId::new("agy");
+
+    // Zero budget
+    proj.nucleus_index_budget_bytes = 0;
+    let built_zero = build(&proj, &id);
+    assert!(built_zero.contains("# What the swarm has learned (nucleus index)"));
+
+    // Budget = 1
+    proj.nucleus_index_budget_bytes = 1;
+    let built_one = build(&proj, &id);
+    assert!(built_one.contains("# What the swarm has learned (nucleus index)"));
+
+    // Budget = 7
+    proj.nucleus_index_budget_bytes = 7;
+    let built_seven = build(&proj, &id);
+    assert!(built_seven.contains("# What the swarm has learned (nucleus index)"));
+
+    // Budget = 100_000
+    proj.nucleus_index_budget_bytes = 100_000;
+    let built_100k = build(&proj, &id);
+    assert!(built_100k.contains("# What the swarm has learned (nucleus index)"));
+    assert!(built_100k.contains("note1"));
+
+    // Budget = usize::MAX / 10 (avoid overflow in multiplication if any, though division handles it)
+    proj.nucleus_index_budget_bytes = usize::MAX / 10;
+    let built_max = build(&proj, &id);
+    assert!(built_max.contains("# What the swarm has learned (nucleus index)"));
+    assert!(built_max.contains("note1"));
+}
+
+#[test]
+fn test_cache_stable_prefix_remains_byte_identical_across_different_tasks() {
+    let proj1 = projection("First task description");
+    let proj2 = projection("Completely different second task");
+
+    let prefix1 = build_cache_stable_prefix(&proj1);
+    let prefix2 = build_cache_stable_prefix(&proj2);
+
+    assert_eq!(
+        prefix1, prefix2,
+        "Stable prefix must match 100% byte-for-byte to preserve KV cache"
+    );
+    assert!(prefix1.contains(CRITICAL_DIRECTIVE_HEADER));
+    assert!(prefix1.contains("# Response Format & Output Strictness"));
+    assert!(prefix1.contains("**Be short.**"));
+}
+
+#[test]
+fn without_static_prefix_strips_cached_reference_sections_and_preserves_task() {
+    let mut proj = projection("Delta task");
+    proj.invariants = "Standard model rules".to_string();
+    proj.has_forge_tools = true;
+    proj.nucleus_digest = "Feature map".to_string();
+    proj.nucleus_index = "- [lesson](notes/lesson.md) — hook".to_string();
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+
+    let stripped = without_static_prefix(proj);
+    assert!(stripped.invariants.is_empty());
+    assert!(!stripped.has_forge_tools);
+    assert!(stripped.nucleus_digest.is_empty());
+    assert!(stripped.nucleus_index.is_empty());
+    assert!(stripped.nucleus_index_path.as_os_str().is_empty());
+    assert_eq!(stripped.task, "Delta task");
+}
+
+#[test]
+fn direct_conversational_human_turn_emits_no_orchestrator_tag_instruction() {
+    let mut proj = projection("@team goodnight");
+    proj.roster.push(QuarkCard {
+        id: QuarkId::new("orch"),
+        display_name: None,
+        flavor: Flavor::Orchestrator,
+        energy: EnergyState::Available,
+        provider: String::new(),
+        model: String::new(),
+        commands: Default::default(),
+        energy_limit: None,
+        deny_skills: vec![],
+        has_forge_tools: false,
+    });
+    proj.named_specifically = false;
+    proj.from_human_directly = true;
+    let suffix = build_dynamic_suffix(&proj, &QuarkId::new("agy"));
+    assert!(
+        suffix.contains("# Direct Conversational Message"),
+        "expected Direct Conversational Message section, got:\n{suffix}"
+    );
+    assert!(
+        suffix.contains("do NOT prepend `@orchestrator`"),
+        "expected explicit instruction not to prepend @orchestrator"
+    );
+}

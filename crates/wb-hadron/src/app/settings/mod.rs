@@ -1,0 +1,828 @@
+//! The Settings overlay and provider-connection wizard: opening/closing the overlay,
+//! editing the target identity's name/colour/avatar, committing those inputs, and
+//! rendering the settings panels, nav rows, provider list, and session picker.
+
+use super::*;
+use secrets::secret_status;
+// Re-exported: `SecretStatus` is stored on `Chamber` (app/mod.rs), a sibling of
+// `settings`, so it needs the same reach the type had when it lived directly in
+// settings.rs (`pub(super)` there = visible to `app`).
+pub(super) use secrets::SecretStatus;
+
+pub(super) use model_select::{create_model_delegate, vendor_fallback_models, ModelSelectDelegate};
+pub(super) use providers::{ThemeCategoryTab, ThemeTokenKey};
+
+mod acp_probe;
+mod http_probe;
+mod identity;
+mod model_select;
+pub(super) mod overlay;
+pub(super) mod providers;
+pub mod quark_theme;
+mod secrets;
+#[allow(unused_imports)]
+pub use quark_theme::*;
+#[cfg(test)]
+mod tests;
+
+impl Chamber {
+    /// Open the Settings overlay, editing the human's identity first.
+    pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = true;
+        self.settings_target = SettingsTarget::Appearance;
+        self.load_settings_inputs(window, cx);
+        cx.notify();
+    }
+
+    /// Commit the name/image inputs, then close the overlay and refocus root.
+    pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_settings_inputs(cx);
+        self.settings_open = false;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// A mutable handle to the identity currently being edited (creating an
+    /// empty quark entry on first edit).
+    pub(super) fn settings_identity_mut(&mut self) -> Option<&mut Identity> {
+        match &self.settings_target {
+            SettingsTarget::Human => Some(&mut self.prefs.human),
+            SettingsTarget::Quark(id) => Some(self.prefs.quarks.entry(id.clone()).or_default()),
+            SettingsTarget::General
+            | SettingsTarget::Appearance
+            | SettingsTarget::Execution
+            | SettingsTarget::Environment
+            | SettingsTarget::Providers
+            | SettingsTarget::Skills
+            | SettingsTarget::Schedules => None,
+        }
+    }
+
+    /// The stored color override for the current target, if any (`#rrggbb`).
+    pub(super) fn settings_color(&self) -> Option<String> {
+        let key = self.settings_target.key();
+        let id = if key == "human" {
+            Some(&self.prefs.human)
+        } else {
+            self.prefs.quarks.get(key)
+        };
+        id.and_then(|i| i.color.clone())
+    }
+
+    /// Load the current target's name + image path into the editor inputs.
+    pub(super) fn load_settings_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (
+            name,
+            path,
+            model,
+            effort,
+            mode,
+            deny_skills,
+            energy_limit_str,
+            temp_str,
+            top_p_str,
+            max_tokens_str,
+            secret_var,
+            secret_is_set,
+            secret_applies,
+            supports_params,
+        ) = {
+            let key = self.settings_target.key();
+            let mut mdl = String::new();
+            let mut eff = None;
+            let mut mod_cfg = None;
+            let mut deny_skills_str = String::new();
+            let mut energy_limit_str = String::new();
+            let mut temp_str = String::new();
+            let mut top_p_str = String::new();
+            let mut max_tokens_str = String::new();
+            // Defaults for a non-quark target (Human/Providers), which never shows the
+            // API-key field — overwritten below when `key` resolves to a seat.
+            let mut var = String::new();
+            let mut is_set = SecretStatus::NotSet;
+            // Whether THIS quark's provider needs a secret key at all — the API-key
+            // field is shown only then, not under every quark (its var is not a
+            // universal default).
+            let mut needs_secret = false;
+            let mut supports_params = false;
+            let id = if key == "human" {
+                Some(&self.prefs.human)
+            } else if key == "general"
+                || key == "appearance"
+                || key == "execution"
+                || key == "environment"
+                || key == "providers"
+                || key == "skills"
+                || key == "schedules"
+            {
+                None
+            } else {
+                // Read model/effort/mode from the RESOLVED seat, not just a legacy one — an
+                // adopted quark's definition lives in the catalogue, so a legacy-only
+                // lookup would show blank and a later commit could wipe the real value.
+                // These show the *effective* value (catalogue default + any repo override).
+                let resolved = resolve_team(&self.team, &self.global);
+                if let Some(seat) = resolved
+                    .get(&QuarkId::new(key))
+                    .or_else(|| self.global.get(&QuarkId::new(key)))
+                {
+                    mdl = seat.model.clone();
+                    eff = seat_allows_persisted_effort(seat, self.acp_model_probe.as_ref())
+                        .then(|| seat.effort.clone())
+                        .flatten();
+                    mod_cfg = seat.mode_config.clone();
+                    deny_skills_str = seat.deny_skills.join(", ");
+                    energy_limit_str = seat.energy_limit.map(|n| n.to_string()).unwrap_or_default();
+                    temp_str = seat
+                        .model_params
+                        .temperature
+                        .map(|f| f.to_string())
+                        .unwrap_or_default();
+                    top_p_str = seat
+                        .model_params
+                        .top_p
+                        .map(|f| f.to_string())
+                        .unwrap_or_default();
+                    max_tokens_str = seat
+                        .model_params
+                        .max_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_default();
+                    supports_params = seat.supports_model_params();
+                    // The provider's required secret vars (catalogue SSOT) plus any the
+                    // seat already declares decide whether to show the field and what to
+                    // name it — never the value, only ever the NAME (see `secret_status`).
+                    let catalogue_vars = hadron_gluon::adapter::registry::QuarkKind::secret_env_for(
+                        &seat.vendor,
+                        seat.transport,
+                    );
+                    needs_secret = !catalogue_vars.is_empty() || !seat.secret_env.is_empty();
+                    var = seat
+                        .secret_env
+                        .first()
+                        .cloned()
+                        .or_else(|| catalogue_vars.first().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    if needs_secret {
+                        is_set = secret_status(self.secret_store.as_ref(), &seat.id, &var);
+                    }
+                }
+                self.prefs.quarks.get(key)
+            };
+            (
+                id.and_then(|i| i.display_name.clone()).unwrap_or_default(),
+                id.and_then(|i| i.image_path.clone()).unwrap_or_default(),
+                mdl,
+                eff.unwrap_or_default(),
+                mod_cfg.unwrap_or_default(),
+                deny_skills_str,
+                energy_limit_str,
+                temp_str,
+                top_p_str,
+                max_tokens_str,
+                var,
+                is_set,
+                needs_secret,
+                supports_params,
+            )
+        };
+        self.settings_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+        self.settings_path
+            .update(cx, |s, cx| s.set_value(path, window, cx));
+        self.settings_model
+            .update(cx, |s, cx| s.set_value(model, window, cx));
+        self.settings_effort
+            .update(cx, |s, cx| s.set_value(effort, window, cx));
+        self.settings_mode_config
+            .update(cx, |s, cx| s.set_value(mode, window, cx));
+        self.settings_new_role
+            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+        self.settings_deny_skills
+            .update(cx, |s, cx| s.set_value(deny_skills, window, cx));
+        self.settings_energy_limit
+            .update(cx, |s, cx| s.set_value(energy_limit_str, window, cx));
+        self.settings_temperature
+            .update(cx, |s, cx| s.set_value(temp_str.clone(), window, cx));
+        self.settings_top_p
+            .update(cx, |s, cx| s.set_value(top_p_str.clone(), window, cx));
+        self.settings_max_tokens
+            .update(cx, |s, cx| s.set_value(max_tokens_str.clone(), window, cx));
+        self.settings_secret_var
+            .update(cx, |s, cx| s.set_value(secret_var, window, cx));
+        // Never populated from the store — write-only, always blank on (re)load.
+        self.settings_secret_value
+            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+        self.settings_secret_status = secret_is_set;
+        self.settings_secret_applies = secret_applies;
+        self.settings_model_params_applies = supports_params;
+        self.settings_advanced_expanded =
+            !temp_str.is_empty() || !top_p_str.is_empty() || !max_tokens_str.is_empty();
+        self.settings_name_error = None;
+        // Team-wide, not per-identity — loaded unconditionally (not keyed off `key`) so
+        // it stays in sync with `self.team.max_exchanges` regardless of which target the
+        // overlay happens to be showing when this runs.
+        let max_exchanges = self
+            .team
+            .max_exchanges
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        self.settings_max_exchanges
+            .update(cx, |s, cx| s.set_value(max_exchanges, window, cx));
+
+        let terminal_shell = self.prefs.terminal_shell.clone().unwrap_or_default();
+        self.settings_terminal_shell
+            .update(cx, |s, cx| s.set_value(terminal_shell, window, cx));
+
+        let git_author_name = self
+            .team
+            .git_author_name
+            .clone()
+            .or_else(|| self.prefs.git_author_name.clone())
+            .unwrap_or_default();
+        self.settings_git_author_name
+            .update(cx, |s, cx| s.set_value(git_author_name, window, cx));
+
+        let git_author_email = self
+            .team
+            .git_author_email
+            .clone()
+            .or_else(|| self.prefs.git_author_email.clone())
+            .unwrap_or_default();
+        self.settings_git_author_email
+            .update(cx, |s, cx| s.set_value(git_author_email, window, cx));
+
+        if let Some(custom) = &self.prefs.custom_theme {
+            self.theme_name_input
+                .update(cx, |s, cx| s.set_value(custom.name.clone(), window, cx));
+            if let Some(token) = self.theme_selected_token {
+                let hex = token.get_hex(custom);
+                self.theme_color_hex_input
+                    .update(cx, |s, cx| s.set_value(hex, window, cx));
+            }
+        }
+    }
+
+    /// Write the editor inputs back into the current target identity and persist.
+    pub(super) fn commit_settings_inputs(&mut self, cx: &mut Context<Self>) {
+        let name = self.settings_name.read(cx).value().trim().to_string();
+        let path = self.settings_path.read(cx).value().trim().to_string();
+        let model_val = self.settings_model.read(cx).value().trim().to_string();
+        let effort_val = self.settings_effort.read(cx).value().trim().to_string();
+        let mode_val = self
+            .settings_mode_config
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+
+        let deny_skills_val = self.settings_deny_skills.read(cx).value();
+        let new_deny_skills: Vec<String> = deny_skills_val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let energy_limit_val = self
+            .settings_energy_limit
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let new_energy_limit: Option<u32> = energy_limit_val.parse::<u32>().ok();
+
+        let temp_val = self
+            .settings_temperature
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let top_p_val = self.settings_top_p.read(cx).value().trim().to_string();
+        let max_tokens_val = self.settings_max_tokens.read(cx).value().trim().to_string();
+
+        let new_temperature: Option<f32> = temp_val.parse::<f32>().ok();
+        let new_top_p: Option<f32> = top_p_val.parse::<f32>().ok();
+        let new_max_tokens: Option<u32> = max_tokens_val.parse::<u32>().ok();
+
+        let new_model_params = hadron_lattice::ModelParams {
+            temperature: new_temperature,
+            top_p: new_top_p,
+            max_tokens: new_max_tokens,
+        };
+
+        // Team-wide "Max exchanges" (Providers panel) — gated on the Providers target,
+        // like the per-quark model/effort/mode fields below are gated on `key`. This
+        // must NOT be unconditional: `reload_if_changed` (mod.rs) assigns a freshly
+        // polled `self.team` on an external team.json edit WITHOUT touching
+        // `settings_max_exchanges`, so if that happened while Settings was open on any
+        // OTHER panel, an unconditional read-diff-write here would compare the now-stale
+        // input against the just-updated `self.team.max_exchanges` and silently write the
+        // stale value back — reverting someone else's (or the daemon's own) edit the next
+        // time any control on an unrelated panel commits (closing Settings, an
+        // effort/mode/color click, …). Scoping the write to "the human is actually on the
+        // Providers panel" makes that impossible: `select_settings_target` commits BEFORE
+        // switching away, so an edit made while on Providers is still captured on
+        // navigation, and a commit from any other panel never touches this field.
+        // `load_settings_inputs` still re-syncs the input from `self.team` unconditionally
+        // (every target, including the external-reload path via `reload_if_changed` ->
+        // ... -> next `load_settings_inputs` call) — only the *write* is gated.
+        if matches!(
+            self.settings_target,
+            SettingsTarget::General | SettingsTarget::Execution
+        ) {
+            let max_exchanges_val = self
+                .settings_max_exchanges
+                .read(cx)
+                .value()
+                .trim()
+                .to_string();
+            let new_max_exchanges = parse_max_exchanges(&max_exchanges_val);
+            if new_max_exchanges != self.team.max_exchanges {
+                self.team.max_exchanges = new_max_exchanges;
+                self.save_repo_team(cx);
+            }
+
+            let git_author_name_val = self
+                .settings_git_author_name
+                .read(cx)
+                .value()
+                .trim()
+                .to_string();
+            let new_author_name = if git_author_name_val.is_empty() {
+                None
+            } else {
+                Some(git_author_name_val)
+            };
+            if new_author_name != self.team.git_author_name {
+                self.team.git_author_name = new_author_name.clone();
+                self.prefs.git_author_name = new_author_name;
+                self.save_repo_team(cx);
+                let _ = config::save(&self.prefs);
+            }
+
+            let git_author_email_val = self
+                .settings_git_author_email
+                .read(cx)
+                .value()
+                .trim()
+                .to_string();
+            let new_author_email = if git_author_email_val.is_empty() {
+                None
+            } else {
+                Some(git_author_email_val)
+            };
+            if new_author_email != self.team.git_author_email {
+                self.team.git_author_email = new_author_email.clone();
+                self.prefs.git_author_email = new_author_email;
+                self.save_repo_team(cx);
+                let _ = config::save(&self.prefs);
+            }
+        }
+
+        if matches!(
+            self.settings_target,
+            SettingsTarget::General | SettingsTarget::Environment
+        ) {
+            let terminal_shell_val = self
+                .settings_terminal_shell
+                .read(cx)
+                .value()
+                .trim()
+                .to_string();
+            let new_shell = if terminal_shell_val.is_empty() {
+                None
+            } else {
+                Some(terminal_shell_val)
+            };
+            if new_shell != self.prefs.terminal_shell {
+                self.prefs.terminal_shell = new_shell;
+                let _ = config::save(&self.prefs);
+            }
+        }
+
+        let key = self.settings_target.key().to_string();
+        let is_quark_target = key != "human"
+            && key != "providers"
+            && key != "general"
+            && key != "appearance"
+            && key != "execution"
+            && key != "environment"
+            && key != "skills"
+            && key != "schedules";
+        let name_valid = if is_quark_target {
+            match self.validate_current_quark_display_name(&name, &key) {
+                Ok(()) => {
+                    self.settings_name_error = None;
+                    true
+                }
+                Err(err) => {
+                    self.settings_name_error = Some(err);
+                    false
+                }
+            }
+        } else {
+            self.settings_name_error = None;
+            true
+        };
+
+        if is_quark_target {
+            let qid = QuarkId::new(&key);
+            // The definition knobs (model/effort/mode/display name) are **per-repo**. How
+            // they persist depends on how the quark is seated here:
+            //  - a self-contained legacy seat pins the values directly on the seat;
+            //  - a catalogue-adopted quark records only the *delta from the catalogue
+            //    default* as a per-repo override, so the shared default (and every other
+            //    repo) is untouched and a field left at the default inherits it.
+            // Only write when a value actually changed, so merely opening Settings for an
+            // adopted quark never un-adopts it or rewrites the file.
+            let resolved = resolve_team(&self.team, &self.global);
+            let def = self.global.get(&qid).cloned();
+            if let Some(base) = resolved.get(&qid).cloned().or_else(|| def.clone()) {
+                let new_mode = (!mode_val.is_empty()).then_some(mode_val);
+                let new_name = (!name.is_empty()).then_some(name.clone());
+                // A blank Model means "inherit the catalogue default" (or, for a
+                // self-contained seat with no catalogue, keep what it already runs).
+                let new_model = if model_val.is_empty() {
+                    def.as_ref()
+                        .map(|d| d.model.clone())
+                        .unwrap_or_else(|| base.model.clone())
+                } else {
+                    model_val.clone()
+                };
+                let candidate = hadron_lattice::Seat {
+                    model: new_model.clone(),
+                    ..base.clone()
+                };
+                let new_effort =
+                    if seat_allows_persisted_effort(&candidate, self.acp_model_probe.as_ref()) {
+                        (!effort_val.is_empty()).then_some(effort_val)
+                    } else {
+                        None
+                    };
+                // The **display name is global** — a quark is the same quark in every repo,
+                // so its name lives in the catalogue, never as a per-repo override. That is
+                // also what the router matches `@mentions` against, so a name set once here
+                // resolves everywhere. (A purely-local legacy seat has no catalogue entry, so
+                // its name lives on the seat itself — the only place it can.)
+                if name_valid && base.display_name != new_name {
+                    if let Some(g) = self.global.quarks.iter_mut().find(|s| s.id == qid) {
+                        g.display_name = new_name.clone();
+                        self.save_global_team(cx);
+                    } else if let Some(existing) = self.team.quarks.iter_mut().find(|s| s.id == qid)
+                    {
+                        existing.display_name = new_name.clone();
+                        self.save_repo_team(cx);
+                    }
+                }
+
+                let desired = hadron_lattice::Seat {
+                    model: new_model,
+                    effort: new_effort,
+                    mode_config: new_mode,
+                    deny_skills: new_deny_skills,
+                    energy_limit: new_energy_limit,
+                    model_params: new_model_params,
+                    ..base.clone()
+                };
+
+                let knobs_changed = base.model != desired.model
+                    || base.effort != desired.effort
+                    || base.mode_config != desired.mode_config
+                    || base.deny_skills != desired.deny_skills
+                    || base.energy_limit != desired.energy_limit
+                    || base.model_params != desired.model_params;
+                if knobs_changed {
+                    self.update_seat_config(&qid, &desired, cx);
+                }
+            }
+        }
+
+        if let Some(id) = self.settings_identity_mut() {
+            if name_valid {
+                id.display_name = (!name.is_empty()).then_some(name);
+            }
+            id.image_path = (!path.is_empty()).then_some(path);
+            let _ = config::save(&self.prefs);
+        }
+    }
+
+    /// Validate `name` for quark `qid_str` against reserved routing names, transport prefixes,
+    /// and case-insensitive collisions with other quarks in the global catalogue or repo team.
+    pub(super) fn validate_current_quark_display_name(
+        &self,
+        name: &str,
+        qid_str: &str,
+    ) -> Result<(), String> {
+        let resolved = resolve_team(&self.team, &self.global);
+        let mut pairs: Vec<(String, Option<String>)> = Vec::new();
+        for seat in &self.global.quarks {
+            let pref_dn = self
+                .prefs
+                .quarks
+                .get(seat.id.as_str())
+                .and_then(|i| i.display_name.clone());
+            pairs.push((
+                seat.id.as_str().to_string(),
+                seat.display_name.clone().or(pref_dn),
+            ));
+        }
+        for seat in &resolved.quarks {
+            let pref_dn = self
+                .prefs
+                .quarks
+                .get(seat.id.as_str())
+                .and_then(|i| i.display_name.clone());
+            pairs.push((
+                seat.id.as_str().to_string(),
+                seat.display_name.clone().or(pref_dn),
+            ));
+        }
+        let refs: Vec<(&str, Option<&str>)> = pairs
+            .iter()
+            .map(|(id, dn)| (id.as_str(), dn.as_deref()))
+            .collect();
+        hadron_lattice::quark::validate_quark_display_name(name, qid_str, &refs)
+    }
+
+    /// Persist updated configuration knobs (model, effort, mode, deny_skills, energy_limit, model_params)
+    /// for a seat, handling both self-contained legacy seats and catalogue-adopted seats.
+    pub(super) fn update_seat_config(
+        &mut self,
+        qid: &QuarkId,
+        desired: &Seat,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self.team.quarks.iter_mut().find(|s| s.id == *qid) {
+            // Self-contained legacy seat — pin the values on it directly.
+            existing.model = desired.model.clone();
+            existing.effort = desired.effort.clone();
+            existing.mode_config = desired.mode_config.clone();
+            existing.deny_skills = desired.deny_skills.clone();
+            existing.energy_limit = desired.energy_limit;
+            existing.model_params = desired.model_params.clone();
+            self.save_repo_team(cx);
+        } else if let Some(def) = self.global.get(qid).cloned() {
+            // Adopted via the catalogue — write a delta override (only what
+            // differs from the shared default), preserving any existing
+            // role/participation override. `seat_override_delta` is the tested
+            // inverse of resolve_team's def-layering. `display_name` inherits the
+            // def, so the name never becomes a per-repo override.
+            let prev = self.team.roster.iter().find(|o| o.id == *qid).cloned();
+            let ov = hadron_lattice::seat_override_delta(qid.clone(), &def, desired, prev.as_ref());
+            self.team.roster.retain(|o| o.id != *qid);
+            self.team.roster.push(ov);
+            self.save_repo_team(cx);
+        }
+        // else: an event-only quark with no seatable definition — nothing to
+        // persist a per-repo knob against.
+    }
+
+    /// Switch which identity the overlay edits (committing the current one).
+    pub(super) fn select_settings_target(
+        &mut self,
+        target: SettingsTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_settings_inputs(cx);
+        self.settings_target = target.clone();
+        self.load_settings_inputs(window, cx);
+        // An ACP quark's Model field is a dropdown of what the agent actually offers, so
+        // (re-)probe it on open. Anything else clears the probe and keeps the text field.
+        match &target {
+            SettingsTarget::Quark(id) => {
+                self.start_acp_model_probe(&id.clone(), cx);
+                self.start_agy_bridge_provision(&id.clone(), cx);
+                self.start_http_model_probe(&id.clone(), cx);
+            }
+            _ => {
+                self.acp_model_probe = None;
+                self.agy_bridge_probe = None;
+                self.http_model_probe = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Reset the current target to its code defaults.
+    pub(super) fn reset_settings_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.settings_target.clone() {
+            SettingsTarget::Human => self.prefs.human = Identity::default(),
+            SettingsTarget::Quark(id) => {
+                self.prefs.quarks.remove(&id);
+            }
+            SettingsTarget::General
+            | SettingsTarget::Appearance
+            | SettingsTarget::Execution
+            | SettingsTarget::Environment
+            | SettingsTarget::Providers
+            | SettingsTarget::Skills
+            | SettingsTarget::Schedules => {}
+        }
+        self.load_settings_inputs(window, cx);
+        let _ = config::save(&self.prefs);
+        cx.notify();
+    }
+
+    /// Open the Quark Info panel for `id` on `tab`, launching background model probes
+    /// for ACP/CLI/HTTP seats so the Model selector dropdown populates live.
+    pub(super) fn open_quark_info(&mut self, id: String, tab: InfoTab, cx: &mut Context<Self>) {
+        self.start_acp_model_probe(&id, cx);
+        self.start_agy_bridge_provision(&id, cx);
+        self.start_http_model_probe(&id, cx);
+        self.info_panel = Some(id);
+        self.info_tab = tab;
+        cx.notify();
+    }
+
+    /// Combined model options for `qid`: live probed models (ACP/CLI/HTTP) when ready,
+    /// augmented with curated vendor fallback models so the dropdown is never empty.
+    pub(super) fn models_for_quark(&self, qid: &str, vendor: &str) -> Vec<String> {
+        let mut models = Vec::new();
+        if let Some(p) = &self.acp_model_probe {
+            if p.id == qid {
+                if let AcpModelState::Ready { selectors } = &p.state {
+                    if let Some(sel) = &selectors.model {
+                        for m in &sel.available {
+                            if !m.value.is_empty() && !models.contains(&m.value) {
+                                models.push(m.value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(p) = &self.http_model_probe {
+            if p.id == qid {
+                if let HttpModelState::Ready {
+                    models: http_models,
+                } = &p.state
+                {
+                    for m in http_models {
+                        if !m.is_empty() && !models.contains(m) {
+                            models.push(m.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for m in vendor_fallback_models(vendor) {
+            if !models.contains(&m) {
+                models.push(m);
+            }
+        }
+        models
+    }
+
+    /// Combined effort options for `qid`: live ACP-probed thought levels when probed,
+    /// standard levels when the seat supports a standalone effort selector (`Seat::supports_effort`),
+    /// or an empty list when unsupported (e.g. `cli-agy`, Gemini/effort-encoded models,
+    /// unprobed `acp-agy`, `Transport::Http`), which hides the Effort selector in both
+    /// Settings and the Quark Info drawer.
+    pub(super) fn efforts_for_quark(&self, qid: &str) -> Vec<String> {
+        let resolved = resolve_team(&self.team, &self.global);
+        let qid_obj = QuarkId::new(qid);
+        let seat = resolved
+            .get(&qid_obj)
+            .cloned()
+            .or_else(|| self.global.get(&qid_obj).cloned());
+
+        let Some(seat) = seat else {
+            return Vec::new();
+        };
+
+        effort_options_for_seat(&seat, self.acp_model_probe.as_ref())
+    }
+
+    /// Directly persist a new model choice for `qid_str` from the Quark Info selector.
+    pub(super) fn set_quark_model(
+        &mut self,
+        qid_str: &str,
+        model_val: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let qid = QuarkId::new(qid_str);
+        let resolved = resolve_team(&self.team, &self.global);
+        let def = self.global.get(&qid).cloned();
+        if let Some(base) = resolved.get(&qid).cloned().or_else(|| def.clone()) {
+            let trimmed = model_val.trim();
+            let new_model = if trimmed.is_empty() {
+                def.as_ref()
+                    .map(|d| d.model.clone())
+                    .unwrap_or_else(|| base.model.clone())
+            } else {
+                trimmed.to_string()
+            };
+            let mut desired = Seat {
+                model: new_model.clone(),
+                ..base.clone()
+            };
+            if !seat_allows_persisted_effort(&desired, self.acp_model_probe.as_ref()) {
+                desired.effort = None;
+            }
+            if base.model != desired.model || base.effort != desired.effort {
+                self.update_seat_config(&qid, &desired, cx);
+                if desired.transport == hadron_lattice::Transport::Acp
+                    && base.model != desired.model
+                {
+                    self.start_acp_model_probe(qid_str, cx);
+                }
+            }
+            if self.settings_target.key() == qid_str {
+                self.settings_model
+                    .update(cx, |s, cx| s.set_value(new_model, window, cx));
+                if desired.effort.is_none() {
+                    self.settings_effort
+                        .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// Directly persist a new reasoning effort choice for `qid_str` from the Quark Info selector.
+    pub(super) fn set_quark_effort(
+        &mut self,
+        qid_str: &str,
+        effort_val: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let qid = QuarkId::new(qid_str);
+        let resolved = resolve_team(&self.team, &self.global);
+        let def = self.global.get(&qid).cloned();
+        if let Some(base) = resolved.get(&qid).cloned().or_else(|| def.clone()) {
+            let trimmed = effort_val.trim();
+            let new_effort = (!trimmed.is_empty()).then(|| trimmed.to_string());
+            if base.effort != new_effort {
+                let desired = Seat {
+                    effort: new_effort.clone(),
+                    ..base
+                };
+                self.update_seat_config(&qid, &desired, cx);
+            }
+            if self.settings_target.key() == qid_str {
+                self.settings_effort.update(cx, |s, cx| {
+                    s.set_value(new_effort.unwrap_or_default(), window, cx)
+                });
+            }
+            cx.notify();
+        }
+    }
+}
+
+/// Pure capability resolver for the standalone Effort selector options of `seat`.
+pub(super) fn effort_options_for_seat(
+    seat: &Seat,
+    acp_probe: Option<&AcpModelProbe>,
+) -> Vec<String> {
+    if hadron_lattice::model_encodes_effort(&seat.model) {
+        return Vec::new();
+    }
+
+    if seat.transport == hadron_lattice::Transport::Acp {
+        if let Some(p) = acp_probe {
+            if p.id == seat.id.as_str() {
+                if let AcpModelState::Ready { selectors } = &p.state {
+                    let Some(sel) = &selectors.effort else {
+                        return Vec::new();
+                    };
+                    let mut available = Vec::new();
+                    for m in &sel.available {
+                        if !m.value.is_empty() && !available.contains(&m.value) {
+                            available.push(m.value.clone());
+                        }
+                    }
+                    return available;
+                }
+            }
+        }
+    }
+
+    if seat.supports_effort() {
+        vec!["low".into(), "medium".into(), "high".into(), "max".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `seat` may keep/persist a standalone `effort` field. Preserves an existing
+/// `effort` on a non-effort-encoded ACP seat while its background probe is not yet `Ready`
+/// (e.g. `acp-agy` running native `agy acp`), while stripping stale `effort` immediately
+/// for CLI/HTTP/SDK seats without effort support and for any effort-encoded model.
+pub(super) fn seat_allows_persisted_effort(seat: &Seat, acp_probe: Option<&AcpModelProbe>) -> bool {
+    if !effort_options_for_seat(seat, acp_probe).is_empty() {
+        return true;
+    }
+    if !seat.accepts_effort() {
+        return false;
+    }
+    // Only a not-yet-`Ready` ACP seat reaches here (any other accepting seat already
+    // offered options above); keep its effort until the live probe says otherwise.
+    seat.transport == hadron_lattice::Transport::Acp
+        && !matches!(
+            acp_probe,
+            Some(p) if p.id == seat.id.as_str() && matches!(p.state, AcpModelState::Ready { .. })
+        )
+}

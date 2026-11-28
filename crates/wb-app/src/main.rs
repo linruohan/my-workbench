@@ -1,13 +1,11 @@
 mod app;
 mod appearance;
 mod command_palette;
-mod composer_text;
 mod state;
+mod style;
 mod themes;
-mod thread_export;
 mod timed_deliver;
 mod title_bar;
-mod tool_summary;
 mod tray;
 mod views;
 

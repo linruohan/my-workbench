@@ -1,6 +1,6 @@
 use crate::state::AppState;
+use crate::style;
 use crate::timed_deliver::{fire_timed_task, skip_timed_task};
-use crate::views::agent::AgentPane;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::input::{Input, InputState};
@@ -62,7 +62,6 @@ pub struct TimedPane {
     custom_unit: TimedIntervalUnit,
     end_limited: bool,
     pick: SchedulePick,
-    agent: Option<Entity<AgentPane>>,
     pending_delete_id: Option<String>,
     editing_id: Option<String>,
     composer_open: bool,
@@ -102,17 +101,12 @@ impl TimedPane {
             custom_unit: TimedIntervalUnit::Day,
             end_limited: false,
             pick: SchedulePick::Preset(TimedSchedulePreset::Daily),
-            agent: None,
             pending_delete_id: None,
             editing_id: None,
             composer_open: false,
             open_id: None,
             detail_tab: TimedDetailTab::Detail,
         }
-    }
-
-    pub fn bind_agent(&mut self, agent: Entity<AgentPane>) {
-        self.agent = Some(agent);
     }
 
     fn form_title_command(&self, cx: &Context<Self>) -> (String, String) {
@@ -673,9 +667,6 @@ impl TimedPane {
     }
 
     fn after_deliver(&mut self, cx: &mut Context<Self>) {
-        if let Some(agent) = &self.agent {
-            agent.update(cx, |_, cx| cx.notify());
-        }
         cx.notify();
     }
 
@@ -862,14 +853,27 @@ impl TimedPane {
             .items_center()
             .gap_2()
             .child(
-                div()
+                h_flex()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_xl()
-                    .font_bold()
-                    .child("定时任务"),
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(3.))
+                            .h(px(18.))
+                            .rounded_full()
+                            .bg(cx.theme().primary),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xl()
+                            .font_bold()
+                            .child("定时任务"),
+                    ),
             )
             .child(
                 Tag::secondary()
@@ -900,8 +904,8 @@ impl Render for TimedPane {
         let tasks = self.state.with(|s| s.repo.list_timed_tasks());
         let tasks = timed_tasks_in_display_order(&tasks, now);
         let entity = cx.weak_entity();
-        let radius = cx.theme().radius;
-        let border = cx.theme().border;
+        let radius = style::card_radius(cx);
+        let border = style::hairline(cx);
         let muted = cx.theme().muted_foreground;
         let open_id = self.open_id.clone();
         let open_task = open_id
@@ -966,7 +970,7 @@ impl Render for TimedPane {
                         .bg(if is_open {
                             cx.theme().primary.opacity(0.12)
                         } else {
-                            cx.theme().secondary.opacity(0.22)
+                            style::card(cx).opacity(0.6)
                         })
                         .when(!enabled, |card| card.opacity(0.72))
                         .cursor_pointer()
@@ -1253,7 +1257,7 @@ impl Render for TimedPane {
                                                 .px_2()
                                                 .py_1p5()
                                                 .rounded(radius)
-                                                .bg(cx.theme().secondary.opacity(0.35))
+                                                .bg(style::card(cx).opacity(0.7))
                                                 .child(
                                                     div()
                                                         .text_sm()

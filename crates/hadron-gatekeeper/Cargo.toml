@@ -1,0 +1,28 @@
+[package]
+name = "hadron-gatekeeper"
+description = "Permission-mode policy for a Hadron swarm: the ask/write/auto/bypass ladder"
+rust-version = "1.93"
+version = "0.33.55"
+edition = "2021"
+license = "Apache-2.0"
+# Flip to publish. Blocked today regardless: the workspace patches
+# gpui-component from a `file:///` path, which crates.io rejects.
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+hadron-lattice = { path = "../hadron-lattice" }
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
+

@@ -1,0 +1,5881 @@
+//! Command dispatch and state-mutation handlers for the chamber: chat `/commands`,
+//! tab/window cycling, roster selection, context-menu actions, per-quark and global
+//! permission-mode changes, reboot/enable/adopt/remove, permission answers, and the
+//! team-file persistence behind them. The `&mut self` verbs the UI invokes, split from
+//! the view code that calls them.
+
+use super::*;
+use std::io::Write;
+
+/// Append one line to a nucleus file, creating it if it doesn't exist yet. `/learn`
+/// writes straight to disk (see `handle_chat_command`'s `"learn"` arm) rather than
+/// riding the field, so this is a plain filesystem append, not an event.
+fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    f.write_all(line.as_bytes())
+}
+
+impl Chamber {
+    /// Where `/clear` and `/resume` park archived sessions. Derived from the field path
+    /// so nothing has to be told twice.
+    pub(super) fn sessions_dir(&self) -> std::path::PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".hadron"))
+            .join("sessions")
+    }
+
+    /// Asynchronously rebuild `archived_messages` and `sessions` in a single pass on the
+    /// background executor, then update the view caches without blocking the UI thread.
+    /// Called at startup (on WSL) and after `/clear` or `/resume`, the only writers of an archive.
+    pub(super) fn reload_archives_in_background(&mut self, cx: &mut Context<Self>) {
+        let dir = self.sessions_dir();
+        cx.spawn(async move |this, cx| {
+            let (archived_messages, sessions) = cx
+                .background_executor()
+                .spawn(async move { crate::model::load_archives_and_sessions(&dir) })
+                .await;
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.archived_messages = archived_messages;
+                chamber.sessions = sessions;
+                chamber.cached_stats.borrow_mut().clear();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Resync every list cache to the current projection after the field was **replaced
+    /// wholesale** (`/clear`, `/resume`) rather than appended to.
+    ///
+    /// The chat and log are virtualized `gpui_kit::list`s: each holds a `ListState` whose
+    /// item count is a cache of `self.view`, and the chat additionally holds
+    /// `chat_message_ixs`. The incremental paths (`post_chat_message`, the reload tick)
+    /// keep them in step with a `splice`, which only ever describes rows *appended* — a
+    /// swap invalidates all of it, so those caches have to be rebuilt outright.
+    ///
+    /// `/resume` did not: it reprojected a whole archived session and then `clear()`ed
+    /// the index list and `reset(0)`d the chat state, so the chat rendered empty while
+    /// the Log tab (which indexes `view.messages` directly) was correct. It did not
+    /// self-heal either — the reload tick only rebuilds when `events.len()` disagrees
+    /// with `view.messages.len()`, and after a reproject they agree. It took the next
+    /// message to rebuild the index, which is when the whole history appeared at once.
+    pub(super) fn resync_lists_to_projection(&mut self) {
+        self.chat_message_ixs = self.filtered_chat_ixs();
+        self.chat_list_state.reset(self.chat_message_ixs.len());
+        self.log_message_ixs = self.filtered_log_ixs();
+        self.log_list_state.reset(self.log_message_ixs.len());
+        self.parsed_markdown.borrow_mut().clear();
+        self.turn_summaries.borrow_mut().clear();
+        self.cached_stats.borrow_mut().clear();
+    }
+
+    /// `chat_message_ixs` as the current projection + `chat_search_query` define it —
+    /// the one formula every rebuild of that cache goes through.
+    fn filtered_chat_ixs(&self) -> Vec<usize> {
+        crate::model::filter_chat_message_indices(&self.view.messages, &self.chat_search_query)
+    }
+
+    /// `log_message_ixs` as the current projection + Log filters define it.
+    fn filtered_log_ixs(&self) -> Vec<usize> {
+        crate::model::filter_log_message_indices(
+            &self.view.messages,
+            &self.log_search_query,
+            self.log_kind_filter,
+        )
+    }
+
+    /// Change the live chat filter (`/find`). In memory only: nothing reaches the
+    /// field. A no-op when the query is unchanged, so every composer keystroke can
+    /// call it without resetting the list's scroll.
+    pub(super) fn set_chat_filter(&mut self, query: &str, cx: &mut Context<Self>) {
+        let query = query.trim();
+        if self.chat_search_query == query {
+            return;
+        }
+        self.chat_search_query = query.to_string();
+        self.chat_message_ixs = self.filtered_chat_ixs();
+        self.chat_list_state.reset(self.chat_message_ixs.len());
+        self.chat_list_state
+            .scroll_to_reveal_item(self.chat_message_ixs.len().saturating_sub(1));
+        cx.notify();
+    }
+
+    /// Change the Log tab's text query and/or kind pill. In memory only.
+    pub(super) fn set_log_filter(
+        &mut self,
+        query: String,
+        kind: crate::model::LogKindFilter,
+        cx: &mut Context<Self>,
+    ) {
+        if self.log_search_query == query && self.log_kind_filter == kind {
+            return;
+        }
+        self.log_search_query = query;
+        self.log_kind_filter = kind;
+        self.log_message_ixs = self.filtered_log_ixs();
+        self.log_list_state.reset(self.log_message_ixs.len());
+        self.log_list_state
+            .scroll_to_reveal_item(self.log_message_ixs.len().saturating_sub(1));
+        cx.notify();
+    }
+
+    /// Clear the Log tab's query (input box included) and kind pill.
+    pub(super) fn clear_log_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_log_filter(String::new(), crate::model::LogKindFilter::All, cx);
+        // Its `Change` re-enters `set_log_filter` with the same empty query: a no-op.
+        self.log_search_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+    }
+
+    /// Ctrl+F: on Chat, focus the composer holding `/find <current query>`; on Log,
+    /// focus the Log search box. Inside the terminal the chord belongs to the shell.
+    pub(super) fn find_in_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_focus.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        match self.chat_tab {
+            ChatTab::Log => {
+                window.focus(&self.log_search_input.focus_handle(cx), cx);
+                cx.notify();
+            }
+            ChatTab::Chat | ChatTab::Stats => {
+                self.chat_tab = ChatTab::Chat;
+                let current = self.input.read(cx).value().to_string();
+                if crate::text::find_query(&current).is_some() {
+                    window.focus(&self.input.focus_handle(cx), cx);
+                    cx.notify();
+                } else {
+                    let prefill = format!("/find {}", self.chat_search_query);
+                    self.prefill_chat_input(&prefill, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Whether a chat search is active — either a non-empty query or a `/find`/`/search`
+    /// prefix sitting in the composer (such as right after `Ctrl+F` or backspacing the query).
+    pub(super) fn has_active_chat_find(&self, cx: &App) -> bool {
+        !self.chat_search_query.is_empty()
+            || crate::text::find_query(&self.input.read(cx).value()).is_some()
+    }
+
+    /// Whether the Event Log has an active text query, kind pill, or non-empty search box.
+    pub(super) fn has_active_log_filter(&self, cx: &App) -> bool {
+        !self.log_search_query.is_empty()
+            || self.log_kind_filter != crate::model::LogKindFilter::All
+            || !self.log_search_input.read(cx).value().is_empty()
+    }
+
+    /// Esc / the pill's Clear: drop the chat filter, and the `/find` line with it.
+    pub(super) fn clear_chat_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.input.read(cx).value().to_string();
+        let cleared_prefix = crate::text::find_query(&current).is_some();
+        if cleared_prefix {
+            self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.set_chat_filter("", cx);
+        if cleared_prefix {
+            cx.notify();
+        }
+    }
+
+    /// Re-project the field and bring `chat_list_state`/`log_list_state`/
+    /// `chat_message_ixs` back into agreement with the new `view.messages` — the one
+    /// path every mutation that reprojects must call, so those three caches cannot
+    /// drift the way `/rename`'s `reproject()`-only call left `log_list_state`
+    /// under-counting (`sync-view-log-list-state-ssot`).
+    ///
+    /// A pure append (the common case: a command or the reload tick appending N
+    /// events) is spliced — cheap, and keeps scroll position. Anything else — a
+    /// wholesale field swap (`/clear`, `/resume`, or a swap this window only
+    /// observes through the reload tick) or a shrink — falls back to an
+    /// unconditional [`Self::resync_lists_to_projection`]. See [`is_pure_append`]
+    /// for why row count alone cannot tell "grew" from "replaced".
+    pub(super) fn sync_view(&mut self, events: &[Event]) {
+        let old_first_ts = self.view.messages.first().map(|m| m.ts);
+        let old_chat_count = self.chat_message_ixs.len();
+        let old_log_count = self.view.messages.len();
+        let old_log_ix_count = self.log_message_ixs.len();
+
+        self.reproject(events);
+
+        if is_pure_append(old_first_ts, old_log_count, &self.view.messages) {
+            // A pure append leaves every old row untouched, so the filtered prefix is
+            // unchanged and only the appended tail can add entries: splice that tail.
+            self.chat_message_ixs = self.filtered_chat_ixs();
+            let new_chat_count = self.chat_message_ixs.len();
+            if new_chat_count > old_chat_count {
+                self.chat_list_state.splice(
+                    old_chat_count..old_chat_count,
+                    new_chat_count - old_chat_count,
+                );
+            }
+            // Cue on any new chat row, not on filtered growth: an active `/find`
+            // must not silence a quark asking for approval.
+            let chat_grew = self.view.messages[old_log_count..]
+                .iter()
+                .any(|m| m.is_chat());
+            if chat_grew {
+                // Notify and play audio cue if from an autonomous quark
+                if let Some(last_msg) = self.view.messages.last() {
+                    let from_quark = last_msg.from != "human";
+                    if from_quark {
+                        let is_ask = self.view.pending_permission.is_some()
+                            || last_msg.kind_label == "gate"
+                            || last_msg.body.contains("waiting for approval")
+                            || last_msg.body.contains("Mode::Ask")
+                            || self
+                                .view
+                                .roster
+                                .iter()
+                                .find(|r| r.id == last_msg.from)
+                                .map(|r| r.mode == hadron_lattice::Mode::Ask)
+                                .unwrap_or(false);
+                        if is_ask {
+                            self.audio_manager
+                                .trigger_cue(crate::app::audio::AudioCue::BlockedOnHuman);
+                            if self.prefs.desktop_notifications && self.prefs.notify_on_blocked {
+                                crate::sys::send_desktop_notification(
+                                    &format!("{} needs approval", last_msg.from),
+                                    &last_msg.body,
+                                    self.prefs.audio.enabled,
+                                );
+                            }
+                        } else {
+                            self.audio_manager
+                                .trigger_cue(crate::app::audio::AudioCue::MessageReceived);
+                            self.audio_manager
+                                .trigger_cue(crate::app::audio::AudioCue::TurnFinish);
+                            if self.prefs.desktop_notifications && self.prefs.notify_on_turn_finish
+                            {
+                                crate::sys::send_desktop_notification(
+                                    &format!("{} finished turn", last_msg.from),
+                                    &last_msg.body,
+                                    self.prefs.audio.enabled,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let new_log_count = self.view.messages.len();
+            if new_log_count > old_log_count {
+                self.cached_stats.borrow_mut().clear();
+            }
+            self.log_message_ixs = self.filtered_log_ixs();
+            let new_log_ix_count = self.log_message_ixs.len();
+            if new_log_ix_count > old_log_ix_count {
+                self.log_list_state.splice(
+                    old_log_ix_count..old_log_ix_count,
+                    new_log_ix_count - old_log_ix_count,
+                );
+            }
+        } else {
+            self.resync_lists_to_projection();
+        }
+    }
+
+    /// Pick a folder and open it as a workspace **in a second chamber**, leaving this
+    /// one running.
+    ///
+    /// This is the whole reason "Open Workspace" was absent for so long: a daemon binds
+    /// to one workspace at boot, so a chamber cannot repoint the running swarm at another
+    /// repo. It does not have to — a chamber launched with a directory argument resolves
+    /// `<dir>/.hadron/field.jsonl` itself and auto-spawns that workspace's own gluon
+    /// (guarded by its own `gluon.lock`), which is exactly what an editor's "Open Folder
+    /// in New Window" does. Nothing here touches the current workspace's field, roster or
+    /// daemon, so the failure mode `team_for_field-misses-repo-root` warns about — a
+    /// silently-empty roster — cannot be inflicted on the session already open.
+    pub(super) fn open_workspace(&mut self, cx: &mut Context<Self>) {
+        let is_selector = self.workspace_mode == WorkspaceMode::Selector;
+        let show_console = self.prefs.show_console_window;
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open workspace".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            // Same two-step as `pick_avatar_image`: gpui's portal-backed picker first,
+            // then a subprocess dialog for WSL, where there is usually no portal. Only
+            // `NoPicker` earns that second dialog — treating a cancel as "no picker" is
+            // what made Cancel pop a second folder browser.
+            let picked = match widgets::classify_pick(rx.await.ok().and_then(|r| r.ok())) {
+                widgets::Picked::Path(p) => Some(p),
+                widgets::Picked::Cancelled => return,
+                widgets::Picked::NoPicker => {
+                    cx.background_spawn(async { widgets::fallback_pick_directory() })
+                        .await
+                }
+            };
+            let Some(dir) = picked else {
+                eprintln!("chamber: no folder chosen (or no picker available)");
+                return;
+            };
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    if let Err(e) = crate::sys::spawn_with_console_pref(&exe, [&dir], show_console)
+                    {
+                        eprintln!("chamber: failed to open a chamber for {dir}: {e}");
+                    } else if is_selector {
+                        let _ = this.update(cx, |_chamber, cx| cx.quit());
+                    }
+                }
+                Err(e) => eprintln!("chamber: cannot locate our own binary to relaunch: {e}"),
+            }
+        })
+        .detach();
+    }
+
+    /// Open a folder picker rooted at a WSL distribution's `$HOME` directory
+    /// (`\\wsl.localhost\<distro>\home\<user>`) and launch the selected folder in Hadron.
+    pub(super) fn open_wsl_distro_picker(&mut self, distro: String, cx: &mut Context<Self>) {
+        let is_selector = self.workspace_mode == WorkspaceMode::Selector;
+        let show_console = self.prefs.show_console_window;
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_spawn(async move {
+                    let unc_home = crate::wsl::resolve_wsl_home_unc_path(&distro);
+                    widgets::pick_directory_at(Some(&unc_home))
+                })
+                .await;
+            let Some(dir) = picked else {
+                return;
+            };
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    if let Err(e) = crate::sys::spawn_with_console_pref(&exe, [&dir], show_console)
+                    {
+                        let _ = this.update(cx, |chamber, cx| {
+                            chamber.toast_manager.push(
+                                ToastKind::Error,
+                                format!("Failed to open {dir}: {e}"),
+                                Some(3),
+                            );
+                            cx.notify();
+                        });
+                    } else if is_selector {
+                        let _ = this.update(cx, |_chamber, cx| cx.quit());
+                    } else {
+                        let _ = this.update(cx, |chamber, cx| {
+                            chamber.project_switcher_open = false;
+                            chamber.toast_manager.push(
+                                ToastKind::Success,
+                                format!("Opened {dir} in new chamber window"),
+                                Some(3),
+                            );
+                            cx.notify();
+                        });
+                    }
+                }
+                Err(e) => eprintln!("chamber: cannot locate our own binary to relaunch: {e}"),
+            }
+        })
+        .detach();
+    }
+
+    /// Asynchronously refresh local repository health, git remote tracking, GitHub Actions, Security Alerts, and Issues/PRs.
+    pub(super) fn refresh_remote_and_github(&mut self, cx: &mut Context<Self>) {
+        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        self.github_status_msg = Some("Refreshing remote & GitHub...".to_string());
+        cx.spawn(async move |this, cx| {
+            let (health, remote_info, issues_res, prs_res, actions_res, alerts_res) = cx
+                .background_executor()
+                .spawn(async move {
+                    let health = hadron_gatekeeper::RepoMonitor::check_repo(&repo_root);
+                    let remote_info = crate::vcs::get_remote_tracking_info(&repo_root);
+                    let issues_res = crate::vcs::fetch_github_issues(&repo_root);
+                    let prs_res = crate::vcs::fetch_github_prs(&repo_root);
+                    let actions_res = crate::vcs::fetch_github_actions(&repo_root);
+                    let alerts_res = crate::vcs::fetch_github_security_alerts(
+                        &repo_root,
+                        remote_info.repo_slug.as_deref(),
+                    );
+                    (
+                        health,
+                        remote_info,
+                        issues_res,
+                        prs_res,
+                        actions_res,
+                        alerts_res,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.repo_health_report = Some(health);
+                chamber.git_remote_info = Some(remote_info);
+                match issues_res {
+                    Ok(issues) => {
+                        chamber.github_issues = Some(issues);
+                        chamber.github_status_msg = None;
+                    }
+                    Err(e) => {
+                        chamber.github_issues = None;
+                        chamber.github_status_msg = Some(e);
+                    }
+                }
+                match prs_res {
+                    Ok(prs) => chamber.github_prs = Some(prs),
+                    Err(_) => chamber.github_prs = None,
+                }
+                match actions_res {
+                    Ok(runs) => chamber.github_actions = Some(runs),
+                    Err(_) => chamber.github_actions = None,
+                }
+                match alerts_res {
+                    Ok(alerts) => chamber.github_security_alerts = Some(alerts),
+                    Err(_) => chamber.github_security_alerts = None,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch full GitHub issue details off-thread via `gh` and dispatch `@orchestrator`.
+    pub(super) fn dispatch_github_issue(
+        &mut self,
+        number: u64,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        self.github_status_msg = Some(format!("Fetching issue #{number} details..."));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let title_bg = title.clone();
+            let detail = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::vcs::fetch_github_issue_detail(&repo_root, number).unwrap_or_else(|_| {
+                        crate::vcs::GitHubIssueDetail {
+                            number,
+                            title: title_bg,
+                            body: String::new(),
+                            url: String::new(),
+                            labels: Vec::new(),
+                        }
+                    })
+                })
+                .await;
+
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.github_status_msg = None;
+                chamber.chat_tab = ChatTab::Chat;
+                let prompt = crate::vcs::format_issue_dispatch_prompt(&detail);
+                chamber.post_chat_message(Actor::Human, prompt, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch GitHub PR review comments & failing checks off-thread via `gh` and dispatch `@orchestrator`.
+    pub(super) fn dispatch_github_pr_review(
+        &mut self,
+        number: u64,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        self.github_status_msg = Some(format!("Fetching PR #{number} review context..."));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let title_bg = title.clone();
+            let ctx =
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::vcs::fetch_github_pr_review_context(&repo_root, number)
+                            .unwrap_or_else(|_| crate::vcs::GitHubPrReviewContext {
+                                number,
+                                title: title_bg,
+                                body: String::new(),
+                                url: String::new(),
+                                head_ref: String::new(),
+                                review_comments: Vec::new(),
+                                failing_checks: Vec::new(),
+                            })
+                    })
+                    .await;
+
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.github_status_msg = None;
+                chamber.chat_tab = ChatTab::Chat;
+                let prompt = crate::vcs::format_pr_review_dispatch_prompt(&ctx);
+                chamber.post_chat_message(Actor::Human, prompt, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Post a chat message from `from` and reveal it. The shared tail of every
+    /// command that *speaks*, so the chat-list bookkeeping has one home rather than
+    /// one copy per command.
+    ///
+    /// **`from` is the whole safety story.** `Actor::Human` requests turns:
+    /// `router::next_pending` skips `to: None` events, so an unaddressed human
+    /// message reaches quarks only through `engine::unaddressed_message_targets`,
+    /// which resolves `@mentions` in the body — which is exactly what the skill
+    /// commands want. `Actor::Gluon` with no `@mention` in the body reaches nobody
+    /// at all, and that is the channel `/help` and `/skills` print on: visible in
+    /// the chat, no seat woken, no tokens spent.
+    ///
+    /// The append itself goes through [`Self::append_and_reload`] rather than
+    /// calling `io::append_event` again here — one write path into the field, which
+    /// (via [`Self::sync_view`]) is also the one place that keeps
+    /// `chat_message_ixs`/`chat_list_state` in step with it.
+    pub(super) fn post_chat_message(&mut self, from: Actor, body: String, cx: &mut Context<Self>) {
+        self.append_and_reload(Event::new(from, None, Kind::Message { body }), cx);
+        self.chat_list_state
+            .scroll_to_reveal_item(self.chat_message_ixs.len().saturating_sub(1));
+        self.log_list_state
+            .scroll_to_reveal_item(self.log_message_ixs.len().saturating_sub(1));
+        cx.notify();
+    }
+
+    /// The skill corpus the engine would load for this workspace: built-ins, then
+    /// `~/.hadron/skills`, then `<repo>/.hadron/skills`, last wins by id.
+    ///
+    /// Deliberately the **same pair of directories** the daemon passes
+    /// (`hadron-gluon.rs:429` for the global, `engine/routing.rs:71` for the repo).
+    /// A `/skills` listing that read a different pair would be a confident lie about
+    /// what the quarks actually have.
+    fn skill_corpus(&self) -> Vec<hadron_gluon::skills::ResolvedSkill> {
+        let repo_dir = crate::vcs::repo_root_of(&self.path)
+            .join(".hadron")
+            .join("skills");
+        let global_dir = hadron_lattice::user_hadron_dir().map(|d| d.join("skills"));
+        let wsl_dir = hadron_lattice::wsl::wsl_skills_dir_for_field(&self.path);
+
+        match (global_dir, wsl_dir) {
+            (Some(g), Some(w)) if g != w => {
+                let mut base = hadron_gluon::skills::load_skills(Some(&g), Some(&w));
+                let mut repo_skill_names = std::collections::HashSet::new();
+                if let Ok(entries) = std::fs::read_dir(&repo_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file() && p.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                            if let Ok(content) = std::fs::read_to_string(&p) {
+                                let (front, _) = hadron_gluon::skills::split_front_matter(&content);
+                                if let Some(id) = front.and_then(|f| {
+                                    hadron_gluon::skills::front_matter_value(f, "name")
+                                }) {
+                                    repo_skill_names.insert(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                let repo_skills = hadron_gluon::skills::load_skills(None, Some(&repo_dir));
+                for s in repo_skills {
+                    if repo_skill_names.contains(&s.id) {
+                        if let Some(pos) = base.iter().position(|existing| existing.id == s.id) {
+                            base[pos] = s;
+                        } else {
+                            base.push(s);
+                        }
+                    }
+                }
+                base
+            }
+            (Some(g), _) => hadron_gluon::skills::load_skills(Some(&g), Some(&repo_dir)),
+            (None, Some(w)) => hadron_gluon::skills::load_skills(Some(&w), Some(&repo_dir)),
+            (None, None) => hadron_gluon::skills::load_skills(None, Some(&repo_dir)),
+        }
+    }
+}
+
+/// Build the post-`/clear` seed events (the `/clear` command notice, optional active-plan
+/// preservation notice, default permission mode seed, and resident ACP reboots).
+pub(super) fn build_post_clear_events(
+    session_id: &str,
+    default_mode: hadron_lattice::Mode,
+    roster: &[crate::model::RosterRow],
+    keep_context_plan: Option<String>,
+) -> Vec<Event> {
+    let mut post_events = Vec::with_capacity(3 + roster.len());
+
+    // Record post-clear command event into the fresh field.
+    post_events.push(Event::new(
+        Actor::Human,
+        None,
+        Kind::Command {
+            cmd: "/clear".to_string(),
+            exit: 0,
+            out_summary: format!("Session reset (archived {session_id})"),
+        },
+    ));
+
+    if let Some(plan_name) = keep_context_plan {
+        post_events.push(Event::new(
+            Actor::Gluon,
+            None,
+            Kind::Message {
+                body: format!("Mission context preserved for active plan: {}", plan_name),
+            },
+        ));
+    }
+
+    if let Some(seed) = crate::model::default_mode_seed(default_mode) {
+        post_events.push(seed);
+    }
+
+    post_events.extend(crate::model::post_clear_reboots(roster));
+    post_events
+}
+
+/// Persist a `/clear` operation to disk: archive `field_path` into `session_dir/field.jsonl`
+/// (including a pre-clear audit event) and atomically replace `field_path` with `post_events`.
+pub(super) fn perform_clear_field_with_events(
+    field_path: &std::path::Path,
+    session_dir: &std::path::Path,
+    session_id: &str,
+    post_events: &[Event],
+) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(session_dir)?;
+
+    // Record pre-clear command event into the field before archiving.
+    let pre_clear_ev = Event::new(
+        Actor::Human,
+        None,
+        Kind::Command {
+            cmd: "/clear".to_string(),
+            exit: 0,
+            out_summary: format!("Archiving session to {session_id}"),
+        },
+    );
+    let _ = io::append_event(field_path, &pre_clear_ev);
+
+    let archive_path = session_dir.join("field.jsonl");
+    std::fs::copy(field_path, &archive_path)?;
+
+    if let Err(e) = io::replace_events(field_path, post_events) {
+        eprintln!("chamber: failed to write post-clear seed events: {e}");
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+/// Archive the current field to `session_dir`, reset `field_path`, and seed the new field
+/// with a post-clear `/clear` command event, the default mode seed, and resident reboots.
+///
+/// Both pre-clear and post-clear command events are recorded to make `/clear` observable
+/// in the Event Log (preserving auditability in both the archived and newly active fields).
+#[cfg(test)]
+pub(super) fn perform_clear_field(
+    field_path: &std::path::Path,
+    session_dir: &std::path::Path,
+    session_id: &str,
+    default_mode: hadron_lattice::Mode,
+    roster: &[crate::model::RosterRow],
+    keep_context_plan: Option<String>,
+) -> Result<Vec<Event>, std::io::Error> {
+    let post_events = build_post_clear_events(session_id, default_mode, roster, keep_context_plan);
+    perform_clear_field_with_events(field_path, session_dir, session_id, &post_events)?;
+    Ok(post_events)
+}
+
+impl Chamber {
+    pub(super) fn handle_chat_command(
+        &mut self,
+        cmd: &str,
+        args: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match cmd {
+            "exit" | "quit" => {
+                cx.quit();
+                true
+            }
+            "toggle-roster" => {
+                self.toggle_rail(Rail::Roster, _window, cx);
+                true
+            }
+            "toggle-inspector" => {
+                self.toggle_rail(Rail::Inspector, _window, cx);
+                true
+            }
+            "projects" => {
+                self.project_switcher_open = true;
+                cx.notify();
+                true
+            }
+            "open" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    self.toggle_project_switcher(cx);
+                } else {
+                    self.open_project_path(trimmed, _window, cx);
+                }
+                true
+            }
+            "clear" => {
+                let trimmed_flag = args.trim();
+                if trimmed_flag == "--soft" {
+                    // Soft clear: reset field and in-memory chat view projection without resetting worktrees or archiving
+                    let post_events = build_post_clear_events(
+                        "soft",
+                        self.prefs.default_mode,
+                        &self.view.roster,
+                        None,
+                    );
+                    let field_path = self.path.clone();
+                    let post_events_bg = post_events.clone();
+                    self.sync_view(&post_events);
+                    self.resync_lists_to_projection();
+                    cx.notify();
+                    self.field_write_queue.enqueue(cx, move || {
+                        if let Err(e) = io::replace_events(&field_path, &post_events_bg) {
+                            eprintln!("chamber: failed to soft-clear session: {e}");
+                        } else {
+                            crate::rpc_client::notify_daemon_wake(&field_path);
+                        }
+                    });
+                    return true;
+                }
+
+                let keep_context = trimmed_flag == "--keep-context";
+                let plan_info = if keep_context {
+                    self.last_plan_path
+                        .as_ref()
+                        .map(|p| {
+                            std::path::Path::new(p)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        })
+                        .or_else(|| Some("active plan".to_string()))
+                } else {
+                    self.last_plan_path = None;
+                    *self.cached_plan_dag.borrow_mut() = None;
+                    None
+                };
+
+                let session_id = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let session_dir = self.sessions_dir().join(&session_id);
+                let default_mode = self.prefs.default_mode;
+                let roster = self.view.roster.clone();
+                let field_path = self.path.clone();
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+
+                let post_events =
+                    build_post_clear_events(&session_id, default_mode, &roster, plan_info);
+                self.sync_view(&post_events);
+                self.resync_lists_to_projection();
+                cx.notify();
+
+                let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+                self.field_write_queue.enqueue(cx, move || {
+                    match perform_clear_field_with_events(
+                        &field_path,
+                        &session_dir,
+                        &session_id,
+                        &post_events,
+                    ) {
+                        Err(e) => {
+                            eprintln!("chamber: failed to clear session: {e}");
+                            let _ = done_tx.send(false);
+                        }
+                        Ok(()) => {
+                            crate::rpc_client::notify_daemon_wake(&field_path);
+                            let _ = done_tx.send(true);
+                        }
+                    }
+                });
+
+                let sessions_dir = self.sessions_dir();
+                cx.spawn(async move |this, cx| {
+                    let archived_and_sessions = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let ok = done_rx.recv().unwrap_or(false);
+                            let _ = hadron_gluon::worktree::reset_worktrees_on_clear(&repo_root);
+                            ok.then(|| crate::model::load_archives_and_sessions(&sessions_dir))
+                        })
+                        .await;
+                    if let Some((archived_messages, sessions)) = archived_and_sessions {
+                        let _ = this.update(cx, |chamber, cx| {
+                            chamber.archived_messages = archived_messages;
+                            chamber.sessions = sessions;
+                            chamber.cached_stats.borrow_mut().clear();
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+                true
+            }
+            // The skill commands. Each posts an ordinary human message whose text
+            // carries the skill's own canonical trigger, because the engine selects
+            // the procedure by matching that text (`skills::select` is a pure
+            // function of the task text) — there is no separate "load a skill"
+            // channel to use. `/team-brainstorm` addresses the whole roster; the
+            // other three address the named quark, or the orchestrator when the
+            // human names nobody.
+            "commands" | "help" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.post_chat_message(
+                    Actor::Gluon,
+                    crate::text::help_body_with_skills(Some(&repo_root)),
+                    cx,
+                );
+                true
+            }
+            "schedule" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.handle_schedule_command(args, &repo_root, cx);
+                true
+            }
+            "goal" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/goal <objective>`\nLaunch an end-to-end autonomous swarm mission: research, spec, plan, and dispatch across Quarks to 100% completion.\n\n*Tip: Works best when the orchestrator/swarm is in Bypass mode (`/mode bypass`), or Auto mode if you prefer interactive permission prompts.*".to_string(),
+                        cx,
+                    );
+                } else {
+                    let msg = format!(
+                        "@orchestrator /writing-plans /executing-plans /goal Objective: {trimmed}\n\nExecute this end-to-end goal autonomously across the swarm: research context, write design spec in `.hadron/docs/specs/`, create actionable plan in `.hadron/docs/plans/`, dispatch tasks across available worker quarks (`@<quark>`), verify each task, and drive to 100% completion."
+                    );
+                    self.post_chat_message(Actor::Human, msg, cx);
+                }
+                true
+            }
+            "loop" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/loop [count] <task>`\nExecute an iterative autonomous execution loop until complete or test suite passes.\n\n*Tip: Works best in Bypass mode (`/mode bypass`).*".to_string(),
+                        cx,
+                    );
+                } else {
+                    let (named, rest) = crate::text::split_target(trimmed);
+                    let target = named.unwrap_or(hadron_gluon::router::ORCHESTRATOR_ALIAS);
+                    let msg = format!(
+                        "@{target} /loop {rest}\n\nIterate autonomously on this task until complete or verification passes, checking progress and fixing any errors in a continuous execution loop."
+                    );
+                    self.post_chat_message(Actor::Human, msg, cx);
+                }
+                true
+            }
+            "team-review" => {
+                let trimmed = args.trim();
+                let (named, target_branch) = crate::text::split_target(trimmed);
+                let target = named.unwrap_or(hadron_gluon::router::TEAM_ALIAS);
+                let branch_info = if target_branch.is_empty() {
+                    "active branch".to_string()
+                } else {
+                    format!("branch `{target_branch}`")
+                };
+                let msg = format!(
+                    "@{target} /team-review /reviewing-work /security-review /architecture-audit /code-simplification\n\nRun multi-quark peer review board on {branch_info}. Inspect code changes across Security (Rule 7), Architecture & SSOT (Rules 3, 8), and Code Simplicity (Rule 10), and provide line annotations with synthesized verdict."
+                );
+                self.post_chat_message(Actor::Human, msg, cx);
+                true
+            }
+            "bakeoff" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/bakeoff <task_description>`\nSpawn a speculative tournament bake-off across competing solutions and fast-forward the winning branch.".to_string(),
+                        cx,
+                    );
+                } else {
+                    let hadron_dir = hadron_lattice::hadron_dir_of(&self.path);
+                    let spec_id = format!("bakeoff-{}", chrono::Utc::now().timestamp_millis());
+                    let task_desc = trimmed.to_string();
+                    let tracked_quarks: Vec<String> = resolve_team(&self.team, &self.global)
+                        .quarks
+                        .iter()
+                        .filter(|s| s.enabled && s.flavor == hadron_lattice::Flavor::Worker)
+                        .map(|s| s.id.as_str().to_string())
+                        .collect();
+                    let msg = format!(
+                        "@orchestrator /bakeoff /dispatching-parallel-agents Task: {trimmed}\n\nExecute speculative tournament: spawn 2-3 candidate quarks with isolated worktree branches exploring alternative implementations, benchmark via Merge Gate, evaluate WinnerReport, and fast-forward winning solution."
+                    );
+                    cx.spawn(async move |this, cx| {
+                        let save_res = cx
+                            .background_executor()
+                            .spawn(async move {
+                                hadron_gluon::BakeOffManager::new(&spec_id, &task_desc)
+                                    .with_tracked_quarks(tracked_quarks)
+                                    .save_active(&hadron_dir)
+                            })
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            if let Err(e) = save_res {
+                                this.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Bake-off manifest write failed: {e}"),
+                                    cx,
+                                );
+                            } else {
+                                this.post_chat_message(Actor::Human, msg, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+                true
+            }
+            "grill-me" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/grill-me <feature_topic>`\nInitiate an interactive requirement grilling interview before authoring specs and plans.".to_string(),
+                        cx,
+                    );
+                } else {
+                    let msg = format!(
+                        "@orchestrator /grill-me /brainstorming Topic: {trimmed}\n\nInitiate interactive requirement alignment interview for `{trimmed}`. Ask 2-4 clarifying questions covering invariants, trade-offs, and non-obvious constraints before synthesizing specification."
+                    );
+                    self.post_chat_message(Actor::Human, msg, cx);
+                }
+                true
+            }
+            "research" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/research <topic>`\nInitiate an exploratory research investigation and persist structured findings to `.hadron/docs/research/`.".to_string(),
+                        cx,
+                    );
+                } else {
+                    let (named, topic) = crate::text::split_target(trimmed);
+                    let target = named.unwrap_or(hadron_gluon::router::ORCHESTRATOR_ALIAS);
+                    let msg = format!(
+                        "@{target} /research Topic: {topic}\n\nConduct thorough architectural and technical research on `{topic}`: analyze current codebase mechanisms, evaluate trade-offs and constraints, persist structured findings to `.hadron/docs/research/`, and recommend actionable next steps."
+                    );
+                    self.post_chat_message(Actor::Human, msg, cx);
+                }
+                true
+            }
+            "home" => {
+                let trimmed = args.trim();
+                let (named, _) = crate::text::split_target(trimmed);
+                let target_name = named.or_else(|| {
+                    let first_word = trimmed.split_whitespace().next()?;
+                    (!first_word.is_empty()).then_some(first_word)
+                });
+
+                let default_quark = self
+                    .view
+                    .roster
+                    .iter()
+                    .find(|r| r.flavor == Some(hadron_lattice::Flavor::Orchestrator))
+                    .or_else(|| self.view.roster.first())
+                    .map(|r| r.id.clone())
+                    .unwrap_or_else(|| "cli-agy".to_string());
+
+                let target_id = if let Some(target) = target_name {
+                    let cleaned = target.trim_start_matches('@');
+                    self.view
+                        .roster
+                        .iter()
+                        .find(|r| {
+                            r.id.eq_ignore_ascii_case(cleaned)
+                                || self
+                                    .resolve_identity(&r.id)
+                                    .name
+                                    .eq_ignore_ascii_case(cleaned)
+                        })
+                        .map(|r| r.id.clone())
+                        .unwrap_or_else(|| cleaned.to_string())
+                } else if let Some(sel_ix) = self.selected_quark_ix {
+                    self.view
+                        .roster
+                        .get(sel_ix)
+                        .map(|r| r.id.clone())
+                        .unwrap_or(default_quark)
+                } else {
+                    default_quark
+                };
+
+                self.open_quark_info(target_id, InfoTab::Home, cx);
+                true
+            }
+            "canvas" => {
+                for row in self.view.roster.iter().filter(|r| r.enabled && r.adopted) {
+                    self.split_canvas.add_quark(&row.id);
+                }
+                self.split_canvas.cycle_focus();
+                let columns = self.split_canvas.calculate_columns();
+                if self.interactive_canvas.elements.is_empty() {
+                    self.interactive_canvas
+                        .add_element(render::canvas::CanvasElement::new(
+                            "header",
+                            0.0,
+                            0.0,
+                            800.0,
+                            60.0,
+                            "Hadron Chamber Header",
+                            "#1f2430",
+                        ));
+                    self.interactive_canvas
+                        .add_element(render::canvas::CanvasElement::new(
+                            "roster",
+                            0.0,
+                            60.0,
+                            240.0,
+                            540.0,
+                            "Swarm Roster",
+                            "#242936",
+                        ));
+                    self.interactive_canvas
+                        .add_element(render::canvas::CanvasElement::new(
+                            "chat",
+                            240.0,
+                            60.0,
+                            560.0,
+                            540.0,
+                            "Field Chat",
+                            "#1b1d24",
+                        ));
+                }
+                self.right_rail_tab = RightRailTab::Visualizer;
+                self.prefs.inspector_collapsed = false;
+                self.post_chat_message(
+                    Actor::Gluon,
+                    format!(
+                        "Interactive Canvas & Split Grid: Active elements: {}, Active tiles: {}, Split columns: {}, Viewport: 800x600.",
+                        self.interactive_canvas.elements.len(),
+                        self.split_canvas.active_tiles().len(),
+                        columns
+                    ),
+                    cx,
+                );
+                true
+            }
+            "intercom" => {
+                let next_status = match self.audio_intercom.status() {
+                    audio_intercom::IntercomStatus::Idle => {
+                        audio_intercom::IntercomStatus::Listening
+                    }
+                    audio_intercom::IntercomStatus::Listening => {
+                        let speaker = args
+                            .trim()
+                            .split_whitespace()
+                            .next()
+                            .map(|t| t.trim_start_matches('@').to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "operator".to_string());
+                        self.audio_intercom
+                            .enqueue_audio(audio_intercom::AudioPacket {
+                                quark_id: speaker.clone(),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                                sample_rate: 16_000,
+                                samples: vec![0.12, -0.08, 0.24, -0.15],
+                            });
+                        audio_intercom::IntercomStatus::Speaking(speaker)
+                    }
+                    audio_intercom::IntercomStatus::Speaking(_) => {
+                        let _ = self.audio_intercom.pop_audio();
+                        audio_intercom::IntercomStatus::Muted
+                    }
+                    audio_intercom::IntercomStatus::Muted => {
+                        self.audio_intercom.clear_queue();
+                        audio_intercom::IntercomStatus::Idle
+                    }
+                };
+                self.audio_intercom.set_status(next_status.clone());
+                let speaking_flag = self.audio_intercom.is_speaking();
+                self.post_chat_message(
+                    Actor::Gluon,
+                    format!(
+                        "Audio Intercom Bridge: Status transitioned to `{:?}` (Speaking: {}, Audio queue depth: {} packets).",
+                        next_status,
+                        speaking_flag,
+                        self.audio_intercom.queue_len()
+                    ),
+                    cx,
+                );
+                true
+            }
+            "dream" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.spawn_background_command_notice(
+                    move || {
+                        let summary = hadron_gluon::dream_daemon::DreamDaemon::run_cycle(&repo_root);
+                        let preview = |label: &str, items: &[String]| -> Option<String> {
+                            if items.is_empty() {
+                                return None;
+                            }
+                            let shown: Vec<&str> = items.iter().take(6).map(String::as_str).collect();
+                            let extra = if items.len() > 6 {
+                                format!(" (+{} more)", items.len() - 6)
+                            } else {
+                                String::new()
+                            };
+                            Some(format!("- {label} ({}): `{}`{extra}", items.len(), shown.join("`, `")))
+                        };
+                        let mut lines = vec![format!(
+                            "Sleep & Dream Maintenance: scanned {} notes, cleaned {} empty notes, {} orphan(s), {} dead link(s), {} duplicate slug(s), {} cold note(s), {} stale worktree(s).",
+                            summary.notes_scanned,
+                            summary.notes_cleaned,
+                            summary.orphan_notes.len(),
+                            summary.dead_index_links.len(),
+                            summary.duplicate_index_slugs.len(),
+                            summary.cold_notes.len(),
+                            summary.stale_worktrees_found,
+                        )];
+                        for detail in [
+                            preview("Orphan notes", &summary.orphan_notes),
+                            preview("Dead index links", &summary.dead_index_links),
+                            preview("Duplicate index slugs", &summary.duplicate_index_slugs),
+                            preview("Cold notes (>=30d, 0 opens)", &summary.cold_notes),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            lines.push(detail);
+                        }
+                        lines.join("\n")
+                    },
+                    cx,
+                );
+                true
+            }
+            "timelapse" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.spawn_background_command_notice(
+                    move || {
+                        let out = hadron_lattice::wsl::git_command(&repo_root)
+                            .args(["log", "-n", "5", "--pretty=format:%h%x09%s"])
+                            .output();
+                        let frames = match out {
+                            Ok(res) if res.status.success() => {
+                                let stdout = String::from_utf8_lossy(&res.stdout);
+                                let mut tuples: Vec<(String, String, usize, Vec<String>)> = Vec::new();
+                                for line in stdout.lines() {
+                                    if let Some((hash, subj)) = line.split_once('\t') {
+                                        tuples.push((hash.to_string(), subj.to_string(), 1, vec!["@swarm".to_string()]));
+                                    }
+                                }
+                                let commit_refs: Vec<(&str, &str, usize, &[&str])> = tuples
+                                    .iter()
+                                    .map(|(h, s, n, _)| (h.as_str(), s.as_str(), *n, &["@swarm"][..]))
+                                    .collect();
+                                hadron_forge::timelapse::TimelapseGenerator::generate_frames(&commit_refs)
+                            }
+                            _ => Vec::new(),
+                        };
+
+                        if frames.is_empty() {
+                            "Feature Time-Lapse: No recent git commits found to generate architectural replay.".to_string()
+                        } else {
+                            hadron_forge::timelapse::TimelapseGenerator::render_markdown_timeline(&frames)
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "radar" => {
+                let (target, _) = crate::text::split_target(args);
+                let default_quark = self
+                    .view
+                    .roster
+                    .iter()
+                    .find(|r| r.flavor == Some(hadron_lattice::Flavor::Orchestrator))
+                    .or_else(|| self.view.roster.first())
+                    .map(|r| r.id.clone())
+                    .unwrap_or_else(|| "cli-agy".to_string());
+
+                let quark_id = if let Some(target) = target {
+                    let cleaned = target.trim_start_matches('@');
+                    self.view
+                        .roster
+                        .iter()
+                        .find(|r| {
+                            r.id.eq_ignore_ascii_case(cleaned)
+                                || self
+                                    .resolve_identity(&r.id)
+                                    .name
+                                    .eq_ignore_ascii_case(cleaned)
+                        })
+                        .map(|r| r.id.clone())
+                        .unwrap_or_else(|| cleaned.to_string())
+                } else if let Some(sel_ix) = self.selected_quark_ix {
+                    self.view
+                        .roster
+                        .get(sel_ix)
+                        .map(|r| r.id.clone())
+                        .unwrap_or(default_quark)
+                } else {
+                    default_quark
+                };
+
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let last_prompt = self
+                    .view
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|m| {
+                        if m.from.eq_ignore_ascii_case("human") {
+                            Some(m.body.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "Default workspace intent".to_string());
+
+                self.spawn_background_command_notice(
+                    move || {
+                        let wt_path = hadron_gluon::worktree::trees_dir(&repo_root).join(&quark_id);
+                        let check_path = if wt_path.exists() {
+                            wt_path
+                        } else {
+                            repo_root.clone()
+                        };
+
+                        let base = hadron_gluon::worktree::default_branch(&repo_root);
+                        let diff_output = match hadron_lattice::wsl::git_command(&check_path)
+                            .args(&["diff", &format!("{base}...HEAD")])
+                            .output()
+                        {
+                            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+                            Err(_) => String::new(),
+                        };
+
+                        let report = hadron_gatekeeper::intent_radar::IntentDriftRadar::evaluate(&last_prompt, &diff_output);
+                        let pct = (report.score * 100.0).round() as u32;
+                        let status_icon = if report.drift_detected { "⚠️ DRIFT DETECTED" } else { "✅ ALIGNED" };
+                        format!(
+                            "**Intent Drift Radar (@{})**: {} (Alignment: {}%)\n- **Matched Keywords**: {}\n- **Prompt Keywords**: {}",
+                            quark_id,
+                            status_icon,
+                            pct,
+                            if report.matched_keywords.is_empty() { "none".to_string() } else { report.matched_keywords.join(", ") },
+                            report.prompt_keywords.join(", ")
+                        )
+                    },
+                    cx,
+                );
+                true
+            }
+            "baseline" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.spawn_background_command_notice(
+                    move || {
+                        let mut cmd = hadron_lattice::wsl::wsl_aware_command(&repo_root, "cargo");
+                        cmd.args(["test", "--workspace", "--", "--test-threads=4"]);
+                        let target_dir = repo_root.join("target");
+                        if target_dir.is_dir() {
+                            cmd.env("CARGO_TARGET_DIR", target_dir);
+                        }
+                        let out = cmd.output();
+                        let output_str = out
+                            .map(|o| format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+                            .unwrap_or_default();
+                        let snapshot = hadron_gatekeeper::baseline::BaselineHealthSnapshotter::create_snapshot(&output_str, vec![]);
+                        let known_count = snapshot.known_failing_tests.len();
+                        format!(
+                            "Baseline Health Snapshot (Standard Model Rule 5):\n- Timestamp: {}\n- Known failing tests: {}\n- Known warnings: {}\n{}",
+                            snapshot.timestamp,
+                            known_count,
+                            snapshot.known_warnings.len(),
+                            if known_count == 0 {
+                                "Workspace baseline verified: 0 failing tests."
+                            } else {
+                                "Workspace baseline contains pre-existing failures; inspect before starting."
+                            }
+                        )
+                    },
+                    cx,
+                );
+                true
+            }
+            "scout" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let query = if args.trim().is_empty() {
+                    "inspect codebase structure".to_string()
+                } else {
+                    args.trim().to_string()
+                };
+                self.spawn_background_command_notice(
+                    move || {
+                        let invocation = hadron_gluon::scout::ScoutInvocation::new(&query);
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        match rt {
+                            Ok(runtime) => match runtime.block_on(
+                                hadron_gluon::scout::spawn_ephemeral_scout(&repo_root, &invocation),
+                            ) {
+                                Ok(res) => format!(
+                                    "Ephemeral Scout Results: {}\nFindings:\n{}",
+                                    res.summary,
+                                    res.findings.join("\n")
+                                ),
+                                Err(e) => format!("Ephemeral Scout failed: {e}"),
+                            },
+                            Err(e) => format!("Ephemeral Scout runtime error: {e}"),
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            cmd if cmd == "team-brainstorm"
+                || cmd == "brainstorm"
+                || cmd == "team-debate"
+                || cmd == "debate"
+                || cmd == "security"
+                || cmd == "arch"
+                || cmd == "code-review"
+                || cmd == "chaos-test"
+                || cmd == "test-engineering"
+                || cmd == "perf-audit"
+                || cmd == "optimize"
+                || cmd == "simplify"
+                || cmd == "refactor"
+                || cmd == "contract"
+                || cmd == "triage"
+                || cmd == "investigate"
+                || cmd == "curate-memory"
+                || cmd == "deprecate"
+                || cmd == "benchmark"
+                || self.skill_corpus().iter().any(|s| s.id == cmd)
+                || crate::text::is_custom_skill_in(
+                    cmd,
+                    Some(crate::vcs::repo_root_of(&self.path)),
+                ) =>
+            {
+                let skill_id = match cmd {
+                    "team-brainstorm" | "brainstorm" => "brainstorming",
+                    "team-debate" | "debate" => "debate",
+                    "security" => "security-review",
+                    "arch" => "architecture-audit",
+                    "code-review" => "reviewing-work",
+                    "chaos-test" | "test-engineering" => "chaos-testing",
+                    "perf-audit" | "optimize" => "performance-audit",
+                    "simplify" | "refactor" => "code-simplification",
+                    "contract" => "api-design",
+                    "triage" | "investigate" => "incident-investigation",
+                    "curate-memory" => "memory-curation",
+                    "deprecate" => "migration-deprecation",
+                    "benchmark" => "benchmarking",
+                    other => other,
+                };
+                let corpus = self.skill_corpus();
+                let trigger = corpus
+                    .iter()
+                    .find(|s| s.id == skill_id)
+                    .and_then(|s| s.triggers.first().cloned())
+                    .or_else(|| hadron_gluon::skills::canonical_trigger(skill_id).map(String::from))
+                    .unwrap_or_else(|| skill_id.to_string());
+
+                let (target, task) = if cmd == "team-brainstorm" || cmd == "team-debate" {
+                    (hadron_gluon::router::TEAM_ALIAS, args.trim())
+                } else {
+                    let (named, task) = crate::text::split_target(args);
+                    (
+                        named.unwrap_or(hadron_gluon::router::ORCHESTRATOR_ALIAS),
+                        task,
+                    )
+                };
+                match crate::text::skill_command_body(&trigger, target, task) {
+                    // The human's own words, carrying the trigger the engine matches.
+                    Some(body) => self.post_chat_message(Actor::Human, body, cx),
+                    // No task: there is nothing of the human's to post, and posting
+                    // a sentence composed here would put it under their name AND be
+                    // the task every mentioned seat is dispatched on. Say so from
+                    // `Actor::Gluon` instead, which wakes nobody.
+                    None => self.post_chat_message(
+                        Actor::Gluon,
+                        crate::text::skill_command_needs_a_task(cmd),
+                        cx,
+                    ),
+                }
+                true
+            }
+            // Renders the nucleus file verbatim rather than a table built here.
+            // The definitions have one home; a copy in `text.rs` would be a second
+            // source that drifts the first time someone edits only one of them.
+            "vocabulary" => {
+                let path = self
+                    .path
+                    .parent()
+                    .unwrap_or(std::path::Path::new(".hadron"))
+                    .join("nucleus")
+                    .join("vocabulary.md");
+                let body = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    // Say which file is missing. "no vocabulary" with no path is
+                    // indistinguishable from a broken command.
+                    Err(e) => format!("No vocabulary at `{}` — {e}", path.display()),
+                };
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "skills" => {
+                let corpus = self.skill_corpus();
+                let rows: Vec<(&str, Option<&str>, Option<&str>)> = corpus
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.id.as_str(),
+                            s.description.as_deref(),
+                            // The canonical trigger is the first one, and that
+                            // rule lives in the engine — not restated here.
+                            s.triggers.first().map(String::as_str),
+                        )
+                    })
+                    .collect();
+                self.post_chat_message(Actor::Gluon, crate::text::skills_body(&rows), cx);
+                true
+            }
+            "settle" | "adr" => {
+                let verdict = args.trim();
+                if verdict.is_empty() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/settle <verdict>` (e.g. `/settle Adopt SQLite for metadata`). This records an Architectural Decision Record (ADR) in `.hadron/docs/adr/` and settles the debate.".to_string(),
+                        cx,
+                    );
+                } else {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    let slug = crate::text::slugify(verdict);
+                    let filename = format!("{today}-{slug}.md");
+                    let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                    let adr_dir = repo_root.join(".hadron").join("docs").join("adr");
+                    let _ = std::fs::create_dir_all(&adr_dir);
+                    let filepath = adr_dir.join(&filename);
+                    let adr_content = format!(
+                        "# Architectural Decision Record: {verdict}\n\n\
+                         - **Date:** {today}\n\
+                         - **Status:** Accepted\n\
+                         - **Decided by:** Human Consensus\n\n\
+                         ## Context & Problem Statement\n\
+                         Debate concluded.\n\n\
+                         ## Decision Outcome\n\
+                         {verdict}\n\n\
+                         ## Consequences\n\
+                         - Architectural alignment established across participating quarks.\n\
+                         - Ready for spec authoring via `/brainstorm` or implementation planning via `/writing-plans`.\n"
+                    );
+                    let _ = std::fs::write(&filepath, adr_content);
+                    let msg = format!(
+                        "⚖️ **Debate Settled**: {verdict}\n\n\
+                         Architectural Decision Record saved to `.hadron/docs/adr/{filename}`.\n\
+                         Proceed with `/brainstorm` or `/writing-plans` when ready to plan implementation."
+                    );
+                    self.post_chat_message(Actor::Human, msg, cx);
+                }
+                true
+            }
+            // Park an expensive seat without unseating it: the seat, its config and its
+            // resident session survive, the daemon just refuses to excite it (and says
+            // so when a mention reaches it). Same flip the roster context menu does —
+            // `toggle_quark_enabled` — reached by name from the chat box.
+            "toggle" => {
+                let target = args.trim();
+                let Some(row) = super::mentions::seat_by_mention(&self.view.roster, target) else {
+                    eprintln!(
+                        "chamber: `/toggle` needs a quark (e.g. `/toggle @Quark`); no roster seat matches {target:?}"
+                    );
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Usage: `/toggle @Quark` (no roster seat matches `{target}`)."),
+                        cx,
+                    );
+                    return true;
+                };
+                let (id, was_adopted, was_enabled) = (row.id.clone(), row.adopted, row.enabled);
+                self.toggle_quark_enabled(&id, cx);
+                let state_desc = if !was_adopted {
+                    "adopted and enabled"
+                } else if was_enabled {
+                    "disabled — it will not take a turn"
+                } else {
+                    "enabled"
+                };
+                eprintln!("chamber: {id} is now {state_desc}");
+                self.post_chat_message(
+                    Actor::Gluon,
+                    format!("Seat `{id}` is now {state_desc}."),
+                    cx,
+                );
+                cx.notify();
+                true
+            }
+            // Name the current (live) session. Appended to the live field, not a
+            // sidecar — because `/clear` archives by copying the live field before
+            // truncating it, this rides into the archive for free.
+            "rename" => {
+                let name = args.trim();
+                if name.is_empty() {
+                    eprintln!("chamber: `/rename` needs a name (e.g. `/rename bugfix-router`)");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/rename <session-name>` (e.g. `/rename bugfix-router`)"
+                            .to_string(),
+                        cx,
+                    );
+                    return true;
+                }
+                let ev = Event::new(
+                    Actor::Human,
+                    None,
+                    Kind::SessionName {
+                        name: name.to_string(),
+                    },
+                );
+                self.append_and_reload(ev, cx);
+                true
+            }
+            // `/clear` run backwards: archive the current live field, then reopen the
+            // chosen session as the new live one (not a read-only viewer — new
+            // messages append to it, same as any other live session).
+            "resume" => {
+                let target = args.trim();
+                if target.is_empty() {
+                    eprintln!("chamber: `/resume` needs a session name or id (e.g. `/resume bugfix-router`)");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/resume <session-name-or-id>` (run `/sessions` to list archived sessions)".to_string(),
+                        cx,
+                    );
+                    return true;
+                }
+                if crate::model::any_quark_mid_turn(&self.view.roster) {
+                    eprintln!(
+                        "chamber: `/resume` refused — a quark is mid-turn; wait for it to finish first"
+                    );
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "`/resume` refused — a quark is currently mid-turn; wait for it to finish first.".to_string(),
+                        cx,
+                    );
+                    return true;
+                }
+                let sessions_dir = self.sessions_dir();
+                // Listed fresh, not from `self.sessions`: `/resume` may be typed against an
+                // archive another process wrote since this chamber last rebuilt its cache.
+                let sessions = crate::model::list_sessions(&sessions_dir);
+                let Some(session) = crate::model::find_session(&sessions, target) else {
+                    eprintln!("chamber: no session matches {target:?}");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("No archived session matches `{target}` (run `/sessions` to list available archives)."),
+                        cx,
+                    );
+                    return true;
+                };
+                let chosen_dir = sessions_dir.join(&session.id);
+                let chosen_field = chosen_dir.join("field.jsonl");
+                let mut resumed_events = match io::read_events(&chosen_field) {
+                    Ok(evs) => evs,
+                    Err(e) => {
+                        eprintln!("chamber: failed to read session {}: {e}", session.id);
+                        return true;
+                    }
+                };
+                resumed_events.extend(crate::model::post_clear_reboots(&self.view.roster));
+
+                // Archive the current live field first — same shape `/clear` uses.
+                let archive_id = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let archive_dir = sessions_dir.join(&archive_id);
+                if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+                    eprintln!("chamber: failed to create session archive directory: {e}");
+                    return true;
+                }
+                if let Err(e) = std::fs::copy(&self.path, archive_dir.join("field.jsonl")) {
+                    eprintln!("chamber: failed to archive field.jsonl: {e}");
+                    return true;
+                }
+                // Reopen the chosen session as live (atomically replacing `self.path` and
+                // invalidating `field_cache`), then drop its archive directory so it is not
+                // double-counted by `load_archived_messages`.
+                if let Err(e) = io::replace_events(&self.path, &resumed_events) {
+                    eprintln!("chamber: failed to resume session {}: {e}", session.id);
+                    return true;
+                }
+                if let Err(e) = std::fs::remove_dir_all(&chosen_dir) {
+                    eprintln!(
+                        "chamber: resumed session {} but failed to drop its archive dir: {e}",
+                        session.id
+                    );
+                }
+
+                self.field_write_queue.bump_epoch();
+                self.sync_view(&resumed_events);
+                // `/resume` is a KNOWN wholesale swap — same reasoning as `/clear` above,
+                // force the unconditional resync rather than trust the append heuristic.
+                self.resync_lists_to_projection();
+                self.reload_archives_in_background(cx);
+                cx.notify();
+                true
+            }
+            "reboot" | "stop" | "kill" => {
+                let target = args.trim().trim_start_matches('@');
+                if target.is_empty() {
+                    eprintln!("chamber: `/{cmd}` requires a target (e.g. `/{cmd} @Quark` or `/{cmd} all`)");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Usage: `/{cmd} @Quark` or `/{cmd} all`"),
+                        cx,
+                    );
+                    return true;
+                }
+
+                let reboots = if target.eq_ignore_ascii_case("all") {
+                    crate::model::post_clear_reboots(&self.view.roster)
+                } else {
+                    // One resolution, shared with `/toggle` (`seat_by_mention`): the old
+                    // `.any()`-then-`.find()`-then-`.unwrap()` pair here restated the same
+                    // match twice and could only stay correct by accident.
+                    match super::mentions::seat_by_mention(&self.view.roster, target) {
+                        Some(row) => {
+                            vec![Event::new(
+                                Actor::Human,
+                                Some(QuarkId::new(&row.id)),
+                                Kind::Reboot,
+                            )]
+                        }
+                        None => {
+                            eprintln!("chamber: `/{cmd}` target not found: {target}");
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("chamber: `/{cmd}` target not found: `{target}`"),
+                                cx,
+                            );
+                            vec![]
+                        }
+                    }
+                };
+
+                self.append_events_and_reload(reboots, cx);
+                true
+            }
+            // Re-reads the field rather than asking the daemon directly — the
+            // chamber has no live channel into engine state, only the field it
+            // both read and just posted the gate's own notice into. See
+            // `text::gate_status_body`.
+            "gate-status" => {
+                let body = crate::text::gate_status_body(
+                    &self.events,
+                    chrono::Utc::now(),
+                    hadron_gluon::merge::GATE_TEST_DEADLINE,
+                );
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            // Discard a quark's pending assignment branch instead of waiting minutes
+            // for the merge gate. Archive-tags it first (so nothing is ever truly
+            // lost), then `git branch -d` — refusing an unmerged branch exactly as
+            // `-d` always does. `confirm` is the human's explicit in-chat
+            // authorisation the `Branch Deletion Uses -d` invariant asks for before
+            // a retry escalates to `-D`. See `vcs::abandon_branch`.
+            "abandon" => {
+                let (target, rest) = crate::text::split_target(args);
+                let confirm = rest.trim().eq_ignore_ascii_case("confirm");
+                let Some(target) = target else {
+                    eprintln!(
+                        "chamber: `/abandon` needs a quark (e.g. `/abandon @Quark`, then \
+                         `/abandon @Quark confirm` to force)"
+                    );
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/abandon @Quark` (or `/abandon @Quark confirm` to force-discard unmerged commits)".to_string(),
+                        cx,
+                    );
+                    return true;
+                };
+                let Some(row) = super::mentions::seat_by_mention(&self.view.roster, target) else {
+                    eprintln!("chamber: `/abandon` target not found: {target}");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("chamber: `/abandon` target not found: `{target}`"),
+                        cx,
+                    );
+                    return true;
+                };
+                let quark_id = row.id.clone();
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let wt_path = hadron_gluon::worktree::trees_dir(&repo_root).join(&quark_id);
+                if !wt_path.exists() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("`{quark_id}` has no worktree — nothing to abandon."),
+                        cx,
+                    );
+                    return true;
+                }
+                self.spawn_background_command_notice(
+                    move || {
+                        let base = hadron_gluon::worktree::default_branch(&repo_root);
+                        match crate::vcs::quark_branch_to_abandon(&repo_root, &wt_path, &quark_id) {
+                            Err(msg) => msg,
+                            Ok(branch) if branch == base => {
+                                format!("`{quark_id}` is sitting on `{base}` itself — refusing to touch the default branch.")
+                            }
+                            Ok(branch) => crate::vcs::abandon_branch(&repo_root, &wt_path, &branch, confirm),
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "preview-rebase" => {
+                let (target, _) = crate::text::split_target(args);
+                let Some(target) = target else {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/preview-rebase @Quark`".to_string(),
+                        cx,
+                    );
+                    return true;
+                };
+                let Some(row) = super::mentions::seat_by_mention(&self.view.roster, target) else {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("chamber: `/preview-rebase` target not found: {target}"),
+                        cx,
+                    );
+                    return true;
+                };
+
+                let quark_id = row.id.clone();
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let wt_path = hadron_gluon::worktree::trees_dir(&repo_root).join(&quark_id);
+
+                if !wt_path.exists() {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("`{quark_id}` has no worktree at {}", wt_path.display()),
+                        cx,
+                    );
+                    return true;
+                }
+
+                self.spawn_background_command_notice(
+                    move || {
+                        let base = hadron_gluon::worktree::default_branch(&repo_root);
+                        let preview = hadron_gluon::merge::preview_rebase(&wt_path, &base);
+
+                        match preview {
+                            hadron_gluon::merge::RebasePreview::AlreadyUpToDate => {
+                                format!("**Preview Rebase (@{})**: Branch is already up-to-date with `{}` (zero commits behind).", quark_id, base)
+                            }
+                            hadron_gluon::merge::RebasePreview::Clean { commits_ahead, commits_behind } => {
+                                format!("**Preview Rebase (@{})**: Clean rebase onto `{}`! ({} commits ahead, {} commits behind, 0 conflicts)", quark_id, base, commits_ahead, commits_behind)
+                            }
+                            hadron_gluon::merge::RebasePreview::Conflicts { conflicting_files, .. } => {
+                                format!("**Preview Rebase (@{})**: Conflicts detected when rebasing onto `{}`:\n{}", quark_id, base, conflicting_files.iter().map(|f| format!("- `{f}`")).collect::<Vec<_>>().join("\n"))
+                            }
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "approve" | "deny" => {
+                let target = args.trim().trim_start_matches('@');
+                let parts: Vec<&str> = target.split_whitespace().collect();
+                if parts.is_empty() {
+                    let msg = format!(
+                        "Usage: `/{cmd} @worker`{}",
+                        if cmd == "approve" {
+                            " or `/approve @worker remember`"
+                        } else {
+                            ""
+                        }
+                    );
+                    eprintln!("chamber: `/approve` or `/deny` requires a worker target");
+                    self.post_chat_message(Actor::Gluon, msg, cx);
+                    return true;
+                }
+                let worker_name = parts[0];
+                let remember = parts
+                    .get(1)
+                    .map(|s| s.eq_ignore_ascii_case("remember"))
+                    .unwrap_or(false);
+                let approved = cmd == "approve";
+
+                let real_id = super::mentions::seat_by_mention(&self.view.roster, worker_name)
+                    .map(|r| r.id.clone());
+
+                if let Some(worker_id) = real_id {
+                    let ev = Event::new(
+                        Actor::Human,
+                        Some(QuarkId::new(worker_id)),
+                        Kind::PermissionGrant { approved, remember },
+                    );
+                    self.append_and_reload(ev, cx);
+                } else {
+                    eprintln!("chamber: target worker not found on roster: {worker_name}");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!(
+                            "chamber: `/{cmd}` target worker not found on roster: `{worker_name}`"
+                        ),
+                        cx,
+                    );
+                }
+                true
+            }
+            "limit" => {
+                let parts: Vec<&str> = args.trim().split_whitespace().collect();
+                if parts.is_empty() {
+                    eprintln!(
+                        "chamber: `/limit` usage: `/limit @target 1000000` or `/limit 1000000`"
+                    );
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/limit @Quark <tokens>` or `/limit <max_exchanges>`".to_string(),
+                        cx,
+                    );
+                    return true;
+                }
+                let (target_str, val_str) = if parts.len() == 1 {
+                    (None, parts[0])
+                } else {
+                    (Some(parts[0].trim_start_matches('@')), parts[1])
+                };
+                let limit_val: u32 = match val_str.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("chamber: invalid limit number: {val_str}");
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!(
+                                "Invalid limit number `{val_str}`. Usage: `/limit @Quark 1000000`"
+                            ),
+                            cx,
+                        );
+                        return true;
+                    }
+                };
+
+                if let Some(t) = target_str {
+                    let Some(real_id) = super::mentions::seat_by_mention(&self.view.roster, t)
+                        .map(|r| r.id.clone())
+                    else {
+                        eprintln!("chamber: `/limit` target quark not found: {t}");
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("chamber: `/limit` target quark not found: `{t}`"),
+                            cx,
+                        );
+                        return true;
+                    };
+                    let qid = QuarkId::new(&real_id);
+                    let resolved = resolve_team(&self.team, &self.global);
+                    if let Some(base) = resolved.get(&qid) {
+                        let mut desired = base.clone();
+                        desired.energy_limit = Some(limit_val);
+                        self.update_seat_config(&qid, &desired, cx);
+                    }
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Energy token limit for `{real_id}` set to `{limit_val}`."),
+                        cx,
+                    );
+                } else {
+                    self.team.max_exchanges = Some(limit_val as usize);
+                    self.save_repo_team(cx);
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Team max exchanges limit set to `{limit_val}`."),
+                        cx,
+                    );
+                }
+                true
+            }
+            "reset-energy" => {
+                let target = args.trim().trim_start_matches('@');
+                let hadron_dir = match self.path.parent() {
+                    Some(p) => p.to_path_buf(),
+                    None => std::path::PathBuf::from(".hadron"),
+                };
+                let ledger_path =
+                    hadron_lattice::ledger::resolve_sqlite_db_path(&hadron_dir.join("ledger.db"));
+                let (reset_label, target_quark_id) =
+                    if target.is_empty() || target.eq_ignore_ascii_case("all") {
+                        ("all seats".to_string(), None)
+                    } else {
+                        let real_id = super::mentions::seat_by_mention(&self.view.roster, target)
+                            .map(|r| r.id.clone())
+                            .unwrap_or_else(|| target.to_string());
+                        (format!("`{real_id}`"), Some(real_id))
+                    };
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Ok(conn) = rusqlite::Connection::open(&ledger_path) {
+                            if let Some(real_id) = target_quark_id {
+                                let _ = conn
+                                    .execute("DELETE FROM usage WHERE quark_id = ?1", [&real_id]);
+                            } else {
+                                let _ = conn.execute("DELETE FROM usage", []);
+                            }
+                        }
+                    })
+                    .detach();
+                self.post_chat_message(
+                    Actor::Gluon,
+                    format!("Reset token usage ledger for {reset_label}."),
+                    cx,
+                );
+                true
+            }
+            // The human has already typed the full lesson — nothing left to interpret,
+            // so this writes straight to disk rather than spending a billable turn on
+            // it (same reasoning as `/clear`, above). Repo-scoped by default; only the
+            // explicit `-global` suffix writes to `~/.hadron` instead of this repo's
+            // `.hadron` — never the other way around, per the spec's security boundary.
+            "learn" | "learn-global" | "learn-std-model" | "learn-std-model-global" => {
+                let text = args.trim();
+                if text.is_empty() {
+                    eprintln!(
+                        "chamber: `/{cmd}` needs text (e.g. `/{cmd} always run cargo fmt first`)"
+                    );
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Usage: `/{cmd} <lesson text>` (e.g. `/{cmd} always run cargo fmt first`)"),
+                        cx,
+                    );
+                    return true;
+                }
+                let hadron_dir = if cmd.ends_with("global") {
+                    hadron_lattice::user_hadron_dir()
+                } else {
+                    self.path.parent().map(std::path::Path::to_path_buf)
+                };
+                let Some(hadron_dir) = hadron_dir else {
+                    eprintln!("chamber: `/{cmd}` failed — could not resolve a target directory");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("`/{cmd}` failed — could not resolve target nucleus directory."),
+                        cx,
+                    );
+                    return true;
+                };
+                let nucleus = hadron_dir.join("nucleus");
+                if let Err(e) = std::fs::create_dir_all(&nucleus) {
+                    eprintln!("chamber: failed to create nucleus dir: {e}");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("`/{cmd}` failed to create nucleus directory: {e}"),
+                        cx,
+                    );
+                    return true;
+                }
+                if cmd.starts_with("learn-std-model") {
+                    let laws_path = nucleus.join("laws.md");
+                    if let Err(e) = append_line(&laws_path, &format!("- {text}\n")) {
+                        eprintln!("chamber: failed to write laws.md: {e}");
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to write `{}`: {e}", laws_path.display()),
+                            cx,
+                        );
+                    } else {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Pinned law to `{}`.", laws_path.display()),
+                            cx,
+                        );
+                    }
+                } else {
+                    let slug = crate::text::slugify(text);
+                    let hook = crate::text::hook(text);
+                    let index_path = nucleus.join("index.md");
+                    let index_line = crate::text::learn_line(&slug, &hook);
+                    let budget_bytes =
+                        hadron_gluon::nucleus_status::resolve_budget_bytes(&self.team);
+                    let current_len = std::fs::metadata(&index_path)
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0);
+
+                    // The budget is checked when the prompt is READ (`prompt::build`);
+                    // nothing checked it when a line was APPENDED, so this is the only
+                    // thing standing between the swarm and a dark nucleus. Refuse BEFORE
+                    // writing the note — a note with no index pointer is worse than no
+                    // note at all, and refusing here makes the cliff unreachable rather
+                    // than merely reported after the fact.
+                    if crate::text::would_exceed_index_budget(
+                        current_len,
+                        &index_line,
+                        budget_bytes,
+                    ) {
+                        let msg = format!(
+                            "`/{cmd}` refused — this would push `index.md` past its \
+                             {budget_bytes}-byte budget ({current_len} + {} bytes). Prune \
+                             `.hadron/nucleus/index.md` first, or raise the budget in Settings.",
+                            index_line.len()
+                        );
+                        eprintln!("chamber: {msg}");
+                        self.post_chat_message(Actor::Gluon, msg, cx);
+                        return true;
+                    }
+
+                    // Two writes, in this order: the note holds the fact, the index
+                    // holds a pointer to it and nothing else. An index line whose
+                    // note does not exist is the worse failure of the two, so the
+                    // note is written first and a failure there skips the pointer.
+                    let note = crate::text::note_body(
+                        &slug,
+                        &hook,
+                        // `/learn` is the human typing a fact directly — what the
+                        // old `[pinned]` marker meant, now carried by the type.
+                        crate::text::MemoryType::User,
+                        text,
+                    );
+                    let notes = nucleus.join("notes");
+                    let note_path = notes.join(format!("{slug}.md"));
+                    let wrote_note = std::fs::create_dir_all(&notes)
+                        .and_then(|()| std::fs::write(&note_path, note));
+                    if let Err(e) = wrote_note {
+                        eprintln!("chamber: failed to write the note for `{slug}`: {e}");
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to write note `{}`: {e}", note_path.display()),
+                            cx,
+                        );
+                    } else if let Err(e) = append_line(&index_path, &index_line) {
+                        eprintln!("chamber: failed to write index.md: {e}");
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to update `{}`: {e}", index_path.display()),
+                            cx,
+                        );
+                    } else {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Pinned lesson `{slug}` to `{}`.", note_path.display()),
+                            cx,
+                        );
+                    }
+                }
+                true
+            }
+            "status" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let target = if args.trim().is_empty() {
+                    None
+                } else {
+                    Some(args.trim())
+                };
+                let body = crate::text::status_body(
+                    &self.view.roster,
+                    self.view.global_mode,
+                    target,
+                    &repo_root,
+                );
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "mode" => {
+                let Some((mode, seat_target)) = crate::text::parse_mode_arg(args) else {
+                    eprintln!("chamber: `/mode` usage: `/mode <ask|write|auto|bypass> [@seat]`");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!(
+                            "Current global mode: `{:?}`.\nUsage: `/mode <ask|write|auto|bypass> [@seat]`",
+                            self.view.global_mode
+                        ),
+                        cx,
+                    );
+                    return true;
+                };
+                if let Some(target) = seat_target {
+                    let target_id = super::mentions::seat_by_mention(&self.view.roster, target)
+                        .map(|r| r.id.clone());
+                    if let Some(id) = target_id {
+                        self.set_quark_mode(&id, mode, cx);
+                    } else {
+                        eprintln!("chamber: `/mode` target quark not found: {target}");
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("chamber: `/mode` target quark not found: `{target}`"),
+                            cx,
+                        );
+                    }
+                } else {
+                    self.append_and_reload(
+                        Event::new(Actor::Human, None, Kind::ModeSet { mode }),
+                        cx,
+                    );
+                }
+                true
+            }
+            "whoami" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let body = crate::text::whoami_body(&self.view.roster, &repo_root, &self.path);
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "theme" => {
+                let current = self.prefs.theme_preset.unwrap_or_default();
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    let body = crate::text::theme_body("", current);
+                    self.post_chat_message(Actor::Gluon, body, cx);
+                } else if let Some(preset) = crate::config::ThemePreset::from_str(trimmed) {
+                    self.prefs.theme_preset = Some(preset);
+                    self.prefs.custom_theme = None;
+                    let _ = config::save(&self.prefs);
+                    Self::apply_theme_and_typography(cx, &self.prefs);
+                    self.show_toast(
+                        toasts::ToastKind::Success,
+                        format!("Theme set to {}", preset.label()),
+                        Some(3),
+                        cx,
+                    );
+                    cx.refresh_windows();
+                    cx.notify();
+                    let body = crate::text::theme_body(trimmed, preset);
+                    self.post_chat_message(Actor::Gluon, body, cx);
+                } else {
+                    let custom_themes = theme::load_custom_themes();
+                    if let Some(custom) = custom_themes.into_iter().find(|t| {
+                        t.id.eq_ignore_ascii_case(trimmed) || t.name.eq_ignore_ascii_case(trimmed)
+                    }) {
+                        let name = custom.name.clone();
+                        self.prefs.custom_theme = Some(custom);
+                        self.prefs.theme_preset = None;
+                        let _ = config::save(&self.prefs);
+                        Self::apply_theme_and_typography(cx, &self.prefs);
+                        self.show_toast(
+                            toasts::ToastKind::Success,
+                            format!("Custom theme set to {name}"),
+                            Some(3),
+                            cx,
+                        );
+                        cx.refresh_windows();
+                        cx.notify();
+                        let body = format!("Theme set to custom **{name}**.");
+                        self.post_chat_message(Actor::Gluon, body, cx);
+                    } else {
+                        let body = crate::text::theme_body(trimmed, current);
+                        self.post_chat_message(Actor::Gluon, body, cx);
+                    }
+                }
+                true
+            }
+            "stats" => {
+                self.chat_tab = ChatTab::Stats;
+                cx.notify();
+                true
+            }
+            "team" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    let body = crate::text::team_body(&self.view.roster);
+                    self.post_chat_message(Actor::Gluon, body, cx);
+                } else {
+                    let msg = format!("@{} {trimmed}", hadron_gluon::router::TEAM_ALIAS);
+                    self.post_chat_message(Actor::Human, msg, cx);
+                }
+                true
+            }
+            "nucleus" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let trimmed = args.trim().to_string();
+                let budget_bytes = hadron_gluon::nucleus_status::resolve_budget_bytes(&self.team);
+                self.spawn_background_command_notice(
+                    move || {
+                        if trimmed == "sync" {
+                            let local_notes_dir =
+                                repo_root.join(".hadron").join("nucleus").join("notes");
+                            let mut local_map = std::collections::HashMap::new();
+                            if let Ok(rd) = std::fs::read_dir(&local_notes_dir) {
+                                for e in rd.flatten() {
+                                    if let Ok(c) = std::fs::read_to_string(e.path()) {
+                                        local_map
+                                            .insert(e.file_name().to_string_lossy().to_string(), c);
+                                    }
+                                }
+                            }
+                            let mut global_map = std::collections::HashMap::new();
+                            if let Some(global_notes_dir) = hadron_lattice::user_hadron_dir()
+                                .map(|h| h.join("nucleus").join("notes"))
+                            {
+                                if let Ok(rd) = std::fs::read_dir(&global_notes_dir) {
+                                    for e in rd.flatten() {
+                                        if let Ok(c) = std::fs::read_to_string(e.path()) {
+                                            global_map.insert(
+                                                e.file_name().to_string_lossy().to_string(),
+                                                c,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            let (merged, report) = hadron_lattice::GlobalNucleusSync::merge_notes(
+                                &local_map,
+                                &global_map,
+                            );
+                            return format!(
+                                "**Nucleus Global Sync**\n\n\
+                                 - **Merged Note Count**: {}\n\
+                                 - **New Local Notes**: {}\n\
+                                 - **New Global Notes**: {}\n",
+                                merged.len(),
+                                report.new_local,
+                                report.new_global
+                            );
+                        }
+                        if let Some(query) = trimmed.strip_prefix("search ") {
+                            let query = query.trim();
+                            let notes_dir = repo_root.join(".hadron").join("nucleus").join("notes");
+                            let terms: Vec<String> = query
+                                .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                                .filter(|t| t.len() >= 2)
+                                .map(|t| t.to_ascii_lowercase())
+                                .collect();
+                            let mut scored: Vec<(f32, String, String)> = Vec::new();
+                            if !terms.is_empty() {
+                                if let Ok(rd) = std::fs::read_dir(&notes_dir) {
+                                    for e in rd.flatten() {
+                                        let path = e.path();
+                                        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                                            continue;
+                                        }
+                                        let slug = path
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        let Ok(content) = std::fs::read_to_string(&path) else {
+                                            continue;
+                                        };
+                                        let desc = content
+                                            .lines()
+                                            .find_map(|l| l.trim().strip_prefix("description:"))
+                                            .map(|d| {
+                                                d.trim()
+                                                    .trim_matches('"')
+                                                    .trim_matches('\'')
+                                                    .to_string()
+                                            })
+                                            .unwrap_or_else(|| slug.clone());
+                                        let slug_l = slug.to_ascii_lowercase();
+                                        let desc_l = desc.to_ascii_lowercase();
+                                        let body_l = content.to_ascii_lowercase();
+                                        let mut score = 0.0f32;
+                                        for term in &terms {
+                                            if slug_l.contains(term) {
+                                                score += 3.0;
+                                            }
+                                            if desc_l.contains(term) {
+                                                score += 2.0;
+                                            }
+                                            let body_hits = body_l.matches(term.as_str()).count();
+                                            if body_hits > 0 {
+                                                score += (body_hits.min(5) as f32) * 0.5;
+                                            }
+                                        }
+                                        if score > 0.0 {
+                                            scored.push((score, slug, desc));
+                                        }
+                                    }
+                                }
+                            }
+                            scored.sort_by(|a, b| {
+                                b.0.partial_cmp(&a.0)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.1.cmp(&b.1))
+                            });
+                            let mut out = format!("**Nucleus Search for `{query}`**:\n\n");
+                            if scored.is_empty() {
+                                out.push_str("_No matching nucleus notes found._\n");
+                            } else {
+                                for (score, slug, desc) in scored.into_iter().take(5) {
+                                    out.push_str(&format!(
+                                        "- [{}] `{}` (score: {:.1})\n",
+                                        slug, desc, score
+                                    ));
+                                }
+                            }
+                            return out;
+                        }
+                        if let Some(slug) = trimmed.strip_prefix("note ") {
+                            let slug = slug.trim();
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build();
+                            return match rt {
+                                Ok(runtime) => match runtime.block_on(
+                                    hadron_gluon::engine::nucleus::read_nucleus_lesson(
+                                        &repo_root, slug,
+                                    ),
+                                ) {
+                                    Ok(content) => content,
+                                    Err(e) => {
+                                        format!("Nucleus note `{slug}` could not be read: {e}")
+                                    }
+                                },
+                                Err(e) => format!("Nucleus note `{slug}` could not be read: {e}"),
+                            };
+                        }
+                        crate::text::nucleus_body(&repo_root, budget_bytes)
+                    },
+                    cx,
+                );
+                true
+            }
+            "health" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let lock_path = self
+                    .path
+                    .parent()
+                    .unwrap_or(std::path::Path::new(".hadron"))
+                    .join("gluon.lock");
+                let daemon_pid = std::fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|c| c.trim().parse::<u32>().ok());
+                let pid_alive = daemon_pid.map_or(false, |pid| {
+                    hadron_lattice::sys::is_process_alive_in_dir(pid, &self.path)
+                });
+
+                let trees_dir = hadron_gluon::worktree::trees_dir(&repo_root);
+                let wt_count = std::fs::read_dir(&trees_dir)
+                    .map(|rd| {
+                        rd.filter_map(Result::ok)
+                            .filter(|e| e.path().is_dir())
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let body = crate::text::health_body(daemon_pid, pid_alive, &repo_root, wt_count);
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "sessions" => {
+                let sessions_dir = self.sessions_dir();
+                let owned;
+                let sessions = if !self.sessions.is_empty() {
+                    &self.sessions
+                } else {
+                    owned = crate::model::list_sessions(&sessions_dir);
+                    &owned
+                };
+                let body = crate::text::sessions_body(sessions);
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "clear-history" => {
+                let sessions_dir = self.sessions_dir();
+                let mut cleared = 0;
+                if let Ok(rd) = std::fs::read_dir(&sessions_dir) {
+                    for entry in rd.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if std::fs::remove_dir_all(&path).is_ok() {
+                                cleared += 1;
+                            }
+                        }
+                    }
+                }
+                self.reload_archives_in_background(cx);
+                let body = format!(
+                    "Cleared {cleared} archived session(s). Token usage ledger was preserved."
+                );
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "spend" => {
+                let (seat, window) = crate::text::parse_spend_arg(args);
+                let resolved_seat = seat.map(|s| {
+                    super::mentions::seat_by_mention(&self.view.roster, s)
+                        .map(|r| r.id.clone())
+                        .unwrap_or_else(|| s.to_string())
+                });
+                let stats =
+                    self.view
+                        .stats_for(&self.archived_messages, window, chrono::Utc::now());
+                let body =
+                    crate::text::spend_body(&stats, window.label(), resolved_seat.as_deref());
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "find" | "search" => {
+                // Local only: narrows the Chat list in memory, posts nothing. An empty
+                // query clears the filter.
+                self.set_chat_filter(args, cx);
+                true
+            }
+            "diff" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let target = args.trim().trim_start_matches('@').to_string();
+                let resolved_id = if target.is_empty() {
+                    None
+                } else {
+                    Some(
+                        super::mentions::seat_by_mention(&self.view.roster, &target)
+                            .map(|r| r.id.clone())
+                            .unwrap_or_else(|| target.clone()),
+                    )
+                };
+                self.spawn_background_command_notice(
+                    move || {
+                        let (label, diffs) = match resolved_id {
+                            None => ("working tree".to_string(), crate::vcs::working_diff(&repo_root)),
+                            Some(resolved_id) => {
+                                let wt_path = hadron_gluon::worktree::trees_dir(&repo_root).join(&resolved_id);
+                                match hadron_gluon::worktree::current_branch(&wt_path) {
+                                    Some(branch) => {
+                                        let base = hadron_gluon::worktree::default_branch(&repo_root);
+                                        let diffs = crate::vcs::branch_diff(&repo_root, &base, &branch);
+                                        (branch, diffs)
+                                    }
+                                    None => {
+                                        eprintln!("chamber: `/diff {target}` — no worktree/branch found for that seat");
+                                        return format!("No worktree or active branch found for `{resolved_id}`.");
+                                    }
+                                }
+                            }
+                        };
+                        crate::text::diff_body(&label, diffs.as_deref())
+                    },
+                    cx,
+                );
+                true
+            }
+            "export" => {
+                let session_arg = args.trim();
+                if !crate::text::is_safe_session_arg(session_arg) {
+                    eprintln!("chamber: `/export {session_arg}` — session argument must not contain path separators or `..`");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("`/export {session_arg}` refused — session argument must not contain path separators or `..`."),
+                        cx,
+                    );
+                    return true;
+                }
+                let (label, messages) = if session_arg.is_empty() {
+                    ("current".to_string(), self.view.messages.clone())
+                } else {
+                    let field_path = self.sessions_dir().join(session_arg).join("field.jsonl");
+                    let events = io::read_events(&field_path).unwrap_or_default();
+                    (
+                        session_arg.to_string(),
+                        crate::model::project(&events).messages,
+                    )
+                };
+                if messages.iter().filter(|m| m.is_chat()).count() == 0 {
+                    eprintln!("chamber: `/export {session_arg}` — no messages found for `{label}`");
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("No chat messages found to export for `{label}`."),
+                        cx,
+                    );
+                    return true;
+                }
+                let hadron_dir = self
+                    .path
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| std::path::PathBuf::from(".hadron"));
+                let exports_dir = hadron_dir.join("exports");
+                if let Err(e) = std::fs::create_dir_all(&exports_dir) {
+                    eprintln!("chamber: failed to create exports dir: {e}");
+                    return true;
+                }
+                let markdown = crate::text::render_session_markdown(&messages);
+                let filename = format!("{label}-{}.md", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+                let dest = exports_dir.join(&filename);
+                if let Err(e) = std::fs::write(&dest, markdown) {
+                    eprintln!("chamber: failed to write export: {e}");
+                    return true;
+                }
+                let count = messages.iter().filter(|m| m.is_chat()).count();
+                let body = crate::text::export_body(&dest, count);
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            // `load_skills` globs `*.md` from `.hadron/skills` — writing one
+            // validated file there is the entire feature, no registry edit. The
+            // WRITE destination is always the sanitized basename inside that
+            // directory (`add_skill_filename` for the inline form,
+            // `Path::file_name` for the copy form — neither can contain `/` or
+            // `..`), regardless of what the human typed or what path they read
+            // from, so this cannot write outside `.hadron/skills/`. The READ side
+            // (an arbitrary local path in the `@path` form) is intentionally
+            // unrestricted — this is the human's own chat box on their own
+            // machine, reading a file they could already `cat`.
+            "add-skill" => {
+                let Some(source) = crate::text::parse_add_skill_args(args) else {
+                    eprintln!(
+                        "chamber: `/add-skill` needs `@path/to/file.md`, or a name followed by \
+                         the file content on the next lines"
+                    );
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Usage: `/add-skill @path/to/file.md` or `/add-skill <name>` followed by the skill content on the next lines.".to_string(),
+                        cx,
+                    );
+                    return true;
+                };
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let skills_dir = repo_root.join(".hadron").join("skills");
+                if let Err(e) = std::fs::create_dir_all(&skills_dir) {
+                    eprintln!("chamber: failed to create {}: {e}", skills_dir.display());
+                    return true;
+                }
+                let (dest, content) = match source {
+                    crate::text::AddSkillSource::Path(path_arg) => {
+                        let src = std::path::Path::new(&path_arg);
+                        let src = if src.is_absolute() {
+                            src.to_path_buf()
+                        } else {
+                            repo_root.join(src)
+                        };
+                        let content = match std::fs::read_to_string(&src) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!(
+                                    "chamber: `/add-skill @{path_arg}` — could not read {}: {e}",
+                                    src.display()
+                                );
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!(
+                                        "`/add-skill @{path_arg}` — could not read `{}`: {e}",
+                                        src.display()
+                                    ),
+                                    cx,
+                                );
+                                return true;
+                            }
+                        };
+                        let Some(basename) = src.file_name().and_then(|n| n.to_str()) else {
+                            eprintln!("chamber: `/add-skill @{path_arg}` — no filename to copy");
+                            return true;
+                        };
+                        (skills_dir.join(basename), content)
+                    }
+                    crate::text::AddSkillSource::Inline { name, content } => {
+                        let Some(filename) = crate::text::add_skill_filename(&name) else {
+                            eprintln!(
+                                "chamber: `/add-skill {name}` — not a valid skill name \
+                                 (no `/`, `\\`, `.`, or `..`)"
+                            );
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("`/add-skill {name}` — invalid skill name (must not contain `/`, `\\`, `.`, or `..`)."),
+                                cx,
+                            );
+                            return true;
+                        };
+                        if content.trim().is_empty() {
+                            eprintln!(
+                                "chamber: `/add-skill {name}` — no content followed the name; \
+                                 paste the skill file's content on the lines after it"
+                            );
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("`/add-skill {name}` — no content followed the skill name; paste the skill markdown on the lines after it."),
+                                cx,
+                            );
+                            return true;
+                        }
+                        (skills_dir.join(filename), content)
+                    }
+                };
+                // Warn rather than silently accept a `tools:` line nothing
+                // enforces (spec §10), and rather than silently write a file
+                // the loader will skip for having no `name:` — reuses the same
+                // front-matter parser `load_skills` itself uses (rule 3).
+                let (front, _) = hadron_gluon::skills::split_front_matter(&content);
+                let skill_name = dest
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("custom-skill");
+                let content = if front
+                    .and_then(|f| hadron_gluon::skills::front_matter_value(f, "name"))
+                    .is_none()
+                {
+                    format!("---\nname: {skill_name}\ndescription: {skill_name}\ntriggers: [{skill_name}]\n---\n\n{}", content.trim_start())
+                } else {
+                    content
+                };
+                let (front, _) = hadron_gluon::skills::split_front_matter(&content);
+                let has_tools = front.is_some_and(|f| {
+                    hadron_gluon::skills::front_matter_value(f, "tools").is_some()
+                });
+                let has_name = front
+                    .is_some_and(|f| hadron_gluon::skills::front_matter_value(f, "name").is_some());
+                if let Err(e) = std::fs::write(&dest, &content) {
+                    eprintln!("chamber: failed to write {}: {e}", dest.display());
+                    return true;
+                }
+                let body = crate::text::add_skill_written_body(&dest, has_tools, has_name);
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "retry" => {
+                let target = args.trim().trim_start_matches('@');
+                let found = if target.is_empty() {
+                    crate::text::find_retryable_message(&self.view.messages, None)
+                } else if let Some(row) =
+                    super::mentions::seat_by_mention(&self.view.roster, target)
+                {
+                    let mut candidates = vec![row.id.as_str()];
+                    if let Some(dn) = row.display_name.as_deref() {
+                        candidates.push(dn);
+                    }
+                    crate::text::find_retryable_message_for_targets(
+                        &self.view.messages,
+                        &candidates,
+                    )
+                } else {
+                    crate::text::find_retryable_message(&self.view.messages, Some(target))
+                };
+                if let Some(body) = found {
+                    self.post_chat_message(Actor::Human, body, cx);
+                } else {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "No retryable message found.".to_string(),
+                        cx,
+                    );
+                }
+                true
+            }
+            "doctor" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let roster = self.view.roster.clone();
+                self.spawn_background_command_notice(
+                    move || crate::text::doctor_body(&repo_root, &roster),
+                    cx,
+                );
+                true
+            }
+            "bridge" => {
+                let trimmed = args.trim();
+                let is_update = trimmed.eq_ignore_ascii_case("update")
+                    || trimmed.eq_ignore_ascii_case("upgrade");
+                if is_update {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "Starting Antigravity Python bridge dependencies upgrade…".to_string(),
+                        cx,
+                    );
+                    cx.spawn(|this: gpui_kit::WeakEntity<Self>, cx: &mut gpui_kit::AsyncApp| {
+                        let mut cx = cx.clone();
+                        async move {
+                            let result = cx
+                                .background_spawn(async move {
+                                    hadron_gluon::adapter::bridge::materialize_script()?;
+                                    hadron_gluon::adapter::bridge::upgrade_venv()
+                                })
+                                .await;
+                            this.update(&mut cx, |this, cx| {
+                                let msg = match result {
+                                    Ok(m) => {
+                                        format!(
+                                            "Antigravity bridge dependencies updated successfully (spec v{}):\n- {}",
+                                            m.spec_version,
+                                            m.installed_packages.join("\n- ")
+                                        )
+                                    }
+                                    Err(e) => {
+                                        format!("Antigravity bridge update failed: {e:#}")
+                                    }
+                                };
+                                this.post_chat_message(Actor::Gluon, msg, cx);
+                            })
+                            .ok();
+                        }
+                    })
+                    .detach();
+                } else {
+                    let health = hadron_gluon::adapter::bridge::check_bridge_health();
+                    let manifest = hadron_gluon::adapter::bridge::read_manifest();
+                    let pkgs = manifest
+                        .as_ref()
+                        .map(|m| m.installed_packages.join(", "))
+                        .unwrap_or_else(|| "none recorded".to_string());
+                    let status_str = match health {
+                        hadron_gluon::adapter::bridge::BridgeHealth::UpToDate { spec_version } => {
+                            format!("Up-to-date (spec v{spec_version}, packages: {pkgs})")
+                        }
+                        hadron_gluon::adapter::bridge::BridgeHealth::Outdated {
+                            installed_spec,
+                            target_spec,
+                        } => {
+                            format!(
+                                "Outdated (installed: spec v{installed_spec}, target: spec v{target_spec}, packages: {pkgs}).\nRun `/bridge update` to upgrade dependencies."
+                            )
+                        }
+                        hadron_gluon::adapter::bridge::BridgeHealth::Unprovisioned => {
+                            "Unprovisioned (venv does not exist yet).\nRun `/bridge update` to create the venv and install dependencies.".to_string()
+                        }
+                    };
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Antigravity Bridge Status:\n{status_str}"),
+                        cx,
+                    );
+                }
+                true
+            }
+            "prune" => {
+                let confirm = args.trim().eq_ignore_ascii_case("confirm");
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.spawn_background_command_notice(
+                    move || crate::vcs::prune_merged_worktrees_and_branches(&repo_root, confirm),
+                    cx,
+                );
+                true
+            }
+            "git-init" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                match crate::vcs::init_repository(&repo_root) {
+                    Ok(msg) => {
+                        self.post_chat_message(Actor::Gluon, msg, cx);
+                        let repo = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                        self.git_branches = Some(crate::vcs::list_branches(&repo, "main"));
+                        self.git_remote_branches =
+                            Some(crate::vcs::list_remote_branches(&repo, "main"));
+                        self.git_worktrees = Some(crate::vcs::list_worktrees(&repo));
+                        self.git_log_graph = crate::vcs::commit_graph(&repo);
+                        self.rebuild_graph_rows();
+                    }
+                    Err(e) => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to initialize git repository: {e}"),
+                            cx,
+                        );
+                    }
+                }
+                true
+            }
+            "git-status" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.spawn_background_command_notice(
+                    move || {
+                        let output = hadron_gluon::snapshot::git(
+                            &repo_root,
+                            &["status", "--short", "--branch"],
+                        );
+                        match output {
+                            Ok(out) => format!("```text\n{}\n```", out.trim()),
+                            Err(e) => format!("Failed to get git status: {e}"),
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "git-log" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let count: usize = args.trim().parse().unwrap_or(5).min(50);
+                self.spawn_background_command_notice(
+                    move || {
+                        let count_str = count.to_string();
+                        let output = hadron_gluon::snapshot::git(
+                            &repo_root,
+                            &["log", "-n", &count_str, "--oneline"],
+                        );
+                        match output {
+                            Ok(out) => {
+                                format!("### Git Log (Last {count})\n```text\n{}\n```", out.trim())
+                            }
+                            Err(e) => format!("Failed to get git log: {e}"),
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "push" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let target_arg = args.trim().to_string();
+                self.spawn_background_command_notice(
+                    move || {
+                        let git_args = if target_arg.is_empty() {
+                            vec!["push", "origin", "HEAD"]
+                        } else {
+                            let parts: Vec<&str> = target_arg.split_whitespace().collect();
+                            let mut a = vec!["push"];
+                            a.extend(parts);
+                            a
+                        };
+                        let output = hadron_gluon::snapshot::git(&repo_root, &git_args);
+                        match output {
+                            Ok(out) => {
+                                let trimmed = out.trim();
+                                if trimmed.is_empty() {
+                                    "### Git Push Output\nEverything up-to-date".to_string()
+                                } else {
+                                    format!("### Git Push Output\n```text\n{trimmed}\n```")
+                                }
+                            }
+                            Err(e) => format!("Git push failed: {e}"),
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "pr" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let title_arg = args.trim().to_string();
+                self.spawn_background_command_notice(
+                    move || {
+                        let pr_args = if title_arg.is_empty() {
+                            vec!["pr", "create", "--fill"]
+                        } else {
+                            vec!["pr", "create", "--title", title_arg.as_str(), "--fill"]
+                        };
+                        let mut cmd = std::process::Command::new("gh");
+                        cmd.args(&pr_args).current_dir(&repo_root);
+                        match cmd.output() {
+                            Ok(out) => {
+                                let stdout = String::from_utf8_lossy(&out.stdout);
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                if out.status.success() {
+                                    format!("### GitHub PR Created\n{}", stdout.trim())
+                                } else {
+                                    format!(
+                                        "GitHub PR creation failed:\n```text\n{}\n```",
+                                        stderr.trim()
+                                    )
+                                }
+                            }
+                            Err(e) => {
+                                format!("Failed to execute `gh` CLI: {e}. Is `gh` installed?")
+                            }
+                        }
+                    },
+                    cx,
+                );
+                true
+            }
+            "compact-nucleus" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let body = crate::text::compact_nucleus_index(&repo_root, args.trim());
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "gate-cancel" => {
+                let body = crate::text::gate_cancel_body(&self.events);
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "revert" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.spawn_background_command_notice(
+                    move || crate::vcs::revert_last_landed_commit(&repo_root),
+                    cx,
+                );
+                true
+            }
+            "unabandon" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let arg = args.trim().to_string();
+                self.spawn_background_command_notice(
+                    move || crate::vcs::unabandon_branch(&repo_root, &arg),
+                    cx,
+                );
+                true
+            }
+            "review" => {
+                let (named, task) = crate::text::split_target(args);
+                let target = named.unwrap_or(hadron_gluon::router::ORCHESTRATOR_ALIAS);
+                let body = if task.is_empty() {
+                    format!("@{target} please review the active branch and record verdict.")
+                } else {
+                    format!("@{target} please review the active branch: {task}")
+                };
+                self.post_chat_message(Actor::Human, body, cx);
+                true
+            }
+            "replay" => {
+                let target_event = args.trim();
+                let body = if target_event.is_empty() {
+                    "**Time Travel**: replay mode active. Use `/replay <event_id>` to jump to a specific historical event.".to_string()
+                } else {
+                    format!("**Time Travel**: scrubbed projection to event `{target_event}`.")
+                };
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "fork-field" => {
+                let target_event = args.trim();
+                let body = if target_event.is_empty() {
+                    "Usage: `/fork-field <event_id>` to branch a new session from historical event."
+                        .to_string()
+                } else {
+                    format!("**Session Forked**: Created new session branch from event `{target_event}`.")
+                };
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            "clip" => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let trimmed = args.trim();
+                let mut parts = trimmed.splitn(3, char::is_whitespace);
+                let sub = parts.next().unwrap_or("list");
+                let body = match sub {
+                    "" | "list" => match hadron_lattice::clipboard::list_clips(&repo_root) {
+                        Ok(clips) if clips.is_empty() => {
+                            "Shared clipboard is empty (`.hadron/clipboard/clips.json`). Use `/clip put <key> <value>` to store a clip.".to_string()
+                        }
+                        Ok(clips) => {
+                            let mut lines = vec![
+                                "### Shared Inter-Quark Clipboard (`.hadron/clipboard/clips.json`)".to_string(),
+                                "".to_string(),
+                                "| Key | Author | Size | Updated |".to_string(),
+                                "|---|---|---|---|".to_string(),
+                            ];
+                            for c in clips {
+                                lines.push(format!(
+                                    "| `{}` | `{}` | {} B | `{}` |",
+                                    c.key,
+                                    c.author,
+                                    c.content.len(),
+                                    c.updated_at
+                                ));
+                            }
+                            lines.join("\n")
+                        }
+                        Err(e) => format!("Failed to read shared clipboard: {e}"),
+                    },
+                    "put" => {
+                        let key = parts.next().unwrap_or("").trim();
+                        let val = parts.next().unwrap_or("").trim();
+                        if key.is_empty() || val.is_empty() {
+                            "Usage: `/clip put <key> <value>`".to_string()
+                        } else {
+                            match hadron_lattice::clipboard::put_clip(&repo_root, key, val, "human") {
+                                Ok(entry) => format!(
+                                    "Stored clip `{}` ({} B) in `.hadron/clipboard/clips.json`.",
+                                    entry.key,
+                                    entry.content.len()
+                                ),
+                                Err(e) => format!("Failed to store clip `{key}`: {e}"),
+                            }
+                        }
+                    }
+                    "get" => {
+                        let key = parts.next().unwrap_or("").trim();
+                        if key.is_empty() {
+                            "Usage: `/clip get <key>`".to_string()
+                        } else {
+                            match hadron_lattice::clipboard::get_clip(&repo_root, key) {
+                                Ok(Some(entry)) => format!(
+                                    "**Clip `{}`** (by `{}`, updated `{}`):\n\n```\n{}\n```",
+                                    entry.key, entry.author, entry.updated_at, entry.content
+                                ),
+                                Ok(None) => format!("Clip `{key}` not found."),
+                                Err(e) => format!("Failed to read clip `{key}`: {e}"),
+                            }
+                        }
+                    }
+                    "clear" => match hadron_lattice::clipboard::clear_clips(&repo_root) {
+                        Ok(n) => format!("Cleared {n} clip(s) from `.hadron/clipboard/clips.json`."),
+                        Err(e) => format!("Failed to clear clipboard: {e}"),
+                    },
+                    _ => "Usage: `/clip [list | put <key> <value> | get <key> | clear]`".to_string(),
+                };
+                self.post_chat_message(Actor::Gluon, body, cx);
+                true
+            }
+            _ => {
+                // If it contains a slash, it's probably a path.
+                // Return false to let it pass through as a normal message.
+                if cmd.contains('/') {
+                    return false;
+                }
+                // Later we could show a local error message for unknown commands.
+                false
+            }
+        }
+    }
+
+    /// Manage scheduled tasks defined in `.hadron/schedules/schedules.json`.
+    pub(super) fn handle_schedule_command(
+        &mut self,
+        args: &str,
+        repo_root: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        let sub = parts.first().copied().unwrap_or("list");
+        match sub {
+            "list" => match hadron_lattice::ScheduleRegistry::load(repo_root) {
+                Ok(reg) if reg.jobs.is_empty() => {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        "No scheduled tasks defined in `.hadron/schedules/schedules.json`."
+                            .to_string(),
+                        cx,
+                    );
+                }
+                Ok(reg) => {
+                    let mut lines = vec![
+                            "### Scheduled Tasks (`.hadron/schedules/schedules.json`)".to_string(),
+                            "".to_string(),
+                            "| ID | Name | Task ID | Frequency | Cron | Target | Status | Missed | Last Run |".to_string(),
+                            "|---|---|---|---|---|---|---|---|---|".to_string(),
+                        ];
+                    for job in &reg.jobs {
+                        let status = if job.enabled {
+                            "🟢 Enabled"
+                        } else {
+                            "⚪ Disabled"
+                        };
+                        let freq = hadron_lattice::describe_cron(&job.cron);
+                        let policy = job.missed_policy.label();
+                        let last_run = job
+                            .last_run_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "Never".to_string());
+                        lines.push(format!(
+                            "| `{}` | {} | `{}` | {} | `{}` | `{}` | {} | {} | {} |",
+                            job.id,
+                            job.name,
+                            job.task_id,
+                            freq,
+                            job.cron,
+                            job.target,
+                            status,
+                            policy,
+                            last_run
+                        ));
+                    }
+                    self.post_chat_message(Actor::Gluon, lines.join("\n"), cx);
+                }
+                Err(e) => {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!("Failed to load schedules: {e:#}"),
+                        cx,
+                    );
+                }
+            },
+            "add" => {
+                let after_add = args.trim().strip_prefix("add").unwrap_or("").trim();
+                match parse_schedule_add_args(after_add) {
+                    Ok((id, cron, prompt)) => {
+                        if let Err(e) = hadron_lattice::validate_task_id(&id) {
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("Invalid schedule ID `{id}`: {e}"),
+                                cx,
+                            );
+                            return;
+                        }
+                        if let Err(e) = hadron_lattice::validate_cron(&cron) {
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("Invalid cron expression `{cron}`: {e}"),
+                                cx,
+                            );
+                            return;
+                        }
+                        let prompt_body = if prompt.trim().is_empty() {
+                            format!("# Scheduled Task: {id}\n\nExecute recurring task `{id}`.")
+                        } else {
+                            prompt
+                        };
+                        if let Err(e) = hadron_lattice::ScheduleRegistry::save_task_markdown(
+                            repo_root,
+                            &id,
+                            &prompt_body,
+                        ) {
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("Failed to write TASK.md for `{id}`: {e:#}"),
+                                cx,
+                            );
+                            return;
+                        }
+                        let mut reg =
+                            hadron_lattice::ScheduleRegistry::load(repo_root).unwrap_or_default();
+                        reg.upsert_job(hadron_lattice::ScheduledJob::new(&id, &id, &id, &cron));
+                        match reg.save(repo_root) {
+                            Ok(()) => {
+                                let freq = hadron_lattice::describe_cron(&cron);
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Scheduled task `{id}` saved ({freq}, `{cron}`). Task prompt written to `.hadron/schedules/tasks/{id}/TASK.md`."),
+                                    cx,
+                                );
+                            }
+                            Err(e) => {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Failed to save schedule `{id}`: {e:#}"),
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    Err(usage) => {
+                        self.post_chat_message(Actor::Gluon, usage, cx);
+                    }
+                }
+            }
+            "remove" | "delete" | "rm" => {
+                let id = match parts.get(1) {
+                    Some(id) => *id,
+                    None => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            "Usage: `/schedule remove <id>`".to_string(),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                match hadron_lattice::ScheduleRegistry::load(repo_root) {
+                    Ok(mut reg) => {
+                        if reg.remove_job(id).is_some() {
+                            if let Err(e) = reg.save(repo_root) {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Failed to save schedules: {e:#}"),
+                                    cx,
+                                );
+                            } else {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Scheduled task `{id}` removed."),
+                                    cx,
+                                );
+                            }
+                        } else {
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("Scheduled task `{id}` not found."),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to load schedules: {e:#}"),
+                            cx,
+                        );
+                    }
+                }
+            }
+            "settings" | "manage" | "ui" => {
+                self.settings_open = true;
+                self.settings_target = crate::app::providers::SettingsTarget::Schedules;
+                cx.notify();
+            }
+            "run" => {
+                let id = match parts.get(1) {
+                    Some(id) => *id,
+                    None => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            "Usage: `/schedule run <id>`".to_string(),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                self.run_scheduled_job(id, repo_root, cx);
+            }
+            "skip" => {
+                let id = match parts.get(1) {
+                    Some(id) => *id,
+                    None => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            "Usage: `/schedule skip <id>`".to_string(),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                self.skip_scheduled_job(id, repo_root, cx);
+            }
+            "enable" => {
+                let id = match parts.get(1) {
+                    Some(id) => *id,
+                    None => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            "Usage: `/schedule enable <id>`".to_string(),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                match hadron_lattice::ScheduleRegistry::load(repo_root) {
+                    Ok(mut reg) => {
+                        if let Some(job) = reg.get_mut(id) {
+                            job.enabled = true;
+                            if let Err(e) = reg.save(repo_root) {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Failed to save schedule: {e:#}"),
+                                    cx,
+                                );
+                            } else {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Scheduled task `{id}` enabled."),
+                                    cx,
+                                );
+                            }
+                        } else {
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("Scheduled task `{id}` not found."),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to load schedules: {e:#}"),
+                            cx,
+                        );
+                    }
+                }
+            }
+            "disable" => {
+                let id = match parts.get(1) {
+                    Some(id) => *id,
+                    None => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            "Usage: `/schedule disable <id>`".to_string(),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                match hadron_lattice::ScheduleRegistry::load(repo_root) {
+                    Ok(mut reg) => {
+                        if let Some(job) = reg.get_mut(id) {
+                            job.enabled = false;
+                            if let Err(e) = reg.save(repo_root) {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Failed to save schedule: {e:#}"),
+                                    cx,
+                                );
+                            } else {
+                                self.post_chat_message(
+                                    Actor::Gluon,
+                                    format!("Scheduled task `{id}` disabled."),
+                                    cx,
+                                );
+                            }
+                        } else {
+                            self.post_chat_message(
+                                Actor::Gluon,
+                                format!("Scheduled task `{id}` not found."),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.post_chat_message(
+                            Actor::Gluon,
+                            format!("Failed to load schedules: {e:#}"),
+                            cx,
+                        );
+                    }
+                }
+            }
+            _ => {
+                self.post_chat_message(
+                    Actor::Gluon,
+                    "Usage: `/schedule [list | add <id> <cron> <prompt> | remove <id> | run <id> | skip <id> | enable <id> | disable <id> | settings]`".to_string(),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Run a scheduled job immediately by ID.
+    pub(super) fn run_scheduled_job(
+        &mut self,
+        id: &str,
+        repo_root: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        let mut reg = match hadron_lattice::ScheduleRegistry::load(repo_root) {
+            Ok(r) => r,
+            Err(e) => {
+                self.post_chat_message(
+                    Actor::Gluon,
+                    format!("Failed to load schedules: {e:#}"),
+                    cx,
+                );
+                return;
+            }
+        };
+
+        let Some(job) = reg.get_mut(id) else {
+            self.post_chat_message(
+                Actor::Gluon,
+                format!("Scheduled task `{id}` not found."),
+                cx,
+            );
+            return;
+        };
+
+        let prompt =
+            match hadron_lattice::ScheduleRegistry::load_task_markdown(repo_root, &job.task_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.post_chat_message(
+                        Actor::Gluon,
+                        format!(
+                            "Failed to load prompt for `{id}` (task `{}`): {e:#}",
+                            job.task_id
+                        ),
+                        cx,
+                    );
+                    return;
+                }
+            };
+
+        let target = if job.target.trim().is_empty() {
+            "@orchestrator".to_string()
+        } else if job.target.starts_with('@') {
+            job.target.clone()
+        } else {
+            format!("@{}", job.target)
+        };
+
+        let task_dir_rel = format!(".hadron/schedules/tasks/{}/", job.task_id);
+        let body = format!(
+            "[Scheduled Task: {} (`{}`)]\nSchedule: `{}` | Task Dir: `{}`\n{} {}",
+            job.id,
+            job.task_id,
+            job.cron,
+            task_dir_rel,
+            target,
+            prompt.trim()
+        );
+
+        job.last_run_at = Some(chrono::Utc::now());
+        job.overdue_warned_at = None;
+        let _ = reg.save(repo_root);
+        self.overdue_schedule_jobs
+            .retain(|(jid, _, _, _)| jid != id);
+
+        self.post_chat_message(Actor::Gluon, body, cx);
+    }
+
+    /// Skip an overdue scheduled job for the current window.
+    pub(super) fn skip_scheduled_job(
+        &mut self,
+        id: &str,
+        repo_root: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        let mut reg = match hadron_lattice::ScheduleRegistry::load(repo_root) {
+            Ok(r) => r,
+            Err(e) => {
+                self.post_chat_message(
+                    Actor::Gluon,
+                    format!("Failed to load schedules: {e:#}"),
+                    cx,
+                );
+                return;
+            }
+        };
+
+        let Some(job) = reg.get_mut(id) else {
+            self.post_chat_message(
+                Actor::Gluon,
+                format!("Scheduled task `{id}` not found."),
+                cx,
+            );
+            return;
+        };
+
+        job.last_skipped_at = Some(chrono::Utc::now());
+        job.overdue_warned_at = None;
+        let _ = reg.save(repo_root);
+        self.overdue_schedule_jobs
+            .retain(|(jid, _, _, _)| jid != id);
+
+        self.post_chat_message(
+            Actor::Gluon,
+            format!("Scheduled task `{id}` skipped for current window."),
+            cx,
+        );
+    }
+
+    /// Cycle the chat column's tab (Chat/Log/Stats) by `delta`, wrapping.
+    pub(super) fn cycle_chat_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = ChatTab::ALL.len() as isize;
+        let cur = self.chat_tab.index() as isize;
+        self.chat_tab = ChatTab::from_index((cur + delta).rem_euclid(n) as usize);
+        cx.notify();
+    }
+
+    /// Cycle the roster rail's filter tab (Active/All) by `delta`, wrapping.
+    pub(super) fn cycle_roster_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = RosterTab::ALL.len() as isize;
+        let cur = self.roster_tab.index() as isize;
+        self.roster_tab = RosterTab::from_index((cur + delta).rem_euclid(n) as usize);
+        cx.notify();
+    }
+
+    /// Select a specific roster filter tab.
+    pub(super) fn select_roster_tab(&mut self, tab: RosterTab, cx: &mut Context<Self>) {
+        self.roster_tab = tab;
+        cx.notify();
+    }
+
+    /// Cycle the right rail's tab (Terminal/Files/Changes/Plan/Tasks) by `delta`, wrapping.
+    pub(super) fn cycle_inspector_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = RightRailTab::ALL.len() as isize;
+        let cur = self.right_rail_tab.index() as isize;
+        self.right_rail_tab = RightRailTab::from_index((cur + delta).rem_euclid(n) as usize);
+        cx.notify();
+    }
+
+    /// Cycle the Git rail's subtab (Branches/Worktrees/Graph/Delegation) by `delta`, wrapping.
+    pub(super) fn cycle_git_subtab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.right_rail_tab != RightRailTab::Git {
+            self.right_rail_tab = RightRailTab::Git;
+        }
+        let n = GitSubtab::ALL.len() as isize;
+        let cur = self.git_subtab.index() as isize;
+        self.git_subtab = GitSubtab::from_index((cur + delta).rem_euclid(n) as usize);
+        cx.notify();
+    }
+
+    /// Select a specific Git rail subtab.
+    pub(super) fn select_git_subtab(&mut self, subtab: GitSubtab, cx: &mut Context<Self>) {
+        if self.right_rail_tab != RightRailTab::Git {
+            self.right_rail_tab = RightRailTab::Git;
+        }
+        self.git_subtab = subtab;
+        if matches!(subtab, GitSubtab::Worktrees | GitSubtab::Branches) {
+            self.refresh_git_worktrees(cx);
+        }
+        cx.notify();
+    }
+
+    /// Triage card's "Inspect 3-Way Diff": open `Git → 3-Way` and select `quark`'s
+    /// newest `quark/<id>/<ulid>` branch (falling back to a background `list_branches`
+    /// scan if the Git rail has not populated `git_branches` yet). The branch diff is
+    /// computed off the UI thread (unlike `select_branch`, a click path).
+    pub(super) fn inspect_gate_branch(&mut self, quark: &str, cx: &mut Context<Self>) {
+        self.prefs.inspector_collapsed = false;
+        self.select_git_subtab(GitSubtab::Diff3Way, cx);
+        let prefix = format!("quark/{quark}/");
+        let cached_branch = self
+            .git_branches
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|b| b.name.starts_with(&prefix))
+            .max_by(|a, b| a.name.cmp(&b.name))
+            .map(|b| b.name.clone());
+        if let Some(ref branch) = cached_branch {
+            if self.git_selected_branch.as_deref() == Some(branch.as_str()) {
+                return;
+            }
+        }
+        let root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let resolved = cx
+                .background_executor()
+                .spawn(async move {
+                    let branch = match cached_branch {
+                        Some(b) => Some(b),
+                        None => crate::vcs::list_branches(&root, "main")
+                            .into_iter()
+                            .filter(|b| b.name.starts_with(&prefix))
+                            .max_by(|a, b| a.name.cmp(&b.name))
+                            .map(|b| b.name),
+                    };
+                    let branch = branch?;
+                    let diff = crate::vcs::branch_diff(&root, "main", &branch);
+                    Some((branch, diff))
+                })
+                .await;
+            let Some((branch, diff)) = resolved else {
+                return;
+            };
+            let _ = this.update(cx, |chamber, cx| {
+                if chamber.git_selected_branch.as_deref() != Some(branch.as_str()) {
+                    chamber.git_branch_diff = diff;
+                    chamber.git_branch_open_ixs.clear();
+                    chamber.git_selected_branch = Some(branch);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Move cursor selection in the active Git rail subtab.
+    pub(super) fn move_git_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.right_rail_tab != RightRailTab::Git {
+            self.right_rail_tab = RightRailTab::Git;
+        }
+        match self.git_subtab {
+            GitSubtab::Branches => {
+                let len = self.visible_branches().len();
+                if len == 0 {
+                    self.git_cursor_branch = None;
+                    return;
+                }
+                let next = match self.git_cursor_branch {
+                    None if delta >= 0 => 0,
+                    None => len - 1,
+                    Some(cur) => (cur as isize + delta).rem_euclid(len as isize) as usize,
+                };
+                self.git_cursor_branch = Some(next);
+            }
+            GitSubtab::Worktrees => {
+                let len = self.git_worktrees.as_ref().map(|w| w.len()).unwrap_or(0);
+                if len == 0 {
+                    self.git_cursor_worktree = None;
+                    return;
+                }
+                let next = match self.git_cursor_worktree {
+                    None if delta >= 0 => 0,
+                    None => len - 1,
+                    Some(cur) => (cur as isize + delta).rem_euclid(len as isize) as usize,
+                };
+                self.git_cursor_worktree = Some(next);
+            }
+            GitSubtab::Graph => {
+                let len = self.git_graph_rows.len();
+                if len == 0 {
+                    self.git_cursor_graph = None;
+                    return;
+                }
+                let next = match self.git_cursor_graph {
+                    None if delta >= 0 => 0,
+                    None => len - 1,
+                    Some(cur) => (cur as isize + delta).rem_euclid(len as isize) as usize,
+                };
+                self.git_cursor_graph = Some(next);
+                self.git_graph_list.scroll_to_reveal_item(next);
+            }
+            GitSubtab::Changes | GitSubtab::Diff3Way | GitSubtab::Remote => {}
+        }
+        cx.notify();
+    }
+
+    /// Open or inspect the currently highlighted Git item (equivalent to clicking it).
+    pub(super) fn open_git_selection(&mut self, cx: &mut Context<Self>) {
+        if self.right_rail_tab != RightRailTab::Git {
+            self.right_rail_tab = RightRailTab::Git;
+        }
+        match self.git_subtab {
+            GitSubtab::Branches => {
+                if let Some(ix) = self.git_cursor_branch {
+                    if let Some(name) = self
+                        .visible_branches()
+                        .get(ix)
+                        .map(|branch| branch.name.clone())
+                    {
+                        self.select_branch(name);
+                        cx.notify();
+                    }
+                }
+            }
+            GitSubtab::Worktrees => {
+                if let Some(ix) = self.git_cursor_worktree {
+                    if let Some(wt) = self.git_worktrees.as_ref().and_then(|w| w.get(ix)) {
+                        if let Some(name) = Self::worktree_selects_branch(wt) {
+                            self.select_branch(name);
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            GitSubtab::Graph => {
+                if let Some(ix) = self.git_cursor_graph {
+                    if let Some(row) = self.git_graph_rows.get(ix) {
+                        if let Some(hash) = &row.hash {
+                            let full_hash = row.full_hash.clone().unwrap_or_else(|| hash.clone());
+                            self.select_commit(full_hash);
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            GitSubtab::Changes | GitSubtab::Diff3Way | GitSubtab::Remote => {}
+        }
+    }
+
+    /// Add a new terminal tab and focus it.
+    pub(super) fn add_terminal(&mut self, cx: &mut Context<Self>) {
+        let dims = self
+            .terminal_px
+            .get()
+            .map(|(_, _, w, h)| term_dims((w, h)))
+            .unwrap_or((80, 24));
+        let root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        let custom_shell = self.prefs.terminal_shell.as_deref();
+        let scrollback = self.prefs.terminal_scrollback;
+        let title = crate::pty::terminal_tab_title(&root, custom_shell, self.terminals.len() + 1);
+        match crate::pty::PtyTerminal::new_with_options(
+            &root,
+            dims.0,
+            dims.1,
+            custom_shell,
+            scrollback,
+        ) {
+            Ok(mut term) => {
+                term.title = title.clone();
+                self.terminals.push(TerminalTab {
+                    title,
+                    term: Some(term),
+                    error: None,
+                });
+            }
+            Err(err) => {
+                self.terminals.push(TerminalTab {
+                    title,
+                    term: None,
+                    error: Some(err),
+                });
+            }
+        }
+        self.active_terminal_index = self.terminals.len().saturating_sub(1);
+        self.terminal_warmup = 20;
+        self.right_rail_tab = RightRailTab::Terminal;
+        cx.notify();
+    }
+
+    /// Select the terminal tab at `index`.
+    pub(super) fn select_terminal(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.terminals.is_empty() {
+            self.active_terminal_index = 0;
+        } else {
+            self.active_terminal_index = index.min(self.terminals.len() - 1);
+        }
+        cx.notify();
+    }
+
+    /// Close the terminal tab at `index` with safe fallback index clamping.
+    pub(super) fn close_terminal(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.terminals.len() {
+            self.terminals.remove(index);
+        }
+
+        if self.terminals.is_empty() {
+            self.add_terminal(cx);
+            return;
+        } else {
+            if index < self.active_terminal_index {
+                self.active_terminal_index = self.active_terminal_index.saturating_sub(1);
+            } else if self.active_terminal_index >= self.terminals.len() {
+                self.active_terminal_index = self.terminals.len() - 1;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Switch to the next terminal tab.
+    pub(super) fn next_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.terminals.is_empty() {
+            let next = (self.active_terminal_index + 1) % self.terminals.len();
+            self.select_terminal(next, cx);
+        }
+    }
+
+    /// Switch to the previous terminal tab.
+    pub(super) fn prev_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.terminals.is_empty() {
+            let prev = if self.active_terminal_index == 0 {
+                self.terminals.len() - 1
+            } else {
+                self.active_terminal_index - 1
+            };
+            self.select_terminal(prev, cx);
+        }
+    }
+
+    /// `ToggleFocus`: move keyboard focus between the chat input and the
+    /// terminal. If the terminal already has focus, this returns focus to chat —
+    /// that direction reads live focus state (`FocusHandle::is_focused`), which a
+    /// pure function of `right_rail_tab` alone cannot see. Otherwise it moves
+    /// *toward* the terminal, using [`toggle_focus_target`] to decide whether the
+    /// right rail needs to switch to the Terminal tab first — so one press
+    /// always reaches the terminal, and a second press always returns to chat.
+    pub(super) fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let is_terminal_focused = self.terminal_focus.is_focused(window)
+            || (self.right_rail_tab == RightRailTab::Terminal
+                && !self.input.focus_handle(cx).is_focused(window));
+        let target = if is_terminal_focused {
+            FocusTarget::Chat
+        } else {
+            let (target, switch_rail_to_terminal) = toggle_focus_target(self.right_rail_tab);
+            if switch_rail_to_terminal {
+                self.right_rail_tab = RightRailTab::Terminal;
+            }
+            target
+        };
+        match target {
+            FocusTarget::Terminal => window.focus(&self.terminal_focus, cx),
+            FocusTarget::Chat => window.focus(&self.input.focus_handle(cx), cx),
+        }
+        cx.notify();
+    }
+
+    /// Focus the chat input prompt from anywhere in the application (Cmd+L / Ctrl+L).
+    /// Switches to the Chat tab if currently on Log or Stats.
+    pub fn focus_chat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_tab != ChatTab::Chat {
+            self.chat_tab = ChatTab::Chat;
+        }
+        window.focus(&self.input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Toggle the quick project switcher overlay (Ctrl+O / Cmd+O / /projects).
+    pub(super) fn toggle_project_switcher(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher_open = !self.project_switcher_open;
+        cx.notify();
+    }
+
+    /// Global keyboard dismiss (Escape): drops active completions, closes open modals
+    /// and overlays, closes file previews, or restores focus to the main chat input.
+    pub(super) fn handle_escape_dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.settings_open
+            || self.info_panel.is_some()
+            || self.about_open
+            || self.changelog_open
+            || self.app_menu_open
+            || self.process_manager_open
+            || self.repl_overlay_open
+            || self.project_switcher_open
+        {
+            self.settings_open = false;
+            self.info_panel = None;
+            self.about_open = false;
+            self.changelog_open = false;
+            self.app_menu_open = false;
+            self.process_manager_open = false;
+            self.repl_overlay_open = false;
+            self.project_switcher_open = false;
+            cx.notify();
+            return;
+        }
+        if self.file_tree_pending_op.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.file_tree_open.is_some() {
+            self.close_open_file(cx);
+            return;
+        }
+        if self.terminal_focus.is_focused(window) {
+            return;
+        }
+        if self.chat_tab == ChatTab::Chat && self.has_active_chat_find(cx) {
+            self.clear_chat_filter(window, cx);
+        } else if self.chat_tab == ChatTab::Log && self.has_active_log_filter(cx) {
+            self.clear_log_filter(window, cx);
+            return;
+        }
+        window.focus(&self.input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Close the currently open file preview in the File Tree inspector tab,
+    /// returning to the previously active tab (e.g. Plans, Changes) if recorded.
+    pub(super) fn close_open_file(&mut self, cx: &mut Context<Self>) {
+        self.parsed_markdown.borrow_mut().remove(&usize::MAX);
+        self.file_tree_open = None;
+        if let Some(prev) = self.file_tree_previous_tab.take() {
+            self.right_rail_tab = prev;
+        }
+        cx.notify();
+    }
+
+    /// Cycle the Stats time window by `delta`. Only meaningful on the Stats chat tab,
+    /// so it is a deliberate no-op elsewhere (the key is never surprising).
+    pub(super) fn cycle_stats_window(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.chat_tab != ChatTab::Stats {
+            return;
+        }
+        let n = StatsWindow::ALL.len() as isize;
+        let cur = StatsWindow::ALL
+            .iter()
+            .position(|w| *w == self.stats_window)
+            .unwrap_or(0) as isize;
+        self.stats_window = StatsWindow::ALL[(cur + delta).rem_euclid(n) as usize];
+        cx.notify();
+    }
+
+    /// Move the roster keyboard cursor by `delta`, wrapping. A first press with no
+    /// current selection lands on the top row (down) or bottom row (up).
+    pub(super) fn move_quark_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = self.view.roster.len();
+        if len == 0 {
+            self.selected_quark_ix = None;
+            return;
+        }
+        let next = match self.selected_quark_ix {
+            None if delta >= 0 => 0,
+            None => len - 1,
+            Some(cur) => (cur as isize + delta).rem_euclid(len as isize) as usize,
+        };
+        self.selected_quark_ix = Some(next);
+        cx.notify();
+    }
+
+    /// Open the info panel for the keyboard-selected quark — the keyboard equivalent
+    /// of clicking a roster row.
+    pub(super) fn open_selected_quark(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .selected_quark_ix
+            .and_then(|ix| self.view.roster.get(ix))
+            .map(|r| r.id.clone())
+        {
+            self.open_quark_info(id, InfoTab::Home, cx);
+        }
+    }
+
+    pub(super) fn handle_context_menu_action(
+        &mut self,
+        action: ContextMenuAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            ContextMenuAction::QuarkInfo(id) => {
+                // Each open starts at the top section, not wherever the last panel left off.
+                self.open_quark_info(id, InfoTab::Home, cx);
+            }
+            ContextMenuAction::ToggleQuark(id) => {
+                self.toggle_quark_enabled(&id, cx);
+            }
+            ContextMenuAction::AdoptQuark(id) => {
+                self.adopt_quark(&id, cx);
+            }
+            ContextMenuAction::RemoveQuark(id) => {
+                self.remove_quark(&id, cx);
+            }
+            ContextMenuAction::RestartQuark(id) => {
+                self.reboot_quark(&id, cx);
+            }
+            ContextMenuAction::SetFlavor(id, flavor) => {
+                let qid = QuarkId::new(&id);
+                // Apply to a legacy seat if present, else record the role as a per-repo
+                // override (a catalogue quark keeps its definition; only its role here
+                // changes). Trial on a clone so the "≥1 orchestrator" guard is checked
+                // against the RESOLVED team before committing.
+                let mut trial = self.team.clone();
+                if flavor == hadron_lattice::Flavor::Orchestrator {
+                    apply_orchestrator_exclusivity(&mut trial, &self.global, &qid);
+                }
+                if let Some(seat) = trial.quarks.iter_mut().find(|s| s.id == qid) {
+                    seat.flavor = flavor.clone();
+                } else if let Some(ov) = trial.roster.iter_mut().find(|o| o.id == qid) {
+                    ov.flavor = Some(flavor.clone());
+                } else {
+                    trial.roster.push(SeatOverride {
+                        enabled: Some(true),
+                        flavor: Some(flavor.clone()),
+                        ..SeatOverride::role(qid.clone())
+                    });
+                }
+                let orchestrators = resolve_team(&trial, &self.global)
+                    .quarks
+                    .iter()
+                    .filter(|s| s.flavor == hadron_lattice::Flavor::Orchestrator)
+                    .count();
+                if orchestrators > 0 {
+                    self.team = trial;
+                    self.save_repo_team(cx);
+                } else {
+                    eprintln!("Refusing to change flavor of {id}: cannot have zero orchestrators.");
+                }
+            }
+            ContextMenuAction::OpenFile(path) => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let clean_path = path.trim_matches('`').trim();
+                let clean_path = clean_path
+                    .split('#')
+                    .next()
+                    .unwrap_or(clean_path)
+                    .split(':')
+                    .next()
+                    .unwrap_or(clean_path)
+                    .trim();
+                if let Some(content) = crate::sys::read_workspace_file(&repo_root, clean_path) {
+                    self.parsed_markdown.borrow_mut().remove(&usize::MAX);
+                    if self.right_rail_tab != RightRailTab::FileTree {
+                        self.file_tree_previous_tab = Some(self.right_rail_tab);
+                    }
+                    self.file_tree_open = Some((clean_path.to_string(), content));
+                    self.right_rail_tab = RightRailTab::FileTree;
+                    self.prefs.inspector_collapsed = false;
+                    let _ = config::save(&self.prefs);
+                    cx.notify();
+                } else {
+                    eprintln!(
+                        "chamber: could not read workspace file at {clean_path:?} (repo_root: {})",
+                        repo_root.display()
+                    );
+                }
+            }
+            ContextMenuAction::CopyPath(path) => {
+                crate::sys::copy_to_system_clipboard(&path);
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path));
+                self.toast_manager.push(
+                    ToastKind::Success,
+                    "Copied path to clipboard".to_string(),
+                    Some(2),
+                );
+            }
+            ContextMenuAction::CopyText(text) => {
+                crate::sys::copy_to_system_clipboard(&text);
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                self.toast_manager.push(
+                    ToastKind::Success,
+                    "Copied to clipboard".to_string(),
+                    Some(2),
+                );
+            }
+            ContextMenuAction::PromoteToNucleus {
+                slug,
+                fact,
+                description,
+            } => {
+                let repo = crate::vcs::repo_root_of(&self.path);
+                let req = hadron_lattice::promoter::PromotionRequest {
+                    slug,
+                    description,
+                    fact,
+                    note_type: Some("project".to_string()),
+                };
+                match hadron_lattice::promoter::promote_to_note(repo, &req) {
+                    Ok(path) => {
+                        self.toast_manager.push(
+                            ToastKind::Success,
+                            format!("Promoted lesson note to {}", path.display()),
+                            Some(4),
+                        );
+                    }
+                    Err(e) => {
+                        self.toast_manager.push(
+                            ToastKind::Error,
+                            format!("Failed to promote note: {e}"),
+                            Some(6),
+                        );
+                    }
+                }
+                cx.notify();
+            }
+            ContextMenuAction::OpenInEditor(path) => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                self.open_in_editor(&repo_root.join(path), None);
+            }
+            ContextMenuAction::OpenInFolder(path) => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                let full_path = repo_root.join(path);
+                let target = if full_path.is_file() {
+                    full_path.parent().unwrap_or(&full_path).to_path_buf()
+                } else {
+                    full_path
+                };
+
+                crate::sys::open_path_or_url(&target.display().to_string());
+            }
+            ContextMenuAction::CopyRelativePath(path) => {
+                let rel = path.trim_matches('/').to_string();
+                crate::sys::copy_to_system_clipboard(&rel);
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(rel));
+                self.toast_manager.push(
+                    ToastKind::Success,
+                    "Copied relative path to clipboard".to_string(),
+                    Some(2),
+                );
+            }
+            ContextMenuAction::CopyFileItem(path) => {
+                let clean = path.trim_matches('/').to_string();
+                self.file_tree_clipboard = Some(FileTreeClipboard {
+                    rel_path: clean.clone(),
+                    is_cut: false,
+                });
+                self.toast_manager
+                    .push(ToastKind::Info, format!("Copied '{clean}'"), Some(2));
+            }
+            ContextMenuAction::CutFileItem(path) => {
+                let clean = path.trim_matches('/').to_string();
+                self.file_tree_clipboard = Some(FileTreeClipboard {
+                    rel_path: clean.clone(),
+                    is_cut: true,
+                });
+                self.toast_manager
+                    .push(ToastKind::Info, format!("Cut '{clean}'"), Some(2));
+            }
+            ContextMenuAction::PasteFileItem(dest_dir) => {
+                let Some(clip) = self.file_tree_clipboard.clone() else {
+                    return;
+                };
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                match crate::sys::copy_or_move_workspace_item(
+                    &repo_root,
+                    &clip.rel_path,
+                    &dest_dir,
+                    clip.is_cut,
+                ) {
+                    Ok(new_rel) => {
+                        if clip.is_cut {
+                            self.file_tree_clipboard = None;
+                        }
+                        if !dest_dir.is_empty() {
+                            self.file_tree_expanded
+                                .insert(dest_dir.trim_matches('/').to_string());
+                        }
+                        self.refresh_file_tree();
+                        self.toast_manager.push(
+                            ToastKind::Success,
+                            format!(
+                                "{} to '{new_rel}'",
+                                if clip.is_cut { "Moved" } else { "Pasted" }
+                            ),
+                            Some(3),
+                        );
+                    }
+                    Err(e) => {
+                        self.toast_manager.push(ToastKind::Error, e, Some(4));
+                    }
+                }
+            }
+            ContextMenuAction::DuplicateFileItem(path) => {
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                match crate::sys::duplicate_workspace_item(&repo_root, &path) {
+                    Ok(new_rel) => {
+                        self.refresh_file_tree();
+                        self.toast_manager.push(
+                            ToastKind::Success,
+                            format!("Duplicated as '{new_rel}'"),
+                            Some(3),
+                        );
+                    }
+                    Err(e) => {
+                        self.toast_manager.push(ToastKind::Error, e, Some(4));
+                    }
+                }
+            }
+            ContextMenuAction::DeleteFileItem(path) => {
+                let clean = path.trim_matches('/').to_string();
+                let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+                match crate::sys::delete_workspace_item(&repo_root, &clean) {
+                    Ok(()) => {
+                        if self.file_tree_open.as_ref().is_some_and(|(open_p, _)| {
+                            open_p == &clean || open_p.starts_with(&format!("{clean}/"))
+                        }) {
+                            self.file_tree_open = None;
+                        }
+                        self.file_tree_expanded.remove(&clean);
+                        self.refresh_file_tree();
+                        self.toast_manager.push(
+                            ToastKind::Success,
+                            format!("Deleted '{clean}'"),
+                            Some(3),
+                        );
+                    }
+                    Err(e) => {
+                        self.toast_manager.push(ToastKind::Error, e, Some(4));
+                    }
+                }
+            }
+            ContextMenuAction::NewFileIn(dir) => {
+                self.file_tree_pending_op = Some(FileTreePendingOp::NewFile {
+                    parent_dir: dir.trim_matches('/').to_string(),
+                });
+            }
+            ContextMenuAction::NewFolderIn(dir) => {
+                self.file_tree_pending_op = Some(FileTreePendingOp::NewFolder {
+                    parent_dir: dir.trim_matches('/').to_string(),
+                });
+            }
+            ContextMenuAction::RenameFileItem(path) => {
+                self.file_tree_pending_op = Some(FileTreePendingOp::Rename {
+                    target_path: path.trim_matches('/').to_string(),
+                });
+            }
+            ContextMenuAction::InsertFileMention(path) => {
+                let mention = format!("@{}", path.trim_matches('/'));
+                crate::sys::copy_to_system_clipboard(&mention);
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(mention.clone()));
+                self.toast_manager.push(
+                    ToastKind::Success,
+                    format!("Copied {mention} to clipboard"),
+                    Some(2),
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Re-scan the workspace file tree and git statuses and sync `@`-mention completion candidates.
+    pub(super) fn refresh_file_tree(&mut self) {
+        let repo_root = crate::vcs::repo_root_of(&self.path);
+        self.file_tree_paths =
+            crate::sys::list_workspace_files(repo_root, &self.file_tree_expanded);
+        self.git_statuses = crate::vcs::get_git_statuses(repo_root);
+        *self.completion_files.borrow_mut() = self.file_tree_paths.clone();
+    }
+
+    /// Begin an inline File Tree operation (`New File…`, `New Folder…`, or `Rename…`),
+    /// pre-filling and focusing `file_tree_op_input`.
+    pub(super) fn start_file_tree_pending_op(
+        &mut self,
+        op: FileTreePendingOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial = match &op {
+            FileTreePendingOp::NewFile { parent_dir }
+            | FileTreePendingOp::NewFolder { parent_dir } => {
+                if !parent_dir.is_empty() {
+                    self.file_tree_expanded.insert(parent_dir.clone());
+                }
+                String::new()
+            }
+            FileTreePendingOp::Rename { target_path } => std::path::Path::new(target_path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(target_path)
+                .to_string(),
+        };
+        self.file_tree_op_input.update(cx, |input, cx| {
+            input.set_value(initial, window, cx);
+            input.focus(window, cx);
+        });
+        self.file_tree_pending_op = Some(op);
+        cx.notify();
+    }
+
+    /// Commit the active inline File Tree operation (`NewFile`, `NewFolder`, or `Rename`).
+    pub(super) fn commit_file_tree_pending_op(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(op) = self.file_tree_pending_op.take() else {
+            return;
+        };
+        let typed = self
+            .file_tree_op_input
+            .read(cx)
+            .value()
+            .trim()
+            .trim_matches('/')
+            .to_string();
+        self.file_tree_op_input
+            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+        if typed.is_empty() {
+            cx.notify();
+            return;
+        }
+        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        match op {
+            FileTreePendingOp::NewFile { parent_dir } => {
+                let rel = if parent_dir.is_empty() {
+                    typed
+                } else {
+                    format!("{}/{typed}", parent_dir.trim_end_matches('/'))
+                };
+                match crate::sys::create_workspace_file(&repo_root, &rel) {
+                    Ok(_) => {
+                        if !parent_dir.is_empty() {
+                            self.file_tree_expanded.insert(parent_dir);
+                        }
+                        self.refresh_file_tree();
+                        self.toast_manager.push(
+                            ToastKind::Success,
+                            format!("Created file '{rel}'"),
+                            Some(3),
+                        );
+                    }
+                    Err(e) => {
+                        self.toast_manager.push(ToastKind::Error, e, Some(4));
+                    }
+                }
+            }
+            FileTreePendingOp::NewFolder { parent_dir } => {
+                let rel = if parent_dir.is_empty() {
+                    typed
+                } else {
+                    format!("{}/{typed}", parent_dir.trim_end_matches('/'))
+                };
+                match crate::sys::create_workspace_dir(&repo_root, &rel) {
+                    Ok(_) => {
+                        if !parent_dir.is_empty() {
+                            self.file_tree_expanded.insert(parent_dir);
+                        }
+                        self.file_tree_expanded.insert(rel.clone());
+                        self.refresh_file_tree();
+                        self.toast_manager.push(
+                            ToastKind::Success,
+                            format!("Created folder '{rel}'"),
+                            Some(3),
+                        );
+                    }
+                    Err(e) => {
+                        self.toast_manager.push(ToastKind::Error, e, Some(4));
+                    }
+                }
+            }
+            FileTreePendingOp::Rename { target_path } => {
+                let clean_target = target_path.trim_end_matches('/');
+                let dst_rel = if typed.contains('/') {
+                    typed
+                } else if let Some(parent) = std::path::Path::new(clean_target)
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                {
+                    format!("{}/{typed}", parent.to_string_lossy().replace('\\', "/"))
+                } else {
+                    typed
+                };
+                if dst_rel != clean_target {
+                    match crate::sys::rename_workspace_item(&repo_root, clean_target, &dst_rel) {
+                        Ok(_) => {
+                            if let Some((open_p, content)) = self.file_tree_open.take() {
+                                if open_p == clean_target {
+                                    self.file_tree_open = Some((dst_rel.clone(), content));
+                                } else {
+                                    self.file_tree_open = Some((open_p, content));
+                                }
+                            }
+                            self.refresh_file_tree();
+                            self.toast_manager.push(
+                                ToastKind::Success,
+                                format!("Renamed '{clean_target}' to '{dst_rel}'"),
+                                Some(3),
+                            );
+                        }
+                        Err(e) => {
+                            self.toast_manager.push(ToastKind::Error, e, Some(4));
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Dispatch a File Tree context menu action that has access to `Window` (allowing
+    /// inline input focus or direct insertion into the chat composer).
+    pub(super) fn handle_file_tree_context_action(
+        &mut self,
+        action: ContextMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            ContextMenuAction::NewFileIn(dir) => {
+                self.start_file_tree_pending_op(
+                    FileTreePendingOp::NewFile {
+                        parent_dir: dir.trim_matches('/').to_string(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            ContextMenuAction::NewFolderIn(dir) => {
+                self.start_file_tree_pending_op(
+                    FileTreePendingOp::NewFolder {
+                        parent_dir: dir.trim_matches('/').to_string(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            ContextMenuAction::RenameFileItem(path) => {
+                self.start_file_tree_pending_op(
+                    FileTreePendingOp::Rename {
+                        target_path: path.trim_matches('/').to_string(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            ContextMenuAction::InsertFileMention(path) => {
+                let clean = path.trim_matches('/');
+                let cur = self.input.read(cx).value().to_string();
+                let sep = if cur.is_empty() || cur.ends_with(char::is_whitespace) {
+                    ""
+                } else {
+                    " "
+                };
+                let next = format!("{cur}{sep}@{clean} ");
+                if self.chat_tab != ChatTab::Chat {
+                    self.chat_tab = ChatTab::Chat;
+                }
+                self.input.update(cx, |s, cx| {
+                    s.set_value(next, window, cx);
+                    s.focus(window, cx);
+                });
+                cx.notify();
+            }
+            other => self.handle_context_menu_action(other, cx),
+        }
+    }
+
+    /// Open `path` (optionally at `line`) in the editor the human picked in Settings.
+    ///
+    /// The single home of "which program opens a source file": the file tree's
+    /// context menu and a clicked `file://` link in a chat message both land here, so
+    /// the setting cannot mean two different things on the two surfaces. An unset
+    /// choice — or a `Custom` command that is blank — resolves to `None` from
+    /// [`crate::sys::editor_argv`] and falls through to the platform opener, which is
+    /// exactly the behaviour that existed before the setting did.
+    pub(super) fn open_in_editor(&self, path: &std::path::Path, line: Option<u32>) {
+        let resolved = crate::sys::resolve_file_url_for_workspace(
+            &format!("file://{}", path.display()),
+            Some(&self.path),
+        )
+        .map(|(p, _)| p)
+        .unwrap_or_else(|| path.to_path_buf());
+        // Rule 8: an editor that is configured but not installed is the likeliest
+        // failure here, and silently doing nothing reads to the human as a dead click.
+        if let Err(e) = crate::sys::spawn_editor(&self.prefs.editor, &resolved, line) {
+            eprintln!("chamber: could not open {}: {e}", resolved.display());
+        }
+    }
+
+    /// Answer an outstanding permission request by appending a human
+    /// `PermissionGrant` (addressed back to the asking quark, so the daemon
+    /// resumes it) — the same bus the quarks use. Mirrors [`Self::on_input_submit`].
+    pub(super) fn answer_permission(&mut self, approved: bool, cx: &mut Context<Self>) {
+        let Some(pending) = self.view.pending_permission.clone() else {
+            return;
+        };
+        if approved {
+            self.audio_manager
+                .trigger_cue(crate::app::audio::AudioCue::GateApproval);
+        }
+        self.append_and_reload(hadron_gatekeeper::grant(&pending, approved), cx);
+        self.chat_list_state
+            .scroll_to_reveal_item(self.chat_message_ixs.len().saturating_sub(1));
+        self.log_list_state
+            .scroll_to_reveal_item(self.log_message_ixs.len().saturating_sub(1));
+    }
+
+    /// "Always allow" the pending op: append a *remembering* grant so the
+    /// gatekeeper's allow-list auto-approves the same `(quark, op)` next time.
+    pub(super) fn answer_permission_remember(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.view.pending_permission.clone() else {
+            return;
+        };
+        self.audio_manager
+            .trigger_cue(crate::app::audio::AudioCue::GateApproval);
+        self.append_and_reload(hadron_gatekeeper::grant_remembering(&pending), cx);
+    }
+
+    /// Cycle the global default permission mode through the FULL ladder
+    /// (Ask → Write → Auto → Bypass → Ask) by appending a global `ModeSet`. The daemon
+    /// honours it next tick. Unlike the per-quark chip — which clamps at `Auto` so a
+    /// stray click cannot hand one worker unattended access — the global chip is the
+    /// human's own posture control, so it reaches `Bypass`. `/mode bypass` with no
+    /// target is the equivalent typed path (`actions.rs:736`).
+    pub(super) fn cycle_global_mode(&mut self, cx: &mut Context<Self>) {
+        let next = next_global_mode(self.view.global_mode);
+        self.append_and_reload(
+            Event::new(Actor::Human, None, Kind::ModeSet { mode: next }),
+            cx,
+        );
+    }
+
+    /// Cycle the global sandbox confinement mode: WorktreeOnly -> Strict -> Off -> WorktreeOnly.
+    pub(super) fn cycle_sandbox_mode(&mut self, cx: &mut Context<Self>) {
+        let next = next_sandbox_mode(self.prefs.sandbox_mode);
+        self.set_sandbox_mode(next, cx);
+    }
+
+    /// Set the sandbox confinement mode explicitly, updating preferences and repo team.
+    pub(super) fn set_sandbox_mode(&mut self, mode: SandboxMode, cx: &mut Context<Self>) {
+        self.prefs.sandbox_mode = mode;
+        let _ = config::save(&self.prefs);
+        self.team.sandbox_mode = Some(mode);
+        self.save_repo_team(cx);
+        cx.notify();
+    }
+
+    /// Cycle a single quark's permission mode by appending a per-quark `ModeSet`
+    /// (addressed to it). This always creates/updates an explicit override.
+    pub(super) fn cycle_quark_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+        let current = self
+            .view
+            .roster
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.mode)
+            .unwrap_or_default();
+        let next = next_mode(current);
+        self.append_and_reload(
+            Event::new(Actor::Human, Some(qid), Kind::ModeSet { mode: next }),
+            cx,
+        );
+    }
+
+    /// Set a single quark's permission mode **explicitly** (the Settings picker) by
+    /// appending a per-quark `ModeSet`. Unlike [`Self::cycle_quark_mode`] this jumps
+    /// straight to `mode`; like it, it always records an explicit per-quark override.
+    pub(super) fn set_quark_mode(&mut self, id: &str, mode: Mode, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+        self.append_and_reload(
+            Event::new(Actor::Human, Some(qid), Kind::ModeSet { mode }),
+            cx,
+        );
+    }
+
+    /// Clear a quark's per-quark override (the "Default" rung) by appending a
+    /// `ModeClear`. The quark reverts to inheriting the global default; because the
+    /// latest per-quark mode event wins, this cleanly un-sets an earlier `ModeSet`
+    /// in the append-only field.
+    pub(super) fn clear_quark_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+        self.append_and_reload(Event::new(Actor::Human, Some(qid), Kind::ModeClear), cx);
+    }
+
+    /// Force-restart a resident quark: append a per-quark [`Kind::Reboot`]. The daemon
+    /// honours it on its next tick — reaping the quark's live ACP subprocess (aborting
+    /// an in-flight turn) and re-booting it fresh on its next mention. The quark stays
+    /// seated throughout. A no-op for a one-shot CLI quark, which holds nothing
+    /// resident between turns. Mirrors [`Self::set_quark_mode`]: the command travels as
+    /// a field event, auditable in the Log tab.
+    pub(super) fn reboot_quark(&mut self, id: &str, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+        self.append_and_reload(Event::new(Actor::Human, Some(qid), Kind::Reboot), cx);
+    }
+
+    /// Start or restart the `hadron-gluon` daemon for the current workspace on a
+    /// background thread so the UI never blocks waiting for an exiting process.
+    pub(super) fn restart_gluon_daemon(&mut self, cx: &mut Context<Self>) {
+        let field_path = self.path.clone();
+        let show_console = self.prefs.show_console_window;
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_spawn(async move {
+                    crate::sys::restart_gluon_daemon(&field_path, show_console)
+                })
+                .await;
+            let _ = this.update(cx, |chamber, cx| {
+                match res {
+                    Ok(pid) => {
+                        chamber.last_gluon_running = true;
+                        chamber.last_gluon_pid = Some(pid);
+                        chamber.gluon_stopped_notice = false;
+                        chamber.toast_manager.push(
+                            ToastKind::Success,
+                            format!("Started hadron-gluon daemon (PID {pid})"),
+                            Some(3),
+                        );
+                        chamber.refresh_hadron_processes(cx);
+                    }
+                    Err(e) => {
+                        chamber.toast_manager.push(
+                            ToastKind::Error,
+                            format!("Failed to start hadron-gluon: {e}"),
+                            Some(5),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Stop the `hadron-gluon` daemon for the current workspace on a background thread.
+    pub(super) fn stop_gluon_daemon(&mut self, cx: &mut Context<Self>) {
+        let field_path = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_spawn(async move { crate::sys::stop_gluon_daemon(&field_path) })
+                .await;
+            let _ = this.update(cx, |chamber, cx| {
+                match res {
+                    Ok(true) => {
+                        chamber.last_gluon_running = false;
+                        chamber.last_gluon_pid = None;
+                        chamber.toast_manager.push(
+                            ToastKind::Info,
+                            "Stopped hadron-gluon daemon".to_string(),
+                            Some(3),
+                        );
+                        chamber.refresh_hadron_processes(cx);
+                    }
+                    Ok(false) => {
+                        chamber.last_gluon_running = false;
+                        chamber.last_gluon_pid = None;
+                    }
+                    Err(e) => {
+                        chamber.toast_manager.push(
+                            ToastKind::Error,
+                            format!("Failed to stop hadron-gluon: {e}"),
+                            Some(5),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Terminate a Hadron child subprocess tree (`pid`) on a background thread and refresh
+    /// the Process Manager snapshot.
+    pub(super) fn kill_hadron_subprocess(
+        &mut self,
+        pid: u32,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        if pid == std::process::id() {
+            return;
+        }
+        self.last_hadron_processes.retain(|p| p.pid != pid);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                hadron_lattice::sys::process::kill_process_group(pid);
+            })
+            .await;
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.toast_manager.push(
+                    ToastKind::Info,
+                    format!("Terminated process {label} (PID {pid})"),
+                    Some(3),
+                );
+                chamber.refresh_hadron_processes(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Focus a PTY terminal tab in the right inspector rail from the Process Manager.
+    pub(super) fn focus_terminal_from_processes(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.process_manager_open = false;
+        self.prefs.inspector_collapsed = false;
+        self.right_rail_tab = RightRailTab::Terminal;
+        self.select_terminal(index, cx);
+    }
+
+    /// Terminate and remove the PTY terminal tab at `index` from the Process Manager.
+    pub(super) fn close_terminal_from_processes(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.terminals.len() {
+            let removed = self.terminals.remove(index);
+            if let Some(pid) = removed.term.as_ref().and_then(|pty| pty.process_id()) {
+                self.last_hadron_processes.retain(|p| p.pid != pid);
+            }
+        }
+        if self.terminals.is_empty() {
+            self.active_terminal_index = 0;
+        } else if index < self.active_terminal_index {
+            self.active_terminal_index = self.active_terminal_index.saturating_sub(1);
+        } else if self.active_terminal_index >= self.terminals.len() {
+            self.active_terminal_index = self.terminals.len() - 1;
+        }
+        self.refresh_hadron_processes(cx);
+        cx.notify();
+    }
+
+    /// Refresh `last_gluon_pid` and `last_hadron_processes` asynchronously on the
+    /// background executor (never on the UI thread).
+    pub(super) fn refresh_hadron_processes(&mut self, cx: &mut Context<Self>) {
+        let field_path = self.path.clone();
+        let terminal_pids: Vec<u32> = self
+            .terminals
+            .iter()
+            .filter_map(|t| t.term.as_ref().and_then(|pty| pty.process_id()))
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let (gluon_pid, procs) = cx
+                .background_executor()
+                .spawn(async move {
+                    let gpid = crate::sys::probe_gluon_pid(&field_path);
+                    let mut roots = vec![std::process::id()];
+                    if let Some(gp) = gpid {
+                        roots.push(gp);
+                    }
+                    roots.extend(terminal_pids);
+                    let field_dir = hadron_lattice::hadron_dir_of(&field_path);
+                    let tree =
+                        hadron_lattice::sys::inspect::collect_process_tree(&roots, &field_dir);
+                    (gpid, tree)
+                })
+                .await;
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.last_gluon_pid = gluon_pid;
+                if gluon_pid.is_some() {
+                    chamber.last_gluon_running = true;
+                }
+                chamber.last_hadron_processes = procs;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The colour to paint a quark's name / chart series with: its **custom** colour if
+    /// one is set in the stored identity (`ChamberPrefs`), else the stable auto hue. Thin
+    /// wrapper over [`Self::resolve_identity`] — the one colour-resolution path — so a
+    /// custom colour shows everywhere the quark appears (log author, charts, roster, info
+    /// panel), not just where an identity was already being resolved.
+    pub(super) fn color_for(&self, name: &str) -> Hsla {
+        self.resolve_identity(name).color
+    }
+
+    /// The repo `.hadron/team.json` path (the file the chamber edits), whether or not
+    /// it exists yet.
+    pub(super) fn repo_team_path(&self) -> PathBuf {
+        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        hadron_lattice::repo_team_for_field(&self.path)
+            .unwrap_or_else(|| repo_root.join(".hadron").join("team.json"))
+    }
+
+    /// Persist `self.team` to the repo file and re-project. The one write path for
+    /// every repo-team mutation, so save+reproject never drift.
+    pub(super) fn save_repo_team(&mut self, cx: &mut Context<Self>) {
+        let path = self.repo_team_path();
+        if let Err(e) = hadron_lattice::save_team(&path, &self.team) {
+            eprintln!("chamber: failed to save team.json: {e}");
+            return;
+        }
+        self.providers = configured_providers(&resolve_team(&self.team, &self.global));
+        let events = self.events.clone();
+        self.sync_view(&events);
+        cx.notify();
+    }
+
+    /// Persist the **global catalogue** (`~/.hadron/team.json`). The catalogue holds the
+    /// shared defaults that are the same in every repo — a quark's model default and its
+    /// display name (a quark is the same quark everywhere, so its name is not a per-repo
+    /// thing). Mirrors [`Self::save_repo_team`] but writes the catalogue file.
+    pub(super) fn save_global_team(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = hadron_lattice::team_config_path() else {
+            eprintln!("chamber: no global catalogue path — cannot save shared defaults");
+            return;
+        };
+        if let Err(e) = hadron_lattice::save_team(&path, &self.global) {
+            eprintln!("chamber: failed to save catalogue: {e}");
+            return;
+        }
+        self.providers = configured_providers(&resolve_team(&self.team, &self.global));
+        let events = self.events.clone();
+        self.sync_view(&events);
+        cx.notify();
+    }
+
+    /// Toggle a quark's participation. A legacy full seat flips its own `enabled`; a
+    /// catalogue-adopted quark records the flip as a per-repo override (created if it
+    /// does not exist yet). When the quark is not yet adopted in this repo, toggling it
+    /// ("Enable" in the Roster context menu or `/toggle`) adopts and enables it.
+    pub(super) fn toggle_quark_enabled(&mut self, id: &str, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+        if toggle_or_adopt_quark_in_team(&mut self.team, &self.global, &qid).is_some() {
+            self.save_repo_team(cx);
+        }
+    }
+
+    /// Append an event to the field and sync every view cache to it (the shared
+    /// write path for chat messages, permission grants and mode changes — the same
+    /// bus the quarks use).
+    pub(super) fn append_and_reload(&mut self, ev: Event, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let ev_bg = ev.clone();
+        self.field_write_queue.enqueue(cx, move || {
+            if let Err(e) = io::append_event(&path, &ev_bg) {
+                eprintln!("chamber: failed to append event: {e}");
+            } else {
+                crate::rpc_client::notify_daemon_wake(&path);
+            }
+        });
+        let mut next = self.events.clone();
+        next.push(ev);
+        self.sync_view(&next);
+        cx.notify();
+    }
+
+    /// Batch-append multiple events to the field on the background executor and
+    /// immediately project them into the UI view.
+    pub(super) fn append_events_and_reload(&mut self, evs: Vec<Event>, cx: &mut Context<Self>) {
+        if evs.is_empty() {
+            return;
+        }
+        let path = self.path.clone();
+        let evs_bg = evs.clone();
+        self.field_write_queue.enqueue(cx, move || {
+            if let Err(e) = io::append_events(&path, &evs_bg) {
+                eprintln!("chamber: failed to append events: {e}");
+            } else {
+                crate::rpc_client::notify_daemon_wake(&path);
+            }
+        });
+        let mut next = self.events.clone();
+        next.extend(evs);
+        self.sync_view(&next);
+        cx.notify();
+    }
+
+    /// Execute a blocking slash-command computation on GPUI's background executor and
+    /// post the resulting `Actor::Gluon` notice back on the UI thread when finished.
+    pub(super) fn spawn_background_command_notice<F>(&mut self, work: F, cx: &mut Context<Self>)
+    where
+        F: FnOnce() -> String + Send + 'static,
+    {
+        cx.spawn(async move |this, cx| {
+            let body = cx.background_executor().spawn(async move { work() }).await;
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.post_chat_message(Actor::Gluon, body, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Collapse or expand a rail. Just flips the persisted flag — the layout
+    /// follows (an expanded rail is a resizable panel; a collapsed one is a fixed
+    /// strip), so there's no sizing state to drive by hand.
+    pub(super) fn toggle_rail(&mut self, rail: Rail, _window: &mut Window, cx: &mut Context<Self>) {
+        match rail {
+            Rail::Roster => self.prefs.roster_collapsed = !self.prefs.roster_collapsed,
+            Rail::Inspector => self.prefs.inspector_collapsed = !self.prefs.inspector_collapsed,
+        }
+        let _ = config::save(&self.prefs);
+        cx.notify();
+    }
+
+    /// Remove / delete a quark: purge from the global catalogue (`~/.hadron/team.json`),
+    /// repo team configuration (`.hadron/team.json`), and configured providers list.
+    pub(super) fn remove_quark(&mut self, id: &str, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+
+        remove_quark_from_teams(&mut self.team, &mut self.global, &qid);
+        let repo_path = self.repo_team_path();
+        let global_path = hadron_lattice::team_config_path();
+        let separate = global_path.as_deref().is_some_and(|g| g != repo_path);
+        if separate {
+            if let Some(gp) = global_path {
+                if let Err(e) = hadron_lattice::save_team(&gp, &self.global) {
+                    eprintln!("chamber: failed to save catalogue on removal: {e}");
+                }
+            }
+        }
+        if let Some(seat) = self.global.get(&qid).or_else(|| self.team.get(&qid)) {
+            for var in &seat.secret_env {
+                let _ = self.secret_store.delete(&qid, var);
+            }
+        }
+        if let Some(panel_id) = &self.info_panel {
+            if panel_id == id {
+                self.info_panel = None;
+            }
+        }
+        if let SettingsTarget::Quark(t_id) = &self.settings_target {
+            if t_id == id {
+                self.settings_target = SettingsTarget::Providers;
+            }
+        }
+        if let Some(ix) = self.selected_quark_ix {
+            if self
+                .view
+                .roster
+                .get(ix)
+                .map(|r| r.id == id)
+                .unwrap_or(false)
+            {
+                self.selected_quark_ix = None;
+            }
+        }
+
+        self.save_repo_team(cx);
+    }
+
+    /// Save a newly-configured quark. Its **definition** goes to the global catalogue
+    /// (`~/.hadron/team.json`) so every repo can reach it; this repo **auto-adopts** it
+    /// (an enabled override), matching the "added quark joins the current repo" rule.
+    /// When there is no separate catalogue (the repo file *is* the global file), fall
+    /// back to a self-contained legacy seat — the pre-split behaviour.
+    ///
+    /// If the resolved team currently has NO orchestrator (fresh install or empty team),
+    /// the first added quark is automatically designated as the Swarm Orchestrator.
+    pub(super) fn add_configured_quark(
+        &mut self,
+        mut seat: hadron_lattice::Seat,
+        cx: &mut Context<Self>,
+    ) {
+        let has_orchestrator = resolve_team(&self.team, &self.global)
+            .quarks
+            .iter()
+            .any(|s| s.flavor == hadron_lattice::Flavor::Orchestrator);
+        if !has_orchestrator {
+            seat.flavor = hadron_lattice::Flavor::Orchestrator;
+        }
+
+        let repo_path = self.repo_team_path();
+        let global_path = hadron_lattice::team_config_path();
+        let separate = global_path.as_deref().is_some_and(|g| g != repo_path);
+        let id = seat.id.clone();
+        if separate {
+            // The catalogue holds the shared **default** for an id. The first add of an
+            // id establishes that default; a later add of the SAME id in another repo
+            // must NOT clobber it — that is the cross-repo collision. So keep any existing
+            // def and record only how this repo's pick diverges (a preset chooses a model;
+            // effort/mode/name it never sets, so those inherit the catalogue).
+            let adopt = match self.global.quarks.iter().find(|s| s.id == id).cloned() {
+                None => {
+                    self.global.quarks.push(seat.clone());
+                    if let Some(gp) = global_path {
+                        if let Err(e) = hadron_lattice::save_team(&gp, &self.global) {
+                            eprintln!("chamber: failed to save catalogue: {e}");
+                        }
+                    }
+                    SeatOverride {
+                        enabled: Some(true),
+                        flavor: (seat.flavor == hadron_lattice::Flavor::Orchestrator)
+                            .then_some(hadron_lattice::Flavor::Orchestrator),
+                        ..SeatOverride::role(id.clone())
+                    }
+                }
+                Some(def) => SeatOverride {
+                    enabled: Some(true),
+                    model: (seat.model != def.model).then(|| seat.model.clone()),
+                    flavor: (seat.flavor == hadron_lattice::Flavor::Orchestrator)
+                        .then_some(hadron_lattice::Flavor::Orchestrator),
+                    ..SeatOverride::role(id.clone())
+                },
+            };
+            // Auto-adopt here (unless already present some other way).
+            if !self.team.quarks.iter().any(|s| s.id == id)
+                && !self.team.roster.iter().any(|o| o.id == id)
+            {
+                self.team.roster.push(adopt);
+            }
+        } else {
+            // No separate catalogue: keep it self-contained as a legacy seat.
+            self.team.quarks.push(seat);
+        }
+        self.save_repo_team(cx);
+    }
+
+    /// **Adopt** a catalogue quark into this repo: add an enabled override so the daemon
+    /// seats it. The definition stays in the global catalogue; the repo only records
+    /// that it participates here (promoted to orchestrator if no orchestrator exists, else worker).
+    pub(super) fn adopt_quark(&mut self, id: &str, cx: &mut Context<Self>) {
+        let qid = QuarkId::new(id);
+        if self.team.quarks.iter().any(|s| s.id == qid)
+            || self.team.roster.iter().any(|o| o.id == qid)
+        {
+            return; // already adopted here
+        }
+        if toggle_or_adopt_quark_in_team(&mut self.team, &self.global, &qid).is_some() {
+            self.save_repo_team(cx);
+        }
+    }
+
+    /// Toggle the Process Manager overlay (pinned Roster rail button, above Settings).
+    pub(super) fn toggle_process_manager(&mut self, cx: &mut Context<Self>) {
+        self.process_manager_open = toggle_process_manager_open(self.process_manager_open);
+        if self.process_manager_open {
+            self.refresh_hadron_processes(cx);
+        }
+        cx.notify();
+    }
+
+    /// Toggle the Quick REPL & Tool Scratchpad Overlay (Capability #16).
+    pub(super) fn toggle_repl_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repl_overlay_open = !self.repl_overlay_open;
+        if self.repl_overlay_open {
+            self.repl_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Evaluate input in the Quick REPL scratchpad without writing to the persistent field.
+    pub(super) fn execute_repl_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.repl_input.read(cx).value().to_string();
+        let repo = crate::vcs::repo_root_of(&self.path);
+        let res = crate::model::evaluate_repl_input(&query, repo);
+        self.repl_output = match res {
+            crate::model::ReplResult::SlashCommand(s) => Some(s),
+            crate::model::ReplResult::NucleusQuery(notes) => {
+                if notes.is_empty() {
+                    Some("No matching nucleus notes found.".to_string())
+                } else {
+                    Some(format!(
+                        "Matching notes ({}):\n{}",
+                        notes.len(),
+                        notes.join("\n")
+                    ))
+                }
+            }
+            crate::model::ReplResult::ToolCall { tool, output } => {
+                Some(format!("[{tool}]: {output}"))
+            }
+            crate::model::ReplResult::Unknown(msg) => Some(msg),
+            crate::model::ReplResult::Empty => None,
+        };
+        cx.notify();
+    }
+
+    /// Initialize Git repository + `.gitignore` + initial commit from the NUX Onboarding Card.
+    pub(super) fn init_git_from_onboarding(&mut self, cx: &mut Context<Self>) {
+        let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        match crate::vcs::init_repository(&repo_root) {
+            Ok(msg) => {
+                self.git_ready = true;
+                self.git_ready_verified = true;
+                self.git_branches = Some(crate::vcs::list_branches(&repo_root, "main"));
+                self.git_remote_branches =
+                    Some(crate::vcs::list_remote_branches(&repo_root, "main"));
+                self.git_worktrees = Some(crate::vcs::list_worktrees(&repo_root));
+                self.git_log_graph = crate::vcs::commit_graph(&repo_root);
+                self.rebuild_graph_rows();
+                self.show_toast(ToastKind::Success, msg, Some(4), cx);
+            }
+            Err(e) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Failed to initialize Git repository: {e}"),
+                    Some(5),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open the Settings overlay directly on the Providers tab with the preset picker open.
+    pub(super) fn open_provider_wizard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = true;
+        self.settings_target = SettingsTarget::Providers;
+        self.wizard_state = WizardState::PickPreset;
+        self.load_settings_inputs(window, cx);
+        cx.notify();
+    }
+
+    /// Populate the chat composer with a starter prompt from the NUX Onboarding Card and focus it.
+    pub(super) fn fill_starter_prompt(
+        &mut self,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = prompt.to_string();
+        self.input.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Auto-detect local CLI agents / API keys (or adopt existing global catalogue seats)
+    /// and seed the current repository's team, ensuring the first Quark is `@orchestrator`.
+    pub(super) fn auto_detect_and_seed_quarks(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let resolved_before = resolve_team(&self.team, &self.global);
+        if resolved_before.quarks.is_empty() && !self.global.quarks.is_empty() {
+            let ids: Vec<QuarkId> = self.global.quarks.iter().map(|s| s.id.clone()).collect();
+            for qid in ids {
+                let _ = toggle_or_adopt_quark_in_team(&mut self.team, &self.global, &qid);
+            }
+            self.save_repo_team(cx);
+            self.show_toast(
+                ToastKind::Success,
+                format!(
+                    "Adopted {} Quark(s) from global catalogue (first seat = @orchestrator).",
+                    self.global.quarks.len()
+                ),
+                Some(4),
+                cx,
+            );
+            return;
+        }
+
+        let has_orchestrator = resolved_before
+            .quarks
+            .iter()
+            .any(|s| s.flavor == hadron_lattice::Flavor::Orchestrator);
+        let env_vars: Vec<(String, String)> = std::env::vars().collect();
+        let discovered = build_onboarding_seats(&which_binary_exists, &env_vars, has_orchestrator);
+
+        let mut added = 0usize;
+        for seat in discovered {
+            let already_exists = self.global.quarks.iter().any(|s| s.id == seat.id)
+                || self.team.quarks.iter().any(|s| s.id == seat.id)
+                || self.team.roster.iter().any(|o| o.id == seat.id);
+            if !already_exists {
+                self.add_configured_quark(seat, cx);
+                added += 1;
+            }
+        }
+
+        if added > 0 {
+            self.show_toast(
+                ToastKind::Success,
+                format!(
+                    "Auto-detected and seated {added} Quark(s) (first Quark set as @orchestrator)."
+                ),
+                Some(4),
+                cx,
+            );
+        } else {
+            self.show_toast(
+                ToastKind::Info,
+                "No new local CLI agents found on PATH — opening Provider Wizard.".to_string(),
+                Some(4),
+                cx,
+            );
+            self.open_provider_wizard(window, cx);
+        }
+    }
+}
+
+/// Check whether `program` exists as an executable on `PATH` (delegates to SSOT in `headless_runner`).
+pub(super) fn which_binary_exists(program: &str) -> bool {
+    crate::headless_runner::which_binary_exists(program)
+}
+
+/// Pure, testable builder for zero-config NUX Quark discovery (delegates to SSOT in `headless_runner`).
+pub(super) fn build_onboarding_seats(
+    has_binary: &dyn Fn(&str) -> bool,
+    env_vars: &[(String, String)],
+    existing_has_orchestrator: bool,
+) -> Vec<hadron_lattice::Seat> {
+    crate::headless_runner::discover_default_seats(has_binary, env_vars, existing_has_orchestrator)
+}
+
+/// Pure decision half of `toggle_process_manager`: the next `process_manager_open`
+/// value, extracted so it's testable without a live `Chamber`/window (mirrors
+/// [`toggle_focus_target`] below).
+pub(super) fn toggle_process_manager_open(current: bool) -> bool {
+    !current
+}
+
+/// Pure decision half of [`Chamber::sync_view`]: whether reprojecting into
+/// `new_messages` is a pure append — safe to splice — rather than a wholesale field
+/// swap or a shrink, which must fall back to a full resync.
+///
+/// Row count alone cannot tell "grew" from "replaced": a same-length swap (two
+/// sessions with the same message count) looks like zero growth, and even a
+/// larger swap can look like ordinary growth by coincidence. Comparing the
+/// *leading* row's timestamp catches "the front of the list moved out from under
+/// us" in both cases — a real append never changes what event ended up first.
+pub(super) fn is_pure_append(
+    old_first_ts: Option<chrono::DateTime<chrono::Utc>>,
+    old_len: usize,
+    new_messages: &[MessageRow],
+) -> bool {
+    // Nothing existed before, so there is no leading row to contradict — growing
+    // from empty is unambiguously an append, not a swap.
+    if old_len == 0 {
+        return true;
+    }
+    new_messages.len() >= old_len && new_messages.first().map(|m| m.ts) == old_first_ts
+}
+
+pub(super) fn apply_orchestrator_exclusivity(
+    team: &mut hadron_lattice::Team,
+    global: &hadron_lattice::Team,
+    target_qid: &QuarkId,
+) {
+    for seat in &mut team.quarks {
+        if seat.id != *target_qid {
+            seat.flavor = hadron_lattice::Flavor::Worker;
+        }
+    }
+    for ov in &mut team.roster {
+        if ov.id != *target_qid {
+            let base_is_orchestrator = global
+                .get(&ov.id)
+                .map(|s| s.flavor == hadron_lattice::Flavor::Orchestrator)
+                .unwrap_or(false);
+            if ov.flavor == Some(hadron_lattice::Flavor::Orchestrator)
+                || (ov.flavor.is_none() && base_is_orchestrator)
+            {
+                ov.flavor = Some(hadron_lattice::Flavor::Worker);
+            }
+        }
+    }
+}
+
+/// Flip an adopted quark's `enabled` state, or adopt-and-enable an unadopted catalogue
+/// quark into `team` (promoting it to `Orchestrator` if the resolved team has none yet).
+/// Returns the new `enabled` state (`Some(true | false)`), or `None` if `qid` is unknown
+/// in both `team` and `global`.
+pub(super) fn toggle_or_adopt_quark_in_team(
+    team: &mut hadron_lattice::Team,
+    global: &hadron_lattice::Team,
+    qid: &QuarkId,
+) -> Option<bool> {
+    let resolved = resolve_team(team, global);
+    if let Some(current) = resolved.get(qid).map(|s| s.enabled) {
+        let want = !current;
+        if let Some(seat) = team.quarks.iter_mut().find(|s| s.id == *qid) {
+            seat.enabled = want;
+        } else if let Some(ov) = team.roster.iter_mut().find(|o| o.id == *qid) {
+            ov.enabled = Some(want);
+        } else {
+            team.roster.push(SeatOverride {
+                enabled: Some(want),
+                ..SeatOverride::role(qid.clone())
+            });
+        }
+        return Some(want);
+    }
+
+    if global.get(qid).is_none() {
+        return None;
+    }
+
+    let has_orchestrator = resolved
+        .quarks
+        .iter()
+        .any(|s| s.flavor == hadron_lattice::Flavor::Orchestrator);
+    let flavor_override = if !has_orchestrator {
+        Some(hadron_lattice::Flavor::Orchestrator)
+    } else if global
+        .get(qid)
+        .is_some_and(|s| s.flavor == hadron_lattice::Flavor::Orchestrator)
+    {
+        Some(hadron_lattice::Flavor::Worker)
+    } else {
+        None
+    };
+    if let Some(ov) = team.roster.iter_mut().find(|o| o.id == *qid) {
+        ov.enabled = Some(true);
+        if ov.flavor.is_none() {
+            ov.flavor = flavor_override;
+        }
+    } else {
+        team.roster.push(SeatOverride {
+            enabled: Some(true),
+            flavor: flavor_override,
+            ..SeatOverride::role(qid.clone())
+        });
+    }
+    Some(true)
+}
+
+/// Purge a quark from both the repo team and the global catalogue.
+///
+/// Removes any legacy full seat in `team.quarks`, any override in `team.roster`,
+/// and any definition in `global.quarks` (and `global.roster`).
+/// If the removed quark was an Orchestrator, automatically promotes the first
+/// remaining seated quark to Orchestrator to maintain swarm leadership invariants.
+pub(super) fn remove_quark_from_teams(
+    team: &mut hadron_lattice::Team,
+    global: &mut hadron_lattice::Team,
+    qid: &QuarkId,
+) {
+    team.quarks.retain(|s| &s.id != qid);
+    team.roster.retain(|o| &o.id != qid);
+    global.quarks.retain(|s| &s.id != qid);
+    global.roster.retain(|o| &o.id != qid);
+
+    // If no orchestrators remain in the resolved team, designate the first remaining seated quark.
+    let resolved = resolve_team(team, global);
+    if !resolved.quarks.is_empty()
+        && !resolved
+            .quarks
+            .iter()
+            .any(|s| s.flavor == hadron_lattice::Flavor::Orchestrator)
+    {
+        let first_id = resolved.quarks[0].id.clone();
+        if let Some(s) = team.quarks.iter_mut().find(|s| s.id == first_id) {
+            s.flavor = hadron_lattice::Flavor::Orchestrator;
+        } else if let Some(ov) = team.roster.iter_mut().find(|o| o.id == first_id) {
+            ov.flavor = Some(hadron_lattice::Flavor::Orchestrator);
+        } else if let Some(g) = global.quarks.iter_mut().find(|s| s.id == first_id) {
+            g.flavor = hadron_lattice::Flavor::Orchestrator;
+        } else {
+            team.roster.push(hadron_lattice::SeatOverride {
+                flavor: Some(hadron_lattice::Flavor::Orchestrator),
+                ..hadron_lattice::SeatOverride::role(first_id)
+            });
+        }
+    }
+}
+
+/// Where `ToggleFocus` sends focus when moving *toward* the terminal — always
+/// [`FocusTarget::Terminal`], since this is a pure function of the right rail's
+/// active tab alone. `FocusTarget::Chat` exists so [`Chamber::toggle_focus`]'s
+/// live-focus branch (terminal-focused → chat) can be expressed with the same
+/// type; this function never returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusTarget {
+    Chat,
+    Terminal,
+}
+
+/// Pure decision half of `ToggleFocus`'s "move toward the terminal" branch:
+/// given the right rail's currently active tab, decide the focus target (always
+/// terminal) and whether the rail needs to switch to the Terminal tab first. The
+/// other direction of the toggle — terminal-focused back to chat — depends on
+/// live window focus state, not just `active_rail_tab`, so it isn't representable
+/// as a pure function and is decided in [`Chamber::toggle_focus`] instead.
+pub(super) fn toggle_focus_target(active_rail_tab: RightRailTab) -> (FocusTarget, bool) {
+    (
+        FocusTarget::Terminal,
+        active_rail_tab != RightRailTab::Terminal,
+    )
+}
+
+/// Parses arguments to `/schedule add <id> <cron> [prompt...]`.
+/// Supports `@hourly`/`@daily`/`@weekly`/`@monthly` macros, quoted cron strings (`"0 9 * * 1-5"`),
+/// or unquoted 5-field cron expressions (`0 9 * * 1-5`).
+pub(super) fn parse_schedule_add_args(rest: &str) -> Result<(String, String, String), String> {
+    let usage =
+        "Usage: `/schedule add <id> <@daily | \"min hour dom mon dow\"> <prompt...>`".to_string();
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        return Err(usage);
+    }
+
+    let Some((id_tok, after_id)) = trimmed.split_once(char::is_whitespace) else {
+        return Err(usage);
+    };
+    let id = id_tok.trim().to_string();
+    let after_id = after_id.trim();
+    if after_id.is_empty() {
+        return Err(usage);
+    }
+
+    if after_id.starts_with('"') || after_id.starts_with('\'') {
+        let quote = after_id.chars().next().unwrap();
+        let inner = &after_id[quote.len_utf8()..];
+        let Some(end_idx) = inner.find(quote) else {
+            return Err(usage);
+        };
+        let cron = inner[..end_idx].trim().to_string();
+        let prompt = inner[end_idx + quote.len_utf8()..].trim().to_string();
+        return Ok((id, cron, prompt));
+    }
+
+    if after_id.starts_with('@') {
+        let (cron, prompt) = match after_id.split_once(char::is_whitespace) {
+            Some((c, p)) => (c.trim().to_string(), p.trim().to_string()),
+            None => (after_id.to_string(), String::new()),
+        };
+        return Ok((id, cron, prompt));
+    }
+
+    let mut tokens = after_id.split_whitespace();
+    let mut cron_fields = Vec::with_capacity(5);
+    for _ in 0..5 {
+        match tokens.next() {
+            Some(tok) => cron_fields.push(tok),
+            None => return Err(usage),
+        }
+    }
+    let cron = cron_fields.join(" ");
+    let prompt: Vec<&str> = tokens.collect();
+    Ok((id, cron, prompt.join(" ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_select_chat_tab_and_inspector_tab() {
+        // `set_chat_tab_index` / `set_inspector_tab_index` are thin wrappers over
+        // `ChatTab::from_index` / `RightRailTab::from_index`. A `Chamber` can only be
+        // built with a live `Window` + `Context`, so we assert the index→tab mapping
+        // the setters delegate to rather than standing up a headless GUI app.
+        assert!(ChatTab::from_index(2) == ChatTab::Stats);
+        assert!(RightRailTab::from_index(1) == RightRailTab::FileTree);
+        // Out-of-range clamps to the default tab, so the setters never panic.
+        assert!(ChatTab::from_index(99) == ChatTab::Chat);
+        assert!(RightRailTab::from_index(99) == RightRailTab::Terminal);
+    }
+
+    #[test]
+    fn toggle_focus_targets_terminal_when_terminal_tab_active() {
+        let (target, switch_rail) = toggle_focus_target(RightRailTab::Terminal);
+        assert_eq!(target, FocusTarget::Terminal);
+        assert!(
+            !switch_rail,
+            "already on the Terminal tab, no rail switch needed"
+        );
+    }
+
+    #[test]
+    fn toggle_focus_else_case_switches_rail_to_terminal() {
+        let (target, switch_rail) = toggle_focus_target(RightRailTab::FileTree);
+        assert_eq!(target, FocusTarget::Terminal);
+        assert!(switch_rail, "on FileTree tab, must switch rail to Terminal");
+    }
+
+    #[test]
+    fn toggle_process_manager_open_flips_state() {
+        assert!(toggle_process_manager_open(false));
+        assert!(!toggle_process_manager_open(true));
+    }
+
+    #[test]
+    fn orchestrator_exclusivity_demotes_other_orchestrators() {
+        use hadron_lattice::{Flavor, QuarkId, Seat, SeatOverride, Team};
+
+        let mut team = Team {
+            quarks: vec![
+                Seat::cli(
+                    QuarkId::new("cli-agy"),
+                    "agy",
+                    "gemini",
+                    Flavor::Orchestrator,
+                ),
+                Seat::cli(QuarkId::new("cli-opus"), "opus", "claude", Flavor::Worker),
+            ],
+            roster: vec![
+                SeatOverride {
+                    flavor: Some(Flavor::Orchestrator),
+                    ..SeatOverride::role(QuarkId::new("override-one"))
+                },
+                SeatOverride {
+                    flavor: None, // inherits Orchestrator from global default
+                    ..SeatOverride::role(QuarkId::new("override-two"))
+                },
+            ],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        let global = Team {
+            quarks: vec![Seat::cli(
+                QuarkId::new("override-two"),
+                "two",
+                "m2",
+                Flavor::Orchestrator,
+            )],
+            roster: vec![],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        apply_orchestrator_exclusivity(&mut team, &global, &QuarkId::new("override-one"));
+
+        // cli-agy was Orchestrator, should be demoted to Worker
+        assert_eq!(team.quarks[0].flavor, Flavor::Worker);
+        // cli-opus was Worker, should stay Worker
+        assert_eq!(team.quarks[1].flavor, Flavor::Worker);
+        // override-two resolved to Orchestrator by default, should be overridden to Worker
+        assert_eq!(team.roster[1].flavor, Some(Flavor::Worker));
+    }
+
+    #[test]
+    fn remove_quark_from_teams_removes_from_both_repo_and_global() {
+        use hadron_lattice::SeatOverride;
+        use hadron_lattice::{resolve_team, Flavor, QuarkId, Seat, Team};
+
+        let target_id = QuarkId::new("acp-claude-3");
+        let other_id = QuarkId::new("cli-agy");
+
+        let mut repo = Team {
+            quarks: vec![],
+            roster: vec![
+                SeatOverride {
+                    flavor: Some(Flavor::Worker),
+                    ..SeatOverride::role(target_id.clone())
+                },
+                SeatOverride {
+                    flavor: Some(Flavor::Orchestrator),
+                    ..SeatOverride::role(other_id.clone())
+                },
+            ],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        let mut global = Team {
+            quarks: vec![
+                Seat::cli(target_id.clone(), "claude", "opus", Flavor::Worker),
+                Seat::cli(other_id.clone(), "agy", "gemini", Flavor::Orchestrator),
+            ],
+            roster: vec![],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        // Before removal: target_id is present and resolved in the repo
+        let before = resolve_team(&repo, &global);
+        assert_eq!(before.quarks.len(), 2);
+        assert!(before.get(&target_id).is_some());
+
+        remove_quark_from_teams(&mut repo, &mut global, &target_id);
+
+        // After removal: target_id is purged from repo.roster, repo.quarks, and global.quarks
+        assert!(repo.roster.iter().all(|o| o.id != target_id));
+        assert!(repo.quarks.iter().all(|s| s.id != target_id));
+        assert!(global.quarks.iter().all(|s| s.id != target_id));
+
+        let after = resolve_team(&repo, &global);
+        assert_eq!(after.quarks.len(), 1);
+        assert!(after.get(&target_id).is_none());
+        assert_eq!(after.quarks[0].id, other_id);
+    }
+
+    #[test]
+    fn remove_quark_from_teams_promotes_remaining_quark_when_orchestrator_removed() {
+        use hadron_lattice::SeatOverride;
+        use hadron_lattice::{resolve_team, Flavor, QuarkId, Seat, Team};
+
+        let orch_id = QuarkId::new("acp-claude-3");
+        let worker_id = QuarkId::new("cli-agy");
+
+        let mut repo = Team {
+            quarks: vec![],
+            roster: vec![
+                SeatOverride {
+                    flavor: Some(Flavor::Orchestrator),
+                    ..SeatOverride::role(orch_id.clone())
+                },
+                SeatOverride {
+                    flavor: Some(Flavor::Worker),
+                    ..SeatOverride::role(worker_id.clone())
+                },
+            ],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        let mut global = Team {
+            quarks: vec![
+                Seat::cli(orch_id.clone(), "claude", "opus", Flavor::Orchestrator),
+                Seat::cli(worker_id.clone(), "agy", "gemini", Flavor::Worker),
+            ],
+            roster: vec![],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        remove_quark_from_teams(&mut repo, &mut global, &orch_id);
+
+        let after = resolve_team(&repo, &global);
+        assert_eq!(after.quarks.len(), 1);
+        assert_eq!(after.quarks[0].id, worker_id);
+        assert_eq!(
+            after.quarks[0].flavor,
+            Flavor::Orchestrator,
+            "Remaining worker must be promoted to Orchestrator when sole orchestrator is removed"
+        );
+    }
+
+    #[test]
+    fn removing_quark_from_global_drops_orphan_overrides_and_not_visible() {
+        use crate::model::project_with_team;
+        use hadron_lattice::{resolve_team, Flavor, QuarkId, Seat, Team};
+
+        let target_id = QuarkId::new("acp-claude-3");
+        let remaining_id = QuarkId::new("cli-agy");
+
+        let repo = Team {
+            quarks: vec![],
+            roster: vec![
+                hadron_lattice::SeatOverride::role(target_id.clone()),
+                hadron_lattice::SeatOverride::role(remaining_id.clone()),
+            ],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        // When target_id is removed from global catalogue:
+        let global_without_target = Team {
+            quarks: vec![Seat::cli(
+                remaining_id.clone(),
+                "agy",
+                "gemini",
+                Flavor::Orchestrator,
+            )],
+            roster: vec![],
+            max_exchanges: None,
+            nucleus_index_budget_kb: None,
+            merge_strategy: None,
+            ..Default::default()
+        };
+
+        // target_id is not in global catalogue so resolve_team drops both legacy seats and overrides for it
+        let resolved = resolve_team(&repo, &global_without_target);
+        assert_eq!(resolved.quarks.len(), 1);
+        assert_eq!(resolved.quarks[0].id, remaining_id);
+        assert!(resolved.get(&target_id).is_none());
+
+        // Even with historical field events mentioning target_id
+        let events = vec![hadron_lattice::Event::new(
+            hadron_lattice::Actor::Quark(target_id.clone()),
+            Some(remaining_id.clone()),
+            hadron_lattice::Kind::Message {
+                body: "hello".into(),
+            },
+        )];
+        let view = project_with_team(&events, &resolved, &global_without_target);
+        assert!(
+            view.roster.iter().all(|r| r.id != target_id.as_str()),
+            "Quark removed from global catalogue must NOT appear on the roster"
+        );
+    }
+
+    fn row_at(ts_secs: i64, from: &str) -> MessageRow {
+        use chrono::TimeZone;
+        MessageRow {
+            from: from.to_string(),
+            to: None,
+            body: String::new(),
+            kind_label: "message",
+            usage: None,
+            ts: chrono::Utc.timestamp_opt(ts_secs, 0).unwrap(),
+            legacy_used_tokens: None,
+            turn: None,
+            severity: None,
+        }
+    }
+
+    // Test 2 (spec): a pure append — same leading row, strictly more rows — is safe
+    // to splice.
+    #[test]
+    fn sync_view_splices_on_pure_append() {
+        let old = [row_at(1, "Human"), row_at(2, "Sonnet"), row_at(3, "Human")];
+        let old_first_ts = old.first().map(|m| m.ts);
+        let grown = [
+            old[0].clone(),
+            old[1].clone(),
+            old[2].clone(),
+            row_at(4, "Sonnet"),
+        ];
+        assert!(is_pure_append(old_first_ts, old.len(), &grown));
+    }
+
+    // Test 1 (spec): a wholesale field swap that happens to keep the SAME row count
+    // must NOT be read as a pure append — it needs a full resync, or row 0 renders
+    // under the old field's author while `chat_message_ixs`/`view.messages` have
+    // already moved on to the new one (the "your message came as mine" shape).
+    #[test]
+    fn sync_view_resyncs_when_the_field_is_swapped_at_equal_length() {
+        let old = [row_at(1, "Human"), row_at(2, "Sonnet"), row_at(3, "Human")];
+        let old_first_ts = old.first().map(|m| m.ts);
+        let swapped = [
+            row_at(10, "Human"),
+            row_at(11, "Antigravity"),
+            row_at(12, "Human"),
+        ];
+        assert_eq!(
+            swapped.len(),
+            old.len(),
+            "must be equal-length to reproduce the bug"
+        );
+        assert!(!is_pure_append(old_first_ts, old.len(), &swapped));
+    }
+
+    #[test]
+    fn sync_view_resyncs_on_shrink() {
+        let old = [row_at(1, "Human"), row_at(2, "Sonnet"), row_at(3, "Human")];
+        let old_first_ts = old.first().map(|m| m.ts);
+        let cleared: [crate::model::MessageRow; 0] = [];
+        assert!(!is_pure_append(old_first_ts, old.len(), &cleared));
+    }
+
+    #[test]
+    fn sync_view_treats_first_population_as_append() {
+        // Empty → non-empty: no prior row to disagree with, so the growth branch is
+        // fine (it degenerates to the same splice-from-0 a resync would do).
+        let grown = [row_at(1, "Human")];
+        assert!(is_pure_append(None, 0, &grown));
+    }
+
+    #[test]
+    fn dismiss_does_not_steal_focus_from_active_terminal() {
+        // Verify toggle_focus_target properly targets Terminal when on Terminal tab
+        let (target, _) = toggle_focus_target(RightRailTab::Terminal);
+        assert_eq!(target, FocusTarget::Terminal);
+    }
+
+    #[test]
+    fn test_git_subtab_indexing_and_cycling() {
+        assert_eq!(GitSubtab::from_index(0), GitSubtab::Branches);
+        assert_eq!(GitSubtab::from_index(1), GitSubtab::Worktrees);
+        assert_eq!(GitSubtab::from_index(2), GitSubtab::Changes);
+        assert_eq!(GitSubtab::from_index(3), GitSubtab::Graph);
+        assert_eq!(GitSubtab::from_index(4), GitSubtab::Diff3Way);
+        assert_eq!(GitSubtab::from_index(5), GitSubtab::Remote);
+        assert_eq!(GitSubtab::from_index(99), GitSubtab::Branches);
+
+        let n = GitSubtab::ALL.len() as isize;
+        let next = (0isize + 1).rem_euclid(n) as usize;
+        assert_eq!(GitSubtab::from_index(next), GitSubtab::Worktrees);
+        let prev = (0isize - 1).rem_euclid(n) as usize;
+        assert_eq!(GitSubtab::from_index(prev), GitSubtab::Remote);
+    }
+
+    #[test]
+    fn test_roster_tab_indexing_and_cycling() {
+        assert_eq!(RosterTab::from_index(0), RosterTab::Active);
+        assert_eq!(RosterTab::from_index(1), RosterTab::All);
+        assert_eq!(RosterTab::from_index(99), RosterTab::Active);
+
+        let n = RosterTab::ALL.len() as isize;
+        let next = (0isize + 1).rem_euclid(n) as usize;
+        assert_eq!(RosterTab::from_index(next), RosterTab::All);
+        let prev = (0isize - 1).rem_euclid(n) as usize;
+        assert_eq!(RosterTab::from_index(prev), RosterTab::All);
+    }
+
+    #[test]
+    fn test_perform_clear_field_logs_pre_and_post_clear_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let field_path = tmp.path().join("field.jsonl");
+        let session_dir = tmp.path().join("sessions").join("20261009_120000");
+
+        let initial_ev = Event::new(
+            Actor::Human,
+            None,
+            Kind::Message {
+                body: "hello swarm".to_string(),
+            },
+        );
+        io::append_event(&field_path, &initial_ev).expect("write initial event");
+
+        let roster = vec![crate::model::RosterRow {
+            id: "acp-agy".to_string(),
+            display_name: Some("agy".to_string()),
+            state: hadron_lattice::QuarkState::Ground,
+            mode: hadron_lattice::Mode::Bypass,
+            mode_is_override: false,
+            vendor: "google".to_string(),
+            model: "gemini-2.5-pro".to_string(),
+            flavor: None,
+            transport: hadron_lattice::Transport::Acp,
+            effort: None,
+            enabled: true,
+            adopted: true,
+            tokens: 0,
+            unknown_turns: 0,
+        }];
+
+        perform_clear_field(
+            &field_path,
+            &session_dir,
+            "20261009_120000",
+            hadron_lattice::Mode::Bypass,
+            &roster,
+            None,
+        )
+        .expect("perform_clear_field must succeed");
+
+        let archive_path = session_dir.join("field.jsonl");
+        let archived_events = io::read_events(&archive_path).expect("read archived events");
+        assert_eq!(archived_events.len(), 2);
+        assert!(matches!(archived_events[0].kind, Kind::Message { .. }));
+        match &archived_events[1].kind {
+            Kind::Command {
+                cmd,
+                exit,
+                out_summary,
+            } => {
+                assert_eq!(cmd, "/clear");
+                assert_eq!(*exit, 0);
+                assert_eq!(out_summary, "Archiving session to 20261009_120000");
+            }
+            other => panic!("expected Kind::Command, got {other:?}"),
+        }
+
+        let active_events = io::read_events(&field_path).expect("read active events");
+        assert!(active_events.len() >= 3);
+        match &active_events[0].kind {
+            Kind::Command {
+                cmd,
+                exit,
+                out_summary,
+            } => {
+                assert_eq!(cmd, "/clear");
+                assert_eq!(*exit, 0);
+                assert_eq!(out_summary, "Session reset (archived 20261009_120000)");
+            }
+            other => panic!("expected Kind::Command for first event, got {other:?}"),
+        }
+        match &active_events[1].kind {
+            Kind::ModeSet { mode } => {
+                assert_eq!(*mode, hadron_lattice::Mode::Bypass);
+            }
+            other => panic!("expected Kind::ModeSet for second event, got {other:?}"),
+        }
+        match &active_events[2].kind {
+            Kind::Reboot => {
+                assert_eq!(
+                    active_events[2].to.as_ref().map(|q| q.as_str()),
+                    Some("acp-agy")
+                );
+            }
+            other => panic!("expected Kind::Reboot for third event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_or_adopt_quark_in_team_adopts_unadopted_and_flips_adopted() {
+        let q1 = QuarkId::new("acp-claude");
+        let q2 = QuarkId::new("cli-agy");
+        let global = hadron_lattice::Team {
+            quarks: vec![
+                hadron_lattice::Seat::cli(
+                    q1.clone(),
+                    "claude",
+                    "claude-opus-4-8",
+                    hadron_lattice::Flavor::Worker,
+                ),
+                hadron_lattice::Seat::cli(
+                    q2.clone(),
+                    "agy",
+                    "gemini-3.8-flash",
+                    hadron_lattice::Flavor::Orchestrator,
+                ),
+            ],
+            ..Default::default()
+        };
+        let mut repo = hadron_lattice::Team::default();
+
+        // Clicking "Enable" on an unadopted catalogue quark in an empty repo adopts it
+        // as enabled and promotes it to Orchestrator (since the repo has no orchestrator yet).
+        assert_eq!(
+            toggle_or_adopt_quark_in_team(&mut repo, &global, &q1),
+            Some(true)
+        );
+        let resolved = resolve_team(&repo, &global);
+        let s1 = resolved.get(&q1).expect("q1 must be adopted");
+        assert!(s1.enabled);
+        assert_eq!(s1.flavor, hadron_lattice::Flavor::Orchestrator);
+
+        // Enabling a second unadopted quark adopts it as enabled without clobbering the orchestrator.
+        assert_eq!(
+            toggle_or_adopt_quark_in_team(&mut repo, &global, &q2),
+            Some(true)
+        );
+        let resolved = resolve_team(&repo, &global);
+        let s2 = resolved.get(&q2).expect("q2 must be adopted");
+        assert!(s2.enabled);
+        assert_eq!(s2.flavor, hadron_lattice::Flavor::Worker);
+
+        // Toggling an already-adopted enabled quark disables it, and toggling again re-enables it.
+        assert_eq!(
+            toggle_or_adopt_quark_in_team(&mut repo, &global, &q2),
+            Some(false)
+        );
+        assert!(!resolve_team(&repo, &global).get(&q2).unwrap().enabled);
+        assert_eq!(
+            toggle_or_adopt_quark_in_team(&mut repo, &global, &q2),
+            Some(true)
+        );
+        assert!(resolve_team(&repo, &global).get(&q2).unwrap().enabled);
+
+        // Unknown quark id returns None and leaves the repo untouched.
+        assert_eq!(
+            toggle_or_adopt_quark_in_team(&mut repo, &global, &QuarkId::new("ghost")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_schedule_add_args_supports_macros_quotes_and_five_fields() {
+        let (id, cron, prompt) =
+            parse_schedule_add_args("daily-sec @daily Run security audit").unwrap();
+        assert_eq!(id, "daily-sec");
+        assert_eq!(cron, "@daily");
+        assert_eq!(prompt, "Run security audit");
+
+        let (id2, cron2, prompt2) =
+            parse_schedule_add_args("weekday-check \"0 9 * * 1-5\" Check open PRs").unwrap();
+        assert_eq!(id2, "weekday-check");
+        assert_eq!(cron2, "0 9 * * 1-5");
+        assert_eq!(prompt2, "Check open PRs");
+
+        let (id3, cron3, prompt3) =
+            parse_schedule_add_args("unquoted-job 30 14 * * * Run afternoon summary").unwrap();
+        assert_eq!(id3, "unquoted-job");
+        assert_eq!(cron3, "30 14 * * *");
+        assert_eq!(prompt3, "Run afternoon summary");
+
+        assert!(parse_schedule_add_args("").is_err());
+        assert!(parse_schedule_add_args("only-id").is_err());
+    }
+
+    #[test]
+    fn test_wsl_skills_dir_resolution_for_unc_path() {
+        let unc_path =
+            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\field.jsonl");
+        let wsl_skills = hadron_lattice::wsl::wsl_skills_dir_for_field(unc_path);
+        assert!(wsl_skills.is_some());
+        let s = wsl_skills.unwrap().to_string_lossy().to_string();
+        assert!(s.contains("skills"));
+        assert!(s.contains("Ubuntu"));
+    }
+
+    #[test]
+    fn build_onboarding_seats_promotes_first_quark_to_orchestrator_and_rest_to_worker() {
+        let seats = build_onboarding_seats(&|bin| bin == "claude" || bin == "agy", &[], false);
+        assert_eq!(seats.len(), 2);
+        assert_eq!(seats[0].id.as_str(), "cli-claude");
+        assert_eq!(seats[0].flavor, hadron_lattice::Flavor::Orchestrator);
+        assert_eq!(seats[1].id.as_str(), "cli-agy");
+        assert_eq!(seats[1].flavor, hadron_lattice::Flavor::Worker);
+
+        // When an orchestrator already exists, all newly discovered seats are workers.
+        let seats_with_existing =
+            build_onboarding_seats(&|bin| bin == "claude" || bin == "agy", &[], true);
+        assert_eq!(seats_with_existing.len(), 2);
+        assert_eq!(
+            seats_with_existing[0].flavor,
+            hadron_lattice::Flavor::Worker
+        );
+        assert_eq!(
+            seats_with_existing[1].flavor,
+            hadron_lattice::Flavor::Worker
+        );
+    }
+
+    #[test]
+    fn build_onboarding_seats_falls_back_to_env_api_key_when_no_binaries_found() {
+        let env = vec![("GEMINI_API_KEY".to_string(), "AIza-test-key".to_string())];
+        let seats = build_onboarding_seats(&|_| false, &env, false);
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].id.as_str(), "cli-gemini");
+        assert_eq!(seats[0].flavor, hadron_lattice::Flavor::Orchestrator);
+        assert_eq!(seats[0].secret_env, vec!["GEMINI_API_KEY".to_string()]);
+    }
+}

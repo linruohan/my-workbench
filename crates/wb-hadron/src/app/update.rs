@@ -1,0 +1,1111 @@
+use super::Chamber;
+use gpui_kit::{Context, Window};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+pub const CARGO_INSTALL_ARGV: &[&str] = &[
+    "cargo",
+    "install",
+    "--locked",
+    "--git",
+    "https://github.com/s0lda/hadron.git",
+    "hadron",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateState {
+    Idle,
+    Checking,
+    Available {
+        version: String,
+        commit: Option<String>,
+    },
+    Installing {
+        version: String,
+    },
+    Installed {
+        version: String,
+    },
+    UpToDate,
+    Failed(String),
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+/// The numeric components of a `v`-prefixed release tag, or `None` for anything else.
+///
+/// **This repo's tags are not all releases.** `/abandon` writes an archive ref for every
+/// branch it discards (`archive/<slug>`, see the branch-deletion invariant), and there
+/// are several already. Without this filter, one `git push --tags` would make the update
+/// pill offer "update to version archive/cli-agy-auto-update-20260727" and a click would
+/// run `cargo install` against whatever `main` happened to be.
+///
+/// Returning the components rather than the string is what lets the caller order them
+/// NUMERICALLY: `git ls-remote` sorts its output lexicographically, under which
+/// `v0.10.0` sorts before `v0.9.0`, so "the last line" is not "the newest release".
+fn release_version(tag: &str) -> Option<Vec<u64>> {
+    // `git ls-remote` emits a peeled `refs/tags/v1.0^{}` line beside each annotated tag.
+    let tag = tag.strip_suffix("^{}").unwrap_or(tag);
+    let rest = tag.strip_prefix('v')?;
+    let parts: Vec<u64> = rest
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Parses `git ls-remote` output and returns the newest release strictly newer than
+/// `current_version` whose GitHub Release build is ready (`is_ready(version) == true`),
+/// along with a boolean indicating whether a newer release tag exists on remote git whose
+/// build is not ready yet (so the caller can re-poll while GitHub Actions finishes).
+pub fn parse_remote_update_info_with_readiness<F>(
+    remote_output: &str,
+    current_version: &str,
+    mut is_ready: F,
+) -> (UpdateState, bool)
+where
+    F: FnMut(&str) -> bool,
+{
+    let current = release_version(&format!("v{current_version}"));
+    let mut candidates: Vec<(Vec<u64>, String, String)> = Vec::new();
+
+    for line in remote_output.trim().lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let [sha, refname, ..] = parts[..] else {
+            continue;
+        };
+        let Some(tag) = refname.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let Some(key) = release_version(tag) else {
+            continue;
+        };
+        // Strictly newer only. `!=` offered a *downgrade* to anyone running a build ahead
+        // of the newest tag — every developer working from a checkout.
+        if current.as_ref().is_none_or(|c| key > *c) {
+            if !candidates.iter().any(|(k, _, _)| *k == key) {
+                let version = tag
+                    .trim_end_matches("^{}")
+                    .trim_start_matches('v')
+                    .to_string();
+                let short_sha = sha[..7.min(sha.len())].to_string();
+                candidates.push((key, version, short_sha));
+            }
+        }
+    }
+
+    // Check from newest release version to oldest.
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut has_pending_unbuilt_tag = false;
+    for (_key, version, sha) in candidates {
+        if is_ready(&version) {
+            return (
+                UpdateState::Available {
+                    version,
+                    commit: Some(sha),
+                },
+                has_pending_unbuilt_tag,
+            );
+        }
+        has_pending_unbuilt_tag = true;
+    }
+
+    (UpdateState::UpToDate, has_pending_unbuilt_tag)
+}
+
+#[cfg(test)]
+pub fn parse_remote_update_info(remote_output: &str, current_version: &str) -> UpdateState {
+    parse_remote_update_info_with_readiness(remote_output, current_version, |_| true).0
+}
+
+/// The install command, built in one place so a test can inspect it without running it.
+///
+/// `cargo install --git` shells out to **git**, and a GUI process has no terminal: a
+/// private/renamed remote, or an expired credential helper, makes git ask for a password
+/// on stdin and wait for an answer that can never come — the pill would read
+/// "Installing…" forever with no way to cancel. Nulling stdin and setting
+/// `GIT_TERMINAL_PROMPT=0` turns that hang into a fast, legible failure. `hadron-gluon`
+/// learned the same thing the hard way (`snapshot::git_with_env`).
+/// `tag` is pinned with `--tag`, and that is not decoration: without it
+/// `cargo install --git` builds the default branch's HEAD, so the pill would advertise
+/// a release version and install whatever `main` happened to be at click time. Every flag
+/// goes BEFORE the package spec — `cargo` reads the last positional as the package, and
+/// a `--tag` appended after it is read as a second package name.
+fn install_argv(tag: &str, build_dir: Option<&Path>) -> Vec<String> {
+    let (pkg, head) = CARGO_INSTALL_ARGV
+        .split_last()
+        .expect("CARGO_INSTALL_ARGV carries at least a program and a package");
+    let mut argv: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+    argv.push("--tag".into());
+    argv.push(tag.into());
+    if let Some(dir) = build_dir {
+        argv.push("--target-dir".into());
+        argv.push(dir.to_string_lossy().into_owned());
+    }
+    argv.push(pkg.to_string());
+    argv
+}
+
+/// What to type when the pill cannot run cargo itself — the same argv, minus the private
+/// build directory, which is the click's business and not a human's. Everything that
+/// decides *what gets installed* is still shared, so the advice and the click can never
+/// install different things.
+fn manual_install_hint(tag: &str) -> String {
+    install_argv(tag, None).join(" ")
+}
+
+/// Where an update leaves its build tree and its log: `~/.hadron/update/`.
+///
+/// Both halves exist because a *failed* click used to leave nothing behind but rubbish.
+/// `cargo install` builds in a fresh temp directory under `TMPDIR` and abandons it where
+/// it died, so on 2026-07-30 four failed attempts left 6.3 GB of half-built workspace on
+/// a 12 GB tmpfs — and, because each retry got a *new* temp directory, every one of them
+/// restarted the 2,110-crate build from scratch. One stable, disk-backed directory fixes
+/// both: nothing accumulates, and a retry after an interrupted attempt is incremental.
+fn update_dir() -> Option<PathBuf> {
+    Some(hadron_lattice::user_hadron_dir()?.join("update"))
+}
+
+fn update_build_dir() -> Option<PathBuf> {
+    Some(update_dir()?.join("build"))
+}
+
+/// The full transcript of the last install attempt — the thing there was no such file as
+/// when the update first failed and the question was "check the cargo install logs".
+pub fn update_log_path() -> Option<PathBuf> {
+    Some(update_dir()?.join("install.log"))
+}
+
+fn install_command(tag: &str) -> Command {
+    let argv = install_argv(tag, update_build_dir().as_deref());
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .stdin(std::process::Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
+/// Write the whole attempt down before reducing it to something pill-sized. Best effort:
+/// a log we could not write must not turn a successful install into a failed one, so
+/// every error here is deliberately discarded and the caller is told by the `Option`.
+fn write_install_log(command: &str, out: &Output) -> Option<PathBuf> {
+    let path = update_log_path()?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let body = format!(
+        "$ {}\n{}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+        command,
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::write(&path, body).ok()?;
+    Some(path)
+}
+
+/// The pill fits a few lines; a `cargo install` failure is hundreds. Keep the tail — the
+/// part that names the error — and point at the log for the rest.
+fn failure_message(status: &str, stderr: &str, log: Option<&Path>) -> String {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let tail = if lines.len() > 5 {
+        lines[lines.len() - 5..].join("\n")
+    } else {
+        stderr.trim().to_string()
+    };
+    let head = if tail.trim().is_empty() {
+        format!("cargo install exited with {status}")
+    } else {
+        tail
+    };
+    match log {
+        Some(p) => format!("{head}\n\nFull log: {}", p.display()),
+        None => head,
+    }
+}
+
+/// How long the finished pill stays on screen before the window goes away. An update
+/// that vanished the moment it succeeded would read as a crash — this is the only reason
+/// the restart is not immediate.
+const RESTART_GRACE: Duration = Duration::from_secs(2);
+
+/// Set exactly once, by the install that succeeded, and read by `main` after the window
+/// has closed. A `static` because the two ends are on opposite sides of `app::run`:
+/// `Chamber` does not outlive the window, and `main` owns the daemon teardown that has
+/// to happen *between* the quit and the relaunch.
+static RESTART_AFTER_UPDATE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the chamber quit in order to come back on the newly-installed binary, as
+/// opposed to a human closing the window. `main` uses it for both halves of the restart:
+/// stopping the daemon (which is still the *old* build) and relaunching.
+pub fn restart_after_update_requested() -> bool {
+    RESTART_AFTER_UPDATE.load(Ordering::SeqCst)
+}
+
+/// The one state that warrants a restart.
+///
+/// A restart is destructive — it stops the daemon, and with it every turn in flight — so
+/// it may only ever follow an install that actually finished. `Failed` in particular
+/// leaves the running binary untouched, and restarting into it would cost the human a
+/// swarm for nothing.
+fn warrants_restart(state: &UpdateState) -> bool {
+    matches!(state, UpdateState::Installed { .. })
+}
+
+/// The tag naming release `version` — the inverse of [`release_version`], which is what
+/// makes "compare the parsed version, then install the tag it came from" sound. Exact
+/// because `release_version` only admits `v` + dot-separated integers, so there is
+/// never a second `v` or a suffix to lose.
+fn release_tag(version: &str) -> String {
+    format!("v{version}")
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_BINARIES: &[&str] = &[
+    "hadron.exe",
+    "hadron-chamber.exe",
+    "hadron-gluon.exe",
+    "hadron-forge-mcp.exe",
+];
+
+#[cfg(any(windows, test))]
+fn prepare_windows_bin_overwrite_in(bin_dir: &Path) {
+    for name in WINDOWS_BINARIES {
+        let bin_path = bin_dir.join(name);
+        if bin_path.exists() {
+            let mut old_path = bin_dir.join(format!("{name}.old"));
+            if old_path.exists() && std::fs::remove_file(&old_path).is_err() {
+                old_path = bin_dir.join(format!("{name}.old.{}", std::process::id()));
+                if old_path.exists() {
+                    if let Err(err) = std::fs::remove_file(&old_path) {
+                        eprintln!(
+                            "Warning: could not remove stale backup {}: {err}",
+                            old_path.display()
+                        );
+                    }
+                }
+            }
+            if let Err(err) = std::fs::rename(&bin_path, &old_path) {
+                eprintln!(
+                    "Warning: could not rename {} to {}: {err}",
+                    bin_path.display(),
+                    old_path.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn restore_windows_bin_if_missing_in(bin_dir: &Path) {
+    for name in WINDOWS_BINARIES {
+        let bin_path = bin_dir.join(name);
+        if !bin_path.exists() {
+            let pid_old = bin_dir.join(format!("{name}.old.{}", std::process::id()));
+            let plain_old = bin_dir.join(format!("{name}.old"));
+            let restore_src = if pid_old.exists() {
+                Some(pid_old)
+            } else if plain_old.exists() {
+                Some(plain_old)
+            } else {
+                None
+            };
+            if let Some(src) = restore_src {
+                if let Err(err) = std::fs::rename(&src, &bin_path) {
+                    eprintln!(
+                        "Warning: could not restore {} from {}: {err}",
+                        bin_path.display(),
+                        src.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn prepare_windows_cargo_bin_overwrite() -> Option<PathBuf> {
+    let cargo_bin = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .map(PathBuf::from)
+                .ok()
+                .map(|p| p.join(".cargo"))
+        })
+        .map(|p| p.join("bin"));
+
+    if let Some(ref dir) = cargo_bin {
+        prepare_windows_bin_overwrite_in(dir);
+    }
+    cargo_bin
+}
+
+pub fn perform_cargo_install(target_version: &str) -> UpdateState {
+    #[cfg(windows)]
+    let cargo_bin = prepare_windows_cargo_bin_overwrite();
+
+    let tag = release_tag(target_version);
+    let mut cmd = install_command(&tag);
+    // Debug-formatted from the `Command` itself, so the log's first line is what actually
+    // ran — `--target-dir` and all — rather than a hand-kept copy of it.
+    let shown = format!("{cmd:?}");
+    let out = cmd.output();
+
+    #[cfg(windows)]
+    if !matches!(&out, Ok(o) if o.status.success()) {
+        if let Some(ref dir) = cargo_bin {
+            restore_windows_bin_if_missing_in(dir);
+        }
+    }
+
+    match out {
+        Ok(o) if o.status.success() => {
+            write_install_log(&shown, &o);
+            UpdateState::Installed {
+                version: target_version.to_string(),
+            }
+        }
+        Ok(o) => {
+            let log = write_install_log(&shown, &o);
+            let msg = failure_message(
+                &o.status.to_string(),
+                &String::from_utf8_lossy(&o.stderr),
+                log.as_deref(),
+            );
+            UpdateState::Failed(msg)
+        }
+        // The manual fallback is DERIVED from the command we would have run, tag and
+        // all. Spelled out by hand it drifted the moment `--tag` was added, and advice
+        // that installs something other than what the pill offered is worse than none.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => UpdateState::Failed(format!(
+            "Cargo is not installed or not on PATH. Run manually: {}",
+            manual_install_hint(&tag)
+        )),
+        Err(e) => UpdateState::Failed(format!("Failed to run cargo: {}", e)),
+    }
+}
+
+/// Detected installation method of the running Hadron process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallMethod {
+    Cargo,
+    Homebrew,
+    Binary,
+}
+
+/// Detects how Hadron was installed based on executable path.
+pub fn detect_install_method_from_path(path: &Path) -> InstallMethod {
+    let path_str = path.to_string_lossy();
+    if path_str.contains(".cargo") {
+        InstallMethod::Cargo
+    } else if path_str.contains("/opt/homebrew/") || path_str.contains("/usr/local/Cellar/") {
+        InstallMethod::Homebrew
+    } else {
+        InstallMethod::Binary
+    }
+}
+
+fn hide_console_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Returns the target triple matching `.github/workflows/release.yml` for the current OS/arch.
+pub fn current_platform_target_triple() -> Option<&'static str> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("x86_64-pc-windows-msvc")
+    } else {
+        None
+    }
+}
+
+/// Builds the release asset tarball URL for a target platform.
+pub fn release_asset_url(version: &str, target_triple: &str) -> String {
+    let clean = version.trim_start_matches('v');
+    let ext = if target_triple.contains("windows") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    format!(
+        "https://github.com/s0lda/hadron/releases/download/v{clean}/hadron-v{clean}-{target_triple}.{ext}"
+    )
+}
+
+/// Checks whether the GitHub Release build artifacts for `version` have finished building
+/// and are published on GitHub Releases.
+///
+/// Pushing a `vX.Y.Z` tag makes the tag immediately visible to `git ls-remote`, while
+/// `.github/workflows/release.yml` takes ~10-15 minutes to compile all platform binaries
+/// in `build-release` before `publish-release` creates the GitHub Release and uploads the
+/// archives. Probing the platform archive URL with a `HEAD` request ensures Hadron only
+/// advertises `UpdateState::Available` once the binary is actually downloadable.
+pub fn is_release_build_ready(version: &str) -> bool {
+    let clean = version.trim_start_matches('v');
+    if clean.is_empty()
+        || clean.len() > 64
+        || !clean
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return false;
+    }
+
+    let url = match current_platform_target_triple() {
+        Some(triple) => release_asset_url(clean, triple),
+        None => format!("https://github.com/s0lda/hadron/releases/tag/v{clean}"),
+    };
+
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsIL", "--connect-timeout", "10", "--max-time", "15", &url])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// How quickly to re-check in the background when a newer git tag exists on origin
+/// whose GitHub Actions release build has not finished publishing yet.
+const PENDING_RELEASE_BUILD_POLL: Duration = Duration::from_secs(60);
+
+/// Dispatches self-update based on the detected install method.
+pub fn perform_update(target_version: &str) -> UpdateState {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return UpdateState::Failed(format!("Cannot determine executable path: {e}")),
+    };
+    match detect_install_method_from_path(&exe) {
+        InstallMethod::Cargo => perform_cargo_install(target_version),
+        InstallMethod::Homebrew => UpdateState::Failed(
+            "Hadron was installed via Homebrew. Run `brew upgrade hadron` to update.".into(),
+        ),
+        InstallMethod::Binary => perform_binary_install(target_version, &exe),
+    }
+}
+
+/// Performs in-place binary self-update using install.sh or install.ps1.
+pub fn perform_binary_install(target_version: &str, exe_path: &Path) -> UpdateState {
+    let clean = target_version.trim_start_matches('v');
+    if clean.is_empty()
+        || clean.len() > 64
+        || !clean
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return UpdateState::Failed(format!("Invalid version string format: '{target_version}'"));
+    }
+
+    let parent = match exe_path.parent() {
+        Some(p) => p,
+        None => return UpdateState::Failed("Failed to resolve binary directory".into()),
+    };
+
+    let update_dir = match update_dir() {
+        Some(d) => d,
+        None => std::env::temp_dir().join("hadron-update"),
+    };
+    if let Err(e) = std::fs::create_dir_all(&update_dir) {
+        return UpdateState::Failed(format!("Failed to create update directory: {e}"));
+    }
+    let is_windows = cfg!(windows);
+    let script_filename = if is_windows {
+        "install.ps1"
+    } else {
+        "install.sh"
+    };
+    let script_path = update_dir.join(script_filename);
+
+    let mut curl_cmd = Command::new("curl");
+    curl_cmd
+        .args([
+            "-fsSL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            &format!("https://raw.githubusercontent.com/s0lda/hadron/main/{script_filename}"),
+            "-o",
+        ])
+        .arg(&script_path);
+    hide_console_window(&mut curl_cmd);
+    let curl_shown = format!("{curl_cmd:?}");
+    let curl_out = curl_cmd.output();
+
+    match curl_out {
+        Ok(o) if !o.status.success() => {
+            let log = write_install_log(&curl_shown, &o);
+            let msg = failure_message(
+                &o.status.to_string(),
+                &String::from_utf8_lossy(&o.stderr),
+                log.as_deref(),
+            );
+            return UpdateState::Failed(format!("Failed to download installer script: {msg}"));
+        }
+        Err(e) => return UpdateState::Failed(format!("Failed to invoke curl: {e}")),
+        Ok(_) => {}
+    }
+
+    #[cfg(windows)]
+    prepare_windows_bin_overwrite_in(parent);
+
+    let mut cmd = if is_windows {
+        let mut c = Command::new("powershell.exe");
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+        c.arg(&script_path);
+        c.args([
+            "-Version",
+            target_version,
+            "-InstallDir",
+            &parent.to_string_lossy(),
+            "-NoShortcut",
+        ]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg(&script_path);
+        c.args(["--version", target_version, "-b", &parent.to_string_lossy()]);
+        c
+    };
+    cmd.stdin(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let shown = format!("{cmd:?}");
+    let out = cmd.output();
+
+    #[cfg(windows)]
+    if !matches!(&out, Ok(o) if o.status.success()) {
+        restore_windows_bin_if_missing_in(parent);
+    }
+
+    match out {
+        Ok(o) if o.status.success() => {
+            write_install_log(&shown, &o);
+            UpdateState::Installed {
+                version: target_version.to_string(),
+            }
+        }
+        Ok(o) => {
+            let log = write_install_log(&shown, &o);
+            let msg = failure_message(
+                &o.status.to_string(),
+                &String::from_utf8_lossy(&o.stderr),
+                log.as_deref(),
+            );
+            UpdateState::Failed(msg)
+        }
+        Err(e) => UpdateState::Failed(format!("Failed to run installer script: {e}")),
+    }
+}
+
+impl Chamber {
+    pub(super) fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        self.poll_for_updates(true, cx);
+    }
+
+    fn poll_for_updates(&mut self, show_checking: bool, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_state,
+            UpdateState::Installing { .. } | UpdateState::Installed { .. }
+        ) {
+            return;
+        }
+        if show_checking {
+            self.update_state = UpdateState::Checking;
+            cx.notify();
+        }
+
+        let current_version = env!("CARGO_PKG_VERSION");
+        cx.spawn(async move |this, cx| {
+            let (state, has_pending_unbuilt_tag) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut cmd = Command::new("git");
+                    cmd.args([
+                        "ls-remote",
+                        "https://github.com/s0lda/hadron",
+                        "HEAD",
+                        "refs/tags/*",
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .env("GIT_TERMINAL_PROMPT", "0");
+                    hide_console_window(&mut cmd);
+                    let out = cmd.output();
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let text = String::from_utf8_lossy(&o.stdout);
+                            parse_remote_update_info_with_readiness(
+                                &text,
+                                current_version,
+                                is_release_build_ready,
+                            )
+                        }
+                        _ => (
+                            UpdateState::Failed("Could not query update repository".into()),
+                            false,
+                        ),
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |chamber, cx| {
+                if !matches!(
+                    chamber.update_state,
+                    UpdateState::Installing { .. } | UpdateState::Installed { .. }
+                ) {
+                    // Do not clobber a healthy state with a transient error during a silent
+                    // background re-poll.
+                    if show_checking || !matches!(state, UpdateState::Failed(_)) {
+                        if chamber.update_state != state {
+                            chamber.update_state = state;
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+
+            if has_pending_unbuilt_tag {
+                cx.background_executor()
+                    .timer(PENDING_RELEASE_BUILD_POLL)
+                    .await;
+                let _ = this.update(cx, |chamber, cx| {
+                    chamber.poll_for_updates(false, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn trigger_update_flow(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        match &self.update_state {
+            UpdateState::Available { version, .. } => {
+                let target_version = version.clone();
+                self.update_state = UpdateState::Installing {
+                    version: target_version.clone(),
+                };
+                cx.notify();
+
+                cx.spawn(async move |this, cx| {
+                    let state = cx
+                        .background_executor()
+                        .spawn(async move { perform_update(&target_version) })
+                        .await;
+
+                    let restart = warrants_restart(&state);
+                    let _ = this.update(cx, |chamber, cx| {
+                        chamber.update_state = state;
+                        cx.notify();
+                    });
+
+                    // The installed binary is on disk but this process is still the old
+                    // one, and so is the daemon it spawned — a fact the pill could only
+                    // ever *ask* the human to act on, and which cost a manual kill every
+                    // time. Quitting here is what makes the update take effect: `main`
+                    // stops the daemon and relaunches once the window is down.
+                    //
+                    // The flag is raised INSIDE the same update as the quit, and only if
+                    // that update succeeds. Raised beforehand it could outlive a failed
+                    // quit — an app already shutting down when the install landed — and
+                    // `main`, which reads it after `app::run` returns, would then relaunch
+                    // a chamber the human had deliberately closed.
+                    if restart {
+                        cx.background_executor().timer(RESTART_GRACE).await;
+                        let quit = this.update(cx, |_chamber, cx| {
+                            RESTART_AFTER_UPDATE.store(true, Ordering::SeqCst);
+                            cx.quit();
+                        });
+                        if quit.is_err() {
+                            eprintln!(
+                                "hadron-chamber: the update is installed, but this chamber was \
+                                 already shutting down and could not restart itself. Start \
+                                 Hadron again to run the new build."
+                            );
+                        }
+                    }
+                })
+                .detach();
+            }
+            UpdateState::Installing { .. } => {
+                // Idempotent against double clicks while installation is in progress.
+            }
+            // Inert for the same reason, one step later: the pill stays clickable during
+            // `RESTART_GRACE`, and without this arm a click would fall through to
+            // `check_for_updates` and overwrite the state with `Checking` — leaving the
+            // human looking at "Checking…" when the window disappears a second later.
+            UpdateState::Installed { .. } => {}
+            _ => {
+                self.check_for_updates(cx);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cargo_install_argv_matches_readme_spec() {
+        assert_eq!(
+            CARGO_INSTALL_ARGV,
+            &[
+                "cargo",
+                "install",
+                "--locked",
+                "--git",
+                "https://github.com/s0lda/hadron.git",
+                "hadron"
+            ]
+        );
+    }
+
+    /// A credential prompt from the `git` that `cargo install --git` drives would wait
+    /// forever behind a GUI with no terminal, leaving the pill stuck on "Installing…".
+    /// (Stdio has no getter, so the `Stdio::null()` half of that pair is not asserted
+    /// here — only the env var is observable.)
+    #[test]
+    fn the_install_command_can_never_wait_on_a_credential_prompt() {
+        let cmd = install_command("v0.1.0");
+        let prompt = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("GIT_TERMINAL_PROMPT"))
+            .map(|(_, v)| v);
+        assert_eq!(prompt, Some(Some(std::ffi::OsStr::new("0"))));
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("cargo"));
+    }
+
+    /// The pill advertises a TAG and must install that tag. Without `--tag`,
+    /// `cargo install --git` builds the default branch's HEAD, so the moment `main`
+    /// moves past the release the click installs code the offered version never named.
+    #[test]
+    fn the_install_pins_the_tag_it_offered() {
+        let cmd = install_command("v0.1.1");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "--tag")
+            .expect("no --tag in {args:?}");
+        assert_eq!(args[at + 1], "v0.1.1", "the tag must follow the flag");
+        // `cargo install` reads the LAST positional as the package spec; a `--tag`
+        // appended after it would be read as a second package name.
+        assert_eq!(args.last().map(String::as_str), Some("hadron"));
+    }
+
+    /// Cargo's own temp target directory is created under `TMPDIR` and **abandoned where
+    /// it died**: four failed clicks on 2026-07-30 left `/tmp/cargo-install*` dirs holding
+    /// 6.3 GB of a 12 GB tmpfs, and every retry started the 2,110-crate build from zero.
+    /// A stable directory under `~/.hadron` is both the leak fix and the retry fix.
+    #[test]
+    fn the_install_builds_where_a_retry_can_resume_from() {
+        let Some(build) = update_build_dir() else {
+            return;
+        };
+        let cmd = install_command("v0.1.1");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "--target-dir")
+            .expect("no --target-dir");
+        assert_eq!(args[at + 1], build.to_string_lossy());
+        assert!(
+            !build.starts_with("/tmp"),
+            "the build must not land on a tmpfs: {build:?}"
+        );
+    }
+
+    /// The hint is pasted into a human's shell, so it carries only what a human needs:
+    /// the private build directory is the click's business, not theirs. This is the one
+    /// deliberate difference between the hint and the command — everything that decides
+    /// *what gets installed* (`--locked`, `--git`, `--tag`, the package) is still shared.
+    #[test]
+    fn the_manual_hint_is_a_command_a_human_can_paste() {
+        let hint = manual_install_hint("v0.1.1");
+        assert_eq!(
+            hint,
+            "cargo install --locked --git https://github.com/s0lda/hadron.git --tag v0.1.1 hadron"
+        );
+    }
+
+    /// The pill has room for a few lines and a `cargo install` failure is hundreds. Until
+    /// now the rest was simply dropped — asked to "check the cargo install logs" after a
+    /// failed update, there were none to check.
+    #[test]
+    fn a_failure_names_the_log_that_holds_the_rest_of_it() {
+        let stderr = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let msg = failure_message("exit status: 101", &stderr, Some(Path::new("/tmp/i.log")));
+        assert!(msg.contains("line 40"), "the tail must survive: {msg}");
+        assert!(msg.contains("/tmp/i.log"), "the log must be named: {msg}");
+        assert!(
+            !msg.contains("line 1\n"),
+            "only the tail belongs in a pill: {msg}"
+        );
+    }
+
+    /// A cargo that dies without a word (killed, or gone from PATH mid-run) left the pill
+    /// saying nothing at all; the status is then the only fact there is.
+    #[test]
+    fn a_silent_failure_still_says_something() {
+        let msg = failure_message("signal: 9 (SIGKILL)", "   \n", None);
+        assert!(msg.contains("signal: 9"), "{msg}");
+    }
+
+    /// `release_tag` is `release_version`'s inverse, and the pill's correctness rests on
+    /// that: it parses a tag into a version to compare, then rebuilds the tag to install.
+    #[test]
+    fn a_release_tag_round_trips_through_the_version_it_parses_to() {
+        for tag in ["v0.1.0", "v0.1.1", "v1.0", "v10.20.30"] {
+            assert!(release_version(tag).is_some(), "{tag} should parse");
+            let version = tag.trim_start_matches('v');
+            assert_eq!(release_tag(version), tag);
+        }
+    }
+
+    /// `/abandon` writes an `archive/<slug>` tag for every branch it discards, and this
+    /// repo already has several. One `git push --tags` and a non-release tag would have
+    /// been offered as a version — with a `cargo install` behind the click.
+    #[test]
+    fn a_non_release_tag_is_never_offered_as_an_update() {
+        let out = "aaaaaaaaaaaa\trefs/tags/archive/cli-agy-auto-update-20260727\n\
+                   bbbbbbbbbbbb\trefs/tags/archive/acp-claude-01KYB03ZAW\n\
+                   cccccccccccc\tHEAD";
+        assert_eq!(
+            parse_remote_update_info(out, "0.1.0"),
+            UpdateState::UpToDate
+        );
+    }
+
+    /// `git ls-remote` sorts lexicographically, under which `v0.10.0` precedes `v0.9.0`.
+    /// Taking the last line would have offered 0.9.0 as the upgrade from 0.10.0's repo.
+    #[test]
+    fn the_newest_release_is_chosen_numerically_not_lexicographically() {
+        let out = "aaaaaaaaaaaa\trefs/tags/v0.10.0\nbbbbbbbbbbbb\trefs/tags/v0.9.0";
+        assert_eq!(
+            parse_remote_update_info(out, "0.1.0"),
+            UpdateState::Available {
+                version: "0.10.0".into(),
+                commit: Some("aaaaaaa".into())
+            }
+        );
+    }
+
+    /// A developer running a build ahead of the newest tag was offered a DOWNGRADE,
+    /// because the old check was `!=` rather than "strictly newer".
+    #[test]
+    fn a_tag_older_than_the_running_build_is_not_an_update() {
+        let out = "aaaaaaaaaaaa\trefs/tags/v0.1.0";
+        assert_eq!(
+            parse_remote_update_info(out, "0.2.0"),
+            UpdateState::UpToDate
+        );
+    }
+
+    /// An annotated tag emits a peeled `^{}` line beside itself; both must read as one
+    /// version, and neither may leak `^{}` into what the pill shows.
+    #[test]
+    fn an_annotated_tags_peeled_line_is_the_same_version() {
+        let out = "aaaaaaaaaaaa\trefs/tags/v0.2.0\nbbbbbbbbbbbb\trefs/tags/v0.2.0^{}";
+        match parse_remote_update_info(out, "0.1.0") {
+            UpdateState::Available { version, .. } => assert_eq!(version, "0.2.0"),
+            other => panic!("expected an update, got {other:?}"),
+        }
+    }
+
+    /// The restart stops the daemon and every turn on it, so it must follow *only* an
+    /// install that finished. `Failed` is the one that matters: it leaves the running
+    /// binary exactly as it was, and restarting into it would cost a swarm for nothing.
+    #[test]
+    fn only_a_finished_install_warrants_a_restart() {
+        assert!(warrants_restart(&UpdateState::Installed {
+            version: "0.1.2".into()
+        }));
+        for state in [
+            UpdateState::Idle,
+            UpdateState::Checking,
+            UpdateState::UpToDate,
+            UpdateState::Available {
+                version: "0.1.2".into(),
+                commit: None,
+            },
+            UpdateState::Installing {
+                version: "0.1.2".into(),
+            },
+            UpdateState::Failed("boom".into()),
+        ] {
+            assert!(
+                !warrants_restart(&state),
+                "{state:?} must not restart the chamber"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_remote_update_info_available_tag() {
+        let output = "e4f5a6b7c8d9 refs/tags/v0.2.0";
+        let state = parse_remote_update_info(output, "0.1.0");
+        assert_eq!(
+            state,
+            UpdateState::Available {
+                version: "0.2.0".to_string(),
+                commit: Some("e4f5a6b".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_remote_update_info_up_to_date() {
+        let output = "e4f5a6b7c8d9 refs/tags/v0.1.0";
+        let state = parse_remote_update_info(output, "0.1.0");
+        assert_eq!(state, UpdateState::UpToDate);
+    }
+
+    #[test]
+    fn test_parse_remote_update_info_empty() {
+        let state = parse_remote_update_info("", "0.1.0");
+        assert_eq!(state, UpdateState::UpToDate);
+    }
+
+    #[test]
+    fn test_detect_install_method() {
+        let cargo_path = Path::new("/home/user/.cargo/bin/hadron");
+        assert_eq!(
+            detect_install_method_from_path(cargo_path),
+            InstallMethod::Cargo
+        );
+
+        let brew_path = Path::new("/opt/homebrew/bin/hadron");
+        assert_eq!(
+            detect_install_method_from_path(brew_path),
+            InstallMethod::Homebrew
+        );
+
+        let local_path = Path::new("/home/user/.local/bin/hadron");
+        assert_eq!(
+            detect_install_method_from_path(local_path),
+            InstallMethod::Binary
+        );
+    }
+
+    #[test]
+    fn test_release_tarball_url() {
+        let url_linux = release_asset_url("0.31.1", "x86_64-unknown-linux-gnu");
+        assert_eq!(
+            url_linux,
+            "https://github.com/s0lda/hadron/releases/download/v0.31.1/hadron-v0.31.1-x86_64-unknown-linux-gnu.tar.gz"
+        );
+
+        let url_windows = release_asset_url("0.31.1", "x86_64-pc-windows-msvc");
+        assert_eq!(
+            url_windows,
+            "https://github.com/s0lda/hadron/releases/download/v0.31.1/hadron-v0.31.1-x86_64-pc-windows-msvc.zip"
+        );
+    }
+
+    #[test]
+    fn test_perform_binary_install_rejects_malicious_version() {
+        let dummy_path = Path::new("/usr/local/bin/hadron");
+        let result = perform_binary_install("0.31.1; echo injected", dummy_path);
+        assert!(
+            matches!(result, UpdateState::Failed(msg) if msg.contains("Invalid version string format"))
+        );
+
+        let result2 = perform_binary_install("0.31.1`id`", dummy_path);
+        assert!(
+            matches!(result2, UpdateState::Failed(msg) if msg.contains("Invalid version string format"))
+        );
+    }
+
+    #[test]
+    fn test_prepare_and_restore_windows_bin_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hadron_exe = dir.path().join("hadron.exe");
+        let gluon_exe = dir.path().join("hadron-gluon.exe");
+        let mcp_exe = dir.path().join("hadron-forge-mcp.exe");
+        std::fs::write(&hadron_exe, b"old-hadron").unwrap();
+        std::fs::write(&gluon_exe, b"old-gluon").unwrap();
+        std::fs::write(&mcp_exe, b"old-mcp").unwrap();
+
+        prepare_windows_bin_overwrite_in(dir.path());
+        assert!(!hadron_exe.exists());
+        assert!(dir.path().join("hadron.exe.old").exists());
+        assert!(dir.path().join("hadron-gluon.exe.old").exists());
+        assert!(dir.path().join("hadron-forge-mcp.exe.old").exists());
+
+        // Simulate partial update where hadron.exe was written but hadron-gluon.exe failed
+        std::fs::write(&hadron_exe, b"new-hadron").unwrap();
+        restore_windows_bin_if_missing_in(dir.path());
+        assert_eq!(std::fs::read(&hadron_exe).unwrap(), b"new-hadron");
+        assert_eq!(std::fs::read(&gluon_exe).unwrap(), b"old-gluon");
+        assert_eq!(std::fs::read(&mcp_exe).unwrap(), b"old-mcp");
+    }
+
+    #[test]
+    fn unbuilt_release_tag_is_held_back_until_github_actions_finishes() {
+        let out = "111111111111\trefs/tags/v0.33.13\n\
+                   222222222222\trefs/tags/v0.33.14\n\
+                   333333333333\trefs/tags/v0.33.14^{}";
+        let mut probed = Vec::new();
+        let (state, pending) = parse_remote_update_info_with_readiness(out, "0.33.13", |ver| {
+            probed.push(ver.to_string());
+            false // GitHub Actions build-release is still running for v0.33.14
+        });
+        assert_eq!(state, UpdateState::UpToDate);
+        assert!(pending, "must flag pending unbuilt tag so chamber re-polls");
+        assert_eq!(
+            probed,
+            vec!["0.33.14".to_string()],
+            "must probe each newer version once and never probe <= current_version"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_latest_finished_release_when_newest_tag_is_still_building() {
+        let out = "111111111111\trefs/tags/v0.33.12\n\
+                   222222222222\trefs/tags/v0.33.13\n\
+                   333333333333\trefs/tags/v0.33.14";
+        let (state, pending) = parse_remote_update_info_with_readiness(out, "0.33.12", |ver| {
+            ver == "0.33.13" // 0.33.13 build is published; 0.33.14 is still building
+        });
+        assert_eq!(
+            state,
+            UpdateState::Available {
+                version: "0.33.13".into(),
+                commit: Some("2222222".into()),
+            }
+        );
+        assert!(
+            pending,
+            "must continue polling for 0.33.14 build completion"
+        );
+    }
+}

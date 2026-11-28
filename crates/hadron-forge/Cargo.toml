@@ -1,0 +1,46 @@
+[package]
+name = "hadron-forge"
+description = "Compare-and-swap file editing by content hash, with an AST block parser for Rust, Python, TypeScript and Go"
+rust-version = "1.93"
+version = "0.33.55"
+edition = "2021"
+license = "Apache-2.0"
+# Flip to publish. Blocked today regardless: the workspace patches
+# gpui-component from a `file:///` path, which crates.io rejects.
+publish = false
+
+[dependencies]
+hadron-lattice = { path = "../hadron-lattice" }
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.23"
+blake3 = "1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+

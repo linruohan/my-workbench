@@ -1,0 +1,4038 @@
+use super::*;
+use crate::app::providers::{nucleus_budget_kb_for, CLOUD_API_KEY_VAR, NUCLEUS_BUDGET_LADDER_KB};
+
+/// First free seat id: the conventional one, else `<base>-2`, `-3`, … A second
+/// seat of the same provider is a real, wanted thing (same vendor, different
+/// model — "Claude on Fable" next to "Claude on Opus"), so a collision must mint
+/// a NEW id rather than silently re-adopting the existing seat.
+pub(super) fn unique_seat_id(base: &str, taken: &dyn Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2u32..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !taken(id))
+        .expect("an unbounded counter always finds a free id")
+}
+
+/// Strip a trailing `-<digits>` suffix (where `<digits> >= 2`) from a seat ID so
+/// duplicating `acp-claude-2` produces `acp-claude-3` rather than `acp-claude-2-2`.
+pub(super) fn strip_seat_numeric_suffix(id: &str) -> &str {
+    if let Some((base, suffix)) = id.rsplit_once('-') {
+        if !base.is_empty() && suffix.parse::<u32>().is_ok_and(|n| n >= 2) {
+            return base;
+        }
+    }
+    id
+}
+
+/// Cloud LLM provider candidate detected from environment variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvProviderCandidate {
+    Anthropic,
+    OpenAi,
+    Gemini,
+}
+
+impl EnvProviderCandidate {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic Claude",
+            Self::OpenAi => "OpenAI",
+            Self::Gemini => "Google Gemini",
+        }
+    }
+
+    pub fn env_var(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+        }
+    }
+}
+
+/// Detects available provider presets based on standard API key environment variables.
+pub fn detect_available_env_provider<'a, I, K, V>(vars: I) -> Option<EnvProviderCandidate>
+where
+    I: IntoIterator<Item = &'a (K, V)>,
+    K: AsRef<str> + 'a,
+    V: AsRef<str> + 'a,
+{
+    let map: std::collections::HashMap<&str, &str> = vars
+        .into_iter()
+        .map(|(k, v)| (k.as_ref(), v.as_ref()))
+        .collect();
+
+    if map
+        .get("ANTHROPIC_API_KEY")
+        .copied()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        Some(EnvProviderCandidate::Anthropic)
+    } else if map
+        .get("OPENAI_API_KEY")
+        .copied()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        Some(EnvProviderCandidate::OpenAi)
+    } else if map
+        .get("GEMINI_API_KEY")
+        .copied()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        Some(EnvProviderCandidate::Gemini)
+    } else {
+        None
+    }
+}
+
+impl super::Chamber {
+    /// Connect = GET the vendor's model-list endpoint, off the UI thread — a slow
+    /// or unreachable local server must not freeze the window. Mirrors
+    /// `start_acp_model_probe`'s exact shape (a method, not an inline closure —
+    /// GPUI's `Fn`-bound `cx.listener` closure fights the borrow checker over a
+    /// nested `cx.spawn` in ways a plain method body does not).
+    pub(super) fn start_local_provider_probe(
+        &mut self,
+        vendor: hadron_gluon::adapter::local::HttpVendor,
+        base_url: String,
+        api_key: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.wizard_state = WizardState::LocalProvider(vendor, ProviderState::Connecting);
+        cx.notify();
+
+        let target = hadron_gluon::adapter::local::HttpTarget {
+            vendor,
+            base_url: base_url.clone(),
+            api_key: api_key.clone(),
+        };
+        let base_url_for_task = base_url.clone();
+        let api_key_for_task = api_key.clone();
+        cx.spawn(move |this: gpui_kit::WeakEntity<Self>, cx: &mut gpui_kit::AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = cx
+                    .background_spawn(async move { hadron_gluon::adapter::local::fetch_models(&target) })
+                    .await
+                    .map_err(|e| e.to_string());
+
+                this.update(&mut cx, |this, cx| {
+                    // Only the still-open probe may write its result — the human may have
+                    // backed out of this wizard entirely while the request was in flight.
+                    if !matches!(&this.wizard_state, WizardState::LocalProvider(v, _) if *v == vendor) {
+                        return;
+                    }
+                    match result {
+                        Ok(models) if !models.is_empty() => {
+                            let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+                            let first = ids[0].clone();
+                            this.local_models = ids;
+                            this.local_selected_model = Some(first.clone());
+
+                            if !vendor.requires_api_key() {
+                                // 1-Click zero-friction add for local servers (Ollama, LM Studio)
+                                this.save_and_add_http_quark(vendor, &base_url_for_task, &first, api_key_for_task, cx);
+                            } else {
+                                this.wizard_state = WizardState::LocalProvider(
+                                    vendor,
+                                    ProviderState::Ready { model: first },
+                                );
+                                cx.notify();
+                            }
+                        }
+                        Ok(_) => {
+                            this.wizard_state = WizardState::LocalProvider(
+                                vendor,
+                                ProviderState::Failed(format!(
+                                    "connected, but {} has no models loaded",
+                                    vendor.display_name()
+                                )),
+                            );
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            this.wizard_state = WizardState::LocalProvider(
+                                vendor,
+                                ProviderState::Failed(e),
+                            );
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Connect and probe an ACP agent in the background, automatically saving and adopting
+    /// the quark upon successful model detection without requiring manual confirmation.
+    pub(super) fn start_acp_preset_probe(&mut self, desc: AgentDescriptor, cx: &mut Context<Self>) {
+        self.wizard_state = WizardState::Connecting(desc.clone(), ProviderState::Connecting);
+        cx.notify();
+
+        let target = hadron_gluon::adapter::registry::AcpTarget {
+            program: desc.command.clone(),
+            args: desc.args.clone(),
+            env: Vec::new(),
+        };
+        let desc_for_task = desc.clone();
+        cx.spawn(|this: gpui_kit::WeakEntity<Self>, cx: &mut gpui_kit::AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = cx
+                    .background_spawn(async move {
+                        hadron_gluon::adapter::acp::probe(&target)
+                    })
+                    .await
+                    .map_err(|e| e.to_string());
+
+                this.update(&mut cx, |this, cx| {
+                    if !matches!(&this.wizard_state, WizardState::Connecting(d, _) if d.id == desc_for_task.id) {
+                        return;
+                    }
+                    match result {
+                        Ok(model) => {
+                            this.save_and_add_acp_quark(&desc_for_task, &model, cx);
+                        }
+                        Err(e) => {
+                            this.wizard_state = WizardState::Connecting(
+                                desc_for_task,
+                                ProviderState::Failed(e),
+                            );
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Save a probed ACP seat directly into the global catalogue and current repo team.
+    pub(super) fn save_and_add_acp_quark(
+        &mut self,
+        desc: &AgentDescriptor,
+        model: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let base_id = hadron_lattice::Transport::Acp.conventional_id(&desc.id);
+        let seat_id = {
+            let taken = |id: &str| {
+                self.providers.iter().any(|p| p.id == id)
+                    || self.global.quarks.iter().any(|s| s.id.as_str() == id)
+                    || self.team.quarks.iter().any(|s| s.id.as_str() == id)
+                    || self.team.roster.iter().any(|o| o.id.as_str() == id)
+            };
+            unique_seat_id(&base_id, &taken)
+        };
+
+        self.providers.push(ConfiguredQuark {
+            id: seat_id.clone(),
+            transport: "acp".to_string(),
+            model: model.to_string(),
+        });
+
+        let mut seat = hadron_lattice::Seat {
+            id: hadron_lattice::QuarkId::new(&seat_id),
+            display_name: None,
+            vendor: desc.id.clone(),
+            model: model.to_string(),
+            flavor: hadron_lattice::Flavor::Worker,
+            transport: hadron_lattice::Transport::Acp,
+            command: Some(hadron_lattice::AcpCommand {
+                program: desc.command.clone(),
+                args: desc.args.clone(),
+            }),
+            cli: None,
+            enabled: true,
+            effort: None,
+            mode_config: None,
+            commands: hadron_lattice::SeatCommands::default(),
+            secret_env: Vec::new(),
+            energy_limit: None,
+            deny_skills: vec![],
+            external_roots: vec![],
+            http_base_url: None,
+            model_params: hadron_lattice::ModelParams::default(),
+            sandbox: None,
+        };
+        seat.normalize_vendor();
+        if !hadron_lattice::id_follows_convention(seat.id.as_str(), seat.transport) {
+            eprintln!(
+                "chamber: note — id '{}' does not match the '{}-' convention",
+                seat.id.as_str(),
+                seat.transport.code()
+            );
+        }
+        self.add_configured_quark(seat, cx);
+        self.wizard_state = WizardState::None;
+        cx.notify();
+    }
+
+    /// Save a configured HTTP seat directly into the global catalogue and current repo team.
+    pub(super) fn save_and_add_http_quark(
+        &mut self,
+        vendor: hadron_gluon::adapter::local::HttpVendor,
+        base_url: &str,
+        model: &str,
+        api_key: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let base_id = hadron_lattice::Transport::Http.conventional_id(vendor.code());
+        let seat_id = {
+            let taken = |id: &str| {
+                self.providers.iter().any(|p| p.id == id)
+                    || self.global.quarks.iter().any(|s| s.id.as_str() == id)
+                    || self.team.quarks.iter().any(|s| s.id.as_str() == id)
+                    || self.team.roster.iter().any(|o| o.id.as_str() == id)
+            };
+            unique_seat_id(&base_id, &taken)
+        };
+        let qid = hadron_lattice::QuarkId::new(&seat_id);
+
+        let mut secret_env = Vec::new();
+        if vendor.requires_api_key() {
+            if let Some(ref key) = api_key {
+                if !key.is_empty() {
+                    match self.secret_store.set(&qid, CLOUD_API_KEY_VAR, key) {
+                        Ok(()) => secret_env.push(CLOUD_API_KEY_VAR.to_string()),
+                        Err(e) => eprintln!(
+                            "chamber: failed to write API key to the OS credential store: {e}"
+                        ),
+                    }
+                }
+            }
+        }
+
+        self.providers.push(ConfiguredQuark {
+            id: seat_id.clone(),
+            transport: "http".to_string(),
+            model: model.to_string(),
+        });
+
+        let mut seat = hadron_lattice::Seat {
+            id: qid,
+            display_name: None,
+            vendor: vendor.code().to_string(),
+            model: model.to_string(),
+            flavor: hadron_lattice::Flavor::Worker,
+            transport: hadron_lattice::Transport::Http,
+            command: None,
+            cli: None,
+            enabled: true,
+            effort: None,
+            mode_config: None,
+            commands: hadron_lattice::SeatCommands::default(),
+            secret_env,
+            energy_limit: None,
+            deny_skills: vec![],
+            external_roots: vec![],
+            http_base_url: Some(base_url.to_string()),
+            model_params: hadron_lattice::ModelParams::default(),
+            sandbox: None,
+        };
+        seat.normalize_vendor();
+        self.add_configured_quark(seat, cx);
+        self.wizard_state = WizardState::None;
+        cx.notify();
+    }
+
+    /// Duplicate an existing Quark seat under `<base>-2`, `<base>-3`, … preserving transport,
+    /// command/CLI/HTTP target, model, effort, mode_config, roles, deny_skills, energy_limit,
+    /// model_params, sandbox, and copying any keychain secrets in `secret_env`.
+    pub(super) fn duplicate_quark(&mut self, source_id: &str, cx: &mut Context<Self>) {
+        let src_qid = hadron_lattice::QuarkId::new(source_id);
+        let resolved = resolve_team(&self.team, &self.global);
+        let Some(source_seat) = resolved
+            .get(&src_qid)
+            .cloned()
+            .or_else(|| self.global.get(&src_qid).cloned())
+            .or_else(|| self.team.get(&src_qid).cloned())
+        else {
+            return;
+        };
+
+        let base = strip_seat_numeric_suffix(source_id);
+        let new_id = {
+            let taken = |id: &str| {
+                self.providers.iter().any(|p| p.id.eq_ignore_ascii_case(id))
+                    || self.global.quarks.iter().any(|s| {
+                        s.id.as_str().eq_ignore_ascii_case(id)
+                            || s.display_name
+                                .as_deref()
+                                .is_some_and(|dn| dn.trim().eq_ignore_ascii_case(id))
+                    })
+                    || self.team.quarks.iter().any(|s| {
+                        s.id.as_str().eq_ignore_ascii_case(id)
+                            || s.display_name
+                                .as_deref()
+                                .is_some_and(|dn| dn.trim().eq_ignore_ascii_case(id))
+                    })
+                    || self
+                        .team
+                        .roster
+                        .iter()
+                        .any(|o| o.id.as_str().eq_ignore_ascii_case(id))
+                    || self.prefs.quarks.iter().any(|(k, ident)| {
+                        k.eq_ignore_ascii_case(id)
+                            || ident
+                                .display_name
+                                .as_deref()
+                                .is_some_and(|dn| dn.trim().eq_ignore_ascii_case(id))
+                    })
+            };
+            unique_seat_id(base, &taken)
+        };
+        let new_qid = hadron_lattice::QuarkId::new(&new_id);
+
+        for var in &source_seat.secret_env {
+            if let Ok(Some(val)) = self.secret_store.get(&src_qid, var) {
+                let _ = self.secret_store.set(&new_qid, var, &val);
+            }
+        }
+
+        self.providers.push(ConfiguredQuark {
+            id: new_id.clone(),
+            transport: source_seat.transport.code().to_string(),
+            model: source_seat.model.clone(),
+        });
+
+        let mut new_seat = source_seat;
+        new_seat.id = new_qid;
+        new_seat.display_name = None;
+        new_seat.flavor = hadron_lattice::Flavor::Worker;
+        new_seat.enabled = true;
+        new_seat.normalize_vendor();
+
+        self.add_configured_quark(new_seat, cx);
+        self.show_toast(
+            toasts::ToastKind::Success,
+            format!("Duplicated {source_id} as {new_id}"),
+            Some(3),
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(super) fn appearance_settings_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_custom_active = self.prefs.custom_theme.is_some();
+        let active_theme_label = if let Some(custom) = &self.prefs.custom_theme {
+            format!("Custom: {}", custom.name)
+        } else {
+            self.prefs
+                .theme_preset
+                .unwrap_or_default()
+                .label()
+                .to_string()
+        };
+
+        let typography_card = settings_card_section(
+            "Typography & Appearance",
+            Some(IconName::Palette),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Color theme preset",
+                    Some("Curated dark surfaces (Obsidian Neutral, OLED True Black, Midnight Slate, Tokyo Dark) or custom themes."),
+                    self.theme_preset_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Primary accent color",
+                    Some("Accent hue for active indicators, focus outlines, and badges."),
+                    self.accent_choice_select(window, cx),
+                ))
+                .child(settings_field(
+                    "UI font family",
+                    Some("Font used across buttons, menus, labels, and chat prose. Verified regular + bold faces."),
+                    self.ui_font_select(window, cx),
+                ))
+                .child(settings_field(
+                    "UI font size",
+                    Some("Base font size for application interface elements."),
+                    self.ui_font_size_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Code / Monospace font family",
+                    Some("Font used for terminals, diffs, hashes, and code blocks."),
+                    self.mono_font_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Code / Monospace font size",
+                    Some("Font size for code blocks, terminal grid, and inspector diffs."),
+                    self.mono_font_size_select(window, cx),
+                )),
+        );
+
+        let name_input_row = if is_custom_active {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_3()
+                .p_2p5()
+                .rounded_md()
+                .bg(theme::bg_base())
+                .border_1()
+                .border_color(theme::border())
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(theme::text_secondary())
+                        .child("Theme Name:"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.theme_name_input).w_full()),
+                )
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+        let category_filter_bar = h_flex()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(theme::tab_bar_bg())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .children(ThemeCategoryTab::ALL.map(|cat| {
+                let is_sel = self.theme_category_tab == cat;
+                div()
+                    .id(SharedString::from(format!("theme-cat-tab-{}", cat.label())))
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .when(is_sel, |s| {
+                        s.bg(theme::glass_highlight())
+                            .text_color(theme::accent())
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                    })
+                    .when(!is_sel, |s| {
+                        s.text_color(theme::text_muted())
+                            .hover(|h| h.text_color(theme::text()))
+                    })
+                    .text_xs()
+                    .child(cat.label())
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.theme_category_tab = cat;
+                        cx.notify();
+                    }))
+            }));
+
+        let active_token_editor =
+            if let Some(token) = self.theme_selected_token {
+                let current_hex = if let Some(custom) = &self.prefs.custom_theme {
+                    token.get_hex(custom)
+                } else {
+                    let preset = self.prefs.theme_preset.unwrap_or_default();
+                    let def = config::ThemeDefinition::from_preset(preset);
+                    token.get_hex(&def)
+                };
+                let current_color =
+                    config::parse_hex_color(&current_hex).unwrap_or_else(|| rgb(0x888888));
+
+                let quick_colors: [&'static str; 20] = [
+                    "#000000", "#0f0f0f", "#171717", "#1f1f1f", "#262626", "#2e2e2e", "#8e8e8e",
+                    "#a8a8a8", "#ededed", "#ffffff", "#62c073", "#a87ffb", "#c778dd", "#e5c07b",
+                    "#e06c75", "#f97583", "#79b8ff", "#b392f0", "#c084fc", "#f472b6",
+                ];
+
+                let quick_swatches = h_flex().items_center().gap_1p5().flex_wrap().children(
+                    quick_colors.iter().map(|&hex_code| {
+                        let color =
+                            config::parse_hex_color(hex_code).unwrap_or_else(|| rgb(0x888888));
+                        let is_match = current_hex.eq_ignore_ascii_case(hex_code);
+                        div()
+                            .id(SharedString::from(format!("quick-swatch-{}", hex_code)))
+                            .size(px(18.0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .bg(color)
+                            .border_1()
+                            .border_color(if is_match {
+                                theme::accent()
+                            } else {
+                                theme::border()
+                            })
+                            .hover(|s| s.border_color(theme::text()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_custom_theme_token_color(token, hex_code.to_string(), cx);
+                                this.theme_color_hex_input.update(cx, |s, cx| {
+                                    s.set_value(hex_code.to_string(), window, cx)
+                                });
+                            }))
+                    }),
+                );
+
+                v_flex()
+                    .w_full()
+                    .p_3()
+                    .gap_2p5()
+                    .rounded_lg()
+                    .bg(theme::bg_base())
+                    .border_1()
+                    .border_color(theme::accent().opacity(0.5))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(theme::accent().opacity(0.15))
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::accent())
+                                            .child(token.category()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::text())
+                                            .child(format!("Edit Token: {}", token.label())),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(token.description()),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(30.0))
+                                    .rounded_md()
+                                    .bg(current_color)
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .w(px(140.0))
+                                    .child(Input::new(&self.theme_color_hex_input).w_full()),
+                            )
+                            .child(ColorPicker::new(&self.theme_color_picker).label("Pick Color"))
+                            .child(div().flex_1().min_w_0().child(quick_swatches)),
+                    )
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+
+        let current_def = if let Some(custom) = &self.prefs.custom_theme {
+            custom.clone()
+        } else {
+            config::ThemeDefinition::from_preset(self.prefs.theme_preset.unwrap_or_default())
+        };
+
+        let active_tab = self.theme_category_tab;
+        let selected_token = self.theme_selected_token;
+        let mono_family_for_swatch = self
+            .prefs
+            .mono_font_family
+            .clone()
+            .unwrap_or_else(|| "Cascadia Code".into());
+
+        let swatches_grid = h_flex().w_full().flex_wrap().gap_2().children(
+            ThemeTokenKey::ALL
+                .iter()
+                .filter(|t| t.matches_category(active_tab))
+                .map(|&token| {
+                    let is_selected = selected_token == Some(token);
+                    let hex_str = token.get_hex(&current_def);
+                    let parsed_color =
+                        config::parse_hex_color(&hex_str).unwrap_or_else(|| rgb(0x888888));
+                    let mono_font = mono_family_for_swatch.clone();
+
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "theme-token-chip-{}",
+                            token.label()
+                        )))
+                        .items_center()
+                        .gap_2()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(if is_selected {
+                            theme::accent()
+                        } else {
+                            theme::border()
+                        })
+                        .bg(if is_selected {
+                            theme::bg_elevated()
+                        } else {
+                            theme::bg_surface_raised()
+                        })
+                        .hover(|s| {
+                            s.border_color(if is_selected {
+                                theme::accent()
+                            } else {
+                                theme::text_secondary()
+                            })
+                            .bg(theme::bg_elevated())
+                        })
+                        .child(
+                            div()
+                                .size(px(14.0))
+                                .rounded_sm()
+                                .bg(parsed_color)
+                                .border_1()
+                                .border_color(theme::border()),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_0()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(if is_selected {
+                                            gpui_kit::FontWeight::BOLD
+                                        } else {
+                                            gpui_kit::FontWeight::MEDIUM
+                                        })
+                                        .text_color(if is_selected {
+                                            theme::accent()
+                                        } else {
+                                            theme::text()
+                                        })
+                                        .child(token.label()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_family(mono_font)
+                                        .text_color(theme::text_muted())
+                                        .child(hex_str),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_theme_token(token, window, cx);
+                        }))
+                }),
+        );
+
+        let custom_theme_card = settings_card_section(
+            "Custom Theme Engine & Palettes",
+            Some(IconName::Palette),
+            v_flex()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().text_sm().font_weight(gpui_kit::FontWeight::MEDIUM).text_color(theme::text()).child("Active Palette:"))
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(theme::bg_surface_raised())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .child(active_theme_label),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .when(!is_custom_active, |this| {
+                                    this.child(
+                                        text_button("btn-create-theme", "Create Custom Theme")
+                                            .bg(theme::bg_surface_raised())
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let base_preset = this.prefs.theme_preset.unwrap_or_default();
+                                                let mut new_theme = config::ThemeDefinition::from_preset(base_preset);
+                                                new_theme.id = format!("custom-{}", chrono::Utc::now().timestamp());
+                                                let existing = theme::load_custom_themes();
+                                                new_theme.name = theme::next_available_theme_name(&format!("Custom {}", base_preset.label()), &existing);
+                                                let _ = theme::save_custom_theme(&new_theme);
+                                                this.prefs.custom_theme = Some(new_theme.clone());
+                                                this.prefs.theme_preset = None;
+                                                let _ = config::save(&this.prefs);
+                                                this.theme_name_input.update(cx, |s, cx| s.set_value(new_theme.name.clone(), window, cx));
+                                                this.theme_selected_token = Some(ThemeTokenKey::CanvasBase);
+                                                this.theme_color_hex_input.update(cx, |s, cx| s.set_value(new_theme.surfaces.canvas_base.clone(), window, cx));
+                                                theme::set_active_custom_theme(Some(new_theme));
+                                                Self::apply_theme_and_typography(cx, &this.prefs);
+                                                this.show_toast(
+                                                    toasts::ToastKind::Success,
+                                                    "Created new custom theme",
+                                                    Some(3),
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .when(is_custom_active, |this| {
+                                    this.child(
+                                        text_button("btn-new-theme", "New Theme")
+                                            .bg(theme::bg_surface_raised())
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let base_theme = this.prefs.custom_theme.clone().unwrap_or_default();
+                                                let mut new_theme = base_theme;
+                                                new_theme.id = format!("custom-{}", chrono::Utc::now().timestamp());
+                                                let existing = theme::load_custom_themes();
+                                                new_theme.name = theme::next_available_theme_name(&new_theme.name, &existing);
+                                                let _ = theme::save_custom_theme(&new_theme);
+                                                this.prefs.custom_theme = Some(new_theme.clone());
+                                                this.prefs.theme_preset = None;
+                                                let _ = config::save(&this.prefs);
+                                                this.theme_name_input.update(cx, |s, cx| s.set_value(new_theme.name.clone(), window, cx));
+                                                this.theme_selected_token = Some(ThemeTokenKey::CanvasBase);
+                                                this.theme_color_hex_input.update(cx, |s, cx| s.set_value(new_theme.surfaces.canvas_base.clone(), window, cx));
+                                                theme::set_active_custom_theme(Some(new_theme));
+                                                Self::apply_theme_and_typography(cx, &this.prefs);
+                                                this.show_toast(
+                                                    toasts::ToastKind::Success,
+                                                    "Created new custom theme copy",
+                                                    Some(3),
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        text_button("btn-save-theme", "Save to ~/.hadron/themes")
+                                            .bg(theme::bg_surface_raised())
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                if let Some(custom) = &mut this.prefs.custom_theme {
+                                                    let name_val = this.theme_name_input.read(cx).value().trim().to_string();
+                                                    if !name_val.is_empty() {
+                                                        custom.name = name_val;
+                                                    }
+                                                    let clean_id: String = custom.name
+                                                        .to_lowercase()
+                                                        .chars()
+                                                        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                                                        .collect();
+                                                    let clean_id = clean_id.trim_matches('-').to_string();
+                                                    if !clean_id.is_empty() {
+                                                        custom.id = clean_id;
+                                                    }
+                                                }
+                                                if let Some(custom) = &this.prefs.custom_theme {
+                                                    let _ = theme::save_custom_theme(custom);
+                                                    let _ = config::save(&this.prefs);
+                                                    theme::set_active_custom_theme(Some(custom.clone()));
+                                                    let toast_msg = format!("Saved theme '{}' to ~/.hadron/themes/{}.json", custom.name, custom.id);
+                                                    this.show_toast(
+                                                        toasts::ToastKind::Success,
+                                                        toast_msg,
+                                                        Some(3),
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        text_button("btn-reset-theme", "Reset to Built-in Preset")
+                                            .bg(theme::bg_surface_raised())
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.prefs.custom_theme = None;
+                                                this.prefs.theme_preset = Some(config::ThemePreset::Obsidian);
+                                                this.theme_selected_token = None;
+                                                let _ = config::save(&this.prefs);
+                                                theme::set_active_custom_theme(None);
+                                                Self::apply_theme_and_typography(cx, &this.prefs);
+                                                this.show_toast(
+                                                    toasts::ToastKind::Success,
+                                                    "Reset to Obsidian Neutral preset",
+                                                    Some(3),
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        ),
+                )
+                .child(name_input_row)
+                .child(active_token_editor)
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .items_center()
+                                .child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(theme::text_muted()).child("PALETTE TOKENS & LIVE VALUES"))
+                                .child(category_filter_bar),
+                        )
+                        .child(swatches_grid),
+                ),
+        );
+
+        let mono_family_name = self
+            .prefs
+            .mono_font_family
+            .clone()
+            .unwrap_or_else(|| "Cascadia Code".into());
+        let live_preview_card = settings_card_section(
+            "Live UI & Syntax Preview",
+            Some(IconName::Eye),
+            v_flex()
+                .w_full()
+                .gap_3()
+                .child(
+                    // Code snippet syntax preview
+                    v_flex()
+                        .w_full()
+                        .p_3()
+                        .rounded_md()
+                        .bg(theme::term_bg())
+                        .border_1()
+                        .border_color(theme::border())
+                        .font_family(mono_family_name)
+                        .text_xs()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(theme::syntax_comment())
+                                .child("// Dynamic syntax token & font preview"),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_color(theme::syntax_keyword())
+                                        .child("pub async fn"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(theme::syntax_function())
+                                        .child("launch_swarm"),
+                                )
+                                .child(div().text_color(theme::syntax_punctuation()).child("("))
+                                .child(div().text_color(theme::syntax_variable()).child("id"))
+                                .child(div().text_color(theme::syntax_punctuation()).child(": &"))
+                                .child(div().text_color(theme::syntax_type()).child("str"))
+                                .child(div().text_color(theme::syntax_punctuation()).child(") -> "))
+                                .child(
+                                    div()
+                                        .text_color(theme::syntax_type())
+                                        .child("Result<Quark>"),
+                                )
+                                .child(div().text_color(theme::syntax_punctuation()).child(" {")),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .pl_4()
+                                .child(div().text_color(theme::syntax_keyword()).child("let"))
+                                .child(div().text_color(theme::syntax_variable()).child("config"))
+                                .child(div().text_color(theme::syntax_operator()).child("="))
+                                .child(
+                                    div()
+                                        .text_color(theme::syntax_string())
+                                        .child("\"hadron/orch.json\""),
+                                )
+                                .child(div().text_color(theme::syntax_punctuation()).child(";")),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .pl_4()
+                                .child(div().text_color(theme::syntax_type()).child("Quark"))
+                                .child(div().text_color(theme::syntax_punctuation()).child("::"))
+                                .child(div().text_color(theme::syntax_function()).child("spawn"))
+                                .child(div().text_color(theme::syntax_punctuation()).child("("))
+                                .child(div().text_color(theme::syntax_variable()).child("id"))
+                                .child(div().text_color(theme::syntax_punctuation()).child(", "))
+                                .child(div().text_color(theme::syntax_number()).child("42"))
+                                .child(div().text_color(theme::syntax_punctuation()).child(")")),
+                        )
+                        .child(div().text_color(theme::syntax_punctuation()).child("}")),
+                )
+                .child(
+                    // Chamber UI Components Preview
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .p_3()
+                        .rounded_md()
+                        .bg(theme::bg_base())
+                        .border_1()
+                        .border_color(theme::border())
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(theme::accent())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::field_base())
+                                        .child("Active Accent Button"),
+                                )
+                                .child(
+                                    div()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(theme::bg_surface_raised())
+                                        .border_1()
+                                        .border_color(theme::border())
+                                        .text_xs()
+                                        .text_color(theme::text())
+                                        .child("Secondary Control"),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child("Status Indicators:"),
+                                )
+                                .child(
+                                    div()
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(theme::halo_dot(QuarkState::Ground)),
+                                )
+                                .child(
+                                    div()
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(theme::halo_dot(QuarkState::Thinking)),
+                                )
+                                .child(
+                                    div()
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(theme::halo_dot(QuarkState::Excited)),
+                                )
+                                .child(
+                                    div()
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(theme::halo_dot(QuarkState::Blocked)),
+                                ),
+                        ),
+                ),
+        );
+
+        let chat_display_card = settings_card_section(
+            "Chat Display & Density",
+            Some(IconName::Bot),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Chat row density",
+                    Some("Control vertical padding and row spacing between chat messages."),
+                    self.chat_density_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Timestamp format",
+                    Some("Display timestamps as 24-hour clock, 12-hour clock (AM/PM), or relative time."),
+                    self.timestamp_format_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Code block word-wrapping",
+                    Some("Wrap code block lines at the edge of the chat container instead of horizontal scrolling."),
+                    Switch::new("code-block-word-wrap")
+                        .checked(self.prefs.code_block_word_wrap)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.code_block_word_wrap = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Auto-fold reasoning blocks",
+                    Some("Automatically collapse reasoning, thinking, and thought chains into compact summary chips."),
+                    Switch::new("auto-fold-reasoning")
+                        .checked(self.prefs.auto_fold_reasoning)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.auto_fold_reasoning = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )),
+        );
+
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(typography_card)
+            .child(chat_display_card)
+            .child(custom_theme_card)
+            .child(live_preview_card)
+    }
+
+    pub(super) fn execution_settings_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let execution_card = settings_card_section(
+            "Execution & Swarm Limits",
+            Some(IconName::Cpu),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Max exchanges",
+                    Some(
+                        "Caps quark↔quark exchanges before the swarm stops. \
+                         Blank or 0 = daemon default (12).",
+                    ),
+                    Input::new(&self.settings_max_exchanges).w_full().into_any_element(),
+                ))
+                .child(settings_field(
+                    "Nucleus index budget",
+                    Some(
+                        "How big .hadron/nucleus/index.md may grow before a quark is shown \
+                         counts instead of the index.",
+                    ),
+                    self.nucleus_budget_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Merge strategy",
+                    Some(
+                        "Strategy for landing merged quark branches onto main: Fast-forward (default), Squash commit, or GitHub PR mirror.",
+                    ),
+                    self.merge_strategy_select(window, cx),
+                )),
+        );
+
+        let watchdog_card = settings_card_section(
+            "Swarm Watchdog & Thresholds",
+            Some(IconName::Cpu),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Liveness silence limit (stall timeout)",
+                    Some("Maximum silence allowed from a quark (CLI stdout or ACP stream inactivity) before the watchdog reaps the turn."),
+                    self.turn_deadline_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Max turn wall-clock ceiling",
+                    Some("Maximum total elapsed wall-clock duration permitted for a single turn before automatic reaping."),
+                    self.max_turn_wall_clock_select(window, cx),
+                )),
+        );
+
+        let git_card = settings_card_section(
+            "Git & Worktree Automation",
+            Some(IconName::Folder),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Auto-prune worktrees",
+                    Some("Automatically clean up and delete worktrees upon branch merge, completion, or abandonment."),
+                    Switch::new("git-auto-prune-worktrees")
+                        .checked(self.team.git_auto_prune_worktrees.unwrap_or(self.prefs.git_auto_prune_worktrees))
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.team.git_auto_prune_worktrees = Some(*checked);
+                            this.prefs.git_auto_prune_worktrees = *checked;
+                            this.save_repo_team(cx);
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Git author name override",
+                    Some("Override author name for quark git commits in this workspace (blank = inherit git config)."),
+                    Input::new(&self.settings_git_author_name).w_full().into_any_element(),
+                ))
+                .child(settings_field(
+                    "Git author email override",
+                    Some("Override author email for quark git commits in this workspace (blank = inherit git config)."),
+                    Input::new(&self.settings_git_author_email).w_full().into_any_element(),
+                )),
+        );
+
+        let repo_monitor_card = settings_card_section(
+            "Repository Health Diagnostics",
+            Some(IconName::Info),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Periodic repo monitor",
+                    Some("Regularly checks repository for uncommitted Cargo.lock drift, stale worktrees, and nucleus health issues."),
+                    Switch::new("repo-monitor-toggle")
+                        .checked(self.prefs.repo_monitor)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.repo_monitor = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Monitor check interval",
+                    Some("Frequency of periodic background health diagnostics and repository integrity checks."),
+                    self.repo_monitor_interval_select(window, cx),
+                )),
+        );
+
+        let lab_enabled = self.team.hadron_lab_enabled();
+        let active_turns_limit = self
+            .team
+            .effective_max_concurrent_turns()
+            .unwrap_or(if lab_enabled { 64 } else { 16 });
+        let active_gates_limit = self.team.effective_max_concurrent_gates();
+        let active_batch_size = self.team.effective_gate_batch_size();
+        let fast_path_docs = self.team.effective_fast_path_docs_only();
+        let test_low_priority = self.team.effective_test_low_priority();
+        let active_test_threads = self.team.effective_test_max_threads();
+
+        let mut test_threads_pills = h_flex().gap_1p5().items_center();
+        for preset in [None, Some(1usize), Some(2), Some(4), Some(8), Some(16)] {
+            let is_active = active_test_threads == preset;
+            let (id_suffix, label) = match preset {
+                None => ("auto".to_string(), "Auto".to_string()),
+                Some(n) => (n.to_string(), n.to_string()),
+            };
+            test_threads_pills = test_threads_pills.child(
+                div()
+                    .id(SharedString::from(format!("cpu-test-threads-{id_suffix}")))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(if is_active {
+                        gpui_kit::FontWeight::BOLD
+                    } else {
+                        gpui_kit::FontWeight::MEDIUM
+                    })
+                    .bg(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::bg_surface_raised()
+                    })
+                    .text_color(if is_active {
+                        theme::field_base()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.team.test_max_threads = preset;
+                        this.save_repo_team(cx);
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+
+        let mut cpu_gates_pills = h_flex().gap_1p5().items_center();
+        for preset in [1usize, 2, 4, 8, 16] {
+            let is_active = active_gates_limit == preset;
+            cpu_gates_pills = cpu_gates_pills.child(
+                div()
+                    .id(SharedString::from(format!("cpu-max-gates-{preset}")))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(if is_active {
+                        gpui_kit::FontWeight::BOLD
+                    } else {
+                        gpui_kit::FontWeight::MEDIUM
+                    })
+                    .bg(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::bg_surface_raised()
+                    })
+                    .text_color(if is_active {
+                        theme::field_base()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.team.max_concurrent_gates = Some(preset);
+                        this.save_repo_team(cx);
+                        cx.notify();
+                    }))
+                    .child(format!("{preset}")),
+            );
+        }
+
+        let cpu_control_card = settings_card_section(
+            "Test & Build CPU Control",
+            Some(IconName::Cpu),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Lower test & build process priority",
+                    Some("Run cargo test/build and Merge Gate subprocesses at lowered OS scheduling priority (nice +10 on Unix/WSL, BELOW_NORMAL_PRIORITY_CLASS on Windows) so your desktop stays responsive."),
+                    Switch::new("test-low-priority-toggle")
+                        .checked(test_low_priority)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.team.test_low_priority = Some(*checked);
+                            this.save_repo_team(cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Max test & build threads",
+                    Some("Cap CARGO_BUILD_JOBS, RUST_TEST_THREADS, and RAYON_NUM_THREADS per test/build invocation (Auto = uncapped default)."),
+                    test_threads_pills.into_any_element(),
+                ))
+                .child(settings_field(
+                    "Max concurrent merge gates",
+                    Some("Maximum number of Merge Gate test runs allowed in parallel (set to 1 to serialize gate verification and prevent multi-gate CPU spikes)."),
+                    cpu_gates_pills.into_any_element(),
+                )),
+        );
+
+        let mut turns_pills = h_flex().gap_1p5().items_center();
+        for preset in [16usize, 32, 64, 128, 256] {
+            let is_active = active_turns_limit == preset;
+            turns_pills = turns_pills.child(
+                div()
+                    .id(SharedString::from(format!("lab-turns-{preset}")))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(if is_active {
+                        gpui_kit::FontWeight::BOLD
+                    } else {
+                        gpui_kit::FontWeight::MEDIUM
+                    })
+                    .bg(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::bg_surface_raised()
+                    })
+                    .text_color(if is_active {
+                        theme::field_base()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.team.max_concurrent_turns = Some(preset);
+                        this.save_repo_team(cx);
+                        cx.notify();
+                    }))
+                    .child(format!("{preset}")),
+            );
+        }
+
+        let mut gates_pills = h_flex().gap_1p5().items_center();
+        for preset in [1usize, 2, 4, 8, 16] {
+            let is_active = active_gates_limit == preset;
+            gates_pills = gates_pills.child(
+                div()
+                    .id(SharedString::from(format!("lab-gates-{preset}")))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(if is_active {
+                        gpui_kit::FontWeight::BOLD
+                    } else {
+                        gpui_kit::FontWeight::MEDIUM
+                    })
+                    .bg(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::bg_surface_raised()
+                    })
+                    .text_color(if is_active {
+                        theme::field_base()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.team.max_concurrent_gates = Some(preset);
+                        this.save_repo_team(cx);
+                        cx.notify();
+                    }))
+                    .child(format!("{preset}")),
+            );
+        }
+
+        let mut batch_pills = h_flex().gap_1p5().items_center();
+        for preset in [1usize, 4, 8, 16, 32] {
+            let is_active = active_batch_size == preset;
+            batch_pills = batch_pills.child(
+                div()
+                    .id(SharedString::from(format!("lab-batch-{preset}")))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(if is_active {
+                        gpui_kit::FontWeight::BOLD
+                    } else {
+                        gpui_kit::FontWeight::MEDIUM
+                    })
+                    .bg(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::bg_surface_raised()
+                    })
+                    .text_color(if is_active {
+                        theme::field_base()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.team.gate_batch_size = Some(preset);
+                        this.save_repo_team(cx);
+                        cx.notify();
+                    }))
+                    .child(format!("{preset}")),
+            );
+        }
+
+        let hadron_lab_card = settings_card_section(
+            "Hadron Lab (High-Scale Swarm)",
+            Some(IconName::Cpu),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Hadron Lab high-scale mode (50–1000+ Quarks)",
+                    Some("Enable bounded turn/gate concurrency, disjoint-file speculative batch merging, and incremental field I/O for massive swarms."),
+                    Switch::new("hadron-lab-enabled")
+                        .checked(lab_enabled)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.team.hadron_lab_enabled = Some(*checked);
+                            this.save_repo_team(cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Max concurrent turns",
+                    Some("Maximum number of Quark subprocesses/HTTP turns executing simultaneously before queuing."),
+                    turns_pills.into_any_element(),
+                ))
+                .child(settings_field(
+                    "Max concurrent shadow gates",
+                    Some("Maximum number of parallel ShadowGate verification worktrees running cargo check/test."),
+                    gates_pills.into_any_element(),
+                ))
+                .child(settings_field(
+                    "Speculative gate batch size",
+                    Some("Number of disjoint-file candidate commits combined and verified in a single shadow gate pass."),
+                    batch_pills.into_any_element(),
+                ))
+                .child(settings_field(
+                    "Docs & assets fast-path merge",
+                    Some("Bypass full cargo compile/test gates when a candidate branch touches only documentation (.md, .txt) or static assets."),
+                    Switch::new("hadron-lab-fast-path-docs")
+                        .checked(fast_path_docs)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.team.fast_path_docs_only = Some(*checked);
+                            this.save_repo_team(cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )),
+        );
+
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(execution_card)
+            .child(cpu_control_card)
+            .child(hadron_lab_card)
+            .child(watchdog_card)
+            .child(git_card)
+            .child(repo_monitor_card)
+    }
+
+    pub(super) fn environment_settings_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_wsl_workspace = crate::wsl::is_wsl_unc_path(&self.path);
+        let (ipc_label, ipc_color) = match &self.rpc_endpoint {
+            Some(rpc) => {
+                let mode_suffix = if is_wsl_workspace {
+                    " · WSL2 Bridge"
+                } else {
+                    ""
+                };
+                (
+                    format!(
+                        "Connected ({} · {} · pid {}{})",
+                        rpc.addr, rpc.platform, rpc.pid, mode_suffix
+                    ),
+                    theme::success(),
+                )
+            }
+            None if self.last_gluon_running => (
+                if is_wsl_workspace {
+                    "File Watcher Fallback (WSL2 Workspace)".to_string()
+                } else {
+                    "File Watcher Fallback".to_string()
+                },
+                theme::text_secondary(),
+            ),
+            None => ("Daemon Stopped".to_string(), theme::warning()),
+        };
+
+        let environment_card = settings_card_section(
+            "Environment & Defaults",
+            Some(IconName::Settings),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Daemon IPC & WSL Bridge",
+                    Some(
+                        "Live JSON-RPC 2.0 loopback channel (.hadron/gluon.rpc) for <1ms daemon wakeups and WSL2 native daemon bridge status.",
+                    ),
+                    div()
+                        .text_xs()
+                        .text_color(ipc_color)
+                        .child(ipc_label)
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Code editor",
+                    Some(
+                        "Which program opens a file you click (file:// link or file tree). \
+                         System default uses desktop default (xdg-open).",
+                    ),
+                    self.editor_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Default permission mode",
+                    Some(
+                        "The mode a new session starts on. /clear wipes the field and seeds this default.",
+                    ),
+                    self.default_mode_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Close Gluon on Exit",
+                    Some("Terminate the hadron-gluon daemon when the Chamber window closes."),
+                    Switch::new("close-gluon-on-exit")
+                        .checked(self.prefs.close_gluon_on_exit)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.close_gluon_on_exit = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Show console window (Windows)",
+                    Some("Show the companion command-line console window (cmd / conhost) with live daemon and chamber logs."),
+                    Switch::new("show-console-window")
+                        .checked(self.prefs.show_console_window)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.show_console_window = *checked;
+                            crate::sys::set_windows_console_visible(*checked);
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )),
+        );
+
+        let audio_card = settings_card_section(
+            "Audio & Haptics",
+            Some(IconName::Info),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Audio telemetry cues",
+                    Some("Play synthesized audio chimes for swarm events, gate requests, and collision alerts."),
+                    Switch::new("audio-cues-enabled")
+                        .checked(self.prefs.audio.enabled)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.enabled = *checked;
+                            this.audio_manager.config.enabled = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Master audio volume",
+                    Some("Volume level for all synthesized telemetry audio chimes."),
+                    self.volume_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Sound theme & acoustic profile",
+                    Some("Choose acoustic timbre: Classic harmonic chimes, Modern synth FM blips, Minimal soft clicks, or Retro 8-bit arcade."),
+                    self.sound_theme_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Haptic feedback pulse",
+                    Some("Emit subtle terminal / device haptic vibrations on critical swarm alerts."),
+                    Switch::new("haptic-feedback-enabled")
+                        .checked(self.prefs.audio.haptic_enabled)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.haptic_enabled = *checked;
+                            this.audio_manager.config.haptic_enabled = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Message received cue",
+                    Some("Play chime and subtle haptic pulse when an incoming message is received from a quark."),
+                    Switch::new("cue-message-received")
+                        .checked(self.prefs.audio.cue_message_received)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.cue_message_received = *checked;
+                            this.audio_manager.config.cue_message_received = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Message sent cue",
+                    Some("Play subtle swoosh chime and tap when submitting a chat message."),
+                    Switch::new("cue-message-sent")
+                        .checked(self.prefs.audio.cue_message_sent)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.cue_message_sent = *checked;
+                            this.audio_manager.config.cue_message_sent = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Gate approval cue",
+                    Some("Play chime when a gate requires human decision or verification."),
+                    Switch::new("cue-gate-approval")
+                        .checked(self.prefs.audio.cue_gate_approval)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.cue_gate_approval = *checked;
+                            this.audio_manager.config.cue_gate_approval = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Merge collision cue",
+                    Some("Play alert chime when a merge conflict or collision is detected across worktrees."),
+                    Switch::new("cue-merge-collision")
+                        .checked(self.prefs.audio.cue_merge_collision)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.cue_merge_collision = *checked;
+                            this.audio_manager.config.cue_merge_collision = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Turn completion cue",
+                    Some("Play gentle ping when an autonomous quark finishes its execution turn."),
+                    Switch::new("cue-turn-finish")
+                        .checked(self.prefs.audio.cue_turn_finish)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.cue_turn_finish = *checked;
+                            this.audio_manager.config.cue_turn_finish = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Human blocked cue",
+                    Some("Play attention chime when a quark halts and requires user input in Mode::Ask."),
+                    Switch::new("cue-blocked-human")
+                        .checked(self.prefs.audio.cue_blocked_on_human)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.audio.cue_blocked_on_human = *checked;
+                            this.audio_manager.config.cue_blocked_on_human = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Test sound & haptic preview",
+                    Some("Preview the active sound theme, volume level, and haptic feedback."),
+                    Button::new("btn-preview-audio")
+                        .label("Play Test Chime")
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.audio_manager.trigger_cue(crate::app::audio::AudioCue::GateApproval);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )),
+        );
+
+        let terminal_card = settings_card_section(
+            "Terminal / PTY",
+            Some(IconName::SquareTerminal),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Shell executable path",
+                    Some("Path or name of the shell executable to spawn (blank = system $SHELL)."),
+                    Input::new(&self.settings_terminal_shell).w_full().into_any_element(),
+                ))
+                .child(settings_field(
+                    "Cursor rendering style",
+                    Some("Visual cursor indicator in the embedded PTY terminal emulator."),
+                    self.cursor_style_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Scrollback buffer depth",
+                    Some("Maximum lines preserved in the scrollback history buffer per terminal tab."),
+                    self.scrollback_select(window, cx),
+                )),
+        );
+
+        let notifications_card = settings_card_section(
+            "OS Desktop Notifications",
+            Some(IconName::Inbox),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Native desktop notifications",
+                    Some("Deliver native OS desktop banners and dock alerts when the Chamber window is in background."),
+                    Switch::new("desktop-notifications-master")
+                        .checked(self.prefs.desktop_notifications)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.desktop_notifications = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Notify when blocked on Human (Mode::Ask)",
+                    Some("Trigger desktop alert immediately when a quark is blocked waiting for your input."),
+                    Switch::new("notify-on-blocked")
+                        .checked(self.prefs.notify_on_blocked)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.notify_on_blocked = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Notify when quark finishes turn",
+                    Some("Trigger desktop alert when a background quark finishes running its turn."),
+                    Switch::new("notify-on-turn-finish")
+                        .checked(self.prefs.notify_on_turn_finish)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            this.prefs.notify_on_turn_finish = *checked;
+                            let _ = config::save(&this.prefs);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )),
+        );
+
+        let disp_env = crate::sys::detect_display_environment();
+        let display_card = settings_card_section(
+            "Display & Desktop Environment",
+            Some(IconName::Settings),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Display server",
+                    Some("Active desktop windowing protocol (X11 or Wayland compositor)."),
+                    div().text_sm().text_color(theme::text()).child(disp_env.server).into_any_element(),
+                ))
+                .child(settings_field(
+                    "Layer Shell protocol",
+                    Some("Wayland zwlr_layer_shell_v1 protocol support for desktop overlays."),
+                    div().text_sm().text_color(theme::text()).child(disp_env.layer_shell_status).into_any_element(),
+                ))
+                .child(settings_field(
+                    "Notification backend",
+                    Some("Platform notification delivery mechanism (PowerShell host toast on WSL, notify-send on Linux)."),
+                    div().text_sm().text_color(theme::text()).child(disp_env.notification_backend).into_any_element(),
+                ))
+                .child(settings_field(
+                    "Graphics pipeline",
+                    Some("Vulkan / GPU hardware driver or LAVAPIPE software CPU fallback."),
+                    div().text_sm().text_color(theme::text()).child(disp_env.graphics_pipeline).into_any_element(),
+                )),
+        );
+
+        let sandbox_platform = hadron_gatekeeper::detect_sandbox_platform_for_path(&self.path);
+        let is_sandbox_on = self.prefs.sandbox_mode != hadron_lattice::SandboxMode::Off;
+        let sandbox_card = settings_card_section(
+            "Native Process Sandbox Engine",
+            Some(IconName::Settings),
+            v_flex()
+                .gap_3()
+                .child(settings_field(
+                    "Enable process sandbox",
+                    Some("Enforce filesystem and environment containment on command and tool executions across all platforms."),
+                    Switch::new("enable-sandbox-switch")
+                        .checked(is_sandbox_on)
+                        .on_click(cx.listener(|this, checked, _window, cx| {
+                            let next = if *checked {
+                                hadron_lattice::SandboxMode::WorktreeOnly
+                            } else {
+                                hadron_lattice::SandboxMode::Off
+                            };
+                            this.set_sandbox_mode(next, cx);
+                        }))
+                        .into_any_element(),
+                ))
+                .child(settings_field(
+                    "Confinement mode",
+                    Some("Isolation level: Worktree Only (jailed to repo), Strict (jailed + network denied), or Off (host direct)."),
+                    self.sandbox_mode_select(window, cx),
+                ))
+                .child(settings_field(
+                    "Active sandbox driver",
+                    Some("Platform kernel containment mechanism jailing tool and command execution."),
+                    div().text_sm().text_color(theme::text()).child(sandbox_platform.name()).into_any_element(),
+                ))
+                .child(settings_field(
+                    "Containment status",
+                    Some("Whether process, filesystem, and network isolation are enforced by the platform driver."),
+                    div().text_sm().text_color(if !is_sandbox_on {
+                        theme::warning()
+                    } else if sandbox_platform.is_isolated() {
+                        theme::success()
+                    } else {
+                        theme::warning()
+                    })
+                        .child(if !is_sandbox_on {
+                            "Disabled (Host Execution)"
+                        } else if sandbox_platform.is_isolated() {
+                            "Active (Native Isolation)"
+                        } else {
+                            "Host Fallback"
+                        })
+                        .into_any_element(),
+                )),
+        );
+
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(environment_card)
+            .child(audio_card)
+            .child(terminal_card)
+            .child(notifications_card)
+            .child(display_card)
+            .child(sandbox_card)
+    }
+
+    pub(super) fn general_settings_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let typography = self.appearance_settings_view(window, cx);
+        let execution = self.execution_settings_view(window, cx);
+        let environment = self.environment_settings_view(window, cx);
+
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(typography)
+            .child(execution)
+            .child(environment)
+    }
+
+    /// The default-permission-mode picker using native Select dropdown component
+    /// with mode color coding.
+    pub(super) fn default_mode_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.default_mode;
+        if self.default_mode_select_key != Some(current) {
+            self.default_mode_select_key = Some(current);
+            let modes = vec![
+                "Ask".to_string(),
+                "Write".to_string(),
+                "Auto".to_string(),
+                "Bypass".to_string(),
+            ];
+            let current_str = widgets::mode_label(current);
+            let delegate = create_model_delegate(&current_str, &modes, Some(&current_str));
+            self.default_mode_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_str.into(), window, cx);
+            });
+        }
+        v_flex()
+            .gap_1p5()
+            .w_full()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .child(
+                        div().flex_1().min_w(px(140.0)).child(
+                            Select::new(&self.default_mode_select_state)
+                                .w_full()
+                                .placeholder("Select default mode..."),
+                        ),
+                    )
+                    .child(widgets::mode_tag(current, false)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(widgets::mode_hint(current)),
+            )
+            .into_any_element()
+    }
+
+    /// The sandbox confinement mode picker using native Select dropdown component.
+    pub(super) fn sandbox_mode_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.sandbox_mode;
+        if self.sandbox_mode_select_key != Some(current) {
+            self.sandbox_mode_select_key = Some(current);
+            let choices = vec![
+                "Worktree Only".to_string(),
+                "Strict (Offline)".to_string(),
+                "Off (Host Direct)".to_string(),
+            ];
+            let current_label = match current {
+                hadron_lattice::SandboxMode::WorktreeOnly => "Worktree Only",
+                hadron_lattice::SandboxMode::Strict => "Strict (Offline)",
+                hadron_lattice::SandboxMode::Off => "Off (Host Direct)",
+            };
+            let delegate = create_model_delegate(current_label, &choices, Some(current_label));
+            self.sandbox_mode_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        v_flex()
+            .gap_1p5()
+            .w_full()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .child(
+                        div().flex_1().min_w(px(140.0)).child(
+                            Select::new(&self.sandbox_mode_select_state)
+                                .w_full()
+                                .placeholder("Select sandbox mode..."),
+                        ),
+                    )
+                    .child(widgets::sandbox_tag(current)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(widgets::sandbox_hint(current)),
+            )
+            .into_any_element()
+    }
+
+    /// The code-editor picker using native Select dropdown component.
+    pub(super) fn editor_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.editor.clone();
+        if self.editor_select_key.as_ref() != Some(&current) {
+            self.editor_select_key = Some(current.clone());
+            let choices: Vec<String> = crate::sys::EDITOR_LADDER
+                .iter()
+                .map(|e| e.label().to_string())
+                .collect();
+            let current_label = current.label();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.editor_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.editor_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select code editor...")
+            .into_any_element()
+    }
+
+    /// The nucleus index budget picker using native Select dropdown component.
+    pub(super) fn nucleus_budget_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_kb = nucleus_budget_kb_for(&self.team);
+        if self.nucleus_budget_select_key != Some(current_kb) {
+            self.nucleus_budget_select_key = Some(current_kb);
+            let choices: Vec<String> = NUCLEUS_BUDGET_LADDER_KB
+                .iter()
+                .map(|kb| format!("{kb} KiB"))
+                .collect();
+            let current_label = format!("{current_kb} KiB");
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.nucleus_budget_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.nucleus_budget_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select budget...")
+            .into_any_element()
+    }
+
+    /// The merge strategy picker using native Select dropdown component.
+    pub(super) fn merge_strategy_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_strategy = self.team.merge_strategy();
+        if self.merge_strategy_select_key != Some(current_strategy) {
+            self.merge_strategy_select_key = Some(current_strategy);
+            let choices: Vec<String> = vec![
+                "Fast-forward".to_string(),
+                "Squash commit".to_string(),
+                "GitHub PR mirror".to_string(),
+            ];
+            let current_label = match current_strategy {
+                hadron_lattice::MergeStrategy::FastForward => "Fast-forward",
+                hadron_lattice::MergeStrategy::Squash => "Squash commit",
+                hadron_lattice::MergeStrategy::GitHubPr => "GitHub PR mirror",
+            }
+            .to_string();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.merge_strategy_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.merge_strategy_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select strategy...")
+            .into_any_element()
+    }
+
+    /// The chat row density picker using native Select dropdown component.
+    pub(super) fn chat_density_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.chat_density;
+        if self.chat_density_select_key != Some(current) {
+            self.chat_density_select_key = Some(current);
+            let choices: Vec<String> = vec![
+                "Comfortable (Standard Spacing)".to_string(),
+                "Compact (Dense View)".to_string(),
+            ];
+            let current_label = match current {
+                config::ChatDensity::Comfortable => "Comfortable (Standard Spacing)",
+                config::ChatDensity::Compact => "Compact (Dense View)",
+            }
+            .to_string();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.chat_density_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.chat_density_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select density...")
+            .into_any_element()
+    }
+
+    /// The timestamp format picker using native Select dropdown component.
+    pub(super) fn timestamp_format_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.timestamp_format;
+        if self.timestamp_format_select_key != Some(current) {
+            self.timestamp_format_select_key = Some(current);
+            let choices: Vec<String> = vec![
+                "24-Hour (15:04:05)".to_string(),
+                "12-Hour (3:04:05 PM)".to_string(),
+                "Relative (2m ago)".to_string(),
+            ];
+            let current_label = match current {
+                config::TimestampFormat::Clock24h => "24-Hour (15:04:05)",
+                config::TimestampFormat::Clock12h => "12-Hour (3:04:05 PM)",
+                config::TimestampFormat::Relative => "Relative (2m ago)",
+            }
+            .to_string();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.timestamp_format_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.timestamp_format_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select format...")
+            .into_any_element()
+    }
+
+    /// The terminal cursor style picker using native Select dropdown component.
+    pub(super) fn cursor_style_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.terminal_cursor_style;
+        if self.cursor_style_select_key != Some(current) {
+            self.cursor_style_select_key = Some(current);
+            let choices: Vec<String> = vec![
+                "Beam (Vertical Line)".to_string(),
+                "Block (Full Rectangle)".to_string(),
+                "Underline (Bottom Bar)".to_string(),
+            ];
+            let current_label = match current {
+                config::TerminalCursorStyle::Beam => "Beam (Vertical Line)",
+                config::TerminalCursorStyle::Block => "Block (Full Rectangle)",
+                config::TerminalCursorStyle::Underline => "Underline (Bottom Bar)",
+            }
+            .to_string();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.cursor_style_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.cursor_style_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select cursor style...")
+            .into_any_element()
+    }
+
+    /// The terminal scrollback buffer depth picker using native Select dropdown component.
+    pub(super) fn scrollback_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.terminal_scrollback;
+        if self.scrollback_select_key != Some(current) {
+            self.scrollback_select_key = Some(current);
+            let choices: Vec<String> = vec![
+                "1,000 lines".to_string(),
+                "2,500 lines".to_string(),
+                "5,000 lines (Default)".to_string(),
+                "10,000 lines".to_string(),
+                "50,000 lines".to_string(),
+            ];
+            let current_label = if current == 5000 {
+                "5,000 lines (Default)".to_string()
+            } else {
+                format!("{current} lines")
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.scrollback_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.scrollback_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select scrollback...")
+            .into_any_element()
+    }
+
+    /// The master audio volume picker using native Select dropdown component.
+    pub(super) fn volume_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_vol = (self.prefs.audio.volume * 100.0).round() as u32;
+        if self.volume_select_key != Some(current_vol) {
+            self.volume_select_key = Some(current_vol);
+            let choices: Vec<String> = vec![
+                "10%".to_string(),
+                "25%".to_string(),
+                "50% (Default)".to_string(),
+                "75%".to_string(),
+                "100%".to_string(),
+            ];
+            let current_label = if current_vol == 50 {
+                "50% (Default)".to_string()
+            } else {
+                format!("{current_vol}%")
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.volume_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.volume_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select volume...")
+            .into_any_element()
+    }
+
+    /// The sound theme & acoustic profile picker using native Select dropdown component.
+    pub(super) fn sound_theme_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current = self.prefs.audio.sound_theme;
+        if self.sound_theme_select_key != Some(current) {
+            self.sound_theme_select_key = Some(current);
+            let choices: Vec<String> = config::SoundTheme::ALL
+                .iter()
+                .map(|t| t.label().to_string())
+                .collect();
+            let current_label = current.label().to_string();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.sound_theme_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.sound_theme_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select sound theme...")
+            .into_any_element()
+    }
+
+    /// The turn silence deadline picker using native Select dropdown component.
+    pub(super) fn turn_deadline_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_secs = self.team.turn_deadline_secs();
+        if self.turn_deadline_select_key != Some(current_secs) {
+            self.turn_deadline_select_key = Some(current_secs);
+            let choices: Vec<String> = vec![
+                "5 minutes".to_string(),
+                "15 minutes (Default)".to_string(),
+                "30 minutes".to_string(),
+                "45 minutes".to_string(),
+                "60 minutes".to_string(),
+            ];
+            let mins = current_secs / 60;
+            let current_label = if mins == 15 {
+                "15 minutes (Default)".to_string()
+            } else {
+                format!("{mins} minutes")
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.turn_deadline_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.turn_deadline_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select liveness silence limit...")
+            .into_any_element()
+    }
+
+    /// The max turn wall-clock safety ceiling picker using native Select dropdown component.
+    pub(super) fn max_turn_wall_clock_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_secs = self.team.max_turn_wall_clock_secs();
+        if self.max_turn_wall_clock_select_key != Some(current_secs) {
+            self.max_turn_wall_clock_select_key = Some(current_secs);
+            let choices: Vec<String> = vec![
+                "1 hour".to_string(),
+                "2 hours".to_string(),
+                "4 hours (Default)".to_string(),
+                "8 hours".to_string(),
+            ];
+            let hours = current_secs / 3600;
+            let current_label = if hours == 4 {
+                "4 hours (Default)".to_string()
+            } else if hours == 1 {
+                "1 hour".to_string()
+            } else {
+                format!("{hours} hours")
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.max_turn_wall_clock_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.max_turn_wall_clock_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select wall-clock ceiling...")
+            .into_any_element()
+    }
+
+    /// The periodic repository diagnostics check interval picker.
+    pub(super) fn repo_monitor_interval_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_secs = self.prefs.repo_monitor_interval_secs;
+        if self.repo_monitor_interval_select_key != Some(current_secs) {
+            self.repo_monitor_interval_select_key = Some(current_secs);
+            let choices: Vec<String> = vec![
+                "1 minute".to_string(),
+                "5 minutes (Default)".to_string(),
+                "15 minutes".to_string(),
+                "30 minutes".to_string(),
+            ];
+            let mins = current_secs / 60;
+            let current_label = if mins == 5 {
+                "5 minutes (Default)".to_string()
+            } else if mins == 1 {
+                "1 minute".to_string()
+            } else {
+                format!("{mins} minutes")
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.repo_monitor_interval_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.repo_monitor_interval_select_state)
+            .w_full()
+            .min_w(px(220.0))
+            .placeholder("Select check interval...")
+            .into_any_element()
+    }
+
+    /// The color theme preset picker supporting both built-in presets and custom themes.
+    pub(super) fn theme_preset_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_pref = self.prefs.theme_preset;
+        let mut choices: Vec<String> = config::ThemePreset::ALL
+            .iter()
+            .map(|p| p.label().to_string())
+            .collect();
+        for custom in theme::load_custom_themes() {
+            let label = format!("Custom: {}", custom.name);
+            if !choices.contains(&label) {
+                choices.push(label);
+            }
+        }
+        let current_label = if let Some(custom) = &self.prefs.custom_theme {
+            format!("Custom: {}", custom.name)
+        } else {
+            current_pref.unwrap_or_default().label().to_string()
+        };
+
+        if self.theme_preset_select_key.as_deref() != Some(&current_label) {
+            self.theme_preset_select_key = Some(current_label.clone());
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.theme_preset_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.theme_preset_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select theme preset...")
+            .into_any_element()
+    }
+
+    /// The primary accent color picker.
+    pub(super) fn accent_choice_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_pref = self.prefs.accent_choice;
+        if self.accent_choice_select_key != Some(current_pref) {
+            self.accent_choice_select_key = Some(current_pref);
+            let choices: Vec<String> = config::AccentChoice::ALL
+                .iter()
+                .map(|a| a.label().to_string())
+                .collect();
+            let current_accent = current_pref.unwrap_or_default();
+            let current_label = current_accent.label().to_string();
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.accent_choice_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.accent_choice_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select accent color...")
+            .into_any_element()
+    }
+
+    /// The UI font picker listing bundled fonts first, then bold-verified system fonts.
+    pub(super) fn ui_font_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_pref = self.prefs.ui_font_family.clone();
+        if self.ui_font_select_key != Some(current_pref.clone()) {
+            self.ui_font_select_key = Some(current_pref.clone());
+            let mut choices = vec![
+                "Noto Sans (Default)".to_string(),
+                "Inter".to_string(),
+                "Geist".to_string(),
+            ];
+            let text_system = cx.text_system();
+            let mut sys_names = text_system.all_font_names();
+            sys_names.sort();
+            sys_names.dedup();
+            for name in sys_names {
+                if crate::fonts::BUNDLED_UI_FAMILIES.contains(&name.as_str())
+                    || name == ".SystemUIFont"
+                    || crate::fonts::is_emoji_or_symbol_font(&name)
+                {
+                    continue;
+                }
+                let regular = gpui_kit::font(&name);
+                if text_system.resolve_font(&regular.clone().bold())
+                    != text_system.resolve_font(&regular)
+                {
+                    choices.push(name);
+                }
+            }
+            let current_label = match &current_pref {
+                Some(name) => {
+                    if name == "Noto Sans" {
+                        "Noto Sans (Default)".to_string()
+                    } else {
+                        name.clone()
+                    }
+                }
+                None => "Noto Sans (Default)".to_string(),
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.ui_font_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.ui_font_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select UI font...")
+            .into_any_element()
+    }
+
+    /// The UI font size picker (12px - 20px, default 14px).
+    pub(super) fn ui_font_size_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_pref = self.prefs.ui_font_size;
+        if self.ui_font_size_select_key != Some(current_pref) {
+            self.ui_font_size_select_key = Some(current_pref);
+            let choices = vec![
+                "12px".to_string(),
+                "13px".to_string(),
+                "14px (Default)".to_string(),
+                "15px".to_string(),
+                "16px".to_string(),
+                "18px".to_string(),
+                "20px".to_string(),
+            ];
+            let current_label = match current_pref {
+                Some(sz) => {
+                    if (sz - 14.0).abs() < 0.01 {
+                        "14px (Default)".to_string()
+                    } else {
+                        format!("{sz}px")
+                    }
+                }
+                None => "14px (Default)".to_string(),
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.ui_font_size_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.ui_font_size_select_state)
+            .w_full()
+            .min_w(px(140.0))
+            .placeholder("Select UI font size...")
+            .into_any_element()
+    }
+
+    /// The code / monospace font picker listing bundled fonts first, then bold-verified system fonts.
+    pub(super) fn mono_font_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_pref = self.prefs.mono_font_family.clone();
+        if self.mono_font_select_key != Some(current_pref.clone()) {
+            self.mono_font_select_key = Some(current_pref.clone());
+            let mut choices = vec![
+                "Cascadia Code (Default)".to_string(),
+                "JetBrains Mono".to_string(),
+                "Fira Code".to_string(),
+            ];
+            let text_system = cx.text_system();
+            let mut sys_names = text_system.all_font_names();
+            sys_names.sort();
+            sys_names.dedup();
+            for name in sys_names {
+                if crate::fonts::BUNDLED_MONO_FAMILIES.contains(&name.as_str())
+                    || name == ".SystemUIFont"
+                    || crate::fonts::is_emoji_or_symbol_font(&name)
+                {
+                    continue;
+                }
+                let regular = gpui_kit::font(&name);
+                if text_system.resolve_font(&regular.clone().bold())
+                    != text_system.resolve_font(&regular)
+                {
+                    choices.push(name);
+                }
+            }
+            let current_label = match &current_pref {
+                Some(name) => {
+                    if name == "Cascadia Code" {
+                        "Cascadia Code (Default)".to_string()
+                    } else {
+                        name.clone()
+                    }
+                }
+                None => "Cascadia Code (Default)".to_string(),
+            };
+
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.mono_font_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.mono_font_select_state)
+            .w_full()
+            .min_w(px(180.0))
+            .placeholder("Select code font...")
+            .into_any_element()
+    }
+
+    /// The code / monospace font size picker (10px - 18px, default 13px).
+    pub(super) fn mono_font_size_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let current_pref = self.prefs.mono_font_size;
+        if self.mono_font_size_select_key != Some(current_pref) {
+            self.mono_font_size_select_key = Some(current_pref);
+            let choices = vec![
+                "10px".to_string(),
+                "11px".to_string(),
+                "12px".to_string(),
+                "13px (Default)".to_string(),
+                "14px".to_string(),
+                "15px".to_string(),
+                "16px".to_string(),
+                "18px".to_string(),
+            ];
+            let current_label = match current_pref {
+                Some(sz) => {
+                    if (sz - 13.0).abs() < 0.01 {
+                        "13px (Default)".to_string()
+                    } else {
+                        format!("{sz}px")
+                    }
+                }
+                None => "13px (Default)".to_string(),
+            };
+            let delegate = create_model_delegate(&current_label, &choices, Some(&current_label));
+            self.mono_font_size_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                s.set_selected_value(&current_label.into(), window, cx);
+            });
+        }
+        Select::new(&self.mono_font_size_select_state)
+            .w_full()
+            .min_w(px(140.0))
+            .placeholder("Select code font size...")
+            .into_any_element()
+    }
+
+    pub(super) fn providers_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        match &self.wizard_state {
+            WizardState::None => {
+                let mut list = v_flex().gap_3();
+                if self.providers.is_empty() {
+                    let env_vars: Vec<(String, String)> = std::env::vars().collect();
+                    if let Some(candidate) = detect_available_env_provider(&env_vars) {
+                        list = list.child(
+                            div()
+                                .p_3()
+                                .rounded_md()
+                                .bg(theme::input_bg())
+                                .border_1()
+                                .border_color(theme::border())
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(format!(
+                                    "Detected {} via ${}. Click 'Add Quark' to configure.",
+                                    candidate.display_name(),
+                                    candidate.env_var()
+                                )),
+                        );
+                    }
+                }
+                for provider in &self.providers {
+                    let model_text = if provider.model.trim().is_empty() {
+                        "—".to_string()
+                    } else {
+                        provider.model.clone()
+                    };
+                    list = list.child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .p_4()
+                            .rounded_lg()
+                            .bg(theme::input_bg())
+                            .border_1()
+                            .border_color(theme::border())
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .text_color(theme::text())
+                                            .child(provider.id.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(format!("Transport: {}", provider.transport)),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme::text_secondary())
+                                            .child(format!("Model: {}", model_text)),
+                                    )
+                                    .child({
+                                        let pid = provider.id.clone();
+                                        text_button(
+                                            format!("duplicate-{}", provider.id),
+                                            "Duplicate",
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _window, cx| {
+                                                this.duplicate_quark(&pid, cx);
+                                            }),
+                                        )
+                                    })
+                                    .child({
+                                        let pid = provider.id.clone();
+                                        text_button(format!("remove-{}", provider.id), "Remove")
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                this.remove_quark(&pid, cx);
+                                            }))
+                                    }),
+                            ),
+                    );
+                }
+
+                v_flex()
+                    .size_full()
+                    .gap_6()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .text_color(theme::text())
+                                    .child("Configured Providers"),
+                            )
+                            .child(text_button("add-quark", "Add Quark").on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.wizard_state = WizardState::PickPreset;
+                                    cx.notify();
+                                },
+                            ))),
+                    )
+                    // Scroll the roster so a long provider list stays reachable while the
+                    // "Configured Providers" header + Add Quark button stay pinned. Same
+                    // reason as the preset list: a `size_full` wizard can't be scrolled by
+                    // the ancestor, so extra rows would clip off the card.
+                    .child(
+                        div()
+                            .id("providers-list-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(list),
+                    )
+            }
+            WizardState::PickPreset => {
+                // The merged catalogue: compiled presets + the published ACP registry,
+                // so "seat an agent" can offer any registry agent with no CLI install —
+                // not just the ones we've hand-written a preset for. `available_presets`
+                // only ever saw the compiled list; extending that one view rather than
+                // keeping a second is the point (see `available_agents`'s doc comment).
+                let entries = hadron_gluon::adapter::registry::QuarkKind::available_agents();
+
+                // Case-insensitive substring match on name + command. Empty filter shows
+                // all. (A custom provider is added via the "Custom CLI…" option, which
+                // has its own working wizard — the old empty-command "Custom command…"
+                // escape hatch was a dead end and has been removed.)
+                let filter = self.preset_filter.read(cx).value().trim().to_lowercase();
+                let entries: Vec<_> = entries
+                    .into_iter()
+                    .filter(|e| {
+                        let command_line = e
+                            .command
+                            .as_ref()
+                            .map(|(program, args)| format!("{program} {}", args.join(" ")))
+                            .unwrap_or_default();
+                        filter.is_empty()
+                            || e.name.to_lowercase().contains(&filter)
+                            || command_line.to_lowercase().contains(&filter)
+                    })
+                    .collect();
+
+                let mut list = v_flex().gap_2();
+
+                // Ollama / LM Studio (keyless local HTTP servers) and the cloud
+                // OpenAI-compatible endpoint (keyed), pinned at the top since none of the
+                // three need an install check or a boot-and-probe — just a Connect button
+                // against a server that's either reachable or isn't.
+                for vendor in [
+                    hadron_gluon::adapter::local::HttpVendor::Ollama,
+                    hadron_gluon::adapter::local::HttpVendor::LmStudio,
+                    hadron_gluon::adapter::local::HttpVendor::OpenAiCompatible,
+                ] {
+                    if !filter.is_empty() && !vendor.display_name().to_lowercase().contains(&filter)
+                    {
+                        continue;
+                    }
+                    list = list.child(
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "preset-local-{}",
+                                vendor.code()
+                            )))
+                            .items_center()
+                            .justify_between()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(theme::input_bg())
+                            .border_1()
+                            .border_color(theme::border())
+                            .hover(|s| s.bg(theme::bg_surface_raised()))
+                            .cursor_pointer()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_base()
+                                                    .text_color(theme::text())
+                                                    .child(vendor.display_name()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(theme::tab_bar_bg())
+                                                    .border_1()
+                                                    .border_color(theme::glass_highlight())
+                                                    .text_xs()
+                                                    .text_color(theme::accent())
+                                                    .child("Local HTTP"),
+                                            ),
+                                    )
+                                    .child(div().text_xs().text_color(theme::text_muted()).child(
+                                        format!(
+                                            "Connect over HTTP \u{2014} {}",
+                                            vendor.default_base_url()
+                                        ),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::accent())
+                                    .child("1-Click Add \u{2192}"),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.local_base_url.update(cx, |s, cx| {
+                                    s.set_value(vendor.default_base_url(), window, cx)
+                                });
+                                // A stale key from a previous Cloud attempt must not leak
+                                // into a fresh Ollama/LM Studio row (or into a different
+                                // cloud key the human is about to type).
+                                this.local_api_key
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.local_models = Vec::new();
+                                this.local_selected_model = None;
+                                if !vendor.requires_api_key() {
+                                    this.start_local_provider_probe(
+                                        vendor,
+                                        vendor.default_base_url().to_string(),
+                                        None,
+                                        cx,
+                                    );
+                                } else {
+                                    this.wizard_state = WizardState::LocalProvider(
+                                        vendor,
+                                        ProviderState::NotConnected,
+                                    );
+                                    cx.notify();
+                                }
+                            })),
+                    );
+                }
+
+                for entry in entries {
+                    let command_line = entry
+                        .command
+                        .as_ref()
+                        .map(|(program, args)| format!("{program} {}", args.join(" ")))
+                        .unwrap_or_default();
+                    // A human blurb for first-class agents; the raw command line for
+                    // best-effort presets and registry rows with none, so they're still
+                    // identifiable.
+                    let subtitle = if entry.description.is_empty() {
+                        command_line
+                    } else {
+                        entry.description.clone()
+                    };
+
+                    let row = h_flex()
+                        .id(SharedString::from(format!("preset-{}", entry.vendor)))
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(theme::input_bg())
+                        .border_1()
+                        .border_color(theme::border())
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .text_color(theme::text())
+                                                .child(entry.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_full()
+                                                .bg(theme::tab_bar_bg())
+                                                .border_1()
+                                                .border_color(theme::glass_highlight())
+                                                .text_xs()
+                                                .text_color(theme::accent_secondary())
+                                                .child("Resident ACP"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(subtitle),
+                                ),
+                        );
+
+                    // A registry `binary` entry has no resolvable command — Hadron does
+                    // not download and execute a third-party archive, so this row is a
+                    // real agent worth listing but stays greyed and unclickable rather
+                    // than offering a command that cannot work.
+                    let row = match entry.command {
+                        Some((program, args)) => {
+                            let preset = AgentDescriptor {
+                                id: entry.vendor.clone(),
+                                name: entry.name.clone(),
+                                description: entry.description.clone(),
+                                command: program,
+                                args,
+                            };
+                            row.hover(|s| s.bg(theme::bg_surface_raised()))
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::text_muted())
+                                        .child("Connect →"),
+                                )
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.start_acp_preset_probe(preset.clone(), cx);
+                                }))
+                        }
+                        // No command we can synthesise — a `binary`-only registry row
+                        // (we do not download and execute a third-party archive) or an
+                        // agent with no preset. This used to be greyed and unclickable,
+                        // which told the human a command was needed and offered nowhere
+                        // to put one. It now opens the SAME `Connecting` form with empty
+                        // program/args inputs, so the manual command has somewhere to go
+                        // and is booted and probed exactly like a preset's.
+                        None => {
+                            let preset = AgentDescriptor {
+                                id: entry.vendor.clone(),
+                                name: entry.name.clone(),
+                                description: entry.description.clone(),
+                                command: String::new(),
+                                args: Vec::new(),
+                            };
+                            row.hover(|s| s.bg(theme::bg_surface_raised()))
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::text_muted())
+                                        .child("Set command \u{2192}"),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.acp_program
+                                        .update(cx, |s, cx| s.set_value("", window, cx));
+                                    this.acp_args
+                                        .update(cx, |s, cx| s.set_value("", window, cx));
+                                    this.wizard_state = WizardState::Connecting(
+                                        preset.clone(),
+                                        ProviderState::NotConnected,
+                                    );
+                                    cx.notify();
+                                }))
+                        }
+                    };
+                    list = list.child(row);
+                }
+
+                // Custom CLI: a generic `Transport::Cli` seat for a vendor with no ACP
+                // agent (or none the human wants to probe right now) — a raw
+                // program+args+prompt-channel, not a boot-and-probe like the presets
+                // above. See `WizardState::CustomCli` / `cli_seat_from`.
+                list = list.child(
+                    h_flex()
+                        .id("preset-custom-cli")
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(theme::input_bg())
+                        .border_1()
+                        .border_color(theme::border())
+                        .hover(|s| s.bg(theme::bg_surface_raised()))
+                        .cursor_pointer()
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .text_color(theme::text())
+                                        .child("Custom CLI…"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child("A one-shot CLI Hadron has no built-in preset for"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text_muted())
+                                .child("Configure →"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            // Fresh form every time the wizard is (re-)entered — a stale
+                            // vendor/program from a prior custom-CLI attempt must not leak
+                            // into this one.
+                            this.custom_cli_vendor
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.custom_cli_program
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.custom_cli_args
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.custom_cli_model
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.custom_cli_flag
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.custom_cli_channel = CliChannelChoice::Stdin;
+                            this.wizard_state = WizardState::CustomCli;
+                            cx.notify();
+                        })),
+                );
+
+                v_flex()
+                    .size_full()
+                    .gap_4()
+                    .child(text_button("back-wizard", "← Back").on_click(cx.listener(
+                        |this, _, _window, cx| {
+                            this.wizard_state = WizardState::None;
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(theme::text())
+                            .child("Select a Preset"),
+                    )
+                    // Search box: filters the catalogue as you type (name + command), so
+                    // the right provider is one query away instead of a scroll through ~37.
+                    .child(Input::new(&self.preset_filter))
+                    // The catalogue is ~37 presets — taller than the card. Give the list
+                    // its own bounded scroll region (like `settings-nav-scroll`) so every
+                    // provider is reachable while Back/title stay pinned. Without this the
+                    // `size_full` wizard reports full height to the ancestor scroll, which
+                    // then can't scroll, and everything past the first few presets clips.
+                    .child(
+                        div()
+                            .id("preset-list-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(list),
+                    )
+            }
+
+            WizardState::Connecting(desc, state) => {
+                // A catalogue row with no boot command (a `binary`-only registry entry, or
+                // an agent nobody wrote a preset for) arrives here with `command` empty and
+                // the human types one. Resolving it HERE — before the probe, the auth retry
+                // and the save all read `desc` — is what keeps those three in step: the
+                // command that gets probed is the command that gets saved.
+                let needs_command = desc.command.trim().is_empty();
+                let desc = if needs_command {
+                    let program = self.acp_program.read(cx).value().trim().to_string();
+                    let args = self
+                        .acp_args
+                        .read(cx)
+                        .value()
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    &AgentDescriptor {
+                        command: program,
+                        args,
+                        ..desc.clone()
+                    }
+                } else {
+                    desc
+                };
+                // Nothing to boot until a program is typed, so Connect stays inert rather
+                // than spawning `""` and reporting a bare ENOENT that names no path.
+                let command_ready = !desc.command.trim().is_empty();
+                let command_form = needs_command.then(|| {
+                    v_flex()
+                        .gap_4()
+                        .child(settings_field_stacked(
+                            "Program (the binary to spawn)",
+                            Input::new(&self.acp_program).into_any_element(),
+                        ))
+                        .child(settings_field_stacked(
+                            "Args (space-separated)",
+                            Input::new(&self.acp_args).into_any_element(),
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text_muted())
+                                .child(
+                                    "Hadron has no built-in command for this agent. Give it the \
+                                     one its own docs use to speak ACP over stdio \u{2014} that is \
+                                     also how you seat a local model: point an ACP agent \
+                                     (opencode, goose, qwen-code\u{2026}) at Ollama or LM Studio in \
+                                     its own config, then name it here.",
+                                ),
+                        )
+                });
+                let desc_clone = desc.clone();
+                let state_ui = match state {
+                    ProviderState::Connecting => v_flex()
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text_muted())
+                                .child("Connecting..."),
+                        )
+                        .into_any_element(),
+                    ProviderState::NotConnected => v_flex()
+                        .gap_4()
+                        .children(command_form)
+                        .child(
+                            text_button("connect-btn", "Connect").when(command_ready, |b| {
+                                b.on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.start_acp_preset_probe(desc_clone.clone(), cx);
+                                }))
+                            }),
+                        )
+                        .into_any_element(),
+                    ProviderState::Ready { model } => {
+                        let desc_inner = desc.clone();
+                        let model_inner = model.clone();
+                        v_flex()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .text_color(theme::accent())
+                                    .child(format!("Ready! Model available: {}", model)),
+                            )
+                            .child(text_button("save-provider", "Save Provider").on_click(
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.save_and_add_acp_quark(&desc_inner, &model_inner, cx);
+                                }),
+                            ))
+                            .into_any_element()
+                    }
+                    ProviderState::Failed(err) => div()
+                        .text_color(theme::text_secondary())
+                        .child(err.clone())
+                        .into_any_element(),
+                };
+
+                v_flex()
+                    .size_full()
+                    .gap_4()
+                    .child(text_button("back-presets", "← Back").on_click(cx.listener(
+                        |this, _, _window, cx| {
+                            this.wizard_state = WizardState::PickPreset;
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(theme::text())
+                            .child(format!("Connecting to {}", desc.name)),
+                    )
+                    // Scroll the connection form (config fields / auth / errors can run tall)
+                    // while Back + title stay pinned — the ancestor can't scroll a `size_full`
+                    // wizard, so a tall form would otherwise clip off the card's bottom.
+                    .child(
+                        div()
+                            .id("connecting-form-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(state_ui),
+                    )
+            }
+
+            WizardState::CustomCli => {
+                // No boot-and-probe here (unlike `Connecting`) — a custom CLI is saved
+                // straight from its fields via `cli_seat_from`, the same way the ACP
+                // path saves straight from a `ProviderState::Ready` probe result.
+                let stdin_selected = self.custom_cli_channel == CliChannelChoice::Stdin;
+                let channel_toggle = h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("cli-channel-stdin")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(stdin_selected, |d| {
+                                d.bg(theme::glass_card())
+                                    .border_1()
+                                    .border_color(theme::accent())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::accent())
+                            })
+                            .when(!stdin_selected, |d| {
+                                d.border_1()
+                                    .border_color(theme::border())
+                                    .text_color(theme::text_secondary())
+                                    .hover(|s| s.bg(theme::bg_surface_raised()))
+                            })
+                            .child("Stdin")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.custom_cli_channel = CliChannelChoice::Stdin;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("cli-channel-arg")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(!stdin_selected, |d| {
+                                d.bg(theme::glass_card())
+                                    .border_1()
+                                    .border_color(theme::accent())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::accent())
+                            })
+                            .when(stdin_selected, |d| {
+                                d.border_1()
+                                    .border_color(theme::border())
+                                    .text_color(theme::text_secondary())
+                                    .hover(|s| s.bg(theme::bg_surface_raised()))
+                            })
+                            .child("Argv flag")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.custom_cli_channel = CliChannelChoice::Arg;
+                                cx.notify();
+                            })),
+                    );
+
+                // Required fields, checked live so "Save" is only wired up once the
+                // form can actually produce a valid seat (`cli_seat_from` needs both to
+                // build `id`/`cli.program`).
+                let vendor_text = self.custom_cli_vendor.read(cx).value().trim().to_string();
+                let vendor_present = !vendor_text.is_empty();
+                let program_present = !self.custom_cli_program.read(cx).value().trim().is_empty();
+                // This wizard is the FIRST UI that feeds freely-typed text into a
+                // `QuarkId` — which becomes a worktree DIRECTORY name, a git BRANCH ref
+                // segment, and a live-file name. A vendor like "foo/bar" would derive
+                // an id `validate_quark_id` (the SSOT for what's safe there) rejects, so
+                // check it here too and never even wire up Save for a bad one.
+                let vendor_id_valid = vendor_present && custom_cli_vendor_is_valid(&vendor_text);
+                let can_save = vendor_id_valid && program_present;
+
+                let mut form = v_flex()
+                    .size_full()
+                    .gap_4()
+                    .child(
+                        text_button("back-custom-cli", "← Back").on_click(cx.listener(
+                            |this, _, _window, cx| {
+                                this.wizard_state = WizardState::PickPreset;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(theme::text())
+                            .child("Custom CLI"),
+                    )
+                    .child(settings_field_stacked(
+                        "Vendor (short label, e.g. \"ollama\")",
+                        Input::new(&self.custom_cli_vendor).into_any_element(),
+                    ))
+                    .child(settings_field_stacked(
+                        "Program (the binary to spawn)",
+                        Input::new(&self.custom_cli_program).into_any_element(),
+                    ))
+                    .child(settings_field_stacked(
+                        "Args (space-separated, optional)",
+                        Input::new(&self.custom_cli_args).into_any_element(),
+                    ))
+                    .child(settings_field_stacked(
+                        "Model (optional)",
+                        Input::new(&self.custom_cli_model).into_any_element(),
+                    ))
+                    .child(settings_field_stacked(
+                        "Prompt channel",
+                        channel_toggle.into_any_element(),
+                    ));
+
+                if !stdin_selected {
+                    form = form.child(settings_field_stacked(
+                        "Flag (blank = positional argument, e.g. \"--prompt\")",
+                        Input::new(&self.custom_cli_flag).into_any_element(),
+                    ));
+                }
+
+                if !can_save {
+                    let msg = if vendor_present && !vendor_id_valid {
+                        "Vendor may only use letters, digits, '.', '_', and '-' — it becomes \
+                         part of a worktree path and a git branch name."
+                    } else {
+                        "Vendor and program are required."
+                    };
+                    form = form.child(div().text_sm().text_color(theme::text_muted()).child(msg));
+                }
+
+                form.child(
+                    text_button("save-custom-cli", "Save Custom CLI").when(can_save, |b| {
+                        b.on_click(cx.listener(|this, _, _window, cx| {
+                            let vendor = this.custom_cli_vendor.read(cx).value().trim().to_string();
+                            let program =
+                                this.custom_cli_program.read(cx).value().trim().to_string();
+                            if vendor.is_empty()
+                                || program.is_empty()
+                                || !custom_cli_vendor_is_valid(&vendor)
+                            {
+                                return; // re-checked: `can_save` already gates this button
+                            }
+                            let args: Vec<String> = this
+                                .custom_cli_args
+                                .read(cx)
+                                .value()
+                                .split_whitespace()
+                                .map(str::to_string)
+                                .collect();
+                            let model = this.custom_cli_model.read(cx).value().trim().to_string();
+                            let flag = this.custom_cli_flag.read(cx).value().trim().to_string();
+                            let channel = prompt_channel_from(this.custom_cli_channel, &flag);
+
+                            // Pure derivation (unit-tested directly) — the same shape as the
+                            // ACP path's inline `Seat { .. }` literal, just for a Cli
+                            // transport + a generic `CliSpec` instead of an `AcpCommand`.
+                            // `cli_seat_from` already normalizes a stray transport prefix off
+                            // `vendor` BEFORE deriving `id` (see its doc comment), so — unlike
+                            // the ACP path — there is no separate `seat.normalize_vendor()`
+                            // call needed here; doing it after would desync id from vendor.
+                            let seat = cli_seat_from(&vendor, &program, args, channel, &model);
+                            // Advisory only, never blocking — same as the ACP path.
+                            if !hadron_lattice::id_follows_convention(
+                                seat.id.as_str(),
+                                seat.transport,
+                            ) {
+                                eprintln!(
+                                    "chamber: note — id '{}' does not match the '{}-' convention",
+                                    seat.id.as_str(),
+                                    seat.transport.code()
+                                );
+                            }
+
+                            this.providers.push(ConfiguredQuark {
+                                id: seat.id.0.clone(),
+                                transport: seat.transport.code().to_string(),
+                                model: seat.model.clone(),
+                            });
+
+                            this.add_configured_quark(seat, cx);
+
+                            this.wizard_state = WizardState::None;
+                            cx.notify();
+                        }))
+                    }),
+                )
+            }
+
+            WizardState::LocalProvider(vendor, state) => {
+                let vendor = *vendor;
+                let state_ui = match state {
+                    ProviderState::Connecting => v_flex()
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text_muted())
+                                .child("Connecting..."),
+                        )
+                        .into_any_element(),
+                    ProviderState::NotConnected => {
+                        let mut form = v_flex().gap_4().child(settings_field_stacked(
+                            "Base URL",
+                            Input::new(&self.local_base_url).into_any_element(),
+                        ));
+                        if vendor.requires_api_key() {
+                            form = form.child(settings_field_stacked(
+                                "API Key",
+                                Input::new(&self.local_api_key).into_any_element(),
+                            ));
+                        }
+                        form.child(text_button("local-connect-btn", "Connect").on_click(
+                            cx.listener(move |this, _, _window, cx| {
+                                let typed = this.local_base_url.read(cx).value().trim().to_string();
+                                let base_url = if typed.is_empty() {
+                                    vendor.default_base_url().to_string()
+                                } else {
+                                    typed
+                                };
+                                let api_key =
+                                    this.local_api_key.read(cx).value().trim().to_string();
+                                let api_key = (!api_key.is_empty()).then_some(api_key);
+                                this.start_local_provider_probe(vendor, base_url, api_key, cx);
+                            }),
+                        ))
+                        .into_any_element()
+                    }
+                    ProviderState::Ready { model: _ } => {
+                        let picker = self.wizard_model_select(window, cx);
+                        let typed = self.local_base_url.read(cx).value().trim().to_string();
+                        let base_url = if typed.is_empty() {
+                            vendor.default_base_url().to_string()
+                        } else {
+                            typed
+                        };
+                        v_flex()
+                            .gap_4()
+                            .child(div().text_color(theme::accent()).child("Connected"))
+                            .child(settings_field_stacked("Model", picker))
+                            .child(
+                                text_button("save-local-provider", "Save Provider").on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        let model =
+                                            this.local_selected_model.clone().unwrap_or_default();
+                                        if model.is_empty() {
+                                            return;
+                                        }
+                                        let api_key =
+                                            this.local_api_key.read(cx).value().trim().to_string();
+                                        let api_key = (!api_key.is_empty()).then_some(api_key);
+                                        this.local_api_key.update(cx, |s, cx| {
+                                            s.set_value(String::new(), window, cx)
+                                        });
+                                        this.save_and_add_http_quark(
+                                            vendor, &base_url, &model, api_key, cx,
+                                        );
+                                    }),
+                                ),
+                            )
+                            .into_any_element()
+                    }
+                    ProviderState::Failed(err) => v_flex()
+                        .gap_4()
+                        .child(div().text_color(theme::text_secondary()).child(err.clone()))
+                        .child(
+                            text_button("local-retry", "Try Again").on_click(cx.listener(
+                                move |this, _, _window, cx| {
+                                    this.wizard_state = WizardState::LocalProvider(
+                                        vendor,
+                                        ProviderState::NotConnected,
+                                    );
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .into_any_element(),
+                };
+
+                v_flex()
+                    .size_full()
+                    .gap_4()
+                    .child(
+                        text_button("back-local-provider", "← Back").on_click(cx.listener(
+                            |this, _, _window, cx| {
+                                this.wizard_state = WizardState::PickPreset;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(theme::text())
+                            .child(vendor.display_name().to_string()),
+                    )
+                    .child(
+                        div()
+                            .id("local-provider-form-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(state_ui),
+                    )
+            }
+        }
+    }
+
+    pub(super) fn wizard_model_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let selected = self.local_selected_model.clone();
+        let key = (selected.clone(), self.local_models.clone());
+        if self.wizard_model_select_key.as_ref() != Some(&key) {
+            self.wizard_model_select_key = Some(key);
+            let delegate =
+                create_model_delegate("Default", &self.local_models, selected.as_deref());
+            self.wizard_model_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                if let Some(ref sel) = selected {
+                    if !sel.is_empty() {
+                        s.set_selected_value(&sel.clone().into(), window, cx);
+                    } else {
+                        s.set_selected_value(&"".into(), window, cx);
+                    }
+                } else {
+                    s.set_selected_value(&"".into(), window, cx);
+                }
+            });
+        }
+        Select::new(&self.wizard_model_select_state)
+            .w_full()
+            .min_w(px(280.0))
+            .placeholder("Select model...")
+            .search_placeholder("Search models...")
+            .into_any_element()
+    }
+    pub(crate) fn select_theme_token(
+        &mut self,
+        token: ThemeTokenKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prefs.custom_theme.is_none() {
+            let base_preset = self.prefs.theme_preset.unwrap_or_default();
+            let mut new_theme = config::ThemeDefinition::from_preset(base_preset);
+            new_theme.id = format!("custom-{}", chrono::Utc::now().timestamp());
+            let existing = theme::load_custom_themes();
+            new_theme.name = theme::next_available_theme_name(
+                &format!("Custom {}", base_preset.label()),
+                &existing,
+            );
+            let _ = theme::save_custom_theme(&new_theme);
+            self.prefs.custom_theme = Some(new_theme.clone());
+            self.prefs.theme_preset = None;
+            let _ = config::save(&self.prefs);
+            theme::set_active_custom_theme(Some(new_theme));
+            Self::apply_theme_and_typography(cx, &self.prefs);
+        }
+
+        self.theme_selected_token = Some(token);
+        if let Some(custom) = &self.prefs.custom_theme {
+            let hex = token.get_hex(custom);
+            self.theme_color_hex_input
+                .update(cx, |s, cx| s.set_value(hex, window, cx));
+            self.theme_name_input
+                .update(cx, |s, cx| s.set_value(custom.name.clone(), window, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_custom_theme_token_color(
+        &mut self,
+        token: ThemeTokenKey,
+        hex: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prefs.custom_theme.is_none() {
+            let base_preset = self.prefs.theme_preset.unwrap_or_default();
+            let mut new_theme = config::ThemeDefinition::from_preset(base_preset);
+            new_theme.id = format!("custom-{}", chrono::Utc::now().timestamp());
+            let existing = theme::load_custom_themes();
+            new_theme.name = theme::next_available_theme_name(
+                &format!("Custom {}", base_preset.label()),
+                &existing,
+            );
+            let _ = theme::save_custom_theme(&new_theme);
+            self.prefs.custom_theme = Some(new_theme);
+            self.prefs.theme_preset = None;
+        }
+
+        if let Some(custom) = &mut self.prefs.custom_theme {
+            token.set_hex(custom, hex);
+        }
+        let _ = config::save(&self.prefs);
+        theme::set_active_custom_theme(self.prefs.custom_theme.clone());
+        Self::apply_theme_and_typography(cx, &self.prefs);
+        cx.refresh_windows();
+        cx.notify();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeCategoryTab {
+    #[default]
+    All,
+    Surfaces,
+    TextAccents,
+    Terminal,
+    Syntax,
+}
+
+impl ThemeCategoryTab {
+    pub const ALL: [ThemeCategoryTab; 5] = [
+        ThemeCategoryTab::All,
+        ThemeCategoryTab::Surfaces,
+        ThemeCategoryTab::TextAccents,
+        ThemeCategoryTab::Terminal,
+        ThemeCategoryTab::Syntax,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeCategoryTab::All => "All Tokens (33)",
+            ThemeCategoryTab::Surfaces => "Surfaces (8)",
+            ThemeCategoryTab::TextAccents => "Text & Accents (8)",
+            ThemeCategoryTab::Terminal => "Terminal (3)",
+            ThemeCategoryTab::Syntax => "Syntax Highlighting (14)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeTokenKey {
+    // Surfaces (8)
+    CanvasBase,
+    BgBase,
+    BgSurface,
+    BgSurfaceRaised,
+    BgElevated,
+    InputBg,
+    Border,
+    Popover,
+    // Text (3)
+    TextPrimary,
+    TextSecondary,
+    TextMuted,
+    // Accents & Indicators (7)
+    AccentPrimary,
+    GlowBlue,
+    GlowPink,
+    GlowGreen,
+    GlowAmber,
+    Link,
+    FileLink,
+    // Terminal (3)
+    TermBg,
+    TermFg,
+    TermPrompt,
+    // Syntax (14)
+    SyntaxKeyword,
+    SyntaxFunction,
+    SyntaxType,
+    SyntaxString,
+    SyntaxNumber,
+    SyntaxComment,
+    SyntaxOperator,
+    SyntaxVariable,
+    SyntaxConstant,
+    SyntaxAttribute,
+    SyntaxTag,
+    SyntaxBoolean,
+    SyntaxDelimiter,
+    SyntaxPunctuation,
+}
+
+impl ThemeTokenKey {
+    pub const ALL: [ThemeTokenKey; 35] = [
+        // Surfaces
+        ThemeTokenKey::CanvasBase,
+        ThemeTokenKey::BgBase,
+        ThemeTokenKey::BgSurface,
+        ThemeTokenKey::BgSurfaceRaised,
+        ThemeTokenKey::BgElevated,
+        ThemeTokenKey::InputBg,
+        ThemeTokenKey::Border,
+        ThemeTokenKey::Popover,
+        // Text
+        ThemeTokenKey::TextPrimary,
+        ThemeTokenKey::TextSecondary,
+        ThemeTokenKey::TextMuted,
+        // Accents
+        ThemeTokenKey::AccentPrimary,
+        ThemeTokenKey::GlowBlue,
+        ThemeTokenKey::GlowPink,
+        ThemeTokenKey::GlowGreen,
+        ThemeTokenKey::GlowAmber,
+        ThemeTokenKey::Link,
+        ThemeTokenKey::FileLink,
+        // Terminal
+        ThemeTokenKey::TermBg,
+        ThemeTokenKey::TermFg,
+        ThemeTokenKey::TermPrompt,
+        // Syntax
+        ThemeTokenKey::SyntaxKeyword,
+        ThemeTokenKey::SyntaxFunction,
+        ThemeTokenKey::SyntaxType,
+        ThemeTokenKey::SyntaxString,
+        ThemeTokenKey::SyntaxNumber,
+        ThemeTokenKey::SyntaxComment,
+        ThemeTokenKey::SyntaxOperator,
+        ThemeTokenKey::SyntaxVariable,
+        ThemeTokenKey::SyntaxConstant,
+        ThemeTokenKey::SyntaxAttribute,
+        ThemeTokenKey::SyntaxTag,
+        ThemeTokenKey::SyntaxBoolean,
+        ThemeTokenKey::SyntaxDelimiter,
+        ThemeTokenKey::SyntaxPunctuation,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeTokenKey::CanvasBase => "Canvas Base",
+            ThemeTokenKey::BgBase => "Base Well / Panels",
+            ThemeTokenKey::BgSurface => "Surface",
+            ThemeTokenKey::BgSurfaceRaised => "Surface Raised",
+            ThemeTokenKey::BgElevated => "Elevated Surface",
+            ThemeTokenKey::InputBg => "Input Background",
+            ThemeTokenKey::Border => "Borders & Dividers",
+            ThemeTokenKey::Popover => "Popover & Menus",
+            ThemeTokenKey::TextPrimary => "Text Primary",
+            ThemeTokenKey::TextSecondary => "Text Secondary",
+            ThemeTokenKey::TextMuted => "Text Muted",
+            ThemeTokenKey::AccentPrimary => "Primary Accent",
+            ThemeTokenKey::GlowBlue => "Working Glow (Active)",
+            ThemeTokenKey::GlowPink => "Thinking Glow (Reasoning)",
+            ThemeTokenKey::GlowGreen => "Available Glow (Idle)",
+            ThemeTokenKey::GlowAmber => "Waiting Glow (Blocked)",
+            ThemeTokenKey::Link => "Web Link",
+            ThemeTokenKey::FileLink => "File Link",
+            ThemeTokenKey::TermBg => "Terminal Background",
+            ThemeTokenKey::TermFg => "Terminal Text",
+            ThemeTokenKey::TermPrompt => "Terminal Prompt",
+            ThemeTokenKey::SyntaxKeyword => "Keyword",
+            ThemeTokenKey::SyntaxFunction => "Function",
+            ThemeTokenKey::SyntaxType => "Type",
+            ThemeTokenKey::SyntaxString => "String",
+            ThemeTokenKey::SyntaxNumber => "Number",
+            ThemeTokenKey::SyntaxComment => "Comment",
+            ThemeTokenKey::SyntaxOperator => "Operator",
+            ThemeTokenKey::SyntaxVariable => "Variable",
+            ThemeTokenKey::SyntaxConstant => "Constant",
+            ThemeTokenKey::SyntaxAttribute => "Attribute",
+            ThemeTokenKey::SyntaxTag => "Tag / HTML",
+            ThemeTokenKey::SyntaxBoolean => "Boolean",
+            ThemeTokenKey::SyntaxDelimiter => "Delimiter",
+            ThemeTokenKey::SyntaxPunctuation => "Punctuation",
+        }
+    }
+
+    pub fn category(self) -> &'static str {
+        match self {
+            ThemeTokenKey::CanvasBase
+            | ThemeTokenKey::BgBase
+            | ThemeTokenKey::BgSurface
+            | ThemeTokenKey::BgSurfaceRaised
+            | ThemeTokenKey::BgElevated
+            | ThemeTokenKey::InputBg
+            | ThemeTokenKey::Border
+            | ThemeTokenKey::Popover => "Surfaces",
+            ThemeTokenKey::TextPrimary
+            | ThemeTokenKey::TextSecondary
+            | ThemeTokenKey::TextMuted => "Text",
+            ThemeTokenKey::AccentPrimary
+            | ThemeTokenKey::GlowBlue
+            | ThemeTokenKey::GlowPink
+            | ThemeTokenKey::GlowGreen
+            | ThemeTokenKey::GlowAmber
+            | ThemeTokenKey::Link
+            | ThemeTokenKey::FileLink => "Accents",
+            ThemeTokenKey::TermBg | ThemeTokenKey::TermFg | ThemeTokenKey::TermPrompt => "Terminal",
+            ThemeTokenKey::SyntaxKeyword
+            | ThemeTokenKey::SyntaxFunction
+            | ThemeTokenKey::SyntaxType
+            | ThemeTokenKey::SyntaxString
+            | ThemeTokenKey::SyntaxNumber
+            | ThemeTokenKey::SyntaxComment
+            | ThemeTokenKey::SyntaxOperator
+            | ThemeTokenKey::SyntaxVariable
+            | ThemeTokenKey::SyntaxConstant
+            | ThemeTokenKey::SyntaxAttribute
+            | ThemeTokenKey::SyntaxTag
+            | ThemeTokenKey::SyntaxBoolean
+            | ThemeTokenKey::SyntaxDelimiter
+            | ThemeTokenKey::SyntaxPunctuation => "Syntax",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            ThemeTokenKey::CanvasBase => "Deepest background layer behind window housing",
+            ThemeTokenKey::BgBase => "Recessed surface for main panels, rails, and chat backdrop",
+            ThemeTokenKey::BgSurface => "Standard card, container, and section background",
+            ThemeTokenKey::BgSurfaceRaised => {
+                "Elevated cards, headers, capsule tabs, and pill buttons"
+            }
+            ThemeTokenKey::BgElevated => "Lifted dropdowns, tooltips, and active selected items",
+            ThemeTokenKey::InputBg => "Text field, search bar, and edit box background",
+            ThemeTokenKey::Border => "Structural borders, hairline strokes, and dividers",
+            ThemeTokenKey::Popover => "Floating context menus and autocomplete dropdown overlays",
+            ThemeTokenKey::TextPrimary => "Main body text, headings, and prominent labels",
+            ThemeTokenKey::TextSecondary => "Subtitles, secondary labels, and metadata",
+            ThemeTokenKey::TextMuted => "Muted hints, timestamps, icons, and placeholder text",
+            ThemeTokenKey::AccentPrimary => "Focus rings, active tabs, buttons, and badges",
+            ThemeTokenKey::GlowBlue => "Working/excited state halo and corner whisper",
+            ThemeTokenKey::GlowPink => "Thinking/reasoning state halo and corner whisper",
+            ThemeTokenKey::GlowGreen => "Available/idle ground state halo and corner whisper",
+            ThemeTokenKey::GlowAmber => "Waiting/blocked state halo and corner whisper",
+            ThemeTokenKey::Link => "Hyperlink text color in chat and markdown",
+            ThemeTokenKey::FileLink => "Local file path link color in chat and markdown",
+            ThemeTokenKey::TermBg => "PTY terminal screen background surface",
+            ThemeTokenKey::TermFg => "Default terminal output foreground text",
+            ThemeTokenKey::TermPrompt => "Shell prompt indicator ($, >, user@host)",
+            ThemeTokenKey::SyntaxKeyword => "Keywords (fn, pub, struct, let, match, async, return)",
+            ThemeTokenKey::SyntaxFunction => "Function names, methods, and closures",
+            ThemeTokenKey::SyntaxType => "Structs, enums, traits, primitives (String, i32, Option)",
+            ThemeTokenKey::SyntaxString => "Quoted string literals and markdown links",
+            ThemeTokenKey::SyntaxNumber => "Integer, float, hex, and numeric literals",
+            ThemeTokenKey::SyntaxComment => "Line and block code comments, docstrings",
+            ThemeTokenKey::SyntaxOperator => "Operators (=, +, -, *, /, ->, =>)",
+            ThemeTokenKey::SyntaxVariable => "Variable names, identifiers, and parameters",
+            ThemeTokenKey::SyntaxConstant => {
+                "CONSTANTS, static variables, and uppercase identifiers"
+            }
+            ThemeTokenKey::SyntaxAttribute => "Attributes (#[derive(...)], annotations)",
+            ThemeTokenKey::SyntaxTag => "HTML/XML tags, JSX elements, list markers",
+            ThemeTokenKey::SyntaxBoolean => "Boolean literals (true, false)",
+            ThemeTokenKey::SyntaxDelimiter => "Delimiters and brackets ({}, [], ())",
+            ThemeTokenKey::SyntaxPunctuation => "Punctuation marks (comma, colon, semicolon, dot)",
+        }
+    }
+
+    pub fn get_hex(self, theme: &config::ThemeDefinition) -> String {
+        match self {
+            ThemeTokenKey::CanvasBase => theme.surfaces.canvas_base.clone(),
+            ThemeTokenKey::BgBase => theme.surfaces.bg_base.clone(),
+            ThemeTokenKey::BgSurface => theme.surfaces.bg_surface.clone(),
+            ThemeTokenKey::BgSurfaceRaised => theme.surfaces.bg_surface_raised.clone(),
+            ThemeTokenKey::BgElevated => theme.surfaces.bg_elevated.clone(),
+            ThemeTokenKey::InputBg => theme.surfaces.input_bg.clone(),
+            ThemeTokenKey::Border => theme.surfaces.border.clone(),
+            ThemeTokenKey::Popover => theme.surfaces.popover.clone(),
+            ThemeTokenKey::TextPrimary => theme.text.primary.clone(),
+            ThemeTokenKey::TextSecondary => theme.text.secondary.clone(),
+            ThemeTokenKey::TextMuted => theme.text.muted.clone(),
+            ThemeTokenKey::AccentPrimary => theme.accents.primary.clone(),
+            ThemeTokenKey::GlowBlue => theme.accents.glow_blue.clone(),
+            ThemeTokenKey::GlowPink => theme.accents.glow_pink.clone(),
+            ThemeTokenKey::GlowGreen => theme.accents.glow_green.clone(),
+            ThemeTokenKey::GlowAmber => theme.accents.glow_amber.clone(),
+            ThemeTokenKey::Link => theme.accents.link.clone(),
+            ThemeTokenKey::FileLink => theme.accents.file_link.clone(),
+            ThemeTokenKey::TermBg => theme.terminal.bg.clone(),
+            ThemeTokenKey::TermFg => theme.terminal.fg.clone(),
+            ThemeTokenKey::TermPrompt => theme.terminal.prompt.clone(),
+            ThemeTokenKey::SyntaxKeyword => theme.syntax.keyword.clone(),
+            ThemeTokenKey::SyntaxFunction => theme.syntax.function.clone(),
+            ThemeTokenKey::SyntaxType => theme.syntax.r#type.clone(),
+            ThemeTokenKey::SyntaxString => theme.syntax.string.clone(),
+            ThemeTokenKey::SyntaxNumber => theme.syntax.number.clone(),
+            ThemeTokenKey::SyntaxComment => theme.syntax.comment.clone(),
+            ThemeTokenKey::SyntaxOperator => theme.syntax.operator.clone(),
+            ThemeTokenKey::SyntaxVariable => theme.syntax.variable.clone(),
+            ThemeTokenKey::SyntaxConstant => theme.syntax.constant.clone(),
+            ThemeTokenKey::SyntaxAttribute => theme.syntax.attribute.clone(),
+            ThemeTokenKey::SyntaxTag => theme.syntax.tag.clone(),
+            ThemeTokenKey::SyntaxBoolean => theme.syntax.boolean.clone(),
+            ThemeTokenKey::SyntaxDelimiter => theme.syntax.delimiter.clone(),
+            ThemeTokenKey::SyntaxPunctuation => theme.syntax.punctuation.clone(),
+        }
+    }
+
+    pub fn set_hex(self, theme: &mut config::ThemeDefinition, hex: String) {
+        match self {
+            ThemeTokenKey::CanvasBase => theme.surfaces.canvas_base = hex,
+            ThemeTokenKey::BgBase => theme.surfaces.bg_base = hex,
+            ThemeTokenKey::BgSurface => theme.surfaces.bg_surface = hex,
+            ThemeTokenKey::BgSurfaceRaised => theme.surfaces.bg_surface_raised = hex,
+            ThemeTokenKey::BgElevated => theme.surfaces.bg_elevated = hex,
+            ThemeTokenKey::InputBg => theme.surfaces.input_bg = hex,
+            ThemeTokenKey::Border => theme.surfaces.border = hex,
+            ThemeTokenKey::Popover => theme.surfaces.popover = hex,
+            ThemeTokenKey::TextPrimary => theme.text.primary = hex,
+            ThemeTokenKey::TextSecondary => theme.text.secondary = hex,
+            ThemeTokenKey::TextMuted => theme.text.muted = hex,
+            ThemeTokenKey::AccentPrimary => theme.accents.primary = hex,
+            ThemeTokenKey::GlowBlue => theme.accents.glow_blue = hex,
+            ThemeTokenKey::GlowPink => theme.accents.glow_pink = hex,
+            ThemeTokenKey::GlowGreen => theme.accents.glow_green = hex,
+            ThemeTokenKey::GlowAmber => theme.accents.glow_amber = hex,
+            ThemeTokenKey::Link => theme.accents.link = hex,
+            ThemeTokenKey::FileLink => theme.accents.file_link = hex,
+            ThemeTokenKey::TermBg => theme.terminal.bg = hex,
+            ThemeTokenKey::TermFg => theme.terminal.fg = hex,
+            ThemeTokenKey::TermPrompt => theme.terminal.prompt = hex,
+            ThemeTokenKey::SyntaxKeyword => theme.syntax.keyword = hex,
+            ThemeTokenKey::SyntaxFunction => theme.syntax.function = hex,
+            ThemeTokenKey::SyntaxType => theme.syntax.r#type = hex,
+            ThemeTokenKey::SyntaxString => theme.syntax.string = hex,
+            ThemeTokenKey::SyntaxNumber => theme.syntax.number = hex,
+            ThemeTokenKey::SyntaxComment => theme.syntax.comment = hex,
+            ThemeTokenKey::SyntaxOperator => theme.syntax.operator = hex,
+            ThemeTokenKey::SyntaxVariable => theme.syntax.variable = hex,
+            ThemeTokenKey::SyntaxConstant => theme.syntax.constant = hex,
+            ThemeTokenKey::SyntaxAttribute => theme.syntax.attribute = hex,
+            ThemeTokenKey::SyntaxTag => theme.syntax.tag = hex,
+            ThemeTokenKey::SyntaxBoolean => theme.syntax.boolean = hex,
+            ThemeTokenKey::SyntaxDelimiter => theme.syntax.delimiter = hex,
+            ThemeTokenKey::SyntaxPunctuation => theme.syntax.punctuation = hex,
+        }
+    }
+
+    pub fn matches_category(self, tab: ThemeCategoryTab) -> bool {
+        match tab {
+            ThemeCategoryTab::All => true,
+            ThemeCategoryTab::Surfaces => matches!(
+                self,
+                ThemeTokenKey::CanvasBase
+                    | ThemeTokenKey::BgBase
+                    | ThemeTokenKey::BgSurface
+                    | ThemeTokenKey::BgSurfaceRaised
+                    | ThemeTokenKey::BgElevated
+                    | ThemeTokenKey::InputBg
+                    | ThemeTokenKey::Border
+                    | ThemeTokenKey::Popover
+            ),
+            ThemeCategoryTab::TextAccents => matches!(
+                self,
+                ThemeTokenKey::TextPrimary
+                    | ThemeTokenKey::TextSecondary
+                    | ThemeTokenKey::TextMuted
+                    | ThemeTokenKey::AccentPrimary
+                    | ThemeTokenKey::GlowBlue
+                    | ThemeTokenKey::GlowPink
+                    | ThemeTokenKey::GlowGreen
+                    | ThemeTokenKey::GlowAmber
+                    | ThemeTokenKey::Link
+                    | ThemeTokenKey::FileLink
+            ),
+            ThemeCategoryTab::Terminal => matches!(
+                self,
+                ThemeTokenKey::TermBg | ThemeTokenKey::TermFg | ThemeTokenKey::TermPrompt
+            ),
+            ThemeCategoryTab::Syntax => matches!(
+                self,
+                ThemeTokenKey::SyntaxKeyword
+                    | ThemeTokenKey::SyntaxFunction
+                    | ThemeTokenKey::SyntaxType
+                    | ThemeTokenKey::SyntaxString
+                    | ThemeTokenKey::SyntaxNumber
+                    | ThemeTokenKey::SyntaxComment
+                    | ThemeTokenKey::SyntaxOperator
+                    | ThemeTokenKey::SyntaxVariable
+                    | ThemeTokenKey::SyntaxConstant
+                    | ThemeTokenKey::SyntaxAttribute
+                    | ThemeTokenKey::SyntaxTag
+                    | ThemeTokenKey::SyntaxBoolean
+                    | ThemeTokenKey::SyntaxDelimiter
+                    | ThemeTokenKey::SyntaxPunctuation
+            ),
+        }
+    }
+}

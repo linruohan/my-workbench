@@ -1,0 +1,27 @@
+[package]
+name = "hadron-forge-mcp"
+description = "An MCP stdio server exposing hadron-forge's hash-checked edit, write, create, delete and read-blocks tools"
+rust-version = "1.93"
+version = "0.33.55"
+edition = "2021"
+license = "Apache-2.0"
+# Flip to publish. Blocked today regardless: the workspace patches
+# gpui-component from a `file:///` path, which crates.io rejects.
+publish = false
+
+[dependencies]
+hadron-forge = { path = "../hadron-forge" }
+hadron-lattice = { path = "../hadron-lattice" }
+hadron-gatekeeper = { path = "../hadron-gatekeeper" }
+rmcp = { version = "2.2.0", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+

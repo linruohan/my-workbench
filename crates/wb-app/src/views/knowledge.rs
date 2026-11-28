@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonVariants as _, Toggle, ToggleVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState, TabSize};
@@ -963,10 +964,10 @@ fn kb_surface(
     title: &str,
     body: impl IntoElement,
 ) -> impl IntoElement {
-    let border = cx.theme().border;
-    let radius = cx.theme().radius;
+    let border = style::hairline(cx);
+    let radius = style::panel_radius(cx);
     let muted = cx.theme().muted_foreground;
-    let secondary = cx.theme().secondary;
+    let secondary = style::card(cx);
     v_flex()
         .size_full()
         .rounded(radius)
@@ -2175,8 +2176,8 @@ impl Render for KnowledgePane {
         let find_case = self.find_case;
         let find_regex = self.find_regex;
         let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
-        let popover = cx.theme().popover;
+        let border = style::hairline(cx);
+        let popover = style::card(cx);
         let popover_fg = cx.theme().popover_foreground;
 
         div()

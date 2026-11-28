@@ -7,6 +7,14 @@ members = [
     "crates/wb-agent",
     "crates/wb-app",
     "crates/wb-asr",
+    # 从 Hadron 同步过来的后端：事件场、权限门禁、按哈希编辑与 MCP、守护进程。
+    "crates/hadron-lattice",
+    "crates/hadron-gatekeeper",
+    "crates/hadron-forge",
+    "crates/hadron-forge-mcp",
+    "crates/hadron-gluon",
+    # Hadron 聊天区与右侧栏的移植层。
+    "crates/wb-hadron",
 ]
 default-members = ["crates/wb-app"]
 

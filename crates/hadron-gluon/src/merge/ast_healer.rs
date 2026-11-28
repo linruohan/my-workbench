@@ -1,0 +1,197 @@
+//! AST-aware rebase conflict healer.
+//!
+//! Uses semantic AST merging (`hadron_forge::ast_merge`) to automatically resolve
+//! non-overlapping Rust AST changes during a git rebase conflict before falling back
+//! to an abort.
+
+use crate::snapshot::git;
+use hadron_forge::ast_merge::{merge_rust_ast, AstMergeResult};
+use std::path::Path;
+
+/// Attempts to resolve conflicting Rust source contents using AST block merge.
+pub fn heal_conflicting_rust_content(base: &str, ours: &str, theirs: &str) -> Option<String> {
+    // Attempt standard block merge first
+    match merge_rust_ast(base, ours, theirs) {
+        AstMergeResult::Clean(merged) => Some(merged),
+        AstMergeResult::Conflict(_) => {
+            // Check if conflict is purely in use statements
+            if base
+                .lines()
+                .all(|l| l.trim().starts_with("use ") || l.trim().is_empty())
+            {
+                if let AstMergeResult::Clean(merged_uses) =
+                    hadron_forge::ast_merge::merge_rust_use_statements(base, ours, theirs)
+                {
+                    return Some(merged_uses);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Attempts to heal conflicting file content based on file extension and semantics.
+///
+/// For Rust (`.rs`), attempts AST block merging and use-statement merging,
+/// then falls back to `attempt_auto_reconcile`.
+/// For Markdown (`.md`), attempts checklist and item reconciliation.
+/// For all supported files, attempts disjoint block reconciliation.
+pub fn heal_conflicting_content(
+    rel_path: &str,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> Option<String> {
+    if rel_path.ends_with(".rs") {
+        if let Some(merged) = heal_conflicting_rust_content(base, ours, theirs) {
+            return Some(merged);
+        }
+    }
+    hadron_forge::conflict_resolve::attempt_auto_reconcile(base, ours, theirs)
+}
+
+/// Attempts to heal rebase conflicts in `worktree_path` if all conflicts can be cleanly
+/// reconciled via AST or structural conflict reconciliation (`hadron_forge::conflict_resolve`).
+pub fn heal_rebase_conflicts(worktree_path: &Path) -> Result<bool, String> {
+    // 1. Get list of unmerged files
+    let unmerged_output = git(worktree_path, &["diff", "--name-only", "--diff-filter=U"])
+        .map_err(|e| format!("Failed to inspect unmerged files: {e:#}"))?;
+
+    let unmerged_files: Vec<&str> = unmerged_output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if unmerged_files.is_empty() {
+        return Ok(false);
+    }
+
+    // 2. For each unmerged file, extract stage 1 (base), stage 2 (ours/upstream), stage 3 (theirs/patch)
+    for rel_path in &unmerged_files {
+        let base_spec = format!(":1:{rel_path}");
+        let ours_spec = format!(":2:{rel_path}");
+        let theirs_spec = format!(":3:{rel_path}");
+
+        let base_content = git(worktree_path, &["show", &base_spec]).unwrap_or_default();
+        let ours_content = git(worktree_path, &["show", &ours_spec]).unwrap_or_default();
+        let theirs_content = git(worktree_path, &["show", &theirs_spec]).unwrap_or_default();
+
+        match heal_conflicting_content(rel_path, &base_content, &ours_content, &theirs_content) {
+            Some(resolved) => {
+                let full_path = worktree_path.join(rel_path);
+                if let Err(e) = std::fs::write(&full_path, resolved) {
+                    return Err(format!("Failed to write healed merge to {rel_path}: {e}"));
+                }
+                if let Err(e) = git(worktree_path, &["add", rel_path]) {
+                    return Err(format!("Failed to git add healed file {rel_path}: {e:#}"));
+                }
+            }
+            None => {
+                // Semantic or AST conflict detected — cannot heal automatically
+                return Ok(false);
+            }
+        }
+    }
+
+    // 3. Continue the rebase. If multiple commits conflict, this will need git rebase --continue
+    // Set GIT_EDITOR=true to avoid launching interactive editor for rebase message
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rebase", "--continue"])
+        .current_dir(worktree_path)
+        .env("GIT_EDITOR", "true");
+
+    let status = cmd
+        .status()
+        .map_err(|e| format!("Failed to spawn git rebase --continue: {e}"))?;
+    if status.success() {
+        Ok(true)
+    } else {
+        // If git rebase --continue still failed or hit a second conflict, report false
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_heal_conflicting_rust_content_disjoint_fns() {
+        let base = r#"
+pub fn original() -> bool {
+    true
+}
+"#;
+        let ours = r#"
+pub fn original() -> bool {
+    true
+}
+
+pub fn feature_a() -> usize {
+    42
+}
+"#;
+        let theirs = r#"
+pub fn original() -> bool {
+    true
+}
+
+pub fn feature_b() -> &'static str {
+    "hello"
+}
+"#;
+        let healed = heal_conflicting_rust_content(base, ours, theirs);
+        assert!(healed.is_some());
+        let code = healed.unwrap();
+        assert!(code.contains("pub fn feature_a"));
+        assert!(code.contains("pub fn feature_b"));
+    }
+
+    #[test]
+    fn test_heal_conflicting_rust_content_same_fn_conflict() {
+        let base = r#"
+pub fn compute() -> i32 {
+    0
+}
+"#;
+        let ours = r#"
+pub fn compute() -> i32 {
+    1
+}
+"#;
+        let theirs = r#"
+pub fn compute() -> i32 {
+    2
+}
+"#;
+        let healed = heal_conflicting_rust_content(base, ours, theirs);
+        // Both modified compute() differently — should not heal automatically
+        assert!(healed.is_none());
+    }
+
+    #[test]
+    fn test_heal_conflicting_rust_content_disjoint_use_statements() {
+        let base = "use std::collections::HashMap;\n";
+        let ours = "use std::collections::HashMap;\nuse std::path::Path;\n";
+        let theirs = "use std::collections::HashMap;\nuse std::sync::Arc;\n";
+        let healed = heal_conflicting_rust_content(base, ours, theirs);
+        assert!(healed.is_some());
+        let code = healed.unwrap();
+        assert!(code.contains("use std::path::Path;"));
+        assert!(code.contains("use std::sync::Arc;"));
+    }
+
+    #[test]
+    fn test_heal_conflicting_content_markdown_checklists() {
+        let base = "- [ ] Task 1: Baseline setup\n";
+        let ours = "- [x] Task 1: Baseline setup (commit 111)\n- [ ] Task 2: Peer leases\n";
+        let theirs = "- [ ] Task 1: Baseline setup\n- [ ] Task 3: Scratch bus\n";
+        let healed = heal_conflicting_content("plan.md", base, ours, theirs);
+        assert!(healed.is_some());
+        let content = healed.unwrap();
+        assert!(content.contains("Task 1: Baseline setup (commit 111)"));
+        assert!(content.contains("Task 2: Peer leases"));
+        assert!(content.contains("Task 3: Scratch bus"));
+    }
+}

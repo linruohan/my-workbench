@@ -1,0 +1,2616 @@
+//! Stateless UI helpers for the chamber: leaf element builders that take explicit
+//! parameters and return GPUI elements (backdrop washes, titlebar/window-control
+//! buttons, roster rows, settings fields, permission-mode + effort tags, log rows,
+//! stat tiles, progress meters, and the markdown text style). None hold or borrow
+//! `Chamber` — they render from their arguments alone, so they live apart from the
+//! `impl Chamber` render code.
+
+use super::*;
+
+/// Human-readable token count: `50.6k`, `1.2m`, `2m`. One decimal, with a trailing
+/// `.0` trimmed so a round value reads `2m`, not `2.0m`. This is the single formatter
+/// for every token figure in the UI (roster + stats) — do not re-inline the k/m logic.
+pub(super) fn format_num(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        trim_unit(n as f64 / 1_000_000_000.0, 'b')
+    } else if n >= 1_000_000 {
+        trim_unit(n as f64 / 1_000_000.0, 'm')
+    } else if n >= 1_000 {
+        trim_unit(n as f64 / 1_000.0, 'k')
+    } else {
+        n.to_string()
+    }
+}
+
+fn trim_unit(v: f64, suffix: char) -> String {
+    let s = format!("{v:.1}");
+    let s = s.strip_suffix(".0").unwrap_or(&s);
+    format!("{s}{suffix}")
+}
+
+/// Corner radii for the full-height content container, matching the client
+/// frame ([`crate::window_frame`]). Rounds at the frame's own radius so the
+/// content tucks *inside* the 1px border (a hair rounder never pokes past the
+/// arc; the frame's matching sidebar fill hides the sub-pixel sliver). Zero on
+/// a tiled edge (maximized/snapped) so those corners stay square.
+/// One wash of the ambient quark-state field: a full-bleed linear gradient from `hue` at
+/// the origin edge, fading to transparent by ~70%. Several of these, layered at different
+/// angles, build the "bubble chamber" backdrop. Static (no animation) and gradient-only
+/// (no blur), so it costs only per-repaint — see `theme` for why that is affordable now.
+pub(super) fn frame_corner_radii(window: &Window) -> (Pixels, Pixels) {
+    let r = crate::window_frame::FRAME_RADIUS;
+    match window.window_decorations() {
+        Decorations::Client { tiling } => (
+            if tiling.top { px(0.0) } else { r },
+            if tiling.bottom { px(0.0) } else { r },
+        ),
+        Decorations::Server => (px(0.0), px(0.0)),
+    }
+}
+
+/// The titlebar's app/options menu — a 3-line "hamburger" with circular hover.
+/// Placeholder for now: opening a menu of options lands later. Stops propagation
+/// so a press here can't start a window move.
+/// The app menu behind the 3-line icon.
+///
+/// Every item here does something real. "Open Workspace" opens the chosen folder in a
+/// SECOND chamber rather than repointing this one: a daemon binds to one workspace at
+/// boot, so an item that swapped the folder under a running swarm would be a lie with a
+/// file dialog attached. See `Chamber::open_workspace`.
+///
+/// "New Session", "Rename" and every row under "Sessions" are wrappers, not new
+/// behaviour: they drive the existing `/clear`, `/rename` and `/resume` rows of
+/// [`crate::text::COMMANDS`], because that table is the one place a command may be
+/// defined.
+pub(super) fn menu_button(chamber: &Entity<Chamber>) -> impl IntoElement {
+    let view = chamber.clone();
+    Button::new("app-menu")
+        .ghost()
+        .icon(Icon::new(IconName::Menu).small())
+        .dropdown_menu(move |menu, window, cx| {
+            let open_workspace = view.clone();
+            let folder = view.clone();
+            let new_session = view.clone();
+            let rename = view.clone();
+            let settings = view.clone();
+            let about = view.clone();
+            let changelog = view.clone();
+            let check_update = view.clone();
+            let update_label = match &view.read(cx).update_state {
+                crate::app::UpdateState::Available { version, .. } => {
+                    format!("Update to v{}…", version)
+                }
+                crate::app::UpdateState::Installing { version } => {
+                    format!("Installing v{}…", version)
+                }
+                crate::app::UpdateState::Installed { version } => {
+                    format!("v{} installed — restarting…", version)
+                }
+                crate::app::UpdateState::Checking => "Checking for Updates…".to_string(),
+                _ => "Check for Updates…".to_string(),
+            };
+            menu.item(
+                PopupMenuItem::new("Open Workspace…").on_click(move |_, _, cx| {
+                    open_workspace.update(cx, |this, cx| this.toggle_project_switcher(cx));
+                }),
+            )
+            .item(
+                PopupMenuItem::new("Reveal Workspace in File Manager").on_click(move |_, _, cx| {
+                    folder.update(cx, |this, cx| {
+                        this.handle_context_menu_action(
+                            ContextMenuAction::OpenInFolder(String::from(".")),
+                            cx,
+                        );
+                    });
+                }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("New Session").on_click(move |_, window, cx| {
+                    new_session.update(cx, |this, cx| {
+                        this.handle_chat_command("clear", "", window, cx);
+                    });
+                }),
+            )
+            .item(
+                // `/rename` needs a name, and the chamber has no single-line modal to
+                // ask for one. Prefilling the chat input is strictly less code than a
+                // new modal and leaves the human in the surface they already type in.
+                PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                    rename.update(cx, |this, cx| {
+                        this.prefill_chat_input("/rename ", window, cx);
+                    });
+                }),
+            )
+            // The archived sessions, newest first, each row driving `/resume`.
+            // `Chamber::sessions` is a cache: listing them here would re-read every
+            // archive's whole `field.jsonl` on the frame that paints the menu.
+            .submenu("Sessions", window, cx, {
+                let view = view.clone();
+                move |menu, _, cx| {
+                    let menu = menu.scrollable(true);
+                    let chamber = view.read(cx);
+                    // `/resume` swaps the live field out from under a running daemon, so
+                    // it refuses mid-turn — and it refuses to `eprintln!`, which nobody
+                    // sees. Say so here instead of offering rows that do nothing.
+                    if crate::model::any_quark_mid_turn(&chamber.view.roster) {
+                        return menu.item(
+                            PopupMenuItem::new("A quark is mid-turn — finish it first")
+                                .disabled(true),
+                        );
+                    }
+                    // `list_sessions` is oldest-first (it folds history in that order);
+                    // a menu wants the most recent at the top.
+                    let rows: Vec<(String, String)> = chamber
+                        .sessions
+                        .iter()
+                        .rev()
+                        .map(|s| (s.id.clone(), s.label()))
+                        .collect();
+                    let clear_history = view.clone();
+                    let menu = menu
+                        .item(
+                            PopupMenuItem::new("Clear Session History")
+                                .disabled(rows.is_empty())
+                                .on_click(move |_, window, cx| {
+                                    clear_history.update(cx, |this, cx| {
+                                        this.handle_chat_command("clear-history", "", window, cx);
+                                    });
+                                }),
+                        )
+                        .separator();
+                    if rows.is_empty() {
+                        return menu
+                            .item(PopupMenuItem::new("No archived sessions").disabled(true));
+                    }
+                    rows.into_iter().fold(menu, |menu, (id, label)| {
+                        let resume = view.clone();
+                        menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            resume.update(cx, |this, cx| {
+                                this.handle_chat_command("resume", &id, window, cx);
+                            });
+                        }))
+                    })
+                }
+            })
+            .separator()
+            .item(
+                PopupMenuItem::new("Settings…").on_click(move |_, window, cx| {
+                    settings.update(cx, |this, cx| this.open_settings(window, cx));
+                }),
+            )
+            .item(
+                PopupMenuItem::new(update_label).on_click(move |_, window, cx| {
+                    check_update.update(cx, |this, cx| {
+                        this.trigger_update_flow(window, cx);
+                    });
+                }),
+            )
+            .item(PopupMenuItem::new("Changelog").on_click(move |_, _, cx| {
+                changelog.update(cx, |this, cx| {
+                    this.changelog_open = true;
+                    cx.notify();
+                });
+            }))
+            .item(
+                PopupMenuItem::new("About Hadron").on_click(move |_, _, cx| {
+                    about.update(cx, |this, cx| {
+                        this.about_open = true;
+                        cx.notify();
+                    });
+                }),
+            )
+            .separator()
+            .item(PopupMenuItem::new("Quit Hadron").on_click(|_, _, cx| cx.quit()))
+        })
+}
+
+pub(super) fn window_control_area_for_id(id: &str) -> WindowControlArea {
+    match id {
+        "min" => WindowControlArea::Min,
+        "max" => WindowControlArea::Max,
+        _ => WindowControlArea::Close,
+    }
+}
+
+/// A circular window-control button (min / max / close) with circular hover.
+///
+/// On Windows (`gpui_windows`), `window.zoom_window()` unconditionally calls
+/// `ShowWindowAsync(hwnd, SW_MAXIMIZE)` and never restores; native maximize/restore
+/// toggling (plus Win11 Snap Layouts) runs in `gpui_windows`'s `WM_NCHITTEST` /
+/// `WM_NCLBUTTONUP` handler for `WindowControlArea::Max` (`HTMAXBUTTON`), which
+/// returns early if a GPUI mouse/click listener stops propagation.
+pub(super) fn control_button(id: &'static str, icon: IconName, is_close: bool) -> impl IntoElement {
+    let hover_bg = if is_close {
+        theme::danger()
+    } else {
+        theme::bg_surface_raised()
+    };
+    let btn = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(26.0))
+        .rounded_full()
+        .occlude()
+        .text_color(theme::text_secondary())
+        .hover(|s| s.bg(hover_bg).text_color(theme::text()))
+        .child(Icon::new(icon).small());
+
+    if cfg!(target_os = "windows") {
+        btn.window_control_area(window_control_area_for_id(id))
+    } else {
+        btn.on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            match id {
+                "min" => window.minimize_window(),
+                "max" => window.zoom_window(),
+                _ => {
+                    window.remove_window();
+                    cx.quit();
+                }
+            }
+        })
+    }
+}
+
+/// A draggable titlebar region: marks the area for the compositor and starts a
+/// window move on press.
+pub(super) fn drag_region(id: &'static str) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_1()
+        .h_full()
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+}
+
+pub(super) fn effective_presence_state(
+    r_state: QuarkState,
+    adopted: bool,
+    enabled: bool,
+    has_activity: bool,
+) -> QuarkState {
+    if has_activity && adopted && enabled {
+        QuarkState::Excited
+    } else {
+        r_state
+    }
+}
+
+/// The dot and the words must agree: when the dot renders blue (a turn is in
+/// flight) but the adapter has published no live detail — a CLI quark, or the
+/// gap between publishes — the subtitle shows a "working…" placeholder rather
+/// than the seat's static vendor · model caption.
+pub(super) fn needs_activity_placeholder(
+    effective: QuarkState,
+    adopted: bool,
+    enabled: bool,
+    has_activity: bool,
+) -> bool {
+    !has_activity
+        && adopted
+        && enabled
+        && matches!(effective, QuarkState::Excited | QuarkState::Thinking)
+}
+
+/// Every mid-turn quark, not just the first: an adopted, enabled seat with fresh
+/// live detail (an ACP seat) gets its raw stream text — the thought, tool title, or
+/// plan step, with no "working"/"thinking" label glued in front, since that text
+/// already says what is happening. A seat whose field state says a turn is in
+/// flight but which has published no detail (a CLI seat — it does not stream to
+/// us — or the gap between two ACP publishes) gets the `"working…"` placeholder
+/// instead, since there is no stream to show. `live` is injected so this stays a
+/// pure function testable without touching disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct QuarkLiveCapsule {
+    pub quark_id: String,
+    pub doing: hadron_lattice::live::Doing,
+    pub detail: String,
+    pub elapsed_secs: Option<u64>,
+}
+
+/// Humanize verbose raw tool step strings into concise, scannable command-plane labels.
+/// Collapses embedded newlines and caps length on a character boundary so live capsules
+/// and roster rows remain strictly single-line.
+pub(super) fn humanize_activity_detail(raw: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 120;
+    let collapsed: String = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let s = collapsed.as_str();
+    let formatted = if let Some(rest) = s
+        .strip_prefix("run_command:")
+        .or_else(|| s.strip_prefix("execute_command:"))
+    {
+        format!("$ {}", rest.trim())
+    } else if let Some(rest) = s
+        .strip_prefix("read_file:")
+        .or_else(|| s.strip_prefix("view_file:"))
+        .or_else(|| s.strip_prefix("view_file_outline:"))
+    {
+        format!("read {}", rest.trim())
+    } else if let Some(rest) = s
+        .strip_prefix("edit_file:")
+        .or_else(|| s.strip_prefix("replace_file_content:"))
+        .or_else(|| s.strip_prefix("multi_replace_file_content:"))
+    {
+        format!("edit {}", rest.trim())
+    } else if let Some(rest) = s
+        .strip_prefix("write_file:")
+        .or_else(|| s.strip_prefix("write_to_file:"))
+    {
+        format!("write {}", rest.trim())
+    } else if let Some(rest) = s
+        .strip_prefix("grep_search:")
+        .or_else(|| s.strip_prefix("find_by_name:"))
+    {
+        format!("search {}", rest.trim())
+    } else if let Some(rest) = s.strip_prefix("thinking:") {
+        let t = rest.trim();
+        if !t.is_empty() {
+            t.to_string()
+        } else {
+            s.to_string()
+        }
+    } else {
+        s.to_string()
+    };
+    if formatted.chars().count() > MAX_DETAIL_CHARS {
+        let truncated: String = formatted.chars().take(MAX_DETAIL_CHARS).collect();
+        format!("{truncated}…")
+    } else {
+        formatted
+    }
+}
+
+#[cfg(test)]
+pub(super) fn active_quarks_rich(
+    roster: &[RosterRow],
+    live: impl Fn(&str) -> Option<hadron_lattice::live::Activity>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<QuarkLiveCapsule> {
+    active_quarks_rich_with_tasks(roster, &[], live, now)
+}
+
+pub(super) fn active_quarks_rich_with_tasks(
+    roster: &[RosterRow],
+    tasks: &[crate::model::SwarmTask],
+    live: impl Fn(&str) -> Option<hadron_lattice::live::Activity>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<QuarkLiveCapsule> {
+    roster
+        .iter()
+        .filter(|r| r.adopted && r.enabled)
+        .filter_map(|r| {
+            let active_task = tasks
+                .iter()
+                .find(|t| t.to == r.id && t.state == crate::model::tasks::TaskState::Working);
+            if let Some(act) = live(&r.id) {
+                let raw = act.detail.trim();
+                let detail = if raw.is_empty() || raw == "thinking" {
+                    if let Some(t) = active_task {
+                        let clean_title = humanize_activity_detail(&t.title);
+                        if act.doing == hadron_lattice::live::Doing::Speaking {
+                            format!("writing reply · {clean_title}")
+                        } else {
+                            clean_title
+                        }
+                    } else if raw.is_empty() {
+                        act.doing.label().to_string()
+                    } else {
+                        raw.to_string()
+                    }
+                } else {
+                    humanize_activity_detail(raw)
+                };
+                let elapsed_secs = active_task
+                    .map(|t| t.asked_at)
+                    .or(act.started)
+                    .or(Some(act.at))
+                    .map(|st| (now - st).num_seconds().max(0) as u64);
+                Some(QuarkLiveCapsule {
+                    quark_id: act.quark.as_str().to_string(),
+                    doing: act.doing,
+                    detail,
+                    elapsed_secs,
+                })
+            } else if matches!(r.state, QuarkState::Excited | QuarkState::Thinking)
+                || active_task.is_some()
+            {
+                let doing = if r.state == QuarkState::Thinking {
+                    hadron_lattice::live::Doing::Thinking
+                } else {
+                    hadron_lattice::live::Doing::Working
+                };
+                let detail = active_task
+                    .map(|t| humanize_activity_detail(&t.title))
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| "working…".to_string());
+                let elapsed_secs =
+                    active_task.map(|t| (now - t.asked_at).num_seconds().max(0) as u64);
+                Some(QuarkLiveCapsule {
+                    quark_id: r.id.clone(),
+                    doing,
+                    detail,
+                    elapsed_secs,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+pub(super) fn active_quarks(
+    roster: &[RosterRow],
+    live: impl Fn(&str) -> Option<hadron_lattice::live::Activity>,
+) -> Vec<(String, String)> {
+    roster
+        .iter()
+        .filter(|r| r.adopted && r.enabled)
+        .filter_map(|r| {
+            if let Some(act) = live(&r.id) {
+                let text = if act.detail.is_empty() {
+                    act.doing.label().to_string()
+                } else {
+                    act.detail
+                };
+                Some((act.quark.as_str().to_string(), text))
+            } else if matches!(r.state, QuarkState::Excited | QuarkState::Thinking) {
+                Some((r.id.clone(), "working…".to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// How much of a streaming reply the draft bubble shows, in **characters**.
+///
+/// The bubble is pinned above the input, so it cannot be allowed to grow without
+/// bound and push the message box off the window. Characters, not bytes — a byte cut
+/// lands mid-codepoint and panics the renderer (`Char Boundary Safety`).
+pub(super) const DRAFT_TAIL_CHARS: usize = 1200;
+
+/// Every quark whose reply is currently streaming in: `(quark id, text so far)`,
+/// from the same live files [`active_quarks`] reads.
+///
+/// The draft rides `Activity::full`. The publisher carries it on every activity for as
+/// long as the turn lasts — a tool call that dropped it would take the bubble down with
+/// it, since the live file is one overwritten slot — while `detail` still describes what
+/// the quark is doing. So the split holds: **the reply goes to the chat, the tool titles
+/// stay in the Live card**, and an activity from a quark that has not spoken yet carries
+/// no `full` and yields nothing here.
+///
+/// Shows the **tail** when a reply outgrows [`DRAFT_TAIL_CHARS`]: text is arriving at
+/// the end, so the end is what a human is reading. `live` is injected for the same
+/// reason [`active_quarks`] injects it — this stays a pure function, testable without
+/// touching disk.
+pub(super) fn streaming_drafts(
+    roster: &[RosterRow],
+    live: impl Fn(&str) -> Option<hadron_lattice::live::Activity>,
+) -> Vec<(String, String)> {
+    roster
+        .iter()
+        .filter(|r| r.adopted && r.enabled)
+        .filter_map(|r| {
+            let act = live(&r.id)?;
+            let full = act.full?;
+            let trimmed = full.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some((act.quark.as_str().to_string(), draft_tail(trimmed)))
+        })
+        .collect()
+}
+
+/// The last [`DRAFT_TAIL_CHARS`] characters of `text`, marked with a leading ellipsis
+/// when anything was dropped. Counts characters, never bytes.
+fn draft_tail(text: &str) -> String {
+    let count = text.chars().count();
+    if count <= DRAFT_TAIL_CHARS {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(count - DRAFT_TAIL_CHARS).collect();
+    format!("…{tail}")
+}
+
+/// One roster entry, styled as a presence list-item: the resolved avatar with a
+/// status [`Badge`] dot, a display name, and a one-word presence subtitle, with a
+/// tooltip on hover.
+#[allow(dead_code)]
+pub(super) fn roster_row(
+    id: &ResolvedIdentity,
+    r: &RosterRow,
+    activity: Option<hadron_lattice::live::Activity>,
+    controls: gpui_kit::AnyElement,
+) -> impl IntoElement {
+    let name = id.name.clone();
+    let effective_state =
+        effective_presence_state(r.state, r.adopted, r.enabled, activity.is_some());
+    // Not adopted here → "available" (in the catalogue, off in this repo); adopted but
+    // switched off → "disabled"; otherwise the live presence word.
+    let label = if !r.adopted {
+        "available"
+    } else if r.enabled {
+        theme::presence_label(effective_state)
+    } else {
+        "disabled"
+    };
+    let tip: SharedString = format!("{name} — {label}").into();
+
+    // Legibility line: "transport · vendor · model" when the seat is in team.json, else
+    // the presence label alone.
+    let cap = |s: &str| {
+        let mut c = s.chars();
+        match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        }
+    };
+    let transport_label = r.transport.code();
+
+    let tokens_str = format_num(r.tokens as u64);
+
+    let flavor_str = match &r.flavor {
+        Some(hadron_lattice::Flavor::Orchestrator) => "Orchestrator",
+        Some(hadron_lattice::Flavor::Worker) => "Worker",
+        None => "",
+    };
+
+    let has_activity = activity.is_some();
+    // A streaming reply publishes an EMPTY detail on purpose (the text belongs in the
+    // chat bubble, not here), so the label stands alone rather than trailing a colon
+    // over nothing: "speaking", not "speaking: ".
+    let detail_1: SharedString = if let Some(act) = activity {
+        if act.detail.is_empty() {
+            act.doing.label().into()
+        } else {
+            format!("{}: {}", act.doing.label(), act.detail).into()
+        }
+    } else if needs_activity_placeholder(effective_state, r.adopted, r.enabled, has_activity) {
+        "working…".into()
+    } else if r.vendor.is_empty() && r.model_label().is_empty() {
+        label.into()
+    } else if r.model_label().is_empty() {
+        format!("{} · {}", transport_label, cap(&r.vendor)).into()
+    } else {
+        format!(
+            "{} · {} · {}",
+            transport_label,
+            cap(&r.vendor),
+            cap(&r.model_label())
+        )
+        .into()
+    };
+
+    let unknown_str = if r.unknown_turns > 0 {
+        format!(" (+{} turns of unknown spend)", r.unknown_turns)
+    } else {
+        "".to_string()
+    };
+
+    let detail_2: gpui_kit::AnyElement = if flavor_str.is_empty() {
+        div()
+            .font_family(crate::fonts::MONO_FAMILY)
+            .child(format!("{} tokens{}", tokens_str, unknown_str))
+            .into_any_element()
+    } else {
+        h_flex()
+            .gap_1()
+            .child(flavor_str)
+            .child("·")
+            .child(
+                div()
+                    .font_family(crate::fonts::MONO_FAMILY)
+                    .child(format!("{} tokens{}", tokens_str, unknown_str)),
+            )
+            .into_any_element()
+    };
+
+    // Grey dot for both a disabled seat and an available-but-not-adopted quark — the
+    // same "there to use, but off" signal the user asked for.
+    let dot_color = if r.adopted && r.enabled {
+        theme::presence(effective_state)
+    } else {
+        theme::presence_disabled()
+    };
+
+    // A single static presence dot: the colour alone carries the state (blue = working,
+    // green = available, amber = waiting, red = unavailable), so every quark's dot reads
+    // the same way. No per-state ring and no animation — the chamber software-renders
+    // (WSL/llvmpipe, no GPU), and any live animation forces a full-window repaint every
+    // frame, historically the app's worst CPU sink.
+    let dot = div()
+        .absolute()
+        .bottom_0()
+        .right_0()
+        .size(px(10.0))
+        .rounded_full()
+        .bg(dot_color)
+        .border_2()
+        .border_color(theme::bg_elevated());
+
+    h_flex()
+        .id(SharedString::from(format!("quark-{}", r.id)))
+        .items_start()
+        .gap_2p5()
+        .px_2()
+        .py_1p5()
+        .rounded_md()
+        .hover(|s| s.bg(theme::bg_surface()))
+        .child(
+            div()
+                .relative()
+                .mt_1()
+                .child(div().child(identity_avatar(id, 28.0)).map(|el| {
+                    if r.enabled {
+                        el
+                    } else {
+                        el.opacity(0.6)
+                    }
+                }))
+                .child(dot),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if r.enabled {
+                            theme::text()
+                        } else {
+                            theme::text_muted()
+                        })
+                        .truncate()
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text())
+                        .opacity(if r.enabled { 0.8 } else { 0.5 })
+                        .truncate()
+                        .child(detail_1),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text())
+                        .opacity(if r.enabled { 0.7 } else { 0.4 })
+                        .truncate()
+                        .child(detail_2),
+                ),
+        )
+        // Effort + permission-mode tags, trailing (top-right) as before. Kept `xsmall`
+        // so they stay clear of the name/model column instead of squishing it.
+        .child(controls)
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+}
+
+/// A labeled block in the Settings card: Title and option/control on the top row,
+/// with the optional description on the bottom row. Title is `flex_none` so it only takes
+/// its text width, leaving maximum space for the option/control without dividing the row in half.
+pub(super) fn settings_field(
+    label: &'static str,
+    description: Option<&'static str>,
+    content: gpui_kit::AnyElement,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .py_3()
+        .border_b_1()
+        .border_color(theme::border())
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(px(140.0))
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                        .child(label),
+                )
+                .when_some(description, |v, desc| {
+                    v.child(div().text_xs().text_color(theme::text_muted()).child(desc))
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .min_w(px(280.0))
+                .flex()
+                .justify_end()
+                .items_center()
+                .child(content),
+        )
+}
+
+/// A container card for grouping related settings into a distinct visual section.
+pub(super) fn settings_card_section(
+    title: &'static str,
+    icon: Option<IconName>,
+    content: impl IntoElement,
+) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .p_4()
+        .gap_3()
+        .rounded_lg()
+        .bg(theme::bg_surface())
+        .border_1()
+        .border_color(theme::border())
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .pb_2()
+                .border_b_1()
+                .border_color(theme::border())
+                .when_some(icon, |this, ic| {
+                    this.child(Icon::new(ic).small().text_color(theme::accent()))
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child(title),
+                ),
+        )
+        .child(content)
+}
+
+/// A vertically-stacked labeled field: the label above a full-width control, no
+/// fixed-width column. For rows whose label already carries the explanation
+/// (the Custom CLI wizard's inline hints) and needs the full card width rather
+/// than sharing a line with a short name.
+pub(super) fn settings_field_stacked(
+    label: impl Into<gpui_kit::SharedString>,
+    content: gpui_kit::AnyElement,
+) -> impl IntoElement {
+    v_flex()
+        .gap_1p5()
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme::text())
+                .child(label.into()),
+        )
+        .child(content)
+}
+
+/// A section eyebrow — the small, muted, all-caps label that heads a group of rows in
+/// the info/about panels, matching the Settings sidebar's "IDENTITIES"/"SETTINGS" style.
+pub(super) fn panel_eyebrow(label: &'static str) -> impl IntoElement {
+    div()
+        .mt_1()
+        .text_size(px(10.0))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(theme::text_muted())
+        .child(label.to_uppercase())
+}
+
+/// One label→value row: muted label on the left, value right-aligned. The shared row
+/// shape for the info and about panels, so both read as the same instrument panel.
+pub(super) fn kv_row(label: &'static str, value: impl Into<String>) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .justify_between()
+        .gap_4()
+        .text_sm()
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme::text_muted())
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_right()
+                .text_color(theme::text())
+                .child(value.into()),
+        )
+}
+
+/// A small, subtle text button for secondary actions (caller attaches on_click).
+pub(super) fn text_button(
+    id: impl Into<gpui_kit::SharedString>,
+    label: impl Into<gpui_kit::SharedString>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(id.into())
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_sm()
+        .text_color(theme::text_secondary())
+        .hover(|s| s.bg(theme::bg_surface_raised()).text_color(theme::text()))
+        .child(label.into())
+}
+
+/// What the native picker actually said.
+///
+/// `Option<PathBuf>` conflated the two answers that must behave differently: the human
+/// said **no**, and there was **no dialog** for them to say it in. Both arrived as
+/// `None`, so a cancel fell through to the subprocess fallback and popped a SECOND
+/// dialog the human had to cancel again — reported live against "Open Workspace".
+/// An enum makes the two unmistakable at every call site.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Picked {
+    Path(String),
+    /// The human cancelled. Stop — do NOT offer another dialog.
+    Cancelled,
+    /// No picker answered at all (no `xdg-desktop-portal`, the usual case under WSL).
+    /// Only this one earns a fallback.
+    NoPicker,
+}
+
+/// Classify what `cx.prompt_for_paths` handed back, after both its error layers have
+/// been flattened to `Option`: the outer `None` is "the picker never answered", an
+/// inner `None` (or an empty list) is "the human cancelled".
+///
+/// Pure, so the distinction that caused the double dialog is unit-testable without a
+/// GPUI window.
+pub(super) fn classify_pick(result: Option<Option<Vec<std::path::PathBuf>>>) -> Picked {
+    match result {
+        None => Picked::NoPicker,
+        Some(None) => Picked::Cancelled,
+        Some(Some(paths)) => match paths.into_iter().next() {
+            Some(p) => Picked::Path(p.to_string_lossy().into_owned()),
+            None => Picked::Cancelled,
+        },
+    }
+}
+
+/// A best-effort file picker for environments where gpui's native (XDG desktop portal)
+/// dialog is unavailable — most notably WSL, which usually has no `xdg-desktop-portal`
+/// running, so `prompt_for_paths` resolves to nothing. Tries a GTK dialog (`zenity`,
+/// which works under WSLg), then, under WSL, a native Windows dialog driven through
+/// PowerShell and translated back to a Linux path with `wslpath`.
+///
+/// Returns the chosen path, or `None` if the user cancelled or no picker exists.
+/// **Blocking** (waits on the dialog) — must be called on a background thread.
+pub(super) fn fallback_pick_image() -> Option<String> {
+    use std::process::Command;
+
+    // 1) zenity — a GTK file chooser. If it launches at all, its answer is authoritative
+    //    (a path, or `None` on cancel); only a *missing* binary (`Err`) falls through, so
+    //    a cancel never pops a second dialog.
+    match Command::new("zenity")
+        .args([
+            "--file-selection",
+            "--title=Choose avatar image",
+            "--file-filter=Images | *.png *.jpg *.jpeg *.gif *.webp *.bmp *.svg",
+            "--file-filter=All files | *",
+        ])
+        .output()
+    {
+        Ok(out) => {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return (out.status.success() && !path.is_empty()).then_some(path);
+        }
+        Err(_) => { /* zenity not installed — try the Windows dialog below */ }
+    }
+
+    // 2) WSL: drive a native Windows OpenFileDialog through PowerShell, then translate the
+    //    returned `C:\…` path to `/mnt/c/…` with `wslpath`.
+    let initial_path = if crate::sys::is_wsl() {
+        let home = std::env::var("HOME")
+            .ok()
+            .unwrap_or_else(|| ".".to_string());
+        Command::new("wslpath")
+            .arg("-w")
+            .arg(&home)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        None
+    };
+
+    let script = if let Some(ref init) = initial_path {
+        format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $d = New-Object System.Windows.Forms.OpenFileDialog; \
+             $d.InitialDirectory = '{init}'; \
+             $d.Filter = 'Images|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp|All files|*.*'; \
+             if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }}"
+        )
+    } else {
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $d = New-Object System.Windows.Forms.OpenFileDialog; \
+         $d.Filter = 'Images|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp|All files|*.*'; \
+         if ($d.ShowDialog() -eq 'OK') { $d.FileName }"
+            .to_string()
+    };
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-Sta", "-Command", &script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let win = cmd
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    if cfg!(windows) {
+        Some(win)
+    } else {
+        wsl_to_linux(win)
+    }
+}
+
+/// A directory picker with the same two fallbacks as [`fallback_pick_image`], for the
+/// titlebar's "Open Workspace". Kept separate rather than parameterised because the two
+/// dialogs differ in more than a flag — a Windows folder browser is a different class
+/// (`FolderBrowserDialog`) than a file dialog, not the same one with another filter.
+///
+/// **Blocking** — must be called on a background thread.
+pub(super) fn fallback_pick_directory() -> Option<String> {
+    pick_directory_at(None)
+}
+
+/// Directory picker rooted at an optional starting directory (e.g. a WSL distribution's
+/// `$HOME` UNC path `\\wsl.localhost\<distro>\home\<user>`).
+///
+/// **Blocking** — must be called on a background thread.
+pub(super) fn pick_directory_at(initial_dir: Option<&std::path::Path>) -> Option<String> {
+    use std::process::Command;
+
+    let start_dir = initial_dir
+        .map(|p| p.to_string_lossy().to_string())
+        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .unwrap_or_else(|| ".".to_string());
+
+    if !cfg!(windows) && !start_dir.starts_with(r"\\") {
+        // 1) On Linux / WSLg, try zenity with default home path if available
+        let zenity_arg = format!("--filename={}/", start_dir.trim_end_matches('/'));
+        match Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=Open workspace",
+                &zenity_arg,
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+            _ => { /* zenity not installed or failed — try next */ }
+        }
+
+        // 2) If kdialog is available on Linux
+        match Command::new("kdialog")
+            .args([
+                "--getexistingdirectory",
+                &start_dir,
+                "--title",
+                "Open workspace",
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3) Windows or WSL: drive a native Windows FolderBrowserDialog through PowerShell.
+    let initial_path = if start_dir.starts_with(r"\\") || cfg!(windows) {
+        Some(start_dir)
+    } else if crate::sys::is_wsl() {
+        Command::new("wslpath")
+            .arg("-w")
+            .arg(&start_dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        None
+    };
+
+    let script = if let Some(ref init) = initial_path {
+        let escaped = init.replace('\'', "''");
+        format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+             $d.Description = 'Select Hadron Workspace Folder'; \
+             $d.SelectedPath = '{escaped}'; \
+             if ($d.ShowDialog() -eq 'OK') {{ $d.SelectedPath }}"
+        )
+    } else {
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+         $d.Description = 'Select Hadron Workspace Folder'; \
+         if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"
+            .to_string()
+    };
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-Sta", "-Command", &script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let win = cmd
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    if cfg!(windows) {
+        Some(win)
+    } else {
+        wsl_to_linux(win)
+    }
+}
+
+/// `C:\…` → `/mnt/c/…`. If the translation fails, hand back the raw path rather than
+/// lose it — a path we cannot translate is still better than silently nothing.
+fn wsl_to_linux(win: String) -> Option<String> {
+    let translated = std::process::Command::new("wslpath")
+        .arg("-u")
+        .arg(&win)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    translated.or(Some(win))
+}
+
+/// The next mode for a **click on a PER-QUARK chip**, cycling Ask → Write → Auto → Ask.
+///
+/// `Bypass` is deliberately not in this cycle: it is full unattended tool access for
+/// one worker, and the chip is a word-sized target with no confirm and no undo behind
+/// it. Escalating a worker into it is an explicit act — the Settings picker
+/// (`set_quark_mode`) or `/mode bypass @quark`. Clicking a quark that is already in
+/// `Bypass` still drops it to `Ask`, since de-escalation by accident costs nothing.
+///
+/// The GLOBAL chip uses [`next_global_mode`], which DOES reach `Bypass` — see there
+/// for why the two ladders differ.
+pub(super) fn next_mode(mode: Mode) -> Mode {
+    match mode {
+        Mode::Ask => Mode::Write,
+        Mode::Write => Mode::Auto,
+        Mode::Auto | Mode::Bypass => Mode::Ask,
+    }
+}
+
+/// The next mode for a click on the **GLOBAL** mode chip (or `F6`), cycling the full
+/// ladder Ask → Write → Auto → Bypass → Ask.
+///
+/// This is NOT [`next_mode`]. The per-quark clamp exists so a stray click cannot hand
+/// one worker unattended access; the global chip is the human's own posture control and
+/// `Bypass` is a posture they choose for the whole swarm — the mode Hadron is normally
+/// driven in. Sharing one function made the per-quark clamp swallow the global ladder
+/// too, so `Bypass` became unreachable from the chip and from `F6`, contradicting the
+/// documented shortcut (`README.md`). Keep them separate.
+pub(super) fn next_global_mode(mode: Mode) -> Mode {
+    match mode {
+        Mode::Ask => Mode::Write,
+        Mode::Write => Mode::Auto,
+        Mode::Auto => Mode::Bypass,
+        Mode::Bypass => Mode::Ask,
+    }
+}
+
+/// The text on a permission-mode badge. A quark with no per-quark override reads
+/// **"Default"** (it rides the global/inherited mode); otherwise the actual mode
+/// name. Pure so it's unit-testable without a GPUI window. The GLOBAL mode chip
+/// passes `is_default = false` so it always shows the live ASK/WRITE/AUTO/BYPASS.
+pub(super) fn mode_tag_label(mode: Mode, is_default: bool) -> &'static str {
+    if is_default {
+        "Default"
+    } else {
+        mode_label(mode)
+    }
+}
+
+/// A permission-mode badge. When `is_default` (no per-quark override), a neutral
+/// GREY outlined "Default" chip — the quark is on the global mode. Otherwise the
+/// actual mode in its risk colour (Ask muted → Bypass danger). All variants are
+/// `outline` so the tags read as light chips, not solid fills.
+/// Kept `xsmall` so it doesn't crowd the name/model column of the roster row.
+pub(super) fn mode_tag(mode: Mode, is_default: bool) -> gpui_kit::AnyElement {
+    let label = mode_tag_label(mode, is_default);
+    if is_default {
+        return div()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .text_xs()
+            .text_color(theme::text_muted())
+            .child(label)
+            .into_any_element();
+    }
+    let color = mode_color(mode);
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(color)
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::BOLD)
+        .text_color(color)
+        .child(label)
+        .into_any_element()
+}
+
+/// The reasoning-effort badge, mirroring [`mode_tag`]'s default behaviour: a set
+/// per-quark effort (`Some("high")`) renders as an outlined `HIGH` chip; an absent
+/// effort renders a neutral grey outlined `Default` chip (the seat is on the
+/// model/provider default). Effort has no risk-colour ladder like mode, so both
+/// states are outlined `secondary` — only the label differs. Kept `xsmall` so it
+/// doesn't crowd the roster row.
+pub(super) fn effort_tag(effort: &Option<String>) -> gpui_kit::AnyElement {
+    let label = match effort.as_deref() {
+        Some(e) if !e.is_empty() => e.to_uppercase(),
+        _ => "Default".to_string(),
+    };
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(theme::glass_highlight())
+        .text_xs()
+        .text_color(theme::text_muted())
+        .child(label)
+        .into_any_element()
+}
+/// The short badge label for a permission mode, e.g. `Mode::Bypass` → `"BYPASS"`.
+/// One source of truth for the ladder's labels, shared by the roster tag and the
+/// Settings picker.
+pub(super) fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Ask => "ASK",
+        Mode::Write => "WRITE",
+        Mode::Auto => "AUTO",
+        Mode::Bypass => "BYPASS",
+    }
+}
+
+/// The selected-chip colour for a permission mode — a delegated authority ladder
+/// from neutral slate (Ask) through cyan/amethyst to warm amber gold (Bypass).
+pub(super) fn mode_color(mode: Mode) -> gpui_kit::Hsla {
+    match mode {
+        Mode::Ask => theme::text_secondary().into(),
+        Mode::Write => theme::info().into(),
+        Mode::Auto => theme::accent().into(),
+        Mode::Bypass => theme::warning().into(),
+    }
+}
+
+/// A one-line, human-readable gloss of what a permission mode delegates — shown under
+/// the Settings picker so the choice is not just a label. Mirrors the [`Mode`] doc.
+pub(super) fn mode_hint(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Ask => "Every edit and command asks you first.",
+        Mode::Write => "Edits auto-approve; every command asks you.",
+        Mode::Auto => "Edits auto-approve; a command asks once, then is remembered.",
+        Mode::Bypass => "The orchestrator owns it — nothing asks you (still audited).",
+    }
+}
+
+/// The next sandbox confinement mode for cycling: WorktreeOnly -> Strict -> Off -> WorktreeOnly.
+pub(super) fn next_sandbox_mode(mode: SandboxMode) -> SandboxMode {
+    match mode {
+        SandboxMode::WorktreeOnly => SandboxMode::Strict,
+        SandboxMode::Strict => SandboxMode::Off,
+        SandboxMode::Off => SandboxMode::WorktreeOnly,
+    }
+}
+
+/// The text on a sandbox confinement badge.
+pub(super) fn sandbox_tag_label(mode: SandboxMode) -> &'static str {
+    match mode {
+        SandboxMode::WorktreeOnly => "SANDBOX: ON",
+        SandboxMode::Strict => "SANDBOX: STRICT",
+        SandboxMode::Off => "SANDBOX: OFF",
+    }
+}
+
+/// The border/text color for a sandbox badge.
+pub(super) fn sandbox_color(mode: SandboxMode) -> gpui_kit::Hsla {
+    match mode {
+        SandboxMode::WorktreeOnly => theme::success().into(),
+        SandboxMode::Strict => theme::accent().into(),
+        SandboxMode::Off => theme::warning().into(),
+    }
+}
+
+/// A sandbox confinement badge.
+pub(super) fn sandbox_tag(mode: SandboxMode) -> gpui_kit::AnyElement {
+    let label = sandbox_tag_label(mode);
+    let color = sandbox_color(mode);
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(color)
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::BOLD)
+        .text_color(color)
+        .child(label)
+        .into_any_element()
+}
+
+/// A one-line human-readable gloss of what a sandbox confinement mode enforces.
+pub(super) fn sandbox_hint(mode: SandboxMode) -> &'static str {
+    match mode {
+        SandboxMode::WorktreeOnly => "Confinement active: execution is jailed to the worktree with sanitized environment.",
+        SandboxMode::Strict => "Strict isolation: worktree jailing plus external network access is blocked.",
+        SandboxMode::Off => "Sandboxing disabled: tools and commands run directly on the host with full permissions.",
+    }
+}
+
+/// A muted placeholder line shown when a tab view has nothing to render.
+pub(super) fn empty_hint(text: &'static str) -> impl IntoElement {
+    div().text_sm().text_color(theme::text_muted()).child(text)
+}
+
+/// A swarm task's state badge. Mirrors [`mode_tag`]/[`effort_tag`]'s outlined-chip
+/// shape. `Blocked` and `Failed` are the two the projection used to fold into `Done`,
+/// and they are the reason to look at this list at all — they get the warning and
+/// danger tags so a bad outcome cannot read as a green one.
+pub(super) fn task_state_info(state: TaskState) -> (Rgba, &'static str) {
+    match state {
+        TaskState::Working => (theme::info(), "Working"),
+        TaskState::Done => (theme::success(), "Done"),
+        TaskState::Blocked => (theme::warning(), "Blocked"),
+        TaskState::Failed => (theme::error(), "Failed"),
+    }
+}
+
+pub(super) fn task_state_tag(state: TaskState) -> gpui_kit::AnyElement {
+    let (color, label) = task_state_info(state);
+    div()
+        .w(px(64.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .py_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(color)
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::BOLD)
+        .text_color(color)
+        .child(label)
+        .into_any_element()
+}
+
+/// One card in the Tasks tab: who it's addressed to, its title, how long it has taken,
+/// asked timestamp and a state chip — styled as a glass card matching the Delegation view.
+///
+/// `now` is the render pass's clock, so an in-flight row counts UP while you watch it.
+/// That column is the whole point of the tab: a task with no elapsed time next to it
+/// cannot distinguish "started a second ago" from "wedged twenty minutes ago", which
+/// is the one question this list exists to answer.
+///
+/// `to` and `from` are resolved by the CALLER through `Chamber::resolve_identity`, which
+/// is the one place a display name and a colour come from — nucleus
+/// `presence-dot-was-computed-in-three-places` and `mentions-render-raw-id-not-display-name`.
+/// `SwarmTask` carries raw seat ids (`acp-claude-2`), never the name a human reads.
+/// `SwarmTask` carries raw seat ids (`acp-claude-2`), never the name a human reads.
+pub(super) fn task_row(
+    t: &SwarmTask,
+    now: chrono::DateTime<chrono::Utc>,
+    to: &ResolvedIdentity,
+    from: &ResolvedIdentity,
+    mono_font: &gpui_kit::SharedString,
+) -> impl IntoElement {
+    let time = t
+        .asked_at
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string();
+    let elapsed = crate::app::render::chat::format_duration(t.elapsed_secs(now));
+    let from_str = if from.name.starts_with('@') {
+        from.name.clone()
+    } else {
+        format!("@{}", from.name)
+    };
+    let to_str = if to.name.starts_with('@') {
+        to.name.clone()
+    } else {
+        format!("@{}", to.name)
+    };
+
+    let (_state_color, _state_label) = task_state_info(t.state);
+
+    v_flex()
+        .w_full()
+        .p_2p5()
+        .rounded_lg()
+        .bg(theme::glass_card())
+        .border_1()
+        .border_color(theme::glass_highlight())
+        .gap_1p5()
+        .hover(|s| s.bg(theme::bg_elevated()))
+        .child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .text_xs()
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(theme::bg_base())
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(from.color)
+                                .child(from_str),
+                        )
+                        .child(div().text_color(theme::text_muted()).child("➜"))
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(theme::bg_base())
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(to.color)
+                                .child(to_str),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(theme::bg_base())
+                                .text_xs()
+                                .font_family(mono_font.clone())
+                                .text_color(theme::text_muted())
+                                .child(time),
+                        )
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(theme::bg_base())
+                                .text_xs()
+                                .font_family(mono_font.clone())
+                                .text_color(theme::text_secondary())
+                                .child(elapsed),
+                        )
+                        .child(task_state_tag(t.state)),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(theme::text())
+                .truncate()
+                .child(t.title.clone()),
+        )
+}
+
+/// A single row in the compact activity Log: time · actor · kind · body, tabular and dense
+/// so the Log reads like a console rather than a second chat. Body truncates to one line —
+/// the Chat tab is where a message is read in full.
+///
+/// Metadata cells (`@from`, `@to`, time, kind) use `TextView::html` rather than
+/// `TextView::markdown` because `markdown.rs`'s `push_mention_and_command_marks` forces an
+/// inline `pink-400` color mark onto every `@token`, overriding the parent `div().text_color(...)`
+/// and making every quark name in the Event Log render the same pink instead of its own color.
+pub(super) fn log_row<Tz: chrono::TimeZone>(
+    ix: usize,
+    m: &MessageRow,
+    expanded: bool,
+    from: &ResolvedIdentity,
+    to: Option<&ResolvedIdentity>,
+    resolved_body: &str,
+    tz: Tz,
+    mono_font: &gpui_kit::SharedString,
+) -> impl IntoElement
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let time = m.ts.with_timezone(&tz).format("%H:%M:%S").to_string();
+    let body_text = if expanded {
+        resolved_body.to_string()
+    } else {
+        crate::text::flatten_to_single_line(resolved_body)
+    };
+    let from_handle = if from.name.starts_with('@') {
+        from.name.clone()
+    } else {
+        format!("@{}", from.name)
+    };
+    let author_color = from.color;
+    let to_handle = to.map(|t| {
+        if t.name.starts_with('@') {
+            t.name.clone()
+        } else {
+            format!("@{}", t.name)
+        }
+    });
+    let resolved_to_color: Hsla = to
+        .map(|t| t.color)
+        .unwrap_or_else(|| theme::text_muted().into());
+
+    if expanded {
+        let token_tag = m.usage.as_ref().and_then(|u| {
+            let in_tok = u.spend.input.unwrap_or(0);
+            let out_tok = u.spend.output.unwrap_or(0);
+            if in_tok > 0 || out_tok > 0 {
+                Some(format!("{in_tok} in · {out_tok} out"))
+            } else {
+                None
+            }
+        });
+
+        v_flex()
+            .w_full()
+            .gap_1p5()
+            .p_2p5()
+            .rounded_md()
+            .bg(theme::glass_card())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family(mono_font.clone())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::accent())
+                                    .child(
+                                        gpui_kit::component::text::TextView::html(
+                                            ("log-idx-exp", ix),
+                                            format!("#{}", ix + 1),
+                                        )
+                                        .selectable(true),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family(mono_font.clone())
+                                    .text_color(theme::text_muted())
+                                    .child(
+                                        gpui_kit::component::text::TextView::html(
+                                            ("log-time-exp", ix),
+                                            &time,
+                                        )
+                                        .selectable(true),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(author_color)
+                                    .child(
+                                        gpui_kit::component::text::TextView::html(
+                                            ("log-from-exp", ix),
+                                            from_handle.clone(),
+                                        )
+                                        .selectable(true),
+                                    ),
+                            )
+                            .when_some(to_handle.clone(), |d, to| {
+                                d.child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .text_xs()
+                                        .child(div().text_color(theme::text_muted()).child("➜"))
+                                        .child(
+                                            div()
+                                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                                .text_color(resolved_to_color)
+                                                .child(
+                                                    gpui_kit::component::text::TextView::html(
+                                                        ("log-to-exp", ix),
+                                                        to,
+                                                    )
+                                                    .selectable(true),
+                                                ),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme::bg_surface())
+                                    .border_1()
+                                    .border_color(theme::hairline_border())
+                                    .text_xs()
+                                    .text_color(log_kind_color(m.kind_label))
+                                    .child(
+                                        gpui_kit::component::text::TextView::html(
+                                            ("log-kind-exp", ix),
+                                            m.kind_label,
+                                        )
+                                        .selectable(true),
+                                    ),
+                            ),
+                    )
+                    .when_some(token_tag, |d, tokens| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .font_family(mono_font.clone())
+                                .text_color(theme::text_muted())
+                                .child(
+                                    gpui_kit::component::text::TextView::html(
+                                        ("log-tokens-exp", ix),
+                                        tokens,
+                                    )
+                                    .selectable(true),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .p_1()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(
+                        gpui_kit::component::text::TextView::markdown(("log-body", ix), body_text)
+                            .style(markdown_style(None, false))
+                            .selectable(true)
+                            .markdown_extensions(
+                                crate::mermaid::plugin::chamber_markdown_extensions(),
+                            )
+                            .on_link_click(crate::app::handle_chat_link_click),
+                    ),
+            )
+            .into_any_element()
+    } else {
+        h_flex()
+            .w_full()
+            .items_start()
+            .gap_3()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .hover(|s| s.bg(theme::glass_highlight()))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(58.0))
+                    .text_xs()
+                    .font_family(mono_font.clone())
+                    .text_color(theme::text_muted())
+                    .child(
+                        gpui_kit::component::text::TextView::html(("log-time", ix), &time)
+                            .selectable(true),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w(px(130.0))
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(author_color)
+                            .truncate()
+                            .child(
+                                gpui_kit::component::text::TextView::html(
+                                    ("log-from", ix),
+                                    from_handle,
+                                )
+                                .selectable(true),
+                            ),
+                    )
+                    .when_some(to_handle, |d, to| {
+                        d.child(div().text_xs().text_color(theme::text_muted()).child("➜"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(resolved_to_color)
+                                    .truncate()
+                                    .child(
+                                        gpui_kit::component::text::TextView::html(
+                                            ("log-to", ix),
+                                            to,
+                                        )
+                                        .selectable(true),
+                                    ),
+                            )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(80.0))
+                    .text_xs()
+                    .text_color(log_kind_color(m.kind_label))
+                    .child(
+                        gpui_kit::component::text::TextView::html(("log-kind", ix), m.kind_label)
+                            .selectable(true),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .truncate()
+                    .child(
+                        gpui_kit::component::text::TextView::markdown(("log-body", ix), body_text)
+                            .style(markdown_style(None, false))
+                            .selectable(true)
+                            .markdown_extensions(
+                                crate::mermaid::plugin::chamber_markdown_extensions(),
+                            )
+                            .on_link_click(crate::app::handle_chat_link_click),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+/// A quiet accent per event kind, so the Log's kind column reads at a glance.
+pub(super) fn log_kind_color(kind: &str) -> gpui_kit::Rgba {
+    match kind {
+        "status" => theme::accent_secondary(),
+        "edit" => theme::success(),
+        "command" => theme::warning(),
+        "snapshot" => theme::accent(),
+        _ => theme::text_muted(),
+    }
+}
+
+#[allow(dead_code)]
+pub(super) fn tool_kind_icon(kind: &str) -> IconName {
+    match kind {
+        "bash" => IconName::SquareTerminal,
+        "read" => IconName::File,
+        "edit" => IconName::Folder,
+        "command" => IconName::SquareTerminal,
+        "snapshot" => IconName::CircleCheck,
+        _ => IconName::Asterisk,
+    }
+}
+
+fn rgba_hex(c: gpui_kit::Rgba) -> String {
+    let r = (c.r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (c.g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (c.b.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let a = (c.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+}
+
+/// Syntax highlight theme dynamically synchronized with Chamber's active `theme::syntax_*()` tokens.
+pub(super) fn github_syntax_theme(
+) -> std::sync::Arc<gpui_kit::component::highlighter::HighlightTheme> {
+    let att = rgba_hex(theme::syntax_attribute());
+    let boolean = rgba_hex(theme::syntax_boolean());
+    let cmt = rgba_hex(theme::syntax_comment());
+    let cst = rgba_hex(theme::syntax_constant());
+    let func = rgba_hex(theme::syntax_function());
+    let kw = rgba_hex(theme::syntax_keyword());
+    let num = rgba_hex(theme::syntax_number());
+    let op = rgba_hex(theme::syntax_operator());
+    let punc = rgba_hex(theme::syntax_punctuation());
+    let del = rgba_hex(theme::syntax_delimiter());
+    let str_col = rgba_hex(theme::syntax_string());
+    let tag = rgba_hex(theme::syntax_tag());
+    let ty = rgba_hex(theme::syntax_type());
+    let var = rgba_hex(theme::syntax_variable());
+    let var_spec = rgba_hex(theme::syntax_variable_special());
+
+    let json = format!(
+        r##"{{
+            "name": "GitHub Dark (Custom)",
+            "appearance": "dark",
+            "style": {{
+                "syntax": {{
+                    "attribute": {{ "color": "{att}" }},
+                    "boolean": {{ "color": "{boolean}" }},
+                    "comment": {{ "color": "{cmt}" }},
+                    "comment.doc": {{ "color": "{cmt}" }},
+                    "constant": {{ "color": "{cst}" }},
+                    "constructor": {{ "color": "{func}" }},
+                    "embedded": {{ "color": "#edededff" }},
+                    "emphasis": {{ "color": "{var}", "font_style": "italic" }},
+                    "emphasis.strong": {{ "color": "{var}", "font_weight": 700 }},
+                    "enum": {{ "color": "{ty}" }},
+                    "function": {{ "color": "{func}" }},
+                    "hint": {{ "color": "{cmt}" }},
+                    "keyword": {{ "color": "{kw}" }},
+                    "label": {{ "color": "{func}" }},
+                    "link_text": {{ "color": "#48a0c7ff" }},
+                    "link_uri": {{ "color": "{str_col}" }},
+                    "number": {{ "color": "{num}" }},
+                    "operator": {{ "color": "{op}" }},
+                    "predictive": {{ "color": "#555555ff" }},
+                    "preproc": {{ "color": "{kw}" }},
+                    "primary": {{ "color": "{punc}" }},
+                    "property": {{ "color": "{ty}" }},
+                    "punctuation": {{ "color": "{punc}" }},
+                    "punctuation.bracket": {{ "color": "{punc}" }},
+                    "punctuation.delimiter": {{ "color": "{del}" }},
+                    "punctuation.list_marker": {{ "color": "{tag}" }},
+                    "punctuation.special": {{ "color": "{kw}" }},
+                    "string": {{ "color": "{str_col}" }},
+                    "string.escape": {{ "color": "{tag}", "font_weight": 700 }},
+                    "string.regex": {{ "color": "#dbedffff" }},
+                    "string.special": {{ "color": "{ty}" }},
+                    "string.special.symbol": {{ "color": "{ty}" }},
+                    "tag": {{ "color": "{tag}" }},
+                    "text.literal": {{ "color": "{tag}" }},
+                    "text.code.span": {{ "color": "{tag}" }},
+                    "title": {{ "color": "{ty}", "font_weight": 700 }},
+                    "type": {{ "color": "{ty}" }},
+                    "variable": {{ "color": "{var}" }},
+                    "variable.special": {{ "color": "{var_spec}" }},
+                    "variant": {{ "color": "{ty}" }}
+                }}
+            }}
+        }}"##
+    );
+    match serde_json::from_str::<gpui_kit::component::highlighter::HighlightTheme>(&json) {
+        Ok(theme) => std::sync::Arc::new(theme),
+        Err(err) => {
+            hadron_lattice::term::error(
+                hadron_lattice::term::Source::Chamber,
+                &format!("widgets: failed to parse GitHub syntax theme: {err}"),
+            );
+            gpui_kit::component::highlighter::HighlightTheme::default_dark()
+        }
+    }
+}
+
+pub(super) fn markdown_style(
+    ui_font_size: Option<f32>,
+    word_wrap: bool,
+) -> gpui_kit::component::text::TextViewStyle {
+    let base_size = ui_font_size.unwrap_or(14.0);
+    let mut style = gpui_kit::component::text::TextViewStyle::default();
+    style.heading_base_font_size = px(base_size);
+    style.highlight_theme = github_syntax_theme();
+    style.table = {
+        let mut s = gpui_kit::StyleRefinement::default()
+            .border_1()
+            .border_color(theme::border())
+            .rounded_lg();
+        s.overflow.x = Some(gpui_kit::Overflow::Scroll);
+        s
+    };
+    // Fenced code blocks: a solid dark card (header row with language label +
+    // copy button, divider, then the code body) so they read as a distinct
+    // block over the flat #101010 field instead of blending into body text.
+    let mut cb = gpui_kit::StyleRefinement::default()
+        .bg(theme::input_bg())
+        .border_1()
+        .border_color(theme::border())
+        .rounded_lg();
+    if !word_wrap {
+        cb.overflow.x = Some(gpui_kit::Overflow::Scroll);
+    }
+    style.code_block = cb;
+    // Inline code and `/command` tokens (rewritten to `` **`/cmd`** `` by
+    // `mentions::resolve_mention_names_with_human`): upstream `TextView` paints inline
+    // code with `theme::accent()` (purple `#a87ffb` on `#1f1f1f`), clickable `@file`
+    // links with `cx.theme().link` (`theme::file_link()`, yellow `#e5c07b`), and
+    // resolved `@mention`s with a pink `<mark color="#f472b640">` pill highlight.
+    style.inline_code = gpui_kit::HighlightStyle {
+        color: Some(theme::accent().into()),
+        background_color: Some(theme::bg_elevated().into()),
+        ..Default::default()
+    };
+    style
+}
+
+/// A glass card for the Session panels, matching the chat/roster panels.
+pub(super) fn session_card() -> gpui_kit::Div {
+    v_flex()
+        .p_3()
+        .gap_2()
+        .rounded_lg()
+        .bg(theme::glass_surface())
+        .border_1()
+        .border_color(theme::glass_highlight())
+}
+
+/// A slim horizontal progress meter: a recessed track with a `fill`-coloured bar at
+/// `frac` (0..=1) of the width. Pure divs — no chart, no per-frame cost. Shared by the
+/// chat stats cards and the info panel's context gauge so they read identically.
+pub(super) fn progress_meter(frac: f32, fill: impl Into<gpui_kit::Fill>) -> impl IntoElement {
+    div()
+        .w_full()
+        .h(px(6.0))
+        .rounded_full()
+        .bg(theme::bg_base())
+        .child(
+            div()
+                .h_full()
+                .w(gpui_kit::relative(frac.clamp(0.0, 1.0)))
+                .rounded_full()
+                .bg(fill),
+        )
+}
+
+/// A KPI tile: a big value over a small label, for the session totals row.
+pub(super) fn stat_tile(label: &str, value: String, accent: gpui_kit::Rgba) -> impl IntoElement {
+    stat_tile_with_note(label, value, accent, None, None)
+}
+
+/// A KPI tile with an optional status note/badge and tooltip info.
+pub(super) fn stat_tile_with_note(
+    label: &str,
+    value: String,
+    accent: gpui_kit::Rgba,
+    badge: Option<&str>,
+    tooltip_text: Option<&str>,
+) -> impl IntoElement {
+    let has_badge = badge.is_some();
+    let badge_str = badge.unwrap_or("").to_string();
+    let tt_str = tooltip_text.unwrap_or("").to_string();
+
+    v_flex()
+        .flex_1()
+        .gap_1()
+        .p_3()
+        .rounded_lg()
+        .bg(theme::term_bg())
+        .border_1()
+        .border_color(theme::glass_highlight())
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(accent)
+                        .child(value),
+                )
+                .when(has_badge, |this| {
+                    let badge_id = SharedString::from(format!("stat-badge-{}", label));
+                    this.child(
+                        div()
+                            .id(badge_id)
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(theme::warning().opacity(0.2))
+                            .border_1()
+                            .border_color(theme::warning().opacity(0.4))
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(theme::warning())
+                            .child(badge_str)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(SharedString::from(tt_str.clone())).build(window, cx)
+                            }),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(theme::text_muted())
+                .child(label.to_string()),
+        )
+}
+
+/// Shared Swarm Orchestrator icon badge (`IconName::Network`) used in Roster and Process Manager.
+pub(super) fn orchestrator_badge(id: impl Into<SharedString>) -> impl IntoElement {
+    h_flex()
+        .id(id.into())
+        .items_center()
+        .justify_center()
+        .px_1()
+        .py_0p5()
+        .rounded_md()
+        .bg(theme::accent().opacity(0.12))
+        .border_1()
+        .border_color(theme::accent().opacity(0.35))
+        .text_color(theme::accent())
+        .child(Icon::new(IconName::Network).xsmall())
+        .tooltip(|window, cx| {
+            Tooltip::new("Swarm Orchestrator (leads research, planning, dispatch, and escalation)")
+                .build(window, cx)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_github_syntax_theme_loads_correctly() {
+        let theme = github_syntax_theme();
+        assert_eq!(theme.name, "GitHub Dark (Custom)");
+        assert!(theme.style.syntax.function.is_some());
+        assert!(theme.style.syntax.keyword.is_some());
+        assert!(theme.style.syntax.string.is_some());
+        assert!(theme.style.syntax.type_.is_some());
+    }
+
+    #[test]
+    fn test_rust_syntax_highlighting_with_github_theme() {
+        use gpui_kit::component::highlighter::SyntaxHighlighter;
+        use gpui_kit::component::input::Rope;
+        let theme = github_syntax_theme();
+        let code = "pub fn main() {\n    // just tesinting\n}";
+        let mut highlighter = SyntaxHighlighter::new("rust");
+        let rope = Rope::from_str(code);
+        highlighter.update(None, &rope, None);
+        let styles = highlighter.styles(&(0..code.len()), &theme);
+        assert!(
+            !styles.is_empty(),
+            "Highlighter should return parsed token styles for Rust"
+        );
+
+        let kw_style = theme.style("keyword").unwrap();
+        let fn_style = theme.style("function").unwrap();
+        let comment_style = theme.style("comment").unwrap();
+
+        assert_eq!(kw_style.color, Some(gpui_kit::Hsla::from(rgb(0xf97583))));
+        assert_eq!(fn_style.color, Some(gpui_kit::Hsla::from(rgb(0xb392f0))));
+        assert_eq!(
+            comment_style.color,
+            Some(gpui_kit::Hsla::from(rgb(0x7e888c)))
+        );
+
+        // Verify that styles generated for the code block match the expected token spans
+        // `pub` at 0..3 -> keyword
+        let pub_span = styles
+            .iter()
+            .find(|(range, _)| range.start == 0 && range.end == 3);
+        assert!(pub_span.is_some(), "Expected style span for 'pub'");
+        assert_eq!(pub_span.unwrap().1.color, kw_style.color);
+
+        // `main` at 7..11 -> function
+        let main_span = styles
+            .iter()
+            .find(|(range, _)| range.start == 7 && range.end == 11);
+        assert!(main_span.is_some(), "Expected style span for 'main'");
+        assert_eq!(main_span.unwrap().1.color, fn_style.color);
+
+        // `// just tesinting` -> comment
+        let comment_span = styles
+            .iter()
+            .find(|(range, _)| range.start >= 18 && range.end <= 37);
+        assert!(comment_span.is_some(), "Expected style span for comment");
+        assert_eq!(comment_span.unwrap().1.color, comment_style.color);
+    }
+
+    #[test]
+    fn test_task_state_and_mode_tokens() {
+        let (done_col, done_lbl) = task_state_info(TaskState::Done);
+        assert_eq!(done_lbl, "Done");
+        assert_eq!(done_col, theme::success());
+
+        let (failed_col, failed_lbl) = task_state_info(TaskState::Failed);
+        assert_eq!(failed_lbl, "Failed");
+        assert_eq!(failed_col, theme::error());
+
+        assert_eq!(mode_color(Mode::Write), gpui_kit::Hsla::from(theme::info()));
+        assert_eq!(
+            mode_color(Mode::Bypass),
+            gpui_kit::Hsla::from(theme::warning())
+        );
+    }
+
+    #[test]
+    fn markdown_style_heading_base_font_size_matches_preference() {
+        let default_style = markdown_style(None, false);
+        assert_eq!(default_style.heading_base_font_size, px(14.0));
+        assert_eq!(default_style.highlight_theme.name, "GitHub Dark (Custom)");
+
+        let custom_style = markdown_style(Some(18.0), true);
+        assert_eq!(custom_style.heading_base_font_size, px(18.0));
+        assert_eq!(custom_style.highlight_theme.name, "GitHub Dark (Custom)");
+
+        // Inline code (and the `@mention`s / `/command`s rewritten to it) paints in the active accent colour on bg_elevated.
+        assert_eq!(
+            default_style.inline_code.color,
+            Some(gpui_kit::Hsla::from(theme::accent()))
+        );
+        assert_eq!(
+            default_style.inline_code.background_color,
+            Some(gpui_kit::Hsla::from(theme::bg_elevated()))
+        );
+    }
+
+    #[test]
+    fn format_num_is_human_readable_with_trimmed_units() {
+        assert_eq!(format_num(0), "0");
+        assert_eq!(format_num(999), "999");
+        assert_eq!(format_num(50_558), "50.6k");
+        assert_eq!(format_num(1_000), "1k"); // trailing .0 trimmed
+        assert_eq!(format_num(1_200_000), "1.2m");
+        assert_eq!(format_num(2_000_000), "2m"); // not "2.0m"
+        assert_eq!(format_num(503_937), "503.9k");
+        assert_eq!(format_num(5_400_000_000u64), "5.4b");
+    }
+
+    /// `mode_tag` used to early-return an empty element for any quark running the
+    /// global-default mode (`is_override == false`), so "a mode tag next to each
+    /// Quark" wasn't actually true — only overridden quarks showed one. The render
+    /// decision isn't directly introspectable on an `AnyElement`, so this asserts
+    /// the pure style selector behind it: BOTH branches must select a real style
+    /// (neither is "nothing"), and override vs. inherited must land on opposite
+    /// styles per the function's own doc comment (override = solid, inherited =
+    /// outline).
+    #[test]
+    fn mode_tag_label_is_default_only_when_inherited() {
+        // No per-quark override → the grey "Default" chip.
+        assert_eq!(mode_tag_label(Mode::Auto, true), "Default");
+        assert_eq!(mode_tag_label(Mode::Bypass, true), "Default");
+        // An override (and the global chip, which passes is_default=false) → the real mode.
+        assert_eq!(mode_tag_label(Mode::Auto, false), "AUTO");
+        assert_eq!(mode_tag_label(Mode::Ask, false), "ASK");
+        assert_eq!(mode_tag_label(Mode::Bypass, false), "BYPASS");
+    }
+
+    /// One click on a small roster chip used to take a quark from `Auto` straight
+    /// to `Bypass` — full unattended tool access, no confirm and no undo, from a
+    /// stray click on a chip the size of a word. The cycle now stops at `Auto`;
+    /// escalating INTO `Bypass` needs a deliberate path (the Settings picker's
+    /// `set_quark_mode`, or `/mode bypass @quark`). De-escalating OUT of it by
+    /// clicking stays, because that direction is always safe.
+    #[test]
+    fn the_click_cycle_never_escalates_into_bypass() {
+        assert_eq!(next_mode(Mode::Ask), Mode::Write);
+        assert_eq!(next_mode(Mode::Write), Mode::Auto);
+        assert_eq!(next_mode(Mode::Auto), Mode::Ask, "must NOT reach Bypass");
+        assert_eq!(
+            next_mode(Mode::Bypass),
+            Mode::Ask,
+            "but clicking out still works"
+        );
+    }
+
+    /// The per-quark clamp above was shared with the GLOBAL chip, so `Bypass` fell out
+    /// of the global ladder entirely: the chip and `F6` cycled Ask → Write → Auto → Ask
+    /// and there was no way back into `Bypass` short of typing `/mode bypass`, while
+    /// `README.md` documented `F6` as cycling all four. The global ladder must be
+    /// complete and must close the loop.
+    #[test]
+    fn the_global_cycle_does_reach_bypass() {
+        assert_eq!(next_global_mode(Mode::Ask), Mode::Write);
+        assert_eq!(next_global_mode(Mode::Write), Mode::Auto);
+        assert_eq!(
+            next_global_mode(Mode::Auto),
+            Mode::Bypass,
+            "MUST reach Bypass"
+        );
+        assert_eq!(
+            next_global_mode(Mode::Bypass),
+            Mode::Ask,
+            "and wrap back round"
+        );
+    }
+
+    #[test]
+    fn sandbox_tag_label_and_cycling() {
+        assert_eq!(sandbox_tag_label(SandboxMode::WorktreeOnly), "SANDBOX: ON");
+        assert_eq!(sandbox_tag_label(SandboxMode::Strict), "SANDBOX: STRICT");
+        assert_eq!(sandbox_tag_label(SandboxMode::Off), "SANDBOX: OFF");
+
+        assert_eq!(
+            next_sandbox_mode(SandboxMode::WorktreeOnly),
+            SandboxMode::Strict
+        );
+        assert_eq!(next_sandbox_mode(SandboxMode::Strict), SandboxMode::Off);
+        assert_eq!(
+            next_sandbox_mode(SandboxMode::Off),
+            SandboxMode::WorktreeOnly
+        );
+
+        assert!(!sandbox_hint(SandboxMode::WorktreeOnly).is_empty());
+        assert!(!sandbox_hint(SandboxMode::Strict).is_empty());
+        assert!(!sandbox_hint(SandboxMode::Off).is_empty());
+    }
+
+    #[test]
+    fn presence_state_overrides_to_excited_when_active_live_activity() {
+        // Base case: no activity -> keep state
+        assert_eq!(
+            effective_presence_state(QuarkState::Ground, true, true, false),
+            QuarkState::Ground
+        );
+        // Active activity, adopted, and enabled -> override to Excited
+        assert_eq!(
+            effective_presence_state(QuarkState::Ground, true, true, true),
+            QuarkState::Excited
+        );
+        // Active activity but not adopted -> keep base state
+        assert_eq!(
+            effective_presence_state(QuarkState::Ground, false, true, true),
+            QuarkState::Ground
+        );
+        // Active activity but not enabled -> keep base state
+        assert_eq!(
+            effective_presence_state(QuarkState::Ground, true, false, true),
+            QuarkState::Ground
+        );
+    }
+
+    /// A blue dot must never sit next to a static vendor·model caption: an
+    /// excited quark with no published live detail gets the placeholder, and
+    /// every other combination does not.
+    #[test]
+    fn a_blue_dot_without_live_detail_gets_the_placeholder() {
+        // Excited (blue dot), no live file — a CLI quark mid-turn → placeholder.
+        assert!(needs_activity_placeholder(
+            QuarkState::Excited,
+            true,
+            true,
+            false
+        ));
+        assert!(needs_activity_placeholder(
+            QuarkState::Thinking,
+            true,
+            true,
+            false
+        ));
+        // Live detail present → the real activity line renders instead.
+        assert!(!needs_activity_placeholder(
+            QuarkState::Excited,
+            true,
+            true,
+            true
+        ));
+        // Idle (green dot) → the static caption is correct, no placeholder.
+        assert!(!needs_activity_placeholder(
+            QuarkState::Ground,
+            true,
+            true,
+            false
+        ));
+        // Not adopted / disabled seats never fake activity.
+        assert!(!needs_activity_placeholder(
+            QuarkState::Excited,
+            false,
+            true,
+            false
+        ));
+        assert!(!needs_activity_placeholder(
+            QuarkState::Excited,
+            true,
+            false,
+            false
+        ));
+    }
+
+    fn roster_row_fixture(id: &str, state: QuarkState, adopted: bool, enabled: bool) -> RosterRow {
+        RosterRow {
+            id: id.to_string(),
+            display_name: None,
+            state,
+            mode: hadron_lattice::Mode::Ask,
+            mode_is_override: false,
+            vendor: "anthropic".to_string(),
+            model: "claude".to_string(),
+            flavor: None,
+            transport: hadron_lattice::Transport::Acp,
+            effort: None,
+            enabled,
+            adopted,
+            tokens: 0,
+            unknown_turns: 0,
+        }
+    }
+
+    /// One row per mid-turn quark, not just the first: an ACP seat with fresh live
+    /// detail, a CLI seat with no detail but an excited field state, an idle seat,
+    /// and a not-adopted seat all coexist on one roster — only the first two should
+    /// surface, each with its own label/detail.
+    #[test]
+    fn active_quarks_lists_every_quark_mid_turn_not_just_the_first() {
+        let roster = vec![
+            roster_row_fixture("acp-claude", QuarkState::Ground, true, true),
+            roster_row_fixture("cli-agy", QuarkState::Excited, true, true),
+            roster_row_fixture("acp-claude-2", QuarkState::Ground, true, true),
+            roster_row_fixture("acp-codex", QuarkState::Excited, false, true),
+        ];
+
+        let active = active_quarks(&roster, |id| match id {
+            "acp-claude" => Some(hadron_lattice::live::Activity::new(
+                hadron_lattice::QuarkId::new("acp-claude"),
+                hadron_lattice::live::Doing::Working,
+                "Terminal",
+            )),
+            _ => None,
+        });
+
+        assert_eq!(
+            active,
+            vec![
+                ("acp-claude".to_string(), "Terminal".to_string()),
+                ("cli-agy".to_string(), "working…".to_string()),
+            ]
+        );
+
+        let now = chrono::Utc::now();
+        let rich = active_quarks_rich(
+            &roster,
+            |id| match id {
+                "acp-claude" => Some(hadron_lattice::live::Activity::new(
+                    hadron_lattice::QuarkId::new("acp-claude"),
+                    hadron_lattice::live::Doing::Working,
+                    "Terminal",
+                )),
+                _ => None,
+            },
+            now,
+        );
+
+        assert_eq!(rich.len(), 2);
+        assert_eq!(rich[0].quark_id, "acp-claude");
+        assert_eq!(rich[0].doing, hadron_lattice::live::Doing::Working);
+        assert_eq!(rich[0].detail, "Terminal");
+        assert_eq!(rich[1].quark_id, "cli-agy");
+        assert_eq!(rich[1].doing, hadron_lattice::live::Doing::Working);
+    }
+
+    #[test]
+    fn test_gluon_and_gate_live_capsules() {
+        let started = chrono::Utc::now() - chrono::Duration::seconds(15);
+        let gate_act = hadron_lattice::Activity::gating(
+            hadron_lattice::QuarkId::new("cli-agy"),
+            "running test suite · quark/cli-agy/01M",
+            started,
+        );
+        assert_eq!(gate_act.doing, hadron_lattice::live::Doing::Gating);
+        assert_eq!(gate_act.detail, "running test suite · quark/cli-agy/01M");
+        assert!(gate_act.started.is_some());
+
+        let cap = QuarkLiveCapsule {
+            quark_id: "gluon".to_string(),
+            doing: hadron_lattice::live::Doing::Gating,
+            detail: gate_act.detail.clone(),
+            elapsed_secs: gate_act
+                .started
+                .map(|st| (chrono::Utc::now() - st).num_seconds().max(0) as u64),
+        };
+        assert_eq!(cap.quark_id, "gluon");
+        assert_eq!(cap.doing, hadron_lattice::live::Doing::Gating);
+        assert!(cap.elapsed_secs.unwrap_or(0) >= 15);
+    }
+
+    #[test]
+    fn test_active_quarks_rich_with_tasks_replaces_working_placeholder_and_humanizes_tools() {
+        assert_eq!(
+            humanize_activity_detail("run_command: cargo test --workspace"),
+            "$ cargo test --workspace"
+        );
+        assert_eq!(
+            humanize_activity_detail("read_file: chat.rs"),
+            "read chat.rs"
+        );
+        assert_eq!(
+            humanize_activity_detail("edit_file: roster.rs"),
+            "edit roster.rs"
+        );
+
+        let now = chrono::Utc::now();
+        let asked_at = now - chrono::Duration::seconds(42);
+        let roster = vec![roster_row_fixture(
+            "cli-agy",
+            QuarkState::Excited,
+            true,
+            true,
+        )];
+        let tasks = vec![crate::model::SwarmTask {
+            to: "cli-agy".to_string(),
+            from: "human".to_string(),
+            title: "Task 1: Upgrade live activity".to_string(),
+            body: "Task 1: Upgrade live activity".to_string(),
+            state: crate::model::tasks::TaskState::Working,
+            asked_at,
+            done_at: None,
+        }];
+        let rich = active_quarks_rich_with_tasks(&roster, &tasks, |_| None, now);
+        assert_eq!(rich.len(), 1);
+        assert_eq!(rich[0].detail, "Task 1: Upgrade live activity");
+        assert!(rich[0].elapsed_secs.unwrap_or(0) >= 42);
+
+        // When a live activity appears later in the turn (e.g. 12s after asked_at),
+        // elapsed_secs stays anchored to asked_at (42s) instead of jumping backwards to 30s.
+        let mut later_act = hadron_lattice::live::Activity::new(
+            hadron_lattice::QuarkId::new("cli-agy"),
+            hadron_lattice::live::Doing::Thinking,
+            "First line of thought\nSecond line of thought\nThird line",
+        );
+        later_act.started = Some(now - chrono::Duration::seconds(30));
+        let rich_live =
+            active_quarks_rich_with_tasks(&roster, &tasks, |_| Some(later_act.clone()), now);
+        assert_eq!(rich_live.len(), 1);
+        assert_eq!(rich_live[0].elapsed_secs, Some(42));
+        assert!(!rich_live[0].detail.contains('\n'));
+        assert_eq!(
+            rich_live[0].detail,
+            "First line of thought Second line of thought Third line"
+        );
+    }
+
+    /// **The double-dialog bug.** Cancelling gpui's picker used to be indistinguishable
+    /// from having no picker at all, so Cancel immediately opened a second folder browser
+    /// the human had to cancel again (reported live against "Open Workspace"). Only
+    /// `NoPicker` may fall through to the subprocess fallback.
+    #[test]
+    fn a_cancelled_picker_is_not_a_missing_picker() {
+        use std::path::PathBuf;
+
+        assert_eq!(
+            classify_pick(None),
+            Picked::NoPicker,
+            "no answer ⇒ try the fallback"
+        );
+        assert_eq!(
+            classify_pick(Some(None)),
+            Picked::Cancelled,
+            "the human said no"
+        );
+        assert_eq!(
+            classify_pick(Some(Some(vec![]))),
+            Picked::Cancelled,
+            "an empty selection is a cancel, not a missing picker"
+        );
+        assert_eq!(
+            classify_pick(Some(Some(vec![PathBuf::from("/home/user/dev")]))),
+            Picked::Path("/home/user/dev".to_string())
+        );
+    }
+
+    #[test]
+    fn test_log_row_constructs_expanded_and_compact() {
+        let msg = MessageRow {
+            from: "acp-claude".to_string(),
+            to: Some("cli-agy".to_string()),
+            body: "blocked".to_string(),
+            kind_label: "status",
+            usage: None,
+            ts: chrono::Utc::now(),
+            legacy_used_tokens: None,
+            turn: None,
+            severity: None,
+        };
+        let font = gpui_kit::SharedString::from("monospace");
+        let from_id = ResolvedIdentity {
+            name: "Claude".to_string(),
+            color: gpui_kit::hsla(0.0, 0.0, 0.0, 1.0),
+            image: None,
+        };
+        let to_id = ResolvedIdentity {
+            name: "AGY".to_string(),
+            color: gpui_kit::hsla(0.5, 0.5, 0.5, 1.0),
+            image: None,
+        };
+        let _compact = log_row(
+            0,
+            &msg,
+            false,
+            &from_id,
+            Some(&to_id),
+            &msg.body,
+            chrono::Utc,
+            &font,
+        );
+        let _expanded = log_row(
+            0,
+            &msg,
+            true,
+            &from_id,
+            Some(&to_id),
+            &msg.body,
+            chrono::Utc,
+            &font,
+        );
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+    use hadron_lattice::live::Activity;
+    use hadron_lattice::{Doing, QuarkId};
+
+    fn row(id: &str) -> RosterRow {
+        RosterRow {
+            id: id.to_string(),
+            display_name: None,
+            state: QuarkState::Excited,
+            mode: hadron_lattice::Mode::Ask,
+            mode_is_override: false,
+            vendor: "anthropic".to_string(),
+            model: "claude-opus-5".to_string(),
+            flavor: Some(hadron_lattice::Flavor::Worker),
+            transport: hadron_lattice::Transport::Acp,
+            effort: None,
+            enabled: true,
+            adopted: true,
+            tokens: 0,
+            unknown_turns: 0,
+        }
+    }
+
+    /// **Chat draft vs. live card split.** A streaming reply becomes a chat draft; a thought,
+    /// a tool call and a plan step stay in the Live card and produce no draft at all.
+    /// `Activity::full` is what separates them, and only `Activity::speaking` sets it.
+    #[test]
+    fn only_a_speaking_activity_becomes_a_chat_draft() {
+        let roster = vec![row("opus")];
+        let speaking = |_: &str| Some(Activity::speaking(QuarkId::new("opus"), "Half a sentence"));
+        assert_eq!(
+            streaming_drafts(&roster, speaking),
+            vec![("opus".to_string(), "Half a sentence".to_string())]
+        );
+
+        for doing in [Doing::Thinking, Doing::Working, Doing::Planning] {
+            let tool = |_: &str| {
+                Some(Activity::new(
+                    QuarkId::new("opus"),
+                    doing,
+                    "Editing engine.rs",
+                ))
+            };
+            assert!(
+                streaming_drafts(&roster, tool).is_empty(),
+                "{doing:?} belongs in the Live card, not the chat"
+            );
+        }
+    }
+
+    /// The Live card and the chat draft read the SAME file and must not both print the
+    /// message: a speaking activity carries an empty `detail`, so the card falls back
+    /// to the `speaking` label while the text goes to the bubble.
+    #[test]
+    fn the_live_card_shows_the_label_not_the_streaming_text() {
+        let roster = vec![row("opus")];
+        let speaking = |_: &str| Some(Activity::speaking(QuarkId::new("opus"), "Half a sentence"));
+        assert_eq!(
+            active_quarks(&roster, speaking),
+            vec![("opus".to_string(), "speaking".to_string())]
+        );
+    }
+
+    /// The bubble is pinned above the input, so an unbounded reply would push the
+    /// message box off the window. Cut to the TAIL — text arrives at the end — and cut
+    /// on a character boundary, never a byte one (`Char Boundary Safety`).
+    #[test]
+    fn a_long_draft_is_cut_to_its_tail_on_a_character_boundary() {
+        let roster = vec![row("opus")];
+        let body = "🚀".repeat(DRAFT_TAIL_CHARS * 2);
+        let long = move |_: &str| Some(Activity::speaking(QuarkId::new("opus"), &body));
+        let (_, text) = streaming_drafts(&roster, long).pop().expect("one draft");
+        assert_eq!(
+            text.chars().count(),
+            DRAFT_TAIL_CHARS + 1,
+            "the tail plus its ellipsis"
+        );
+        assert!(text.starts_with('…'), "the cut is marked: {}", &text[..8]);
+        assert!(text.ends_with('🚀'), "the END is what is kept");
+    }
+
+    /// An agent that has emitted only whitespace has said nothing yet — an empty
+    /// bordered card flashing above the input is worse than no card.
+    #[test]
+    fn a_blank_draft_renders_nothing() {
+        let roster = vec![row("opus")];
+        let blank = |_: &str| Some(Activity::speaking(QuarkId::new("opus"), "  \n\n "));
+        assert!(streaming_drafts(&roster, blank).is_empty());
+    }
+
+    #[test]
+    fn four_task_states_have_distinct_labels_and_colors() {
+        use crate::model::TaskState;
+        use std::collections::HashSet;
+
+        let states = [
+            TaskState::Working,
+            TaskState::Done,
+            TaskState::Blocked,
+            TaskState::Failed,
+        ];
+        let labels: HashSet<&str> = states.iter().map(|s| task_state_info(*s).1).collect();
+        assert_eq!(
+            labels.len(),
+            4,
+            "Every TaskState must have a distinct label"
+        );
+
+        let colors: HashSet<(u32, u32, u32)> = states
+            .iter()
+            .map(|s| {
+                let c = task_state_info(*s).0;
+                (
+                    (c.r * 255.0).round() as u32,
+                    (c.g * 255.0).round() as u32,
+                    (c.b * 255.0).round() as u32,
+                )
+            })
+            .collect();
+        assert_eq!(
+            colors.len(),
+            4,
+            "Every TaskState must have a distinct color"
+        );
+    }
+
+    #[test]
+    fn window_control_area_for_id_maps_min_max_and_close() {
+        assert_eq!(window_control_area_for_id("min"), WindowControlArea::Min);
+        assert_eq!(window_control_area_for_id("max"), WindowControlArea::Max);
+        assert_eq!(
+            window_control_area_for_id("close"),
+            WindowControlArea::Close
+        );
+    }
+}

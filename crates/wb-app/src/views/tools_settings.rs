@@ -1,4 +1,5 @@
 use super::SettingsPane;
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::group_box::GroupBoxVariant;
@@ -226,7 +227,7 @@ fn render_group(
     cx: &App,
 ) -> AnyElement {
     let palette = ToolRowPalette {
-        border: cx.theme().border,
+        border: style::hairline(cx),
         fg: cx.theme().foreground,
         muted: cx.theme().muted_foreground,
         accent: cx.theme().success,

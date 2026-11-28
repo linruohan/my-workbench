@@ -267,6 +267,7 @@ impl AppState {
     }
 
     /// Shell id from General settings. Empty and `auto` follow the host default.
+    #[allow(dead_code)]
     pub fn terminal_program(&self) -> String {
         self.with(|s| s.prefs.general.terminal_shell.clone())
     }

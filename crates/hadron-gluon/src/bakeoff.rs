@@ -1,0 +1,748 @@
+//! Speculative Parallel Bake-Offs (`/bakeoff`).
+//!
+//! Spawns competing worker quarks across isolated branches to solve the same spec,
+//! auto-benchmarking code churn, test coverage, and execution metrics to select
+//! the winning implementation and generate fast-forward recommendations.
+
+use serde::{Deserialize, Serialize};
+
+/// Evaluation metrics for a single candidate branch in a tournament bake-off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BakeOffCandidateResult {
+    pub quark_id: String,
+    pub branch_name: String,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    pub tests_added: usize,
+    pub duration_ms: u64,
+    pub gate_passed: bool,
+    pub score: f64,
+}
+
+impl BakeOffCandidateResult {
+    /// Total line churn (lines added + lines removed).
+    pub fn lines_changed(&self) -> usize {
+        self.lines_added + self.lines_removed
+    }
+}
+
+/// Lifecycle state of a tournament bake-off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum TournamentStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed {
+        winner: BakeOffCandidateResult,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+fn default_expected_candidates() -> usize {
+    2
+}
+
+/// Summary report of tournament outcomes with ranking and fast-forward guidance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BakeOffWinnerReport {
+    pub spec_id: String,
+    pub task_description: String,
+    pub winner: Option<BakeOffCandidateResult>,
+    pub ranking: Vec<BakeOffCandidateResult>,
+    pub summary_markdown: String,
+    pub fast_forward_command: Option<String>,
+}
+
+/// Scoring helper for evaluating candidate implementations.
+pub struct BakeOffScorer;
+
+impl BakeOffScorer {
+    /// Calculate composite candidate score.
+    ///
+    /// - Gate pass is a strict prerequisite: 0.0 if failed.
+    /// - Base pass reward: 1000.0 pts.
+    /// - Test coverage reward: +50.0 pts per test added.
+    /// - Code simplicity reward: -0.5 pts per line of churn (rewarding conciseness per Rule 10).
+    /// - Performance reward: +100.0 pts for fast runs (< 5000ms), +50.0 pts otherwise.
+    pub fn calculate(
+        lines_added: usize,
+        lines_removed: usize,
+        tests_added: usize,
+        duration_ms: u64,
+        gate_passed: bool,
+    ) -> f64 {
+        if !gate_passed {
+            return 0.0;
+        }
+
+        let base = 1000.0;
+        let test_bonus = (tests_added as f64) * 50.0;
+        let churn_penalty = ((lines_added + lines_removed) as f64) * 0.5;
+        let perf_bonus = if duration_ms < 5000 { 100.0 } else { 50.0 };
+
+        (base + test_bonus - churn_penalty + perf_bonus).max(1.0)
+    }
+}
+
+/// Manager orchestrating speculative tournament bake-offs across competing quarks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BakeOffManager {
+    #[serde(default, alias = "id")]
+    pub spec_id: String,
+    #[serde(default, alias = "task")]
+    pub task_description: String,
+    #[serde(default = "default_expected_candidates", alias = "candidate_count")]
+    pub expected_candidates: usize,
+    #[serde(default, alias = "quarks", alias = "contenders")]
+    pub tracked_quarks: Vec<String>,
+    #[serde(default)]
+    candidates: Vec<BakeOffCandidateResult>,
+    #[serde(default)]
+    status: TournamentStatus,
+}
+
+impl BakeOffManager {
+    pub fn new(spec_id: &str, task_description: &str) -> Self {
+        Self {
+            spec_id: spec_id.to_string(),
+            task_description: task_description.to_string(),
+            expected_candidates: default_expected_candidates(),
+            tracked_quarks: Vec::new(),
+            candidates: Vec::new(),
+            status: TournamentStatus::Pending,
+        }
+    }
+
+    pub fn with_expected_candidates(mut self, expected_candidates: usize) -> Self {
+        self.expected_candidates = expected_candidates.max(1);
+        self
+    }
+
+    pub fn with_tracked_quarks(mut self, tracked_quarks: Vec<String>) -> Self {
+        if !tracked_quarks.is_empty() {
+            self.expected_candidates = tracked_quarks.len();
+        }
+        self.tracked_quarks = tracked_quarks;
+        self
+    }
+
+    pub fn is_completed(&self) -> bool {
+        matches!(
+            self.status,
+            TournamentStatus::Completed { .. } | TournamentStatus::Failed { .. }
+        )
+    }
+
+    /// Register or record a completed evaluation result for a candidate quark.
+    pub fn record_result(
+        &mut self,
+        quark_id: &str,
+        branch_name: &str,
+        lines_added: usize,
+        lines_removed: usize,
+        tests_added: usize,
+        duration_ms: u64,
+        gate_passed: bool,
+    ) -> f64 {
+        let score = BakeOffScorer::calculate(
+            lines_added,
+            lines_removed,
+            tests_added,
+            duration_ms,
+            gate_passed,
+        );
+
+        let result = BakeOffCandidateResult {
+            quark_id: quark_id.to_string(),
+            branch_name: branch_name.to_string(),
+            lines_added,
+            lines_removed,
+            tests_added,
+            duration_ms,
+            gate_passed,
+            score,
+        };
+
+        // Replace if already present for this quark, otherwise push
+        if let Some(pos) = self.candidates.iter().position(|c| c.quark_id == quark_id) {
+            self.candidates[pos] = result;
+        } else {
+            self.candidates.push(result);
+        }
+
+        self.status = TournamentStatus::InProgress;
+        score
+    }
+
+    /// Return all candidate results sorted by score descending.
+    pub fn ranked_candidates(&self) -> Vec<BakeOffCandidateResult> {
+        let mut ranked = self.candidates.clone();
+        ranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.lines_changed().cmp(&b.lines_changed()))
+        });
+        ranked
+    }
+
+    /// Select the highest scoring viable winner (must have passed gate).
+    pub fn select_winner(&mut self) -> Option<BakeOffCandidateResult> {
+        let mut passing: Vec<_> = self
+            .candidates
+            .iter()
+            .filter(|c| c.gate_passed)
+            .cloned()
+            .collect();
+        if passing.is_empty() {
+            if !self.candidates.is_empty() {
+                self.status = TournamentStatus::Failed {
+                    reason: "No candidate passed the Merge Gate verification".to_string(),
+                };
+            }
+            return None;
+        }
+
+        // Rank passing candidates using the speculative gate evaluation
+        passing.sort_by(|a, b| {
+            let exec_a = crate::engine::speculative_gate::CandidateExecution {
+                candidate_id: a.quark_id.clone(),
+                branch: a.branch_name.clone(),
+                passed_tests: a.gate_passed,
+                duration_ms: a.duration_ms,
+                lines_changed: a.lines_changed(),
+                memory_peak_mb: None,
+            };
+            let exec_b = crate::engine::speculative_gate::CandidateExecution {
+                candidate_id: b.quark_id.clone(),
+                branch: b.branch_name.clone(),
+                passed_tests: b.gate_passed,
+                duration_ms: b.duration_ms,
+                lines_changed: b.lines_changed(),
+                memory_peak_mb: None,
+            };
+            match crate::engine::speculative_gate::select_speculative_winner(&exec_a, &exec_b) {
+                crate::engine::speculative_gate::SpeculativeWinner::Winner {
+                    candidate_id, ..
+                } => {
+                    if candidate_id == a.quark_id {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                _ => b
+                    .score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            }
+        });
+
+        let winner = passing.first().cloned();
+        if let Some(ref w) = winner {
+            self.status = TournamentStatus::Completed { winner: w.clone() };
+        }
+        winner
+    }
+
+    /// Cache the winning tournament artifact in Semantic CAS.
+    pub fn cache_winner_artifact(
+        &self,
+        cas: &crate::cas::SemanticCas,
+        winner: &BakeOffCandidateResult,
+    ) -> std::io::Result<std::path::PathBuf> {
+        let hash = crate::cas::SemanticCas::hash_bytes(winner.branch_name.as_bytes());
+        cas.store(&hash, winner.quark_id.as_bytes())
+    }
+
+    /// Evaluate a head-to-head speculative duel between two candidate executions.
+    pub fn evaluate_speculative_duel(
+        &self,
+        quark_a: &str,
+        quark_b: &str,
+    ) -> Option<crate::engine::speculative_gate::SpeculativeWinner> {
+        let cand_a = self.candidates.iter().find(|c| c.quark_id == quark_a)?;
+        let cand_b = self.candidates.iter().find(|c| c.quark_id == quark_b)?;
+
+        let exec_a = crate::engine::speculative_gate::CandidateExecution {
+            candidate_id: cand_a.quark_id.clone(),
+            branch: cand_a.branch_name.clone(),
+            passed_tests: cand_a.gate_passed,
+            duration_ms: cand_a.duration_ms,
+            lines_changed: cand_a.lines_changed(),
+            memory_peak_mb: None,
+        };
+
+        let exec_b = crate::engine::speculative_gate::CandidateExecution {
+            candidate_id: cand_b.quark_id.clone(),
+            branch: cand_b.branch_name.clone(),
+            passed_tests: cand_b.gate_passed,
+            duration_ms: cand_b.duration_ms,
+            lines_changed: cand_b.lines_changed(),
+            memory_peak_mb: None,
+        };
+
+        Some(crate::engine::speculative_gate::select_speculative_winner(
+            &exec_a, &exec_b,
+        ))
+    }
+
+    /// Generate a structured Markdown report summarizing tournament standings.
+    pub fn generate_winner_report(&mut self) -> BakeOffWinnerReport {
+        let winner = self.select_winner();
+        let ranking = self.ranked_candidates();
+
+        let mut md = String::new();
+        md.push_str(&format!(
+            "# Speculative Bake-Off Tournament: `{}`\n\n",
+            self.spec_id
+        ));
+        md.push_str(&format!("**Task**: {}\n\n", self.task_description));
+
+        if let Some(ref w) = winner {
+            md.push_str(&format!(
+                "🏆 **Winning Candidate**: `@`{} (Branch: `{}` | Score: `{:.1}`)\n\n",
+                w.quark_id, w.branch_name, w.score
+            ));
+        } else {
+            md.push_str("⚠️ **No Winning Candidate**: None of the competing branches passed gate verification.\n\n");
+        }
+
+        md.push_str("| Rank | Quark | Branch | Lines (+/-) | Tests | Duration | Gate | Score |\n");
+        md.push_str("|---|---|---|---|---|---|---|---|\n");
+
+        for (idx, c) in ranking.iter().enumerate() {
+            let is_winner = winner
+                .as_ref()
+                .map(|w| w.quark_id == c.quark_id)
+                .unwrap_or(false);
+            let badge = if is_winner { " 👑" } else { "" };
+            let gate_str = if c.gate_passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
+
+            md.push_str(&format!(
+                "| {} | `@{}`{} | `{}` | `+{}/-{}` | `{}` | `{}ms` | {} | `{:.1}` |\n",
+                idx + 1,
+                c.quark_id,
+                badge,
+                c.branch_name,
+                c.lines_added,
+                c.lines_removed,
+                c.tests_added,
+                c.duration_ms,
+                gate_str,
+                c.score
+            ));
+        }
+
+        let ff_cmd = winner
+            .as_ref()
+            .map(|w| format!("git merge --ff-only {}", w.branch_name));
+
+        if let Some(ref cmd) = ff_cmd {
+            md.push_str(&format!(
+                "\n### Integration Recommendation\n```bash\n{}\n```\n",
+                cmd
+            ));
+        }
+
+        BakeOffWinnerReport {
+            spec_id: self.spec_id.clone(),
+            task_description: self.task_description.clone(),
+            winner,
+            ranking,
+            summary_markdown: md,
+            fast_forward_command: ff_cmd,
+        }
+    }
+
+    /// Construct a BakeOffManager directly from a TournamentSpec.
+    pub fn from_tournament_spec(spec: &crate::tournament::TournamentSpec) -> Self {
+        let mut manager =
+            Self::new(&spec.task, &spec.task).with_expected_candidates(spec.candidate_count.max(2));
+        for branch in &spec.branches {
+            manager.record_result("tournament-worker", branch, 0, 0, 0, 0, false);
+        }
+        manager
+    }
+
+    /// Convert recorded results to TournamentSpec candidates and evaluate winner.
+    pub fn evaluate_tournament(&self) -> crate::tournament::WinnerReport {
+        let candidates: Vec<crate::tournament::CandidateResult> = self
+            .candidates
+            .iter()
+            .map(|c| crate::tournament::CandidateResult {
+                branch: c.branch_name.clone(),
+                gate_passed: c.gate_passed,
+                test_duration_ms: c.duration_ms,
+                diff_lines: c.lines_changed(),
+            })
+            .collect();
+        Self::speculative_tournament_winner(&candidates)
+    }
+
+    /// Evaluate candidate results and select the tournament winner prioritizing green gate and minimal diff.
+    pub fn speculative_tournament_winner(
+        candidates: &[crate::tournament::CandidateResult],
+    ) -> crate::tournament::WinnerReport {
+        crate::tournament::TournamentSpec::evaluate_winner(candidates)
+    }
+
+    /// Path to the active bakeoff manifest (`<hadron_dir>/bakeoffs/active.json`).
+    pub fn active_path(hadron_dir: &std::path::Path) -> std::path::PathBuf {
+        crate::tournament::TournamentSpec::active_path(hadron_dir)
+    }
+
+    /// Atomically persist this bake-off manager to `<hadron_dir>/bakeoffs/active.json`.
+    pub fn save_active(&self, hadron_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        let target = Self::active_path(hadron_dir);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = target.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &target)?;
+        Ok(target)
+    }
+
+    /// Load an active bake-off manifest from `<hadron_dir>/bakeoffs/active.json`,
+    /// accepting full `BakeOffManager` payloads, `TournamentSpec` payloads, or
+    /// lightweight UI `/bakeoff` bootstrap JSON objects.
+    pub fn load_active(hadron_dir: &std::path::Path) -> Option<Self> {
+        let content = std::fs::read_to_string(Self::active_path(hadron_dir)).ok()?;
+        if let Ok(mut mgr) = serde_json::from_str::<Self>(&content) {
+            if mgr.spec_id.is_empty() && !mgr.task_description.is_empty() {
+                mgr.spec_id = mgr.task_description.clone();
+            }
+            if !mgr.tracked_quarks.is_empty() && mgr.expected_candidates < mgr.tracked_quarks.len()
+            {
+                mgr.expected_candidates = mgr.tracked_quarks.len();
+            }
+            return Some(mgr);
+        }
+
+        let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let obj = val.as_object()?;
+        if let Some(status_str) = obj.get("status").and_then(|v| v.as_str()) {
+            if status_str.eq_ignore_ascii_case("completed")
+                || status_str.eq_ignore_ascii_case("failed")
+            {
+                return None;
+            }
+        }
+        let task = obj
+            .get("task_description")
+            .or_else(|| obj.get("task"))
+            .or_else(|| obj.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bakeoff")
+            .to_string();
+        let spec_id = obj
+            .get("spec_id")
+            .or_else(|| obj.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&task)
+            .to_string();
+        let mut tracked_quarks = Vec::new();
+        for key in ["tracked_quarks", "quarks", "contenders", "candidates"] {
+            if let Some(arr) = obj.get(key).and_then(|v| v.as_array()) {
+                let strings: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|s| s.trim_start_matches('@').to_string()))
+                    .collect();
+                if !strings.is_empty() {
+                    tracked_quarks = strings;
+                    break;
+                }
+            }
+        }
+        let expected = obj
+            .get("expected_candidates")
+            .or_else(|| obj.get("candidate_count"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or_else(|| {
+                if tracked_quarks.len() >= 2 {
+                    tracked_quarks.len()
+                } else {
+                    default_expected_candidates()
+                }
+            });
+
+        Some(
+            Self::new(&spec_id, &task)
+                .with_tracked_quarks(tracked_quarks)
+                .with_expected_candidates(expected.max(1)),
+        )
+    }
+
+    /// Record a quark turn outcome and, when all expected contenders have reported,
+    /// finalize tournament evaluation via [`TournamentSpec::evaluate_winner`] and
+    /// [`Self::generate_winner_report`], returning the summary Markdown notice.
+    pub fn record_turn_outcome(
+        &mut self,
+        quark_id: &str,
+        branch_name: &str,
+        lines_added: usize,
+        lines_removed: usize,
+        tests_added: usize,
+        duration_ms: u64,
+        gate_passed: bool,
+    ) -> Option<String> {
+        let clean_quark = quark_id.trim_start_matches('@');
+        if !self.tracked_quarks.is_empty()
+            && !self
+                .tracked_quarks
+                .iter()
+                .any(|q| q.trim_start_matches('@') == clean_quark)
+        {
+            return None;
+        }
+        self.record_result(
+            clean_quark,
+            branch_name,
+            lines_added,
+            lines_removed,
+            tests_added,
+            duration_ms,
+            gate_passed,
+        );
+
+        let target_count = if !self.tracked_quarks.is_empty() {
+            self.tracked_quarks.len()
+        } else {
+            self.expected_candidates.max(2)
+        };
+        if self.candidates.len() < target_count {
+            return None;
+        }
+
+        let tournament_verdict = self.evaluate_tournament();
+        let mut report = self.generate_winner_report();
+        report.summary_markdown.push_str(&format!(
+            "\n> **Tournament Verdict**: {}\n",
+            tournament_verdict.reason
+        ));
+        Some(report.summary_markdown)
+    }
+
+    /// Load `<hadron_dir>/bakeoffs/active.json` if an unfinished tournament is active,
+    /// record `quark_id`'s turn metrics, persist updated standings back to `active.json`,
+    /// and return `Some(summary_markdown)` once all contenders have finished.
+    pub fn record_turn_if_active(
+        hadron_dir: &std::path::Path,
+        quark_id: &str,
+        branch_name: &str,
+        lines_added: usize,
+        lines_removed: usize,
+        tests_added: usize,
+        duration_ms: u64,
+        gate_passed: bool,
+    ) -> std::io::Result<Option<String>> {
+        let Some(mut manager) = Self::load_active(hadron_dir) else {
+            return Ok(None);
+        };
+        if manager.is_completed() {
+            return Ok(None);
+        }
+        let summary = manager.record_turn_outcome(
+            quark_id,
+            branch_name,
+            lines_added,
+            lines_removed,
+            tests_added,
+            duration_ms,
+            gate_passed,
+        );
+        manager.save_active(hadron_dir)?;
+        Ok(summary)
+    }
+
+    /// Alias for [`Self::record_turn_if_active`].
+    pub fn record_and_summarize_if_active(
+        hadron_dir: &std::path::Path,
+        quark_id: &str,
+        branch_name: &str,
+        lines_added: usize,
+        lines_removed: usize,
+        tests_added: usize,
+        duration_ms: u64,
+        gate_passed: bool,
+    ) -> std::io::Result<Option<String>> {
+        Self::record_turn_if_active(
+            hadron_dir,
+            quark_id,
+            branch_name,
+            lines_added,
+            lines_removed,
+            tests_added,
+            duration_ms,
+            gate_passed,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bakeoff_candidate_ranking_and_winner_selection() {
+        let mut manager =
+            BakeOffManager::new("spec-vulkan-pipeline", "Implement Vulkan buffer barrier");
+
+        // Candidate 1: Passing, concise, 2 tests
+        manager.record_result("quark-alpha", "quark/alpha/01M1", 45, 10, 2, 1200, true);
+
+        // Candidate 2: Passing, bloated churn, 1 test
+        manager.record_result("quark-beta", "quark/beta/01M2", 300, 80, 1, 4500, true);
+
+        // Candidate 3: Failed gate
+        manager.record_result("quark-gamma", "quark/gamma/01M3", 20, 5, 4, 800, false);
+
+        let ranking = manager.ranked_candidates();
+        assert_eq!(ranking.len(), 3);
+        assert_eq!(ranking[0].quark_id, "quark-alpha");
+        assert!(ranking[0].score > ranking[1].score);
+        assert_eq!(ranking[2].quark_id, "quark-gamma");
+        assert_eq!(ranking[2].score, 0.0);
+
+        let winner = manager.select_winner().expect("Winner should be chosen");
+        assert_eq!(winner.quark_id, "quark-alpha");
+        assert_eq!(winner.branch_name, "quark/alpha/01M1");
+    }
+
+    #[test]
+    fn test_bakeoff_winner_report_generation() {
+        let mut manager = BakeOffManager::new("spec-ast-slicer", "Refactor syn AST pattern match");
+        manager.record_result("quark-agy", "quark/agy/b1", 60, 15, 3, 2000, true);
+        manager.record_result("quark-codex", "quark/codex/b2", 120, 30, 2, 3500, true);
+
+        let report = manager.generate_winner_report();
+        assert!(report.winner.is_some());
+        assert_eq!(report.winner.unwrap().quark_id, "quark-agy");
+        assert!(report
+            .summary_markdown
+            .contains("Speculative Bake-Off Tournament"));
+        assert!(report.summary_markdown.contains("quark/agy/b1"));
+        assert_eq!(
+            report.fast_forward_command.as_deref(),
+            Some("git merge --ff-only quark/agy/b1")
+        );
+    }
+
+    #[test]
+    fn test_bakeoff_all_failed_handling() {
+        let mut manager = BakeOffManager::new("spec-fail", "Hard task that all fail");
+        manager.record_result("quark-1", "quark/1/b", 10, 5, 0, 1000, false);
+        manager.record_result("quark-2", "quark/2/b", 20, 8, 1, 1500, false);
+
+        let winner = manager.select_winner();
+        assert!(winner.is_none());
+        assert!(matches!(manager.status, TournamentStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn test_bakeoff_evaluate_speculative_duel() {
+        let mut manager = BakeOffManager::new("spec-duel", "Compare duel candidates");
+        manager.record_result("quark-fast", "quark/fast/01", 30, 5, 2, 1000, true);
+        manager.record_result("quark-slow", "quark/slow/01", 30, 5, 2, 3000, true);
+
+        let duel = manager
+            .evaluate_speculative_duel("quark-fast", "quark-slow")
+            .unwrap();
+        match duel {
+            crate::engine::speculative_gate::SpeculativeWinner::Winner { candidate_id, .. } => {
+                assert_eq!(candidate_id, "quark-fast");
+            }
+            _ => panic!("Expected quark-fast to win speculative duel"),
+        }
+    }
+
+    #[test]
+    fn test_bakeoff_active_persistence_and_turn_completion_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hadron_dir = tmp.path();
+
+        // Simulate lightweight UI bootstrap JSON at <hadron_dir>/bakeoffs/active.json
+        let active_dir = hadron_dir.join("bakeoffs");
+        std::fs::create_dir_all(&active_dir).unwrap();
+        std::fs::write(
+            active_dir.join("active.json"),
+            serde_json::json!({
+                "task": "Implement ring-buffer framing",
+                "candidates": ["cli-agy-2", "acp-agy"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Unrelated quark turn is ignored
+        let ignored = BakeOffManager::record_turn_if_active(
+            hadron_dir,
+            "other-worker",
+            "quark/other/01",
+            10,
+            2,
+            1,
+            500,
+            true,
+        )
+        .unwrap();
+        assert!(ignored.is_none());
+
+        // First contender finishes: saved to disk, waiting on second contender
+        let first = BakeOffManager::record_turn_if_active(
+            hadron_dir,
+            "cli-agy-2",
+            "quark/cli-agy-2/01",
+            90,
+            30,
+            1,
+            2400,
+            true,
+        )
+        .unwrap();
+        assert!(first.is_none());
+
+        // Second contender finishes with smaller diff + faster run: emits tournament summary
+        let second = BakeOffManager::record_turn_if_active(
+            hadron_dir,
+            "acp-agy",
+            "quark/acp-agy/01",
+            28,
+            6,
+            2,
+            1100,
+            true,
+        )
+        .unwrap()
+        .expect("summary emitted when all contenders finish");
+
+        assert!(second.contains("Speculative Bake-Off Tournament"));
+        assert!(second.contains("acp-agy"));
+        assert!(second.contains("Tournament Verdict"));
+        assert!(second.contains("quark/acp-agy/01"));
+
+        // Subsequent calls after completion do not re-emit
+        let after = BakeOffManager::record_turn_if_active(
+            hadron_dir,
+            "acp-agy",
+            "quark/acp-agy/02",
+            10,
+            1,
+            1,
+            900,
+            true,
+        )
+        .unwrap();
+        assert!(after.is_none());
+    }
+}

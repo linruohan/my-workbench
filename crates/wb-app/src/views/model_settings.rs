@@ -5,6 +5,7 @@ mod model_form;
 
 use super::settings::SettingsPane;
 use crate::state::AppState;
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::group_box::GroupBoxVariant;
@@ -868,7 +869,7 @@ fn render_model_settings(entity: &WeakEntity<SettingsPane>, cx: &mut App) -> Any
         .iter()
         .find(|provider| Some(&provider.id) == view.selected_id.as_ref())
         .cloned();
-    let border = cx.theme().border;
+    let border = style::hairline(cx);
 
     v_flex()
         .w_full()
@@ -946,7 +947,7 @@ fn provider_list(
     view: &ModelView,
     cx: &App,
 ) -> impl IntoElement {
-    let border = cx.theme().border;
+    let border = style::hairline(cx);
     let local: Vec<_> = providers
         .iter()
         .filter(|provider| is_local_provider(provider))
@@ -1060,7 +1061,7 @@ fn provider_detail(
     cx: &App,
 ) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
-    let border = cx.theme().border;
+    let border = style::hairline(cx);
     let success = cx.theme().success;
     let Some(provider) = provider else {
         return v_flex()

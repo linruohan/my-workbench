@@ -1,0 +1,582 @@
+"""ACP stdio adapter for the Antigravity (Gemini) Python SDK.
+
+Speaks line-delimited JSON-RPC on stdin/stdout — the transport `hadron-gluon`'s
+ACP adapter drives — and maps it onto `google.antigravity.Agent`.
+
+AUTH: the SDK accepts an API key or a Vertex project and NOTHING else. It has no
+OAuth path, so the credentials the `agy` CLI logs in with (~/.gemini/oauth_creds.json)
+are useless here: this seat needs GEMINI_API_KEY in the daemon's environment.
+"""
+
+import sys
+import json
+import uuid
+import logging
+import asyncio
+import re
+from typing import Any, Dict, Optional
+import os
+
+from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity.hooks import policy
+from google.antigravity.types import Text, Thought, ToolCall, ToolResult
+
+# The model this seat runs. The SDK's own DEFAULT_MODEL is gemini-3.5-flash, which
+# has been returning 503 "high demand" errors; gemini-3.6-flash is its current
+# sibling (same SDK naming scheme — the thinking level is a separate SDK param, so
+# there is no `-high/-low` suffix here, unlike the agy CLI's model ids). Pinned in
+# ONE place and used for BOTH what we pass to the Agent and what session/new
+# advertises, so the picker can never advertise a model we don't actually run.
+SEAT_MODEL = "gemini-3.6-flash"
+
+# Default context window size for Gemini 3.x / 4.x models in Antigravity (1M = 2^20 tokens,
+# matching `context_window_size: 1048576` in `agy` CLI statusLine and Gemini API `input_token_limit`).
+DEFAULT_CONTEXT_WINDOW_SIZE = 1048576
+MODEL_CONTEXT_WINDOWS: Dict[str, int] = {}
+
+# Default supported Gemini models in the Antigravity Python SDK fallback.
+DEFAULT_SUPPORTED_MODELS = [
+    {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"},
+    {"value": "gemini-3.6-flash", "name": "Gemini 3.6 Flash"},
+    {"value": "gemini-3.5-flash", "name": "Gemini 3.5 Flash"},
+    {"value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"},
+]
+SUPPORTED_MODELS = DEFAULT_SUPPORTED_MODELS
+
+
+def fetch_sdk_models():
+    """Query available Gemini models dynamically via `google.genai.Client` if GEMINI_API_KEY is set.
+    Falls back to DEFAULT_SUPPORTED_MODELS on error or if GEMINI_API_KEY is unset."""
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return DEFAULT_SUPPORTED_MODELS
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        discovered = []
+        for m in client.models.list():
+            raw_name = getattr(m, "name", "") or str(m)
+            val = raw_name[7:] if raw_name.startswith("models/") else raw_name
+            if "gemini" in val.lower():
+                display_name = getattr(m, "display_name", "") or val
+                input_limit = getattr(m, "input_token_limit", None)
+                if isinstance(input_limit, int) and input_limit > 0:
+                    MODEL_CONTEXT_WINDOWS[val] = input_limit
+                discovered.append({"value": val, "name": display_name})
+        if discovered:
+            return discovered
+    except Exception as e:
+        logger.warning(f"failed to fetch SDK models dynamically, using defaults: {e}")
+
+    return DEFAULT_SUPPORTED_MODELS
+
+
+# stdout is the protocol. Anything that prints to it — a stray `print`, a chatty
+# dependency — corrupts the JSON-RPC stream and takes the seat down with no clue
+# why. Keep the real handle to ourselves and point everything else at stderr.
+_protocol_out = sys.stdout
+sys.stdout = sys.stderr
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger("agy_acp")
+
+sessions: Dict[str, Any] = {}
+
+NO_KEY = (
+    "GEMINI_API_KEY is not set in this process's environment. The Antigravity SDK "
+    "authenticates with an API key or a Vertex project only — it cannot use the OAuth "
+    "login the agy CLI uses, so this seat cannot start without one."
+)
+
+
+def _write(payload):
+    _protocol_out.write(json.dumps(payload) + "\n")
+    _protocol_out.flush()
+
+
+def send_response(msg_id, result):
+    _write({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+
+def send_error(msg_id, message, code=-32000):
+    """A failure the client must see AS a failure.
+
+    An error stuffed inside `result` is not a JSON-RPC error: the client reads it
+    as a success, and the seat then fails later for reasons nobody can trace.
+    """
+    _write({"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}})
+
+
+def send_notification(method, params):
+    _write({"jsonrpc": "2.0", "method": method, "params": params})
+
+
+def send_session_update(session_id, update):
+    """Emit one ACP `session/update` notification — the ONLY way a turn's text,
+    thoughts, or usage reach the client.
+
+    The wire contract is the ACP schema's `SessionNotification`/`SessionUpdate`,
+    and it is unforgiving in two places that are easy to get wrong:
+
+      * the method is `session/update` (NOT `session/notification`): the Rust
+        client routes notifications by method name, so a wrong method never
+        reaches the handler at all;
+      * the update's discriminator field is `sessionUpdate` (NOT `type`):
+        `SessionUpdate` is `#[serde(tag = "sessionUpdate")]`, so a wrong tag
+        fails to deserialize and the update is dropped.
+
+    Get either wrong and every chunk is silently discarded — the turn bills
+    tokens and posts an empty message. So the wire shape lives HERE, once.
+    """
+    send_notification("session/update", {"sessionId": session_id, "update": update})
+
+
+def _format_tool_call_title(call: ToolCall) -> str:
+    raw_name = getattr(call, "name", "")
+    name = getattr(raw_name, "value", None) or str(raw_name or "tool")
+    args = getattr(call, "args", None) or {}
+    if isinstance(args, dict):
+        priority_keys = (
+            "CommandLine",
+            "command",
+            "Path",
+            "path",
+            "AbsolutePath",
+            "file_path",
+            "DirectoryPath",
+            "SearchPath",
+            "Query",
+            "query",
+            "Pattern",
+            "toolSummary",
+        )
+        for key in priority_keys:
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                first_line = val.strip().splitlines()[0].strip()
+                if first_line.startswith("/") and "/" in first_line[1:]:
+                    first_line = first_line.rsplit("/", 1)[-1] or first_line
+                if len(first_line) > 56:
+                    first_line = first_line[:56] + "…"
+                return f"{name}: {first_line}"
+    return name
+
+
+MAX_RESIDENT_CONTEXT_TOKENS = 150000
+
+
+def _parse_transcript_context_used(contents: str) -> Optional[int]:
+    """Parse the final `PLANNER_RESPONSE` step's prompt window occupancy
+    (`input_tokens + cache_read_tokens`) from an Antigravity `transcript.jsonl`."""
+    for line in reversed(contents.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "PLANNER_RESPONSE":
+            continue
+        usage_obj = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+        inp = obj.get("input_tokens")
+        if not isinstance(inp, int):
+            inp = usage_obj.get("input_tokens", 0)
+        cache_read = obj.get("cache_read_tokens")
+        if not isinstance(cache_read, int):
+            cache_read = usage_obj.get("cache_read_tokens", 0)
+        total = (inp if isinstance(inp, int) else 0) + (
+            cache_read if isinstance(cache_read, int) else 0
+        )
+        if total > 0:
+            return total
+    return None
+
+
+def _read_transcript_context_used(agent: Any) -> Optional[int]:
+    """Read the true end-of-turn context window occupancy from the localharness
+    `transcript.jsonl` for `agent`'s conversation, if available on disk."""
+    conv = getattr(agent, "_conversation", None) or getattr(agent, "conversation", None)
+    cid = getattr(conv, "conversation_id", None)
+    if not isinstance(cid, str):
+        return None
+    cid = cid.strip()
+    if not cid or "/" in cid or "\\" in cid or ".." in cid:
+        return None
+    homes = []
+    for raw_home in (
+        os.environ.get("HOME"),
+        os.environ.get("USERPROFILE"),
+        os.path.expanduser("~"),
+    ):
+        if raw_home and raw_home not in homes:
+            homes.append(raw_home)
+    for home in homes:
+        for app_dir in ("antigravity", "antigravity-cli"):
+            path = os.path.join(
+                home,
+                ".gemini",
+                app_dir,
+                "brain",
+                cid,
+                ".system_generated",
+                "logs",
+                "transcript.jsonl",
+            )
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    used = _parse_transcript_context_used(f.read())
+                if used is not None:
+                    return used
+            except OSError:
+                continue
+    return None
+
+
+def _transient_tpm_retry_delay_secs(exc: Exception) -> Optional[float]:
+    msg = str(exc)
+    msg_upper = msg.upper()
+    if "429" not in msg and "RESOURCE_EXHAUSTED" not in msg_upper:
+        return None
+    if "MONTHLY SPEND CAP" in msg_upper or "BILLING" in msg_upper:
+        return None
+    m = re.search(r"retry in ([0-9]+(?:\.[0-9]+)?)s", msg, re.IGNORECASE)
+    if not m:
+        m = re.search(r"'retryDelay':\s*'([0-9]+(?:\.[0-9]+)?)s'", msg)
+    delay = float(m.group(1)) + 1.0 if m else 15.0
+    return min(max(delay, 2.0), 60.0)
+
+
+_SYSTEM_MSG_RE = re.compile(
+    r"(?:!The system automatically notified us of a message:\s*)?"
+    r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>[-+]*\n?",
+    re.DOTALL,
+)
+
+
+def _strip_system_messages(text: str) -> str:
+    """Remove internal Antigravity SDK `<SYSTEM_MESSAGE>...</SYSTEM_MESSAGE>` background-task
+    wakeup notifications from assistant text chunks so raw background task stdout never
+    pollutes the ACP message stream."""
+    if "<SYSTEM_MESSAGE>" not in text:
+        return text
+    return _SYSTEM_MSG_RE.sub("", text)
+
+
+async def handle_prompt(msg_id, session_id, prompt):
+    session_data = sessions.get(session_id)
+    if not session_data:
+        send_error(msg_id, f"unknown session {session_id!r}")
+        return
+
+    prompt_text = "\n".join(
+        b.get("text", "") for b in prompt if b.get("type") == "text"
+    )
+    if not prompt_text.strip():
+        send_response(msg_id, {"stopReason": "end_turn"})
+        return
+
+    send_session_update(session_id, {
+        "sessionUpdate": "agent_thought_chunk",
+        "content": {"type": "text", "text": "Analyzing task & preparing context…"}
+    })
+
+    # Boot the SDK Agent lazily, on the FIRST prompt — not at session/new. Model
+    # detection (Settings' probe) opens a session but never prompts, so it must
+    # not require the key or a live Google connection; a real turn does. Keep the
+    # old init_session error text so a boot failure still reads the same way.
+    try:
+        agent = await ensure_agent(session_data)
+    except Exception as e:
+        logger.error(f"could not start the Antigravity agent: {e}")
+        send_error(msg_id, f"could not start the Antigravity agent: {e}")
+        return
+
+    try:
+        for attempt in range(2):
+            try:
+                response = await agent.chat(prompt_text)
+                text_accumulated = []
+                thought_accumulated = []
+                llm_steps = 1
+                last_text_step_index = None
+                async for chunk in response.chunks:
+                    if isinstance(chunk, Text):
+                        step_idx = getattr(chunk, "step_index", None)
+                        chunk_text = _strip_system_messages(chunk.text or "")
+                        if not chunk_text.strip():
+                            continue
+                        if (
+                            last_text_step_index is not None
+                            and step_idx is not None
+                            and step_idx != last_text_step_index
+                            and text_accumulated
+                            and not text_accumulated[-1].endswith("\n")
+                            and chunk_text
+                            and not chunk_text.startswith("\n")
+                        ):
+                            chunk_text = "\n" + chunk_text
+                        if step_idx is not None:
+                            last_text_step_index = step_idx
+                        text_accumulated.append(chunk_text)
+                        send_session_update(session_id, {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": chunk_text}
+                        })
+                    elif isinstance(chunk, Thought):
+                        thought_accumulated.append(chunk.text)
+                        send_session_update(session_id, {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": {"type": "text", "text": chunk.text}
+                        })
+                    elif isinstance(chunk, ToolCall):
+                        llm_steps += 1
+                        title = _format_tool_call_title(chunk)
+                        call_id = str(getattr(chunk, "id", None) or uuid.uuid4())
+                        send_session_update(session_id, {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": call_id,
+                            "title": title,
+                            "kind": "other"
+                        })
+
+                # Fallback if no Text chunks were streamed (e.g. model generated thoughts or text only via resolve())
+                if not text_accumulated:
+                    fallback_text = _strip_system_messages((await response.text()) or "")
+                    if not fallback_text and thought_accumulated:
+                        fallback_text = "".join(thought_accumulated)
+                    if fallback_text:
+                        send_session_update(session_id, {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": fallback_text}
+                        })
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                delay = _transient_tpm_retry_delay_secs(e) if attempt == 0 else None
+                if delay is None:
+                    raise
+                logger.warning(
+                    f"session {session_id} hit transient rate limit (429); "
+                    f"rotating SDK agent and retrying in {delay:.1f}s: {e}"
+                )
+                send_session_update(session_id, {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": f"Rate limit reached; waiting {int(delay)}s and retrying with fresh context…"
+                    }
+                })
+                session_data["agent"] = None
+                session_data["last_used_tokens"] = 0
+                await asyncio.sleep(delay)
+                agent = await ensure_agent(session_data)
+
+        usage = response.usage_metadata
+        usage_payload = None
+        if usage:
+            prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+            cached_tokens = getattr(usage, "cached_content_token_count", 0) or 0
+            # `cached_content_token_count` is a subset of `prompt_token_count` in Gemini/Antigravity SDK.
+            input_tokens = max(0, prompt_tokens - cached_tokens)
+            candidates_tokens = getattr(usage, "candidates_token_count", 0) or 0
+            thoughts_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+            output_tokens = candidates_tokens + thoughts_tokens
+            total_tokens = getattr(usage, "total_token_count", 0) or (
+                input_tokens + output_tokens + cached_tokens
+            )
+            model_name = session_data.get("model", SEAT_MODEL)
+            default_window = MODEL_CONTEXT_WINDOWS.get(
+                model_name, DEFAULT_CONTEXT_WINDOW_SIZE
+            )
+            raw_window = getattr(usage, "context_window_size", None)
+            max_tokens = (
+                raw_window
+                if isinstance(raw_window, int) and not isinstance(raw_window, bool) and raw_window > 0
+                else default_window
+            )
+            transcript_used = _read_transcript_context_used(agent)
+            if transcript_used is not None:
+                raw_context = transcript_used
+            else:
+                invocations = max(1, llm_steps)
+                raw_context = input_tokens + cached_tokens
+                if invocations > 1:
+                    raw_context = raw_context // invocations
+            prev_used = session_data.get("last_used_tokens", 0) or 0
+            used = min(max_tokens, max(raw_context, prev_used))
+            session_data["last_used_tokens"] = used
+
+            send_session_update(session_id, {
+                "sessionUpdate": "usage_update",
+                "used": used,
+                "size": max_tokens
+            })
+
+            usage_payload = {
+                "totalTokens": total_tokens,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cachedReadTokens": cached_tokens,
+                "thoughtTokens": thoughts_tokens,
+                "cumulative": False,
+                "_meta": {"cumulative": False},
+            }
+
+            rotate_ceiling = min(int(0.70 * max_tokens), MAX_RESIDENT_CONTEXT_TOKENS)
+            if used >= rotate_ceiling:
+                logger.info(
+                    f"session {session_id} context reached {used}/{max_tokens} tokens "
+                    f"(>= {rotate_ceiling} resident cap); rotating resident SDK agent for next turn"
+                )
+                session_data["agent"] = None
+                session_data["last_used_tokens"] = 0
+
+        send_response(msg_id, {
+            "stopReason": "end_turn",
+            "usage": usage_payload
+        })
+    except asyncio.CancelledError:
+        logger.info(f"session {session_id} prompt cancelled gracefully")
+        send_response(msg_id, {"stopReason": "cancelled"})
+        raise
+    except Exception as e:
+        # A bare `stopReason: error` tells the swarm the turn failed and nothing
+        # about why. Hand back the reason — the client turns it into a real error.
+        logger.error(f"turn failed: {e}")
+        session_data["agent"] = None
+        session_data["last_used_tokens"] = 0
+        send_error(msg_id, f"Antigravity SDK turn failed: {e}")
+    finally:
+        if session_data.get("current_task") is asyncio.current_task():
+            session_data["current_task"] = None
+
+
+def session_config_options(session_id):
+    """The current configuration options for a session."""
+    current_model = sessions.get(session_id, {}).get("model", SEAT_MODEL)
+    options = fetch_sdk_models()
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            # Without `category`, the client does not recognise this as
+            # the model selector at all.
+            "category": "model",
+            "currentValue": current_model,
+            "options": options
+        }
+    ]
+
+
+def session_config_response(session_id):
+    """The capabilities a `session/new` advertises: supported Gemini models.
+    Queries models dynamically via SDK if key available, falling back to static defaults."""
+    return {
+        "sessionId": session_id,
+        "configOptions": session_config_options(session_id)
+    }
+
+
+async def ensure_agent(session_data):
+    """Boot the SDK Agent on first use and cache it on the session. Deferred from
+    session/new so model detection needs no key or live connection; a real turn
+    does. Raises with a human-readable reason the caller turns into an error."""
+    if session_data.get("agent") is not None:
+        return session_data["agent"]
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(NO_KEY)
+    cwd = session_data.get("cwd") or ""
+    model_name = session_data.get("model", SEAT_MODEL)
+    valid_models = {m["value"] for m in fetch_sdk_models()}
+    if model_name not in valid_models:
+        logger.warning(f"unsupported model {model_name!r}, falling back to default {SEAT_MODEL!r}")
+        model_name = SEAT_MODEL
+    agent = Agent(
+        config=LocalAgentConfig(
+            api_key=api_key,
+            model=model_name,
+            policies=[policy.allow_all()],
+            workspaces=[cwd] if cwd else None
+        )
+    )
+    await agent.__aenter__()
+    session_data["agent"] = agent
+    return agent
+
+
+async def main():
+    loop = asyncio.get_running_loop()
+
+    while True:
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        if not line:
+            break
+
+        try:
+            req = json.loads(line)
+        except Exception:
+            continue
+
+        method = req.get("method")
+        msg_id = req.get("id")
+        params = req.get("params", {})
+
+        if method == "initialize":
+            send_response(msg_id, {
+                "protocolVersion": params.get("protocolVersion", 1),
+                "agentInfo": {"name": "Antigravity (SDK)", "version": "0.1.0"}
+            })
+
+        elif method == "session/new":
+            session_id = str(uuid.uuid4())
+            sessions[session_id] = {
+                "agent": None,
+                "model": SEAT_MODEL,
+                "cwd": params.get("cwd", ""),
+                "current_task": None,
+            }
+            send_response(msg_id, session_config_response(session_id))
+
+        elif method == "session/set_config_option":
+            session_id = params.get("sessionId")
+            config_id = params.get("configId")
+            value = str(params.get("value"))
+            if session_id not in sessions:
+                send_error(msg_id, f"unknown session {session_id!r}")
+            elif config_id == "model":
+                old_model = sessions[session_id].get("model")
+                sessions[session_id]["model"] = value
+                if old_model != value and sessions[session_id].get("agent") is not None:
+                    sessions[session_id]["agent"] = None
+                send_response(msg_id, {"configOptions": session_config_options(session_id)})
+            else:
+                send_response(msg_id, {"configOptions": session_config_options(session_id)})
+
+        elif method == "session/prompt":
+            session_id = params.get("sessionId")
+            prompt = params.get("prompt", [])
+            task = asyncio.create_task(handle_prompt(msg_id, session_id, prompt))
+            if session_id in sessions:
+                sessions[session_id]["current_task"] = task
+
+        elif method == "session/cancel":
+            session_id = params.get("sessionId")
+            if session_id in sessions:
+                task = sessions[session_id].get("current_task")
+                if task and not task.done():
+                    logger.info(f"cancelling in-flight prompt for session {session_id}")
+                    task.cancel()
+            if msg_id is not None:
+                send_response(msg_id, {})
+
+        elif msg_id is not None:
+            send_response(msg_id, {})
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

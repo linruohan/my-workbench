@@ -1,6 +1,7 @@
 use super::model_settings::{ModelEditor, model_page};
 use crate::appearance::apply_ui_font;
 use crate::state::{AppNav, AppState};
+use crate::style;
 use crate::themes;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBoxVariant;
@@ -866,8 +867,8 @@ fn general_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPag
                 .rounded_full()
                 .text_xs()
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().secondary)
+                .border_color(style::hairline(cx))
+                .bg(style::raised(cx))
                 .text_color(cx.theme().muted_foreground)
                 .child("系统默认")
         })
@@ -1658,7 +1659,7 @@ fn recording_group(entity: WeakEntity<SettingsPane>, message: String, warm: bool
             SettingItem::render(move |_, _, cx| {
                 let muted = cx.theme().muted_foreground;
                 let success = cx.theme().success;
-                let border = cx.theme().border;
+                let border = style::hairline(cx);
                 let fg = cx.theme().foreground;
                 let refresh = refresh.clone();
                 let prepare = prepare.clone();
@@ -1946,9 +1947,14 @@ fn render_engine_list(
                                 .child(div().text_xs().text_color(muted).child(bytes)),
                         )
                         .child(
-                            div().w_full().h(px(3.)).rounded_full().bg(border).child(
-                                div().h_full().rounded_full().w(relative(progress)).bg(tone),
-                            ),
+                            div()
+                                .w_full()
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(style::raised(cx))
+                                .child(
+                                    div().h_full().rounded_full().w(relative(progress)).bg(tone),
+                                ),
                         )
                         .child(div().text_xs().text_color(muted).child(format!(
                             "{} · 约 {} MB",
@@ -2241,8 +2247,8 @@ fn skills_page(
             SettingGroup::new().item(
                 SettingItem::render(move |_, _, cx| {
                     let muted = cx.theme().muted_foreground;
-                    let border = cx.theme().border;
-                    let card = cx.theme().secondary;
+                    let border = style::hairline(cx);
+                    let card = style::hover(cx);
                     let fg = cx.theme().foreground;
                     let accent = cx.theme().success;
                     let radius = cx.theme().radius;

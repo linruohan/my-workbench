@@ -1,0 +1,437 @@
+//! The chamber's view layer: the `impl Render for Chamber` entry point plus every
+//! panel/overlay/row builder it composes (titlebar, body, rails, roster, chat, log,
+//! timeline, stats, terminal, toasts, About/menu overlays, mode picker, and the
+//! markdown/message rows). These borrow `&self`/`&mut self` and paint from live state.
+
+use super::*;
+
+mod roster;
+mod titlebar;
+// `pub(crate)` only so `widgets::task_row` can reuse `chat::format_duration` rather
+// than growing a second copy of it.
+mod artifacts;
+mod breadcrumb;
+pub mod canvas;
+pub(crate) mod chat;
+pub(super) mod dag_visualizer;
+pub(super) mod diff_inspector;
+pub mod diff_steering;
+mod flamechart;
+pub(super) mod gate_explorer;
+mod git;
+pub mod nucleus_graph;
+mod overlays;
+pub(crate) mod pty_grid;
+pub mod quark_home;
+mod repl_overlay;
+mod scrubber;
+pub mod selector;
+pub mod split_canvas;
+mod stats;
+mod terminal;
+pub mod visualizer;
+
+pub use gpui_kit::component::scroll::ScrollableElement;
+
+impl Render for Chamber {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.workspace_mode == WorkspaceMode::Selector {
+            return self.render_project_selector(window, cx).into_any_element();
+        }
+
+        let frame_start = std::env::var_os("HADRON_FRAME_TIMING")
+            .is_some()
+            .then(std::time::Instant::now);
+        // Drain a path chosen from the native avatar picker. The picker task runs
+        // without a `Window`, so it parks the path here; `render` has the window and
+        // is the first place `set_value` can apply it. Committing persists it so the
+        // avatar sticks without a separate Done click.
+        if let Some(path) = self.pending_image_pick.take() {
+            self.settings_path
+                .update(cx, |s, cx| s.set_value(path, window, cx));
+            self.commit_settings_inputs(cx);
+        }
+        // Track the window's geometry so it can be restored next launch. The write
+        // is debounced, not immediate: a drag or resize re-renders every frame, and
+        // saving inline here would put a `chamber.json` write on the render thread
+        // ~60×/sec. Updating `prefs` in memory is free; the timer coalesces the
+        // burst into a single trailing write once the geometry settles.
+        if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds() {
+            let wb = config::WindowBoundsPrefs {
+                x: bounds.origin.x.into(),
+                y: bounds.origin.y.into(),
+                width: bounds.size.width.into(),
+                height: bounds.size.height.into(),
+            };
+            if self.prefs.window_bounds.as_ref() != Some(&wb) {
+                self.prefs.window_bounds = Some(wb);
+                if !self.bounds_save_pending {
+                    self.bounds_save_pending = true;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(500))
+                            .await;
+                        let _ = this.update(cx, |this, _cx| {
+                            this.bounds_save_pending = false;
+                            // Saves whatever the geometry settled on, not the value
+                            // that happened to trip the timer.
+                            let _ = config::save(&this.prefs);
+                        });
+                    })
+                    .detach();
+                }
+            }
+        }
+
+        // Round the full-height content itself to match the client frame, rather
+        // than the (too-short) top/bottom strips — a 24px status bar can't reach
+        // the ~20px radius, so its square corners poked past the frame's arc. The
+        // strips are now transparent; the content's own rounded fill owns all four
+        // corners. Zero on any tiled edge, so a maximized/snapped window stays square.
+        let (top_radius, bottom_radius) = frame_corner_radii(window);
+        let titlebar = self.titlebar(window, cx);
+        let body = self.body(window, cx);
+        let settings = self
+            .settings_open
+            .then(|| self.settings_overlay(window, cx));
+        let info = self
+            .info_panel
+            .is_some()
+            .then(|| self.info_panel_overlay(window, cx));
+        let about = self.about_open.then(|| self.about_overlay(cx));
+        let changelog = self.changelog_open.then(|| self.changelog_overlay(cx));
+        let app_menu = self.app_menu_open.then(|| self.app_menu_overlay(cx));
+        let processes = self.process_manager_open.then(|| self.process_overlay(cx));
+        let toasts = self.render_toasts(cx);
+        let repl = self
+            .repl_overlay_open
+            .then(|| self.repl_overlay(window, cx));
+        let project_switcher = self
+            .project_switcher_open
+            .then(|| self.project_switcher_overlay(window, cx));
+
+        let mut content = self
+            .action_surface(cx)
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            // The opaque housing tone; the ambient quark-state field (below) washes over
+            // it, and the translucent panels let it glow through.
+            .bg(theme::window_glint())
+            .rounded_tl(top_radius)
+            .rounded_tr(top_radius)
+            .rounded_bl(bottom_radius)
+            .rounded_br(bottom_radius)
+            .text_color(theme::text())
+            .child(titlebar)
+            .child(body)
+            .children(settings)
+            .children(info)
+            .children(about)
+            .children(changelog)
+            .children(app_menu)
+            .children(processes)
+            .children(repl)
+            .children(project_switcher)
+            .children(toasts);
+        content.text_style().font_fallbacks = Some(crate::fonts::default_fallbacks());
+
+        let wrapped_content = crate::window_frame::window_frame(window, cx, content);
+
+        let res = div().size_full().child(wrapped_content).into_any_element();
+        if let Some(start) = frame_start {
+            hadron_lattice::term::info(
+                hadron_lattice::term::Source::Chamber,
+                &format!("frame render total: {:?}", start.elapsed()),
+            );
+        }
+        res
+    }
+}
+
+impl Chamber {
+    /// 所有键盘动作的唯一挂载点：key context、根焦点句柄与全部 `on_action`。
+    ///
+    /// 独立窗口时挂在整块 `content` 上；嵌入工作台时挂在聊天主区的根元素上，
+    /// 两处共用同一份绑定，避免动作处理出现第二份拷贝。
+    fn action_surface(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        v_flex()
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, window, cx| {
+                    this.on_copy_action(window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &TerminalCopy, window, cx| {
+                this.on_terminal_copy_shortcut(window, cx);
+            }))
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    let is_copy = (event.keystroke.modifiers.control
+                        || event.keystroke.modifiers.platform)
+                        && (event.keystroke.key == "c" || event.keystroke.key == "C");
+                    if is_copy && !this.terminal_focus.is_focused(window) {
+                        if this.copy_terminal_selection(cx) {
+                            return;
+                        }
+                        use gpui_kit::component::WindowExt as _;
+                        let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
+                        if !selected.is_empty() {
+                            crate::sys::copy_to_system_clipboard(&selected);
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(selected));
+                            this.toast_manager.push(
+                                ToastKind::Success,
+                                "Copied to clipboard".to_string(),
+                                Some(2),
+                            );
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ToggleReplOverlay, window, cx| {
+                this.toggle_repl_overlay(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleProjectSwitcher, _, cx| {
+                this.toggle_project_switcher(cx)
+            }))
+            .on_action(cx.listener(|this, _: &CycleMode, _, cx| this.cycle_global_mode(cx)))
+            .on_action(cx.listener(|this, _: &CycleSandbox, _, cx| this.cycle_sandbox_mode(cx)))
+            .on_action(cx.listener(|this, _: &NextChatTab, _, cx| this.cycle_chat_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevChatTab, _, cx| this.cycle_chat_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextRosterTab, _, cx| this.cycle_roster_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevRosterTab, _, cx| this.cycle_roster_tab(-1, cx)))
+            .on_action(
+                cx.listener(|this, _: &NextInspectorTab, _, cx| this.cycle_inspector_tab(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PrevInspectorTab, _, cx| this.cycle_inspector_tab(-1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NextStatsSubTab, _, cx| this.cycle_stats_window(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PrevStatsSubTab, _, cx| this.cycle_stats_window(-1, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NextQuark, _, cx| this.move_quark_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevQuark, _, cx| this.move_quark_selection(-1, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleSelectedQuark, _, cx| this.open_selected_quark(cx)),
+            )
+            .on_action(cx.listener(|this, _: &OpenMenu, _, cx| {
+                this.app_menu_open = !this.app_menu_open;
+                cx.notify();
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleFocus, window, cx| this.toggle_focus(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusChat, window, cx| this.focus_chat_input(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FindInView, window, cx| this.find_in_view(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Dismiss, window, cx| this.handle_escape_dismiss(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleProcessManager, _, cx| {
+                    this.toggle_process_manager(cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &NewTerminalTab, _, cx| this.add_terminal(cx)))
+            .on_action(cx.listener(|this, _: &CloseTerminalTab, _, cx| {
+                let active = this.active_terminal_index;
+                this.close_terminal(active, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextTerminalTab, _, cx| this.next_terminal_tab(cx)))
+            .on_action(cx.listener(|this, _: &PrevTerminalTab, _, cx| this.prev_terminal_tab(cx)))
+            .on_action(cx.listener(|this, _: &NextGitSubtab, _, cx| this.cycle_git_subtab(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevGitSubtab, _, cx| this.cycle_git_subtab(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectGitBranches, _, cx| {
+                this.select_git_subtab(GitSubtab::Branches, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitWorktrees, _, cx| {
+                this.select_git_subtab(GitSubtab::Worktrees, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitGraph, _, cx| {
+                this.select_git_subtab(GitSubtab::Graph, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitDiff3Way, _, cx| {
+                this.select_git_subtab(GitSubtab::Diff3Way, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitRemote, _, cx| {
+                this.select_git_subtab(GitSubtab::Remote, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextGitItem, _, cx| this.move_git_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevGitItem, _, cx| this.move_git_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &OpenGitItem, _, cx| this.open_git_selection(cx)))
+    }
+
+    /// 嵌入模式的聊天主区：消息流、搜索与输入框。占满宿主给的空间。
+    pub fn render_chat_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut surface = self
+            .action_surface(cx)
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
+            // 聊天区自带深色底：它的配色来自 chamber 主题（近白文字），
+            // 不能跟随宿主浅色主题，否则会白字白底。
+            .bg(theme::window_glint())
+            .text_color(theme::text())
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(self.chat_pane(window, cx)),
+            );
+        // 与整窗渲染保持一致的表情/符号回退，避免聊天里的 emoji 变方框。
+        surface.text_style().font_fallbacks = Some(crate::fonts::default_fallbacks());
+        surface
+    }
+
+    /// 嵌入模式的右侧栏：终端 / 文件 / Git / Mission / 可视化 五个页签。
+    /// 只负责内容本身，宽度与拖拽由宿主的分栏面板控制。
+    pub fn render_rail_surface(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut surface = div()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
+            // 右栏同样使用 chamber 的深色底，保持与聊天区一致。
+            .bg(theme::window_glint())
+            .text_color(theme::text())
+            .child(self.terminal_pane(cx));
+        surface.text_style().font_fallbacks = Some(crate::fonts::default_fallbacks());
+        surface
+    }
+
+    /// The body: the left roster ("friends list") at a locked width, then the
+    /// resizable chat + terminal group. The roster sits *outside* the group so
+    /// dragging the terminal never disturbs it — only the terminal is draggable,
+    /// and the chat flexes to fill whatever's left (so a window resize reflows
+    /// into the chat instead of stranding a stored width). A collapsed rail is a
+    /// thin strip. The group is re-keyed on the terminal's presence so a fresh
+    /// sizing state seeds its width from prefs; `on_resize` persists it back.
+    pub(super) fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let roster_collapsed = self.prefs.roster_collapsed;
+        let inspector_collapsed = self.prefs.inspector_collapsed;
+        let left_width = if roster_collapsed {
+            RAIL_STRIP
+        } else {
+            self.prefs.roster_width
+        };
+
+        // Left rail: a fixed-width column (locked, not draggable) or a thin strip
+        // when collapsed.
+        let left = if roster_collapsed {
+            self.rail_strip(Rail::Roster, cx).into_any_element()
+        } else {
+            div()
+                .flex_none()
+                .w(px(self.prefs.roster_width))
+                .h_full()
+                .child(self.roster_pane(cx))
+                .into_any_element()
+        };
+
+        let mut split = h_flex().flex_1().min_w_0().h_full().child(
+            div()
+                .flex_1()
+                .min_w(px(CHAT_MIN))
+                .h_full()
+                .overflow_hidden()
+                .child(self.chat_pane(window, cx)),
+        );
+
+        if !inspector_collapsed {
+            split = split
+                .child(
+                    div()
+                        .id("chat-inspector-splitter")
+                        .flex_none()
+                        .w(px(8.0))
+                        .mx(px(-4.0))
+                        .h_full()
+                        .cursor_col_resize()
+                        .bg(gpui_kit::transparent_black())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &gpui_kit::MouseDownEvent, _window, cx| {
+                                this.inspector_resize_drag =
+                                    Some((f32::from(ev.position.x), this.prefs.inspector_width));
+                                cx.stop_propagation();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(self.prefs.inspector_width))
+                        .h_full()
+                        .overflow_hidden()
+                        .child(self.terminal_pane(cx)),
+                );
+        }
+
+        h_flex()
+            .id("chamber-body-row")
+            .flex_1()
+            // Bound the height so children shrink to it instead of growing to
+            // their content — without this, the chat's min-content height
+            // propagates up and nothing below can scroll (it just pushes down).
+            .min_h_0()
+            .w_full()
+            .on_mouse_move(
+                cx.listener(move |this, ev: &gpui_kit::MouseMoveEvent, window, cx| {
+                    let Some((start_x, start_w)) = this.inspector_resize_drag else {
+                        return;
+                    };
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        let cur_x = f32::from(ev.position.x);
+                        let available = (f32::from(window.viewport_size().width) - left_width)
+                            .max(RAIL_MIN + CHAT_MIN);
+                        let max_w = (available - CHAT_MIN).clamp(RAIL_MIN, TERMINAL_MAX);
+                        this.prefs.inspector_width =
+                            (start_w - (cur_x - start_x)).clamp(RAIL_MIN, max_w);
+                        cx.notify();
+                    } else {
+                        this.inspector_resize_drag = None;
+                        let _ = config::save(&this.prefs);
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev: &gpui_kit::MouseUpEvent, _window, cx| {
+                    if this.inspector_resize_drag.take().is_some() {
+                        let _ = config::save(&this.prefs);
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _ev: &gpui_kit::MouseUpEvent, _window, cx| {
+                    if this.inspector_resize_drag.take().is_some() {
+                        let _ = config::save(&this.prefs);
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(left)
+            .child(split)
+            .when(inspector_collapsed, |this| {
+                this.child(self.rail_strip(Rail::Inspector, cx))
+            })
+    }
+}

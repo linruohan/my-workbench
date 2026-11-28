@@ -1,0 +1,1340 @@
+//! The chamber view-model: a pure projection of the field (`Vec<Event>`) into
+//! what the UI renders — a chat row per event plus the derived per-quark roster
+//! state. No GPUI here, so this is fully unit-tested.
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, NaiveDate, TimeZone};
+use hadron_gatekeeper::{global_mode, has_override, resolve_mode, Mode};
+use hadron_lattice::{Actor, Event, Kind, QuarkId, QuarkState, Team};
+
+pub mod breadcrumb;
+pub mod repl;
+mod stats;
+pub mod tasks;
+#[cfg(test)]
+mod tests;
+
+pub use repl::{evaluate_repl_input, ReplResult};
+pub use stats::{downsample_context_points, downsample_spend_points, downsample_turn_spend};
+pub use tasks::{SwarmTask, TaskState};
+
+/// Wall-clock of an event, to the second (24h format).
+///
+/// Generic over the timezone so the *conversion* stays at the render site
+/// (which uses `Local`) and this stays deterministic under test.
+#[allow(dead_code)]
+pub fn format_clock<Tz: TimeZone>(ts: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    format_timestamp(ts, crate::config::TimestampFormat::Clock24h)
+}
+
+/// Formats timestamp according to the user's selected format (24h, 12h, or Relative).
+pub fn format_timestamp<Tz: TimeZone>(
+    ts: DateTime<Tz>,
+    fmt: crate::config::TimestampFormat,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match fmt {
+        crate::config::TimestampFormat::Clock24h => ts.format("%H:%M:%S").to_string(),
+        crate::config::TimestampFormat::Clock12h => ts.format("%-I:%M:%S %p").to_string(),
+        crate::config::TimestampFormat::Relative => {
+            let now = chrono::Utc::now();
+            let diff = now.signed_duration_since(ts.with_timezone(&chrono::Utc));
+            let secs = diff.num_seconds();
+            if secs < 5 {
+                "just now".to_string()
+            } else if secs < 60 {
+                format!("{secs}s ago")
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            }
+        }
+    }
+}
+
+/// The label on a Discord-style date divider: relative for the two days a
+/// reader thinks of by name, absolute before that.
+pub fn date_divider_label(day: NaiveDate, today: NaiveDate) -> String {
+    if day == today {
+        "Today".to_string()
+    } else if today.pred_opt() == Some(day) {
+        "Yesterday".to_string()
+    } else {
+        day.format("%A, %B %-d, %Y").to_string()
+    }
+}
+
+/// One rendered chat row. `kind_label` lets the UI style/filter by event type;
+/// `body` is a display string synthesized for non-message events.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MessageRow {
+    pub from: String,
+    pub to: Option<String>,
+    pub body: String,
+    pub kind_label: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<hadron_lattice::Usage>,
+    pub ts: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_used_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<hadron_lattice::Severity>,
+}
+
+impl MessageRow {
+    /// Does the Chat tab show this row? The Log tab shows every projected row; Chat
+    /// shows only the ones a human wrote or read. The single definition of that split —
+    /// it used to be the literal `m.kind_label == "message"` copied into five places.
+    pub fn is_chat(&self) -> bool {
+        self.kind_label == "message"
+    }
+
+    /// Formats a single-line audit representation: `[{time_str}] @{from}{to_part} [{kind_label}] {body}`
+    pub fn format_event_line<Tz: TimeZone>(&self, tz: &Tz) -> String
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let time_str = self.ts.with_timezone(tz).format("%H:%M:%S").to_string();
+        let to_part = self
+            .to
+            .as_deref()
+            .map(|t| format!(" ➜ @{t}"))
+            .unwrap_or_default();
+        format!(
+            "[{time_str}] @{}{to_part} [{}] {}",
+            self.from, self.kind_label, self.body
+        )
+    }
+
+    /// Serializes the event row to pretty-printed JSON.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// The indices into `messages` that the virtualized chat list addresses.
+///
+/// The chat is a `gpui_kit::list` over a SUBSET of the projected rows, so it carries this
+/// index list plus a `ListState` whose count must equal its length. Both are caches of
+/// `view.messages` and every rebuild of the projection has to rebuild them too — the
+/// `/resume` handler reprojected a whole archived session and left the index list
+/// cleared, so the chat stayed empty until the next message rebuilt it.
+pub fn chat_message_indices(messages: &[MessageRow]) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, m)| m.is_chat().then_some(ix))
+        .collect()
+}
+
+/// Event-type filter pills for the `Event Log` tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogKindFilter {
+    #[default]
+    All,
+    Messages,
+    Status,
+    Edits,
+    Gates,
+    Commands,
+    Errors,
+}
+
+impl LogKindFilter {
+    pub const ALL: [Self; 7] = [
+        Self::All,
+        Self::Messages,
+        Self::Status,
+        Self::Edits,
+        Self::Gates,
+        Self::Commands,
+        Self::Errors,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Messages => "Messages",
+            Self::Status => "Status",
+            Self::Edits => "Edits",
+            Self::Gates => "Gates",
+            Self::Commands => "Commands",
+            Self::Errors => "Errors",
+        }
+    }
+
+    pub fn matches_row(self, m: &MessageRow) -> bool {
+        match self {
+            Self::All => true,
+            Self::Messages => m.kind_label == "message",
+            Self::Status => matches!(
+                m.kind_label,
+                "status"
+                    | "assign"
+                    | "mode_set"
+                    | "mode_clear"
+                    | "reboot"
+                    | "session_name"
+                    | "energy_report"
+            ),
+            Self::Edits => matches!(m.kind_label, "edit" | "snapshot"),
+            Self::Gates => {
+                matches!(m.kind_label, "permission_req" | "permission_grant" | "gate")
+                    || (m.from == "gluon"
+                        && (m.body.contains("merge gate")
+                            || m.body.contains("gating `")
+                            || m.body.contains("merged →")
+                            || m.body.contains("landed")))
+            }
+            Self::Commands => m.kind_label == "command",
+            Self::Errors => {
+                m.severity == Some(hadron_lattice::Severity::Error)
+                    || (m.kind_label == "status" && (m.body == "error" || m.body == "blocked"))
+            }
+        }
+    }
+}
+
+/// Pure in-memory search matcher over a projected [`MessageRow`].
+///
+/// Supports whitespace-separated conjunctive tokens:
+/// - `to:@target` or `to:target` narrows to rows addressed to `target` (via `to` or line-start `@target`).
+/// - `@actor` narrows to rows authored by, addressed to, or mentioning `@actor`.
+/// - Any other token matches case-insensitively across `body`, `from`, `to`, and `kind_label`.
+pub fn matches_search_query(m: &MessageRow, query: &str) -> bool {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let body_lower = m.body.to_lowercase();
+    let from_lower = m.from.to_lowercase();
+    let to_lower = m.to.as_deref().map(str::to_lowercase);
+    let kind_lower = m.kind_label.to_lowercase();
+
+    for raw_tok in trimmed.split_whitespace() {
+        let tok_lower = raw_tok.to_lowercase();
+        if let Some(target_part) = tok_lower.strip_prefix("to:") {
+            let target = target_part.trim_start_matches('@');
+            if target.is_empty() {
+                continue;
+            }
+            let matches_to = to_lower.as_deref().is_some_and(|t| t.contains(target))
+                || crate::text::line_start_mentions(&m.body)
+                    .iter()
+                    .any(|men| men.to_lowercase().contains(target));
+            if !matches_to {
+                return false;
+            }
+        } else if let Some(actor) = tok_lower.strip_prefix('@') {
+            if actor.is_empty() {
+                continue;
+            }
+            let mention_needle = format!("@{actor}");
+            let matches_actor = from_lower.contains(actor)
+                || to_lower.as_deref().is_some_and(|t| t.contains(actor))
+                || body_lower.contains(&mention_needle);
+            if !matches_actor {
+                return false;
+            }
+        } else {
+            let matches_text = body_lower.contains(&tok_lower)
+                || from_lower.contains(&tok_lower)
+                || kind_lower.contains(&tok_lower)
+                || to_lower.as_deref().is_some_and(|t| t.contains(&tok_lower));
+            if !matches_text {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Filtered indices into `messages` for the virtualized Chat list (`is_chat()` + `query`).
+pub fn filter_chat_message_indices(messages: &[MessageRow], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return chat_message_indices(messages);
+    }
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, m)| (m.is_chat() && matches_search_query(m, query)).then_some(ix))
+        .collect()
+}
+
+/// Filtered indices into `messages` for the virtualized Event Log list (`kind_filter` + `query`).
+pub fn filter_log_message_indices(
+    messages: &[MessageRow],
+    query: &str,
+    kind_filter: LogKindFilter,
+) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, m)| {
+            (kind_filter.matches_row(m) && matches_search_query(m, query)).then_some(ix)
+        })
+        .collect()
+}
+
+fn resolve_fresh(
+    usage: Option<&hadron_lattice::Usage>,
+    legacy_used_tokens: u32,
+    transport: hadron_lattice::Transport,
+) -> Result<u32, u32> {
+    match usage.and_then(|u| u.spend.fresh()) {
+        Some(f) => Ok(f),
+        None => {
+            if matches!(transport, hadron_lattice::Transport::Cli) {
+                Ok(legacy_used_tokens)
+            } else {
+                Err(1)
+            }
+        }
+    }
+}
+
+/// The fresh (input+output, cache-excluded) tokens one message represents, or `None` if
+/// it carries no spend. The seat's `transport` disambiguates a legacy bare `used_tokens`
+/// (a CLI seat's is fresh; an ACP seat's was a cache-inclusive total we cannot split).
+/// Shared by [`ChamberView::fold_stats`] and [`ChamberView::spend_timeline`] so both read
+/// spend identically.
+fn message_fresh(m: &MessageRow, transport: hadron_lattice::Transport) -> Option<u32> {
+    if let Some(u) = &m.usage {
+        u.spend.fresh()
+    } else if let Some(used) = m.legacy_used_tokens {
+        resolve_fresh(None, used, transport).ok()
+    } else {
+        None
+    }
+}
+
+/// One roster entry: a quark, its latest lifecycle state, its effective
+/// permission mode (and whether that's an explicit per-quark override vs the
+/// inherited global), and its legibility (`vendor`/`model` from the team
+/// config — empty strings when the seat isn't in `team.json`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterRow {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub state: QuarkState,
+    pub mode: Mode,
+    pub mode_is_override: bool,
+    pub vendor: String,
+    pub model: String,
+    pub flavor: Option<hadron_lattice::Flavor>,
+    pub transport: hadron_lattice::Transport,
+    /// The reasoning effort the seat runs at (`low`/`medium`/`high`/…), resolved from
+    /// the team config. `None` = inherit / not set, so no tag is shown.
+    pub effort: Option<String>,
+    pub enabled: bool,
+    /// Whether this quark is *adopted* by the current repo (seated by the daemon) or
+    /// only *available* in the global catalogue. A not-adopted row is shown greyed
+    /// ("there to use when you want, but off"), the same visual as a disabled seat,
+    /// and its lifecycle actions (enable/flavor/remove) are replaced by "Adopt".
+    pub adopted: bool,
+    /// Fresh tokens (input + output, cache excluded) — the one unit every transport
+    /// reports the same way, so the only one comparable across a mixed roster.
+    pub tokens: u32,
+    /// Turns whose spend we cannot express in that unit: pre-components turns from an
+    /// ACP seat, whose bare `used_tokens` was ACP's cache-inclusive total. Counted, so
+    /// the UI can say "plus N turns of unknown spend" rather than silently omit them.
+    pub unknown_turns: u32,
+}
+
+impl RosterRow {
+    /// What to display for this seat's model.
+    ///
+    /// An empty `model` on a **CLI** seat is not "unknown" — it means the seat passes
+    /// no `--model`, so the tool's own config decides (for `agy`, that is
+    /// `~/.gemini/antigravity-cli/settings.json`). Hadron cannot read the value back:
+    /// `agy` writes the model it actually used only to its private per-invocation log,
+    /// never to stdout/stderr, so the CLI adapter has nothing to capture. Saying
+    /// "CLI default" states the true situation; a dash reads as broken.
+    ///
+    /// Still empty for a non-CLI seat with no configured model — callers keep their own
+    /// placeholder for that. SSOT for the rule, so the roster row and the Stats table
+    /// cannot drift.
+    pub fn model_label(&self) -> String {
+        if !self.model.is_empty() {
+            self.model.clone()
+        } else if self.transport == hadron_lattice::Transport::Cli {
+            "CLI default".to_string()
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// The global `ModeSet` `/clear` must append to re-arm the human's standing
+/// permission mode, or `None` when the fresh field already resolves to it.
+///
+/// The effective mode is folded from the field's `ModeSet` events
+/// (`hadron_gatekeeper::global_mode`), and `/clear` truncates the field — so
+/// every mode the human had set went with it and each new session silently reopened
+/// on `Mode::Ask`. This is the re-seed.
+///
+/// `None` for `Mode::default()` on purpose: an empty field ALREADY resolves to that,
+/// so seeding it would write a row that changes nothing and would put a second
+/// definition of the floor next to `Mode::default()`. Same pure-and-tested shape as
+/// [`post_clear_reboots`], so the GPUI command handler stays a thin caller.
+pub fn default_mode_seed(default_mode: Mode) -> Option<Event> {
+    (default_mode != Mode::default())
+        .then(|| Event::new(Actor::Human, None, Kind::ModeSet { mode: default_mode }))
+}
+
+/// The reboots `/clear` must append after truncating the field: one per quark on the
+/// roster, so every resident ACP agent re-boots into the fresh session AND any mid-turn
+/// CLI or HTTP quark is immediately aborted by `Engine::service_reboots` instead of
+/// continuing its pre-clear task in the background. For an idle CLI quark, servicing
+/// `Kind::Reboot` is a fast no-op (`reset_session()` + `live::clear`).
+pub fn post_clear_reboots(roster: &[RosterRow]) -> Vec<Event> {
+    roster
+        .iter()
+        .map(|r| Event::new(Actor::Human, Some(QuarkId::new(&r.id)), Kind::Reboot))
+        .collect()
+}
+
+/// Metadata about one archived session: its directory id (the sortable
+/// `YYYYMMDD_HHMMSS` timestamp `/clear` names it with) and, if `/rename` was ever
+/// run in it, the name it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: String,
+    pub name: Option<String>,
+}
+
+impl SessionInfo {
+    /// What a human should see for this session: the name `/rename` gave it, or the
+    /// `YYYYMMDD_HHMMSS` directory id rewritten as a date. An id that does not have that
+    /// shape (nothing writes one today, but nothing stops a human creating one either) is
+    /// returned verbatim — a half-parsed timestamp would read as a confidently wrong date.
+    pub fn label(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        match chrono::NaiveDateTime::parse_from_str(&self.id, "%Y%m%d_%H%M%S") {
+            Ok(ts) => ts.format("%Y-%m-%d %H:%M").to_string(),
+            Err(_) => self.id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionCacheEntry {
+    pub id: String,
+    pub name: Option<String>,
+    pub file_len: u64,
+    pub mtime_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionsIndexCache {
+    pub entries: HashMap<String, SessionCacheEntry>,
+}
+
+impl SessionsIndexCache {
+    pub fn load(cache_path: &std::path::Path) -> Self {
+        if let Ok(content) = std::fs::read_to_string(cache_path) {
+            if let Ok(cache) = serde_json::from_str::<Self>(&content) {
+                return cache;
+            }
+        }
+        Self::default()
+    }
+
+    pub fn save(&self, cache_path: &std::path::Path) {
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(cache_path, json);
+        }
+    }
+}
+
+/// List archived sessions under `sessions_dir`, oldest first (directory names are
+/// timestamp-sortable, same order `load_archived_messages` folds them in). Uses
+/// `.hadron/cache/sessions_index.json` session metadata caching to avoid re-parsing
+/// unchanged `.jsonl` files on disk.
+pub fn list_sessions(sessions_dir: &std::path::Path) -> Vec<SessionInfo> {
+    let cache_path = sessions_dir
+        .parent()
+        .map(|p| p.join("cache").join("sessions_index.json"))
+        .unwrap_or_else(|| sessions_dir.join(".sessions_index_cache.json"));
+    list_sessions_with_cache(sessions_dir, &cache_path)
+}
+
+pub fn list_sessions_with_cache(
+    sessions_dir: &std::path::Path,
+    cache_path: &std::path::Path,
+) -> Vec<SessionInfo> {
+    let mut dirs: Vec<std::path::PathBuf> = match std::fs::read_dir(sessions_dir) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    dirs.sort();
+
+    let mut cache = SessionsIndexCache::load(cache_path);
+    let mut cache_updated = false;
+    let mut sessions = Vec::with_capacity(dirs.len());
+
+    for dir in dirs {
+        let id = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let field_file = dir.join("field.jsonl");
+        let meta = std::fs::metadata(&field_file).ok();
+        let file_len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime_secs = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if let Some(entry) = cache.entries.get(&id) {
+            if entry.file_len == file_len && entry.mtime_secs == mtime_secs {
+                sessions.push(SessionInfo {
+                    id,
+                    name: entry.name.clone(),
+                });
+                continue;
+            }
+        }
+
+        let events = hadron_lattice::io::read_events(&field_file).unwrap_or_default();
+        let name = events.iter().rev().find_map(|e| match &e.kind {
+            Kind::SessionName { name } => Some(name.clone()),
+            _ => None,
+        });
+
+        cache.entries.insert(
+            id.clone(),
+            SessionCacheEntry {
+                id: id.clone(),
+                name: name.clone(),
+                file_len,
+                mtime_secs,
+            },
+        );
+        cache_updated = true;
+        sessions.push(SessionInfo { id, name });
+    }
+
+    if cache_updated {
+        cache.save(cache_path);
+    }
+
+    sessions
+}
+
+/// Resolve a `/resume` target against the session list: the id (the timestamp
+/// directory name, always unique) matches first, then a case-insensitive match on
+/// the name set by `/rename` — a human retyping a name they saw on screen should
+/// not have to match its case exactly.
+pub fn find_session<'a>(sessions: &'a [SessionInfo], target: &str) -> Option<&'a SessionInfo> {
+    sessions.iter().find(|s| s.id == target).or_else(|| {
+        sessions.iter().find(|s| {
+            s.name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(target))
+        })
+    })
+}
+
+/// Whether any roster quark is mid-turn right now. `/resume` swaps out
+/// `.hadron/field.jsonl` — the live bus a running daemon appends to — so it must
+/// refuse while a quark could still be writing to it.
+pub fn any_quark_mid_turn(roster: &[RosterRow]) -> bool {
+    roster
+        .iter()
+        .any(|r| matches!(r.state, QuarkState::Excited | QuarkState::Thinking))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProcessKind {
+    Chamber,
+    Gluon,
+    Quark,
+    Terminal,
+    Subprocess,
+}
+
+/// Which section of the Process Manager modal a row belongs to.
+///
+///Separates live OS processes (`Chamber`, `Gluon`, active/PID-backed `Quark` runners,
+/// `Terminal` PTYs, and child `Subprocess` rows) from standby/inactive `Quark` seats
+/// (`Idle` or `Disabled` with no active OS process).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProcessSection {
+    LiveProcess,
+    StandbyQuark,
+}
+
+/// Truthful runner backing badge for a Quark seat when no separate OS PID is attached.
+pub fn quark_backing_badge(r: &RosterRow, has_pid: bool) -> Option<String> {
+    if has_pid {
+        return None;
+    }
+    Some(if !r.enabled {
+        "disabled · no process".to_string()
+    } else {
+        match r.transport {
+            hadron_lattice::Transport::Http | hadron_lattice::Transport::Sdk => {
+                "in-daemon".to_string()
+            }
+            hadron_lattice::Transport::Cli => {
+                if matches!(r.state, QuarkState::Excited | QuarkState::Thinking) {
+                    "cli runner".to_string()
+                } else {
+                    "on-demand · idle".to_string()
+                }
+            }
+            hadron_lattice::Transport::Acp => {
+                if matches!(r.state, QuarkState::Excited | QuarkState::Thinking) {
+                    "acp runner".to_string()
+                } else {
+                    "standby · no process".to_string()
+                }
+            }
+        }
+    })
+}
+
+/// One row in the Process Manager overlay: the daemon, adopted quark seat, PTY terminal,
+/// or child subprocess tree entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRow {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub kind: ProcessKind,
+    pub section: ProcessSection,
+    pub pid: Option<u32>,
+    pub ppid: Option<u32>,
+    pub rss_bytes: Option<u64>,
+    pub command: Option<String>,
+    pub backing_badge: Option<String>,
+    /// Force-restart is meaningful only for a resident (ACP) seat that is
+    /// currently enabled — a disabled or one-shot CLI seat holds nothing to reap.
+    pub can_restart: bool,
+    /// Whether this row's participation can be flipped at all (every adopted
+    /// quark; not the daemon, which the chamber has no start/stop path for).
+    pub can_toggle: bool,
+    pub enabled: bool,
+    pub can_stop_or_kill: bool,
+}
+
+/// Builds the Process Manager's complete hierarchy: Hadron main UI, daemon,
+/// adopted Quarks, active PTY terminals, and child subprocesses.
+pub fn build_full_process_rows(
+    chamber_pid: u32,
+    gluon_running: bool,
+    gluon_pid: Option<u32>,
+    roster: &[RosterRow],
+    terminals: &[(usize, String, Option<u32>)],
+    process_tree: &[hadron_lattice::sys::inspect::ProcessInfo],
+) -> Vec<ProcessRow> {
+    let info_map: HashMap<u32, &hadron_lattice::sys::inspect::ProcessInfo> =
+        process_tree.iter().map(|p| (p.pid, p)).collect();
+
+    let mut rows = Vec::new();
+
+    // 1. Chamber Main UI
+    let chamber_info = info_map.get(&chamber_pid);
+    rows.push(ProcessRow {
+        id: "chamber".to_string(),
+        label: "hadron-chamber (main UI)".to_string(),
+        status: "Running".to_string(),
+        kind: ProcessKind::Chamber,
+        section: ProcessSection::LiveProcess,
+        pid: Some(chamber_pid),
+        ppid: chamber_info.map(|i| i.ppid),
+        rss_bytes: chamber_info.and_then(|i| i.rss_bytes),
+        command: chamber_info.map(|i| i.cmdline.clone()),
+        backing_badge: None,
+        can_restart: false,
+        can_toggle: false,
+        enabled: true,
+        can_stop_or_kill: false,
+    });
+
+    // 2. Gluon Daemon
+    let effective_gluon_pid = gluon_pid.filter(|_| gluon_running);
+    let gluon_info = effective_gluon_pid.and_then(|pid| info_map.get(&pid));
+    rows.push(ProcessRow {
+        id: "gluon".to_string(),
+        label: "hadron-gluon (daemon)".to_string(),
+        status: if gluon_running {
+            "Running".to_string()
+        } else {
+            "Stopped".to_string()
+        },
+        kind: ProcessKind::Gluon,
+        section: ProcessSection::LiveProcess,
+        pid: effective_gluon_pid,
+        ppid: gluon_info.map(|i| i.ppid),
+        rss_bytes: gluon_info.and_then(|i| i.rss_bytes),
+        command: gluon_info.map(|i| i.cmdline.clone()),
+        backing_badge: None,
+        can_restart: true,
+        can_toggle: false,
+        enabled: gluon_running,
+        can_stop_or_kill: gluon_running,
+    });
+
+    // 3. Adopted Quark seats
+    let mut quark_pids = Vec::new();
+    rows.extend(roster.iter().filter(|r| r.adopted).map(|r| {
+        let status = if !r.enabled {
+            "Disabled".to_string()
+        } else {
+            match r.state {
+                QuarkState::Excited => "Excited".to_string(),
+                QuarkState::Thinking => "Thinking".to_string(),
+                QuarkState::Waiting => "Waiting".to_string(),
+                QuarkState::Blocked => "Blocked".to_string(),
+                QuarkState::Error => "Error".to_string(),
+                QuarkState::Ground => "Idle".to_string(),
+            }
+        };
+        let matches_quark = |p: &&hadron_lattice::sys::inspect::ProcessInfo| {
+            p.pid != chamber_pid
+                && Some(p.pid) != effective_gluon_pid
+                && hadron_lattice::sys::cmdline_matches_quark_id(&p.cmdline, &r.id)
+        };
+        let matching_pids: std::collections::HashSet<u32> = process_tree
+            .iter()
+            .filter(matches_quark)
+            .map(|p| p.pid)
+            .collect();
+        let quark_proc = process_tree
+            .iter()
+            .filter(matches_quark)
+            .find(|p| !matching_pids.contains(&p.ppid))
+            .or_else(|| process_tree.iter().find(matches_quark));
+        if let Some(qp) = quark_proc {
+            quark_pids.push(qp.pid);
+        }
+        let is_active = r.enabled && matches!(r.state, QuarkState::Excited | QuarkState::Thinking);
+        let has_pid = quark_proc.is_some();
+        ProcessRow {
+            id: r.id.clone(),
+            label: r.display_name.clone().unwrap_or_else(|| r.id.clone()),
+            status,
+            kind: ProcessKind::Quark,
+            section: if has_pid || is_active {
+                ProcessSection::LiveProcess
+            } else {
+                ProcessSection::StandbyQuark
+            },
+            pid: quark_proc.map(|p| p.pid),
+            ppid: quark_proc.map(|p| p.ppid),
+            rss_bytes: quark_proc.and_then(|p| p.rss_bytes),
+            command: quark_proc.map(|p| p.cmdline.clone()),
+            backing_badge: quark_backing_badge(r, has_pid),
+            can_restart: r.enabled && matches!(r.transport, hadron_lattice::Transport::Acp),
+            can_toggle: true,
+            enabled: r.enabled,
+            can_stop_or_kill: is_active,
+        }
+    }));
+
+    // 4. Terminal rows
+    let mut terminal_pids = Vec::new();
+    for &(ix, ref title, pid) in terminals {
+        if let Some(p) = pid {
+            terminal_pids.push(p);
+        }
+        let term_info = pid.and_then(|p| info_map.get(&p));
+        rows.push(ProcessRow {
+            id: format!("pty-{ix}"),
+            label: title.clone(),
+            status: if pid.is_some() {
+                "Running".to_string()
+            } else {
+                "Stopped".to_string()
+            },
+            kind: ProcessKind::Terminal,
+            section: ProcessSection::LiveProcess,
+            pid,
+            ppid: term_info.map(|i| i.ppid),
+            rss_bytes: term_info.and_then(|i| i.rss_bytes),
+            command: term_info.map(|i| i.cmdline.clone()),
+            backing_badge: None,
+            can_restart: false,
+            can_toggle: false,
+            enabled: pid.is_some(),
+            can_stop_or_kill: true,
+        });
+    }
+
+    // 5. Child Subprocess rows
+    let mut known_pids = std::collections::HashSet::new();
+    known_pids.insert(chamber_pid);
+    if let Some(gp) = effective_gluon_pid {
+        known_pids.insert(gp);
+    }
+    for qp in quark_pids {
+        known_pids.insert(qp);
+    }
+    for tp in terminal_pids {
+        known_pids.insert(tp);
+    }
+
+    for p in process_tree {
+        if !known_pids.contains(&p.pid) {
+            rows.push(ProcessRow {
+                id: format!("pid-{}", p.pid),
+                label: p.name.clone(),
+                status: "Running".to_string(),
+                kind: ProcessKind::Subprocess,
+                section: ProcessSection::LiveProcess,
+                pid: Some(p.pid),
+                ppid: Some(p.ppid),
+                rss_bytes: p.rss_bytes,
+                command: Some(p.cmdline.clone()),
+                backing_badge: None,
+                can_restart: false,
+                can_toggle: false,
+                enabled: true,
+                can_stop_or_kill: true,
+            });
+        }
+    }
+
+    rows
+}
+
+/// What one quark spent this session. `context` and `quota` are the *latest*
+/// the provider reported, not a sum: occupancy and remaining allowance are
+/// levels, and adding them up would mean nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnSpend {
+    pub turn: u64,
+    pub fresh: u32,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuarkStats {
+    pub turns: u64,
+    pub fresh: u64,
+    pub cached: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total_edits: u64,
+    pub total_commands: u64,
+    pub total_snapshots: u64,
+    pub cost_usd: Option<f64>,
+    pub context: Option<hadron_lattice::ContextUsage>,
+    pub quota: Vec<hadron_lattice::QuotaBucket>,
+    pub first_seen: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_active: Option<chrono::DateTime<chrono::Utc>>,
+    pub spend_history: Vec<TurnSpend>,
+    pub transport: Option<hadron_lattice::Transport>,
+}
+
+/// A time window over the swarm's telemetry. `Session` is bounded by *source* — the
+/// live field only, i.e. the current post-`/clear` session — while the wider windows
+/// fold archived sessions in and bound by *time* ([`StatsWindow::cutoff`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatsWindow {
+    /// The current run: since the last human message. No archives, no time bound.
+    Current,
+    /// The live field: this session since the last `/clear`. No archives, no time bound.
+    Session,
+    /// Rolling `now − 24 hours`, across the live field and archived sessions.
+    Day,
+    /// Rolling `now − 7 days`, across the live field and archived sessions.
+    Week,
+    /// Rolling `now − 30 days`, across the live field and archived sessions.
+    Month,
+    /// Everything, live field and every archived session, no lower bound.
+    AllTime,
+}
+
+impl StatsWindow {
+    /// In tab order.
+    pub const ALL: [StatsWindow; 6] = [
+        StatsWindow::Current,
+        StatsWindow::Session,
+        StatsWindow::Day,
+        StatsWindow::Week,
+        StatsWindow::Month,
+        StatsWindow::AllTime,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StatsWindow::Current => "Current",
+            StatsWindow::Session => "Session",
+            StatsWindow::Day => "Day",
+            StatsWindow::Week => "Week",
+            StatsWindow::Month => "Month",
+            StatsWindow::AllTime => "All time",
+        }
+    }
+
+    /// The inclusive lower bound for an event's `ts`. `None` = no lower bound. `Session`/`Current`
+    /// is `None` too: it is bounded by its source, not by a timestamp.
+    pub fn cutoff(self, now: DateTime<chrono::Utc>) -> Option<DateTime<chrono::Utc>> {
+        match self {
+            StatsWindow::Current | StatsWindow::Session | StatsWindow::AllTime => None,
+            StatsWindow::Day => Some(now - chrono::Duration::hours(24)),
+            StatsWindow::Week => Some(now - chrono::Duration::days(7)),
+            StatsWindow::Month => Some(now - chrono::Duration::days(30)),
+        }
+    }
+
+    /// Whether this window folds in archived sessions or reads the live field alone.
+    pub fn includes_archives(self) -> bool {
+        !matches!(self, StatsWindow::Current | StatsWindow::Session)
+    }
+}
+
+/// Per-quark session statistics plus the totals that are meaningful to add.
+/// Deliberately no total context or quota — see [`QuarkStats`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionStats {
+    /// In roster order, so the tab and the roster agree.
+    pub per_quark: Vec<(String, QuarkStats)>,
+    pub total_turns: u64,
+    pub total_fresh: u64,
+    pub total_cached: u64,
+    pub total_input: u64,
+    pub total_output: u64,
+    pub total_cache_read: u64,
+    pub total_cache_write: u64,
+    pub total_edits: u64,
+    pub total_commands: u64,
+    pub total_snapshots: u64,
+    pub protocol_turns: HashMap<String, u64>,
+    pub total_cost_usd: Option<f64>,
+    pub has_unpriced_quarks: bool,
+    pub spend_history: Vec<TurnSpend>,
+}
+
+/// One point on the [`SpendTimeline`]: the **cumulative** fresh spend, per quark and in
+/// total, as of one spend event. `per_quark` is aligned to [`SpendTimeline::quarks`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpendPoint {
+    /// 1-based chronological index of the spend event (the chart's x).
+    pub step: u32,
+    /// Running cumulative fresh spend per quark, aligned to [`SpendTimeline::quarks`].
+    pub per_quark: Vec<f64>,
+    /// Running cumulative fresh spend across the whole team (the sum).
+    pub team: f64,
+}
+
+/// Cumulative fresh spend over turns, per quark and team, for the combined spend area
+/// chart. Each quark is a series (`quarks[i]` ↔ `points[_].per_quark[i]`); the team total
+/// is `points[_].team` and, being the sum, sits above every quark curve. Empty when
+/// nothing spent in the window.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpendTimeline {
+    /// Series order: the quark ids that spent in the window (all-zero columns dropped).
+    pub quarks: Vec<String>,
+    pub points: Vec<SpendPoint>,
+}
+
+/// Everything the chamber needs to render one frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChamberView {
+    pub messages: Vec<MessageRow>,
+    pub roster: Vec<RosterRow>,
+    /// The global default permission mode (the status-bar mode badge), folded
+    /// from the field's `ModeSet` events. `Mode::Ask` if none has been set.
+    pub global_mode: Mode,
+    /// An outstanding permission request awaiting the human's Approve/Deny, if any.
+    /// The UI renders this as a toast; `None` means nothing to decide.
+    pub pending_permission: Option<hadron_gatekeeper::PendingPermission>,
+    /// The swarm's live task feed — see [`tasks::swarm_tasks`]. Newest-first.
+    pub tasks: Vec<SwarmTask>,
+}
+
+fn actor_str(a: &Actor) -> String {
+    match a {
+        Actor::Human => "human".to_string(),
+        Actor::Gluon => "gluon".to_string(),
+        Actor::Quark(q) => q.as_str().to_string(),
+    }
+}
+
+fn note(order: &mut Vec<String>, id: &str) {
+    if !order.iter().any(|x| x == id) {
+        order.push(id.to_string());
+    }
+}
+
+fn render_row(e: &Event, turn_usages: &HashMap<String, hadron_lattice::Usage>) -> MessageRow {
+    let from = actor_str(&e.from);
+    let to = e.to.as_ref().map(|t| t.as_str().to_string());
+    let mut legacy_used_tokens = None;
+    let (body, kind_label): (String, &'static str) = match &e.kind {
+        Kind::Message { body } => (body.clone(), "message"),
+        Kind::Status { state } => (format!("{state:?}").to_lowercase(), "status"),
+        Kind::Edit { paths, summary, .. } => {
+            (format!("edited {} path(s): {summary}", paths.len()), "edit")
+        }
+        Kind::Command {
+            cmd,
+            exit,
+            out_summary,
+        } => {
+            if cmd.starts_with('/') {
+                let summary = if out_summary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {out_summary}")
+                };
+                (format!("{cmd}{summary}"), "command")
+            } else {
+                (format!("$ {cmd} (exit {exit})"), "command")
+            }
+        }
+        Kind::Snapshot { label, .. } => (format!("snapshot: {label}"), "snapshot"),
+        Kind::EnergyReport { used_tokens } => {
+            legacy_used_tokens = Some(*used_tokens);
+            (format!("used {used_tokens} tokens"), "energy_report")
+        }
+        Kind::Assign { task, invariants } => (
+            format!("assigned: {task} (invariants: {:?})", invariants),
+            "assign",
+        ),
+        Kind::PermissionReq { risk, description } => (
+            format!("permission requested ({risk:?}): {description}"),
+            "permission_req",
+        ),
+        Kind::PermissionGrant { approved, remember } => (
+            format!(
+                "permission {}{}",
+                if *approved { "approved" } else { "denied" },
+                if *remember { " (remembered)" } else { "" },
+            ),
+            "permission_grant",
+        ),
+        Kind::AttentionRequired {
+            urgency,
+            summary,
+            action_needed,
+        } => {
+            let action_str = action_needed
+                .as_ref()
+                .map(|a| format!(" · Action: {a}"))
+                .unwrap_or_default();
+            (
+                format!("🚨 [Attention Required - {urgency:?}]: {summary}{action_str}"),
+                "message",
+            )
+        }
+        Kind::ModeSet { mode } => {
+            let target = to
+                .as_deref()
+                .map(|t| format!(" for @{t}"))
+                .unwrap_or_else(|| " (global)".to_string());
+            (
+                format!("mode → {mode:?}{target}").to_lowercase(),
+                "mode_set",
+            )
+        }
+        Kind::ModeClear => ("mode → default (inherit global)".to_string(), "mode_clear"),
+        Kind::Reboot => {
+            let target = to
+                .as_deref()
+                .map(|t| format!(" for @{t}"))
+                .unwrap_or_default();
+            (format!("force-restart requested{target}"), "reboot")
+        }
+        Kind::SessionName { name } => (format!("session renamed to \"{name}\""), "session_name"),
+        Kind::Unknown { kind, .. } => (format!("unrecognized event: {kind}"), "unrecognized"),
+    };
+    let severity = e.severity.or_else(|| {
+        if matches!(e.kind, Kind::AttentionRequired { .. }) {
+            Some(hadron_lattice::Severity::Error)
+        } else if matches!(e.kind, Kind::PermissionReq { .. }) {
+            Some(hadron_lattice::Severity::Warning)
+        } else {
+            None
+        }
+    });
+    let usage = e
+        .turn
+        .and_then(|t| turn_usages.get(&t.to_string()).cloned())
+        .or_else(|| e.usage.clone())
+        .map(normalize_usage_context);
+    MessageRow {
+        from,
+        to,
+        body,
+        kind_label,
+        usage,
+        ts: e.ts,
+        legacy_used_tokens,
+        turn: e.turn.map(|t| t.to_string()),
+        severity,
+    }
+}
+
+/// Normalize `Usage.context` so historical CLI turns that folded cumulative multi-step
+/// `spend.cache_read` into `context.used_tokens` (`used_tokens == input + cache_read`)
+/// or recorded stale `200_000` windows for 1M-context models / `>200k` single-step
+/// occupancy are corrected to accurate single-window occupancy.
+fn normalize_usage_context(mut usage: hadron_lattice::Usage) -> hadron_lattice::Usage {
+    let model_is_1m = usage
+        .model
+        .as_deref()
+        .is_some_and(hadron_lattice::is_1m_context_model);
+    if let Some(ctx) = &mut usage.context {
+        if let (Some(input), Some(cache_read)) = (usage.spend.input, usage.spend.cache_read) {
+            if input > 0 && cache_read > 0 && ctx.used_tokens == input.saturating_add(cache_read) {
+                ctx.used_tokens = input;
+            }
+        }
+        if ctx.context_window_size == 200_000
+            && (model_is_1m || (ctx.used_tokens > 200_000 && ctx.used_tokens <= 1_048_576))
+        {
+            ctx.context_window_size = 1_048_576;
+        }
+        if ctx.context_window_size > 0 {
+            if ctx.used_tokens > ctx.context_window_size {
+                ctx.used_tokens = ctx.context_window_size;
+            }
+            ctx.used_percentage = (ctx.used_tokens as f64 / ctx.context_window_size as f64) * 100.0;
+        }
+    }
+    usage
+}
+
+/// Project the field into a renderable view, with no team annotations
+/// (`provider`/`model` blank). Convenience for tests and callers without a team.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn project(events: &[Event]) -> ChamberView {
+    project_with_team(events, &Team::default(), &Team::default())
+}
+
+/// Read every archived session under `sessions_dir` in a single pass, returning both
+/// the concatenated projected [`MessageRow`] history for wider [`StatsWindow`]s and
+/// the [`SessionInfo`] list (oldest first).
+pub fn load_archives_and_sessions(
+    sessions_dir: &std::path::Path,
+) -> (Vec<MessageRow>, Vec<SessionInfo>) {
+    let mut dirs: Vec<std::path::PathBuf> = match std::fs::read_dir(sessions_dir) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    dirs.sort();
+
+    let mut archived_messages = Vec::new();
+    let mut sessions = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let id = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let events = hadron_lattice::io::read_events(&dir.join("field.jsonl")).unwrap_or_default();
+        let name = events.iter().rev().find_map(|e| match &e.kind {
+            Kind::SessionName { name } => Some(name.clone()),
+            _ => None,
+        });
+        sessions.push(SessionInfo { id, name });
+        archived_messages.extend(project(&events).messages);
+    }
+    (archived_messages, sessions)
+}
+
+/// Project every archived session under `sessions_dir` into one flat, chronological
+/// `Vec<MessageRow>` for the wider [`StatsWindow`]s (`/clear` writes each cleared field
+/// to `sessions/<timestamp>/field.jsonl`).
+///
+/// Each session is projected **independently** and its rows concatenated — turn numbers
+/// are scoped per field, so projecting sessions separately keeps one session's turn
+/// usage from colliding with another's. The session directories are timestamp-named, so
+/// sorting their paths yields chronological order. A missing `sessions_dir` (nothing
+/// cleared yet) or an unreadable session is not an error — it contributes no rows.
+pub fn load_archived_messages(sessions_dir: &std::path::Path) -> Vec<MessageRow> {
+    load_archives_and_sessions(sessions_dir).0
+}
+
+/// Project the field into a renderable view. Roster order is first-seen; a
+/// quark's state is the latest `Kind::Status` it authored (default `Ground`);
+/// its mode is folded from `ModeSet` events (per-quark override over global);
+/// its `provider`/`model` come from `team` (blank when the seat is unknown).
+/// `team` is the **resolved** team (adopted quarks, full definitions); `global` is
+/// the whole catalogue, so quarks available but not adopted here still get a (greyed)
+/// roster row.
+pub fn project_with_team(events: &[Event], team: &Team, global: &Team) -> ChamberView {
+    let mut messages = Vec::with_capacity(events.len());
+    let mut order: Vec<String> = Vec::new();
+    let mut tokens: HashMap<String, u32> = HashMap::new();
+    let mut unknown_turns: HashMap<String, u32> = HashMap::new();
+    let mut states: HashMap<String, QuarkState> = HashMap::new();
+
+    let mut turn_usages: HashMap<String, hadron_lattice::Usage> = HashMap::new();
+    for e in events {
+        if let Some(turn) = e.turn {
+            if let Some(usage) = &e.usage {
+                turn_usages.insert(turn.to_string(), usage.clone());
+            }
+        }
+    }
+
+    for e in events {
+        // Roster membership: any quark that authors or is addressed.
+        if let Actor::Quark(q) = &e.from {
+            note(&mut order, q.as_str());
+        }
+        if let Some(t) = &e.to {
+            note(&mut order, t.as_str());
+        }
+        // Latest status per quark wins.
+        if let (Actor::Quark(q), Kind::Status { state }) = (&e.from, &e.kind) {
+            states.insert(q.as_str().to_string(), *state);
+        }
+        // Accumulate tokens — in ONE unit: fresh (input + output), cache excluded.
+        if let (Actor::Quark(q), Kind::EnergyReport { used_tokens }) = (&e.from, &e.kind) {
+            let cli = team
+                .get(&QuarkId::new(q.as_str()))
+                .map(|s| s.transport)
+                .unwrap_or(hadron_lattice::Transport::Cli);
+
+            match resolve_fresh(e.usage.as_ref(), *used_tokens, cli) {
+                Ok(f) => *tokens.entry(q.as_str().to_string()).or_default() += f,
+                Err(u) => *unknown_turns.entry(q.as_str().to_string()).or_default() += u,
+            }
+        }
+        messages.push(render_row(e, &turn_usages));
+    }
+
+    // Adopted quarks that have not spoken yet still belong on the roster (seeded from
+    // the resolved team), then catalogue quarks not adopted here — shown greyed,
+    // "available but off". Both are appended after event-seen ids so the order stays
+    // stable across restarts (active quarks first, then silent-adopted, then available).
+    for seat in &team.quarks {
+        note(&mut order, seat.id.as_str());
+    }
+    for seat in &global.quarks {
+        note(&mut order, seat.id.as_str());
+    }
+
+    // An id seen only in the field's HISTORY is not a member of the swarm: a seat that
+    // was renamed or deleted, a routing alias (`@team`), or — the case that cost a
+    // release — a mock quark a broken boot once stood in, whose row then outlived it
+    // forever with no vendor, no model and no way to remove it short of `/clear`. The
+    // roster is who is SEATED, so keep only ids a seat source knows.
+    //
+    // Unless neither source knows anybody: `load_team` degrades a malformed or
+    // mid-write file to an EMPTY team, and the 400ms tick re-reads both, so filtering
+    // unconditionally would blank the whole roster on one transient bad read. With no
+    // seats to trust, event-seen ids are the best answer there is.
+    let seats_known = !team.quarks.is_empty() || !global.quarks.is_empty();
+    let roster = order
+        .into_iter()
+        .filter(|id| {
+            let qid = QuarkId::new(id);
+            if !global.quarks.is_empty() {
+                global.get(&qid).is_some()
+            } else {
+                !seats_known || team.get(&qid).is_some()
+            }
+        })
+        .map(|id| {
+            let state = states.get(&id).copied().unwrap_or(QuarkState::Ground);
+            let qid = QuarkId::new(&id);
+            // Legibility comes from the resolved team if the quark is adopted, else
+            // from the catalogue (available-but-off), else it is an event-only id we
+            // know nothing about (a live participant with no seat).
+            let seat_shows_effort = |s: &hadron_lattice::Seat| s.accepts_effort();
+            let (display_name, vendor, model, flavor, transport, effort, enabled, adopted) =
+                match (team.get(&qid), global.get(&qid)) {
+                    (Some(s), _) => (
+                        s.display_name.clone(),
+                        s.vendor.clone(),
+                        s.model.clone(),
+                        Some(s.flavor.clone()),
+                        s.transport,
+                        seat_shows_effort(s).then(|| s.effort.clone()).flatten(),
+                        s.enabled,
+                        true,
+                    ),
+                    (None, Some(g)) => (
+                        g.display_name.clone(),
+                        g.vendor.clone(),
+                        g.model.clone(),
+                        Some(g.flavor.clone()),
+                        g.transport,
+                        seat_shows_effort(g).then(|| g.effort.clone()).flatten(),
+                        false, // not adopted here → inert, greyed like a disabled seat
+                        false,
+                    ),
+                    (None, None) => (
+                        None,
+                        String::new(),
+                        String::new(),
+                        None,
+                        hadron_lattice::Transport::Cli,
+                        None,
+                        true,
+                        true, // event-only live participant, no seat
+                    ),
+                };
+            let q_tokens = tokens.get(&id).copied().unwrap_or(0);
+            let q_unknown = unknown_turns.get(&id).copied().unwrap_or(0);
+            RosterRow {
+                state,
+                mode: resolve_mode(events, &qid),
+                mode_is_override: has_override(events, &qid),
+                display_name,
+                vendor,
+                model,
+                flavor,
+                transport,
+                effort,
+                enabled,
+                adopted,
+                id,
+                tokens: q_tokens,
+                unknown_turns: q_unknown,
+            }
+        })
+        .collect();
+
+    ChamberView {
+        messages,
+        roster,
+        global_mode: global_mode(events),
+        pending_permission: hadron_gatekeeper::any_pending_permission(events),
+        tasks: tasks::swarm_tasks(events),
+    }
+}
+
+// NOTE: the human's `@mention` routing lives in the daemon now
+// (`hadron_gluon::router::human_mentions`), not the chamber. The chamber writes
+// the raw message with `to: None` and leaves mentions in the body, so ONE message
+// can address several quarks; the daemon resolves and fans them out. (A former
+// `parse_mention` here lifted a single leading mention into `to` — which silently
+// dropped the second addressee — and has been removed.)

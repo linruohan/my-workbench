@@ -1,0 +1,770 @@
+use hadron_lattice::{Actor, Event, Flavor, Kind, QuarkCard, QuarkId, QuarkState};
+
+use crate::preons::Preon;
+
+/// Which quark should be excited next.
+///
+/// v1 rule (stateless, reconstructed from the field): walk the field newest-first for
+/// events that address a quark (`to = Some(q)`) and request a turn, and return the
+/// first one the addressee has **not** answered — answered meaning `q` authored a reply
+/// or a terminal/pause status after it ([`is_turn_completion`]). Nothing unanswered →
+/// quiesce (`None`).
+///
+/// **The walk is the whole point.** This used to stop at the single newest addressed
+/// request and return `None` if it was answered, which let one answered request MASK an
+/// older unanswered one behind it. Live: a worker reports up to the orchestrator
+/// (`Message → orch`), then the merge gate appends its own audit `PermissionReq` +
+/// `PermissionGrant{→worker}` — an addressed turn-request — and the worker's `Ground`
+/// answers that grant a moment later. The orchestrator's message was then never even
+/// examined, so it was never excited and the human's chat sat silent until they typed
+/// again (the retype works because it goes through `unaddressed_message_targets`, a
+/// different path). See `an_answered_merge_grant_does_not_mask_an_older_unanswered_handoff`,
+/// replayed from a real `field.jsonl`.
+///
+/// Walking back is safe because every path that addresses a quark also guarantees it a
+/// terminal status: a disabled/exclusive/depleted seat gets `reroute_blocked`
+/// (`Status{Blocked}`), a failed turn gets `Status{Error}`, and a merge gate whose
+/// `land()` errors reroutes to `Blocked` rather than propagating (`engine/merge.rs`) —
+/// which is what stops an unanswerable grant from being rediscovered forever.
+///
+/// Does event `c` represent `quark` completing a turn that answers request `req`?
+/// - `Kind::Message`: requires completion with `answers == req.id` (or un-stamped legacy),
+///   if authored by `Actor::Gluon`, matching `req.answers` (e.g. merge gate handbacks),
+///   or answering a newer addressed request in `events_after` that superseded `req`.
+/// - `Kind::Assign`: requires completion with `answers == req.answers` (the continued assignment),
+///   or answering a newer addressed request in `events_after` that superseded `req`.
+/// - `Kind::PermissionGrant`: satisfied by any subsequent completion for `target` that resolves the pause.
+/// Return the completing event in `events_after` that answers `req` for `target`, if any.
+///
+/// Prefers an explicit `answers` match for `req` (so concurrent or out-of-order turns each
+/// resolve to their own completion event) before falling back to unstamped legacy completions
+/// or newer-request supersession.
+pub fn request_completion<'a>(
+    events_after: &'a [Event],
+    req: &Event,
+    target: &QuarkId,
+) -> Option<&'a Event> {
+    let is_direct_match = |c: &Event| -> bool {
+        let Some(a) = c.answers else { return false };
+        match &req.kind {
+            Kind::Message { .. } => {
+                a == req.id || (req.from == Actor::Gluon && req.answers == Some(a))
+            }
+            Kind::Assign { .. } => a == req.answers.unwrap_or(req.id) || a == req.id,
+            _ => false,
+        }
+    };
+    let is_unstamped_before_next_request = |idx: usize, c: &Event| -> bool {
+        c.answers.is_none()
+            && matches!(
+                c.kind,
+                Kind::Status {
+                    state: QuarkState::Ground
+                        | QuarkState::Blocked
+                        | QuarkState::Error
+                        | QuarkState::Waiting
+                }
+            )
+            && !events_after[..idx]
+                .iter()
+                .any(|r| r.to.as_ref() == Some(target) && is_turn_request(r))
+    };
+    if let Some(direct) = events_after
+        .iter()
+        .enumerate()
+        .find(|(idx, c)| {
+            is_turn_completion(c, target)
+                && (is_direct_match(c) || is_unstamped_before_next_request(*idx, c))
+        })
+        .map(|(_, c)| c)
+    {
+        return Some(direct);
+    }
+
+    let answered_newer_request = |a: ulid::Ulid| {
+        events_after.iter().any(|r| {
+            (r.id == a || (matches!(r.kind, Kind::Assign { .. }) && r.answers == Some(a)))
+                && r.to.as_ref() == Some(target)
+                && matches!(r.kind, Kind::Assign { .. } | Kind::Message { .. })
+        })
+    };
+    events_after.iter().find(|c| {
+        if !is_turn_completion(c, target) {
+            return false;
+        }
+        match &req.kind {
+            Kind::Message { .. } => match c.answers {
+                Some(a) => {
+                    a == req.id
+                        || (req.from == Actor::Gluon && req.answers == Some(a))
+                        || answered_newer_request(a)
+                }
+                None => true,
+            },
+            Kind::Assign { .. } => match c.answers {
+                Some(a) => {
+                    a == req.answers.unwrap_or(req.id) || a == req.id || answered_newer_request(a)
+                }
+                None => true,
+            },
+            Kind::PermissionGrant { .. } => true,
+            _ => true,
+        }
+    })
+}
+
+pub fn is_request_answered(events_after: &[Event], req: &Event, target: &QuarkId) -> bool {
+    request_completion(events_after, req, target).is_some()
+}
+
+/// Only the newest unanswered request is returned. Two quarks masked at once therefore
+/// resolve one per dispatch pass, which the engine's re-read loop already does.
+pub fn next_pending(events: &[Event]) -> Option<QuarkId> {
+    events
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, e)| e.to.is_some() && is_turn_request(e))
+        .find(|(idx, e)| {
+            let target = e.to.as_ref().unwrap();
+            !is_request_answered(&events[idx + 1..], e, target)
+        })
+        .map(|(_, e)| e.to.clone().unwrap())
+}
+
+/// Does event `e` represent `quark` completing a turn that answers `request_id` (or
+/// any request for an un-stamped legacy completion)?
+pub fn has_answered(after: &[Event], quark: &QuarkId, request_id: ulid::Ulid) -> bool {
+    after.iter().any(|e| {
+        is_turn_completion(e, quark)
+            && match e.answers {
+                Some(a) => a == request_id,
+                None => true, // legacy event: fall back to "it spoke after the message"
+            }
+    })
+}
+
+/// Does event `e` **request or resume** a turn from the quark it addresses (`to =
+/// Some(q)`)? A `Message` or `Assign` starts a new turn; a `PermissionGrant` resumes a
+/// paused one (the engine re-dispatches on `to == quark`).
+///
+/// The SSOT for "an addressed event that wants a turn", the counterpart to
+/// [`is_turn_completion`]. Control/config events that ALSO carry a `to` — `Reboot`
+/// (force-restart), `ModeSet`/`ModeClear` (per-quark posture) — are deliberately
+/// excluded: they address a quark to reconfigure it, not to make it work. Counting one
+/// as pending gave the quark a spurious empty turn — most visibly on every `/clear`,
+/// which appends one `Reboot` per resident quark, so the last-addressed reboot read as
+/// an unanswered turn request and excited that quark.
+pub fn is_turn_request(e: &Event) -> bool {
+    matches!(
+        e.kind,
+        Kind::Message { .. } | Kind::Assign { .. } | Kind::PermissionGrant { .. }
+    )
+}
+
+/// Does event `e` represent `quark` **completing** a turn — a reply (a `Message`) or a
+/// terminal/pause status (`Ground`, `Error`, `Blocked`, `Waiting`)?
+///
+/// This is the single source of truth for "the quark did something that ends a turn",
+/// shared by [`next_pending`] and the engine's `has_answered` so the two can never drift
+/// into disagreeing about whether a quark is still pending. It deliberately EXCLUDES the
+/// non-terminal `Excited`/`Thinking` statuses: those mean "started"/"working", not "done".
+/// Counting an `Excited` as an answer is exactly what stranded a quark whose turn was
+/// interrupted (a restart) after it went Excited but before it replied — the field kept it
+/// marked answered and it was never re-dispatched.
+pub fn is_turn_completion(e: &Event, quark: &QuarkId) -> bool {
+    e.from == Actor::Quark(quark.clone())
+        && (matches!(e.kind, Kind::Message { .. })
+            || matches!(
+                e.kind,
+                Kind::Status {
+                    state: QuarkState::Ground
+                        | QuarkState::Error
+                        | QuarkState::Blocked
+                        | QuarkState::Waiting
+                }
+            ))
+}
+
+/// The role alias every quark can address without knowing who currently holds the
+/// role. `@orchestrator` resolves against the live roster, so re-flavouring the
+/// team in `team.json` moves the escalation target with it and no prompt, test, or
+/// invariant that names the role goes stale. Reserved in `validate_quark_id`, so a
+/// quark can never take the alias as its own id.
+pub const ORCHESTRATOR_ALIAS: &str = "orchestrator";
+
+/// The broadcast alias: `@team` addresses every quark on the roster, which the
+/// daemon then fans out to sequentially (each answers in turn) — the "everyone
+/// report status" case.
+///
+/// Deliberately **human-only**. `parse_addressee` (the quark→quark path) does not
+/// resolve it, because a quark that broadcasts to the team excites every other
+/// quark, each of whom may broadcast back: an amplification loop bounded only by
+/// the exchange backstop. A human can rally the team; a quark must name who it
+/// wants.
+pub const TEAM_ALIAS: &str = "team";
+
+/// Self-delegation alias (`@self`): allows the orchestrator (or any quark in a
+/// multi-step wave) to schedule a continuation slice for itself on the `Work`
+/// lane immediately after flushing worker delegations, so workers and the
+/// orchestrator execute simultaneously rather than serially.
+pub const SELF_ALIAS: &str = "self";
+
+#[derive(Clone)]
+enum ResolvedMention<'a> {
+    Quark(&'a QuarkCard),
+    Team,
+}
+
+/// Does `text` start (case-insensitively) with `target_name`, at a mention-safe word
+/// boundary? The single boundary rule every mention matcher in this file shares —
+/// `try_match` below and [`task_names_card_specifically`] both ride it, so a
+/// multi-byte-char panic fixed once here can never resurface in a second hand-rolled
+/// matcher.
+///
+/// `get(..n)` is `None` when `n` is past the end OR not a char boundary. The boundary
+/// case is the one a raw `&text[..n]` slice panicked on: a multi-byte char (e.g. a
+/// smart quote) straddling the candidate's byte length. Skipping is correct — a
+/// prefix cut mid-char could never equal an ASCII target name. The character
+/// immediately following the match must NOT be a valid intra-word mention character
+/// (alphanumeric, '-', '_'), so `@Google` doesn't match `@GoogleBot`.
+fn boundary_match(text: &str, target_name: &str) -> bool {
+    let Some(prefix) = text.get(..target_name.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(target_name) {
+        return false;
+    }
+    let next_char = text[target_name.len()..].chars().next();
+    !matches!(next_char, Some(c) if c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Tries to find the longest target that matches the START of `text` (case-insensitively).
+/// To prevent partial word matches (e.g. `@Google` matching `@GoogleBot`),
+/// the character immediately following the match in `text` must NOT be a valid
+/// intra-word mention character (alphanumeric, '-', '_'). Note that spaces ARE
+/// allowed inside display names, but a matched name's boundary still applies.
+fn match_longest_mention<'a>(
+    text: &str,
+    roster: &'a [QuarkCard],
+    _preons: &[Preon],
+) -> Option<(usize, ResolvedMention<'a>)> {
+    fn try_match<'a>(
+        text: &str,
+        target_name: &str,
+        resolution: ResolvedMention<'a>,
+        best_match: &mut Option<(usize, ResolvedMention<'a>)>,
+    ) {
+        if boundary_match(text, target_name) {
+            let len = target_name.len();
+            if best_match
+                .as_ref()
+                .map_or(true, |(best_len, _)| len > *best_len)
+            {
+                *best_match = Some((len, resolution));
+            }
+        }
+    }
+
+    let mut best_match: Option<(usize, ResolvedMention<'a>)> = None;
+
+    try_match(text, TEAM_ALIAS, ResolvedMention::Team, &mut best_match);
+
+    if let Some(orch) = roster.iter().find(|c| c.flavor == Flavor::Orchestrator) {
+        try_match(
+            text,
+            ORCHESTRATOR_ALIAS,
+            ResolvedMention::Quark(orch),
+            &mut best_match,
+        );
+    }
+
+    for card in roster {
+        try_match(
+            text,
+            card.id.as_str(),
+            ResolvedMention::Quark(card),
+            &mut best_match,
+        );
+        if let Some(dn) = &card.display_name {
+            let is_reserved = hadron_lattice::is_reserved_quark_name(dn);
+            let collides_id = roster
+                .iter()
+                .any(|other| other.id != card.id && other.id.as_str().eq_ignore_ascii_case(dn));
+            if !is_reserved && !collides_id {
+                try_match(
+                    text,
+                    dn.as_str(),
+                    ResolvedMention::Quark(card),
+                    &mut best_match,
+                );
+            }
+        }
+    }
+
+    best_match
+}
+
+/// Replaces all Markdown fenced code blocks (``` or ~~~) and inline code spans (`...`)
+/// with ASCII spaces (preserving newlines `\n`), returning a String of the exact same
+/// byte length as `body`.
+///
+/// This ensures that `@mentions` inside code blocks, code fences, or inline backticks
+/// are never parsed as active routing targets, preventing spurious quark excitations.
+/// Preserving byte length and newlines guarantees that line numbers and character offsets
+/// outside code blocks match the original text 1-to-1.
+pub fn strip_markdown_code(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = bytes.to_vec();
+    let len = bytes.len();
+
+    let mut i = 0;
+    let mut in_fence: Option<(u8, usize)> = None;
+
+    while i < len {
+        let line_start = i;
+        while i < len && bytes[i] != b'\n' {
+            i += 1;
+        }
+        let line_end = i;
+        if i < len && bytes[i] == b'\n' {
+            i += 1;
+        }
+
+        let line_bytes = &bytes[line_start..line_end];
+        let mut indent = 0;
+        while indent < line_bytes.len() && line_bytes[indent] == b' ' {
+            indent += 1;
+        }
+        let unindented = &line_bytes[indent..];
+
+        if let Some((fence_char, fence_len)) = in_fence {
+            if indent <= 3 && unindented.len() >= fence_len {
+                let mut count = 0;
+                while count < unindented.len() && unindented[count] == fence_char {
+                    count += 1;
+                }
+                if count >= fence_len {
+                    let trailing = &unindented[count..];
+                    if trailing
+                        .iter()
+                        .all(|&b| b == b' ' || b == b'\t' || b == b'\r')
+                    {
+                        for b in &mut out[line_start..line_end] {
+                            *b = b' ';
+                        }
+                        in_fence = None;
+                        continue;
+                    }
+                }
+            }
+            for b in &mut out[line_start..line_end] {
+                *b = b' ';
+            }
+        } else {
+            if indent <= 3 && unindented.len() >= 3 {
+                let first_char = unindented[0];
+                if first_char == b'`' || first_char == b'~' {
+                    let mut count = 0;
+                    while count < unindented.len() && unindented[count] == first_char {
+                        count += 1;
+                    }
+                    if count >= 3 {
+                        let info = &unindented[count..];
+                        let valid_info = if first_char == b'`' {
+                            !info.contains(&b'`')
+                        } else {
+                            true
+                        };
+                        if valid_info {
+                            in_fence = Some((first_char, count));
+                            for b in &mut out[line_start..line_end] {
+                                *b = b' ';
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Inline backtick code spans
+            let mut j = line_start;
+            while j < line_end {
+                if out[j] == b'`' {
+                    let tick_start = j;
+                    while j < line_end && out[j] == b'`' {
+                        j += 1;
+                    }
+                    let tick_count = j - tick_start;
+
+                    if let Some((_, close_end)) = find_closing_backticks(&out, j, tick_count) {
+                        for k in tick_start..close_end {
+                            if out[k] != b'\n' && out[k] != b'\r' {
+                                out[k] = b' ';
+                            }
+                        }
+                        j = close_end;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+        }
+    }
+
+    String::from_utf8(out).unwrap_or_else(|_| body.to_string())
+}
+
+fn find_closing_backticks(bytes: &[u8], start: usize, count: usize) -> Option<(usize, usize)> {
+    let mut k = start;
+    let mut newlines = 0;
+    while k < bytes.len() {
+        if bytes[k] == b'\n' {
+            newlines += 1;
+            if newlines >= 2 {
+                return None;
+            }
+            k += 1;
+            continue;
+        } else if !bytes[k].is_ascii_whitespace() {
+            newlines = 0;
+        }
+
+        if bytes[k] == b'`' {
+            let run_start = k;
+            while k < bytes.len() && bytes[k] == b'`' {
+                k += 1;
+            }
+            let run_len = k - run_start;
+            if run_len == count {
+                return Some((run_start, k));
+            }
+        } else {
+            k += 1;
+        }
+    }
+    None
+}
+
+/// Extract the addressee from a Markdown message: the first line that **starts**
+/// with `@quarkid` (after optional leading whitespace) whose id is on the roster.
+/// `@orchestrator` also routes here — that is the escalation path a worker uses to
+/// put a decision back on whoever holds the role. Returns `None` (hand back to the
+/// human / broadcast) if none match.
+///
+/// A delegation only counts when `@<id>` begins a line — a mention buried in prose
+/// or *quoted* from history (e.g. a quark listing the conversation, which contains
+/// other quarks' handles) does NOT route. This is what keeps a quark from routing
+/// its reply to whoever it happened to name: the original whole-body scan tagged
+/// opus's reply `→ agy` merely because it quoted the string `@agy`, spuriously
+/// exciting agy. Sender-exclusion is kept as a belt-and-suspenders guard.
+pub fn parse_addressee(
+    body: &str,
+    roster: &[QuarkCard],
+    sender: Option<&QuarkId>,
+    preons: &[Preon],
+) -> Option<QuarkId> {
+    let clean = strip_markdown_code(body);
+    for line in clean.lines() {
+        let trimmed = line.trim_start();
+        let rest = if let Some(r) = trimmed.strip_prefix('@') {
+            r
+        } else if let Some(r) = trimmed.strip_prefix("**@") {
+            r
+        } else {
+            continue;
+        };
+        if let Some((_, resolution)) = match_longest_mention(rest, roster, preons) {
+            match resolution {
+                ResolvedMention::Quark(card) => {
+                    // Sender-exclusion also makes `@orchestrator` a no-op for the
+                    // orchestrator itself: its own reply falls through to "no addressee"
+                    // and control returns to the human, as it should.
+                    if Some(&card.id) != sender {
+                        return Some(card.id.clone());
+                    }
+                }
+                ResolvedMention::Team => {}
+            }
+        }
+    }
+    None
+}
+
+/// Parses all unique line-start mentions in a message body, excluding the sender
+/// unless the sender explicitly uses `@self` or is the orchestrator self-assigning
+/// a parallel slice alongside at least one peer worker delegation (`@<worker> ...` +
+/// `@orchestrator ...` / `@<orch-id> ...`).
+pub fn parse_all_addressees(
+    body: &str,
+    roster: &[QuarkCard],
+    sender: Option<&QuarkId>,
+    preons: &[Preon],
+) -> Vec<QuarkId> {
+    let mut out = Vec::new();
+    let mut explicit_self = false;
+    let mut saw_orch_self: Option<QuarkId> = None;
+    let clean = strip_markdown_code(body);
+    for line in clean.lines() {
+        let trimmed = line.trim_start();
+        let rest = if let Some(r) = trimmed.strip_prefix('@') {
+            r
+        } else if let Some(r) = trimmed.strip_prefix("**@") {
+            r
+        } else {
+            continue;
+        };
+        if boundary_match(rest, SELF_ALIAS) {
+            if let Some(s) = sender {
+                if roster.iter().any(|c| &c.id == s) {
+                    explicit_self = true;
+                    saw_orch_self = Some(s.clone());
+                }
+            }
+            continue;
+        }
+        if let Some((_, resolution)) = match_longest_mention(rest, roster, preons) {
+            match resolution {
+                ResolvedMention::Quark(card) => {
+                    if Some(&card.id) != sender {
+                        if !out.contains(&card.id) {
+                            out.push(card.id.clone());
+                        }
+                    } else if card.flavor == Flavor::Orchestrator {
+                        saw_orch_self = Some(card.id.clone());
+                    }
+                }
+                ResolvedMention::Team => {
+                    for card in roster {
+                        if Some(&card.id) != sender {
+                            if !out.contains(&card.id) {
+                                out.push(card.id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(self_id) = saw_orch_self {
+        let has_peer = out.iter().any(|id| id != &self_id);
+        if (explicit_self || has_peer) && !out.contains(&self_id) {
+            out.push(self_id);
+        }
+    }
+    out
+}
+
+/// Prefix any line starting with a mention that resolves to a quark in
+/// `already_dispatched` with `"✓ "` so a turn whose streaming draft already
+/// triggered a mid-turn worker dispatch does not re-dispatch the same worker
+/// when the final message is recorded at turn completion.
+pub fn neutralize_dispatched_mentions(
+    body: &str,
+    roster: &[QuarkCard],
+    sender: Option<&QuarkId>,
+    preons: &[Preon],
+    already_dispatched: &std::collections::HashSet<QuarkId>,
+) -> String {
+    if already_dispatched.is_empty() {
+        return body.to_string();
+    }
+    let mut out = String::with_capacity(body.len() + 16);
+    for (idx, line) in body.lines().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let line_targets = parse_all_addressees(line, roster, sender, preons);
+        if line_targets.iter().any(|t| already_dispatched.contains(t)) {
+            out.push_str("✓ ");
+            out.push_str(line);
+        } else {
+            out.push_str(line);
+        }
+    }
+    if body.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Every roster quark id `@mentioned` ANYWHERE in a human message, in first-seen
+/// order, deduped. Unlike `parse_addressee` (line-start only, for quark replies
+/// where an incidental/quoted mention must not route), a human addresses whoever
+/// they name — so "@opus do X and you @agy do Y" returns `[opus, agy]` and the
+/// daemon fans the turn out to each. Mentions of ids not on the roster are
+/// ignored; an `@` not starting a word (e.g. inside `email@host`) is not a mention.
+/// Mentions inside Markdown code blocks (fenced ```/~~~ or inline `...`) are ignored.
+pub fn human_mentions(body: &str, roster: &[QuarkCard], preons: &[Preon]) -> Vec<QuarkId> {
+    let clean = strip_markdown_code(body);
+    let mut out: Vec<QuarkId> = Vec::new();
+    let mut i = 0;
+    while let Some(at_idx) = clean[i..].find('@') {
+        let actual_at = i + at_idx;
+        let valid_start = actual_at == 0
+            || clean.as_bytes()[actual_at - 1].is_ascii_whitespace()
+            || (actual_at >= 2 && &clean[actual_at - 2..actual_at] == "**");
+
+        if valid_start {
+            let rest = &clean[actual_at + 1..];
+            if let Some((match_len, resolution)) = match_longest_mention(rest, roster, preons) {
+                match resolution {
+                    ResolvedMention::Team => {
+                        for card in roster {
+                            if !out.contains(&card.id) {
+                                out.push(card.id.clone());
+                            }
+                        }
+                    }
+                    ResolvedMention::Quark(card) => {
+                        if !out.contains(&card.id) {
+                            out.push(card.id.clone());
+                        }
+                    }
+                }
+                i = actual_at + 1 + match_len;
+                continue;
+            }
+        }
+        i = actual_at + 1;
+    }
+    out
+}
+
+/// Whether `task` specifically names `card` — by its own `@id` or its `display_name`
+/// (case-insensitive) — using the same char-boundary-safe mention scan [`human_mentions`]
+/// uses ([`boundary_match`]).
+///
+/// Mentions inside Markdown code blocks (fenced ```/~~~ or inline `...`) are ignored.
+pub fn task_names_card_specifically(task: &str, card: &QuarkCard, _preons: &[Preon]) -> bool {
+    let clean = strip_markdown_code(task);
+    let mut i = 0;
+    while let Some(at_idx) = clean[i..].find('@') {
+        let actual_at = i + at_idx;
+        let valid_start = actual_at == 0
+            || clean.as_bytes()[actual_at - 1].is_ascii_whitespace()
+            || (actual_at >= 2 && &clean[actual_at - 2..actual_at] == "**");
+        if valid_start {
+            let rest = &clean[actual_at + 1..];
+            if boundary_match(rest, card.id.as_str())
+                || card
+                    .display_name
+                    .as_deref()
+                    .is_some_and(|dn| boundary_match(rest, dn))
+            {
+                return true;
+            }
+        }
+        i = actual_at + 1;
+    }
+    false
+}
+
+/// Extracts the clause(s) addressed to `target` from a multi-quark message `body`.
+///
+/// Consecutive `@mention`s separated only by whitespace, commas, `&`, `*`, or `"and"`
+/// share a single clause (e.g. `@quark1 and @quark2 /brainstorming ...`). When a
+/// subsequent `@mention` appears after task prose (e.g. `... and @quark3 /plan`),
+/// a new clause begins at that mention.
+///
+/// Returns an empty `String` if `body` addresses fewer than 2 distinct quarks (or if
+/// `target` is not specifically addressed in any clause), signalling the caller to
+/// evaluate `body` as a whole.
+pub fn extract_target_segment(body: &str, target: &QuarkId, roster: &[QuarkCard]) -> String {
+    let clean = strip_markdown_code(body);
+    let mut clauses: Vec<(usize, usize, Vec<QuarkId>)> = Vec::new();
+    let mut prev_mention_end: Option<usize> = None;
+    let mut i = 0;
+
+    while let Some(at_idx) = clean[i..].find('@') {
+        let actual_at = i + at_idx;
+        let bold_prefix = actual_at >= 2 && &clean[actual_at - 2..actual_at] == "**";
+        let valid_start =
+            actual_at == 0 || clean.as_bytes()[actual_at - 1].is_ascii_whitespace() || bold_prefix;
+
+        if valid_start {
+            let rest = &clean[actual_at + 1..];
+            if let Some((match_len, resolution)) = match_longest_mention(rest, roster, &[]) {
+                let mention_start = if bold_prefix {
+                    actual_at - 2
+                } else {
+                    actual_at
+                };
+                let mut mention_end = actual_at + 1 + match_len;
+                if clean[mention_end..].starts_with("**") {
+                    mention_end += 2;
+                }
+
+                let targets: Vec<QuarkId> = match resolution {
+                    ResolvedMention::Team => roster.iter().map(|c| c.id.clone()).collect(),
+                    ResolvedMention::Quark(card) => vec![card.id.clone()],
+                };
+
+                let shares_previous_clause = if let Some(prev_end) = prev_mention_end {
+                    let between = &clean[prev_end..mention_start];
+                    is_mention_conjunction(between)
+                } else {
+                    false
+                };
+
+                if shares_previous_clause {
+                    if let Some((_, _, clause_targets)) = clauses.last_mut() {
+                        for t in targets {
+                            if !clause_targets.contains(&t) {
+                                clause_targets.push(t);
+                            }
+                        }
+                    }
+                } else {
+                    if let Some((_, prev_clause_end, _)) = clauses.last_mut() {
+                        *prev_clause_end = mention_start;
+                    }
+                    clauses.push((mention_start, body.len(), targets));
+                }
+
+                prev_mention_end = Some(mention_end);
+                i = mention_end;
+                continue;
+            }
+        }
+        i = actual_at + 1;
+    }
+
+    let mut distinct_quarks: Vec<QuarkId> = Vec::new();
+    for (_, _, targets) in &clauses {
+        for t in targets {
+            if !distinct_quarks.contains(t) {
+                distinct_quarks.push(t.clone());
+            }
+        }
+    }
+
+    if distinct_quarks.len() < 2 {
+        return String::new();
+    }
+
+    let target_clauses: Vec<&str> = clauses
+        .iter()
+        .filter(|(_, _, targets)| targets.contains(target))
+        .filter_map(|&(start, end, _)| body.get(start..end))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    target_clauses.join("\n")
+}
+
+fn is_mention_conjunction(between: &str) -> bool {
+    if between.contains('\n') {
+        return false;
+    }
+    let cleaned = between
+        .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == '&' || c == '*' || c == '/');
+    cleaned.is_empty() || cleaned.eq_ignore_ascii_case("and") || cleaned.eq_ignore_ascii_case("or")
+}
+
+pub mod balancer;
+pub use balancer::*;
+
+#[cfg(test)]
+mod tests;

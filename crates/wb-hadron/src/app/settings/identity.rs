@@ -1,0 +1,260 @@
+use super::*;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SkillInfo {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub is_global: bool,
+}
+
+impl super::Chamber {
+    /// Open the native file picker to choose an avatar image; the choice is parked
+    /// in `pending_image_pick` for `render` to apply (see the field's doc — the
+    /// picker task has no `Window`, which `set_value` needs).
+    pub(super) fn pick_avatar_image(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose avatar image".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked =
+                match crate::app::widgets::classify_pick(rx.await.ok().and_then(|r| r.ok())) {
+                    crate::app::widgets::Picked::Path(p) => Some(p),
+                    crate::app::widgets::Picked::Cancelled => return,
+                    crate::app::widgets::Picked::NoPicker => {
+                        cx.background_spawn(async { fallback_pick_image() }).await
+                    }
+                };
+            let _ = this.update(cx, |this, cx| {
+                match picked {
+                    Some(path) => this.pending_image_pick = Some(path),
+                    None => eprintln!(
+                        "chamber: could not open a file picker (no xdg-desktop-portal, and \
+                         no zenity/powershell fallback) — paste an image path into the field."
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Set the current target's accent/avatar color from a swatch.
+    pub(crate) fn set_settings_color(&mut self, hex: u32, cx: &mut Context<Self>) {
+        self.commit_settings_inputs(cx);
+        if let Some(id) = self.settings_identity_mut() {
+            id.color = Some(format!("#{hex:06x}"));
+            let _ = config::save(&self.prefs);
+            cx.notify();
+        }
+    }
+
+    /// Clear the current target's image (falling back to color + initials).
+    pub(super) fn clear_settings_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(identity) = self.settings_identity_mut() {
+            identity.image_path = None;
+            self.settings_path
+                .update(cx, |s, cx| s.set_value("", window, cx));
+            let _ = config::save(&self.prefs);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn loaded_skills(&self) -> Vec<SkillInfo> {
+        struct CachedLoadedSkills {
+            chamber_path: std::path::PathBuf,
+            last_scanned: std::time::Instant,
+            skills: Vec<SkillInfo>,
+        }
+
+        thread_local! {
+            static LOADED_SKILLS_CACHE: std::cell::RefCell<Option<CachedLoadedSkills>> = const { std::cell::RefCell::new(None) };
+        }
+
+        LOADED_SKILLS_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(ref c) = *cache {
+                if c.chamber_path == self.path
+                    && c.last_scanned.elapsed() < std::time::Duration::from_millis(1500)
+                {
+                    return c.skills.clone();
+                }
+            }
+
+            let mut skills = Vec::new();
+
+            // Helper to scan a dir for markdown files
+            let mut scan_dir = |dir: &std::path::Path, is_global: bool| {
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+                    entries.sort_by_key(|e| e.path());
+                    for entry in entries {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                let name = stem.to_string();
+                                if !skills.iter().any(|s: &SkillInfo| s.name == name) {
+                                    skills.push(SkillInfo {
+                                        name,
+                                        path,
+                                        is_global,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            // 1. Repo skills (.hadron/skills and fallback .hadron/preons)
+            let hadron_dir = match self.path.parent() {
+                Some(p) => p.to_path_buf(),
+                None => std::path::PathBuf::from(".hadron"),
+            };
+            scan_dir(&hadron_dir.join("skills"), false);
+            scan_dir(&hadron_dir.join("preons"), false);
+
+            // 2. Global skills (~/.hadron/skills and fallback ~/.hadron/preons)
+            if let Some(user_dir) = hadron_lattice::user_hadron_dir() {
+                scan_dir(&user_dir.join("skills"), true);
+                scan_dir(&user_dir.join("preons"), true);
+            }
+
+            *cache = Some(CachedLoadedSkills {
+                chamber_path: self.path.clone(),
+                last_scanned: std::time::Instant::now(),
+                skills: skills.clone(),
+            });
+
+            skills
+        })
+    }
+
+    pub(super) fn available_skills(&self) -> Vec<String> {
+        let mut list: Vec<String> = hadron_gluon::skills::builtins()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        for skill in self.loaded_skills() {
+            if !list.iter().any(|r| r.eq_ignore_ascii_case(&skill.name)) {
+                list.push(skill.name);
+            }
+        }
+        list
+    }
+
+    pub(super) fn add_custom_skill(
+        &self,
+        skill_name: &str,
+        is_global: bool,
+    ) -> Option<std::path::PathBuf> {
+        let clean = skill_name.trim().to_lowercase();
+        if clean.is_empty() {
+            return None;
+        }
+        let target_dir = if is_global {
+            hadron_lattice::user_hadron_dir()?.join("skills")
+        } else {
+            match self.path.parent() {
+                Some(p) => p.join("skills"),
+                None => std::path::PathBuf::from(".hadron/skills"),
+            }
+        };
+
+        if std::fs::create_dir_all(&target_dir).is_ok() {
+            let skill_file = target_dir.join(format!("{clean}.md"));
+            let content = format!("---\nname: {clean}\n---\n\n# Skill: {clean}\nCustom skill procedure and instructions.\n");
+            if std::fs::write(&skill_file, content).is_ok() {
+                Some(skill_file)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn delete_skill_file(&self, path: &std::path::Path) -> bool {
+        if path.exists() {
+            std::fs::remove_file(path).is_ok()
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn skill_selector(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let mut available = self.available_skills();
+        let deny_skills_val = self.settings_deny_skills.read(cx).value();
+        let current_deny_skills: Vec<String> = deny_skills_val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Also include any off-list denied skills so they can be viewed/re-enabled
+        for d in &current_deny_skills {
+            if !available.iter().any(|a| a.eq_ignore_ascii_case(d)) {
+                available.push(d.clone());
+            }
+        }
+
+        let mut row = h_flex().w_full().gap_1p5().flex_wrap();
+        for skill in &available {
+            let denied = current_deny_skills
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(skill));
+            let selected = !denied;
+            let f = self.settings_deny_skills.clone();
+            let p = skill.clone();
+            let current_deny_clone = current_deny_skills.clone();
+
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("skill-chip-{}", skill)))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .text_xs()
+                    .flex_none()
+                    .cursor_pointer()
+                    .when(selected, |d| {
+                        d.bg(theme::bg_elevated())
+                            .border_color(theme::accent())
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(theme::accent())
+                    })
+                    .when(!selected, |d| {
+                        d.bg(theme::input_bg())
+                            .border_color(theme::border())
+                            .text_color(theme::text_muted())
+                            .hover(|s| s.bg(theme::bg_surface_raised()))
+                    })
+                    .child(skill.clone())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let mut new_deny = current_deny_clone.clone();
+                        let target_skill = p.to_string();
+                        if selected {
+                            // Currently ON -> user unselected it -> add to deny_skills
+                            if !new_deny
+                                .iter()
+                                .any(|x| x.eq_ignore_ascii_case(&target_skill))
+                            {
+                                new_deny.push(target_skill);
+                            }
+                        } else {
+                            // Currently OFF (denied) -> user selected it -> remove from deny_skills
+                            new_deny.retain(|x| !x.eq_ignore_ascii_case(&target_skill));
+                        }
+                        f.update(cx, |s, cx| s.set_value(new_deny.join(", "), window, cx));
+                        this.commit_settings_inputs(cx);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        row.into_any_element()
+    }
+}

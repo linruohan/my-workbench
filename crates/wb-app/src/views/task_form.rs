@@ -1,6 +1,7 @@
 //! 任务新建 / 查看 / 编辑共用的弹窗表单。
 
 use crate::state::AppState;
+use crate::style;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime};
@@ -541,7 +542,7 @@ impl Render for TaskForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let form = cx.weak_entity();
         let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
+        let border = style::hairline(cx);
         let radius = cx.theme().radius;
         let project_label = self.project_label();
         let status_label = self.status.label();

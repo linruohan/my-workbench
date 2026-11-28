@@ -1,0 +1,1698 @@
+//! The merge gate's **effects**: running the workspace tests, and landing a branch.
+//!
+//! The split is forced by `hadron-gatekeeper`'s own contract — that crate is
+//! "intentionally offline and side-effect-free", so it cannot shell out to `cargo
+//! test` or `git merge`. It keeps the *decision* ([`hadron_gatekeeper::merge_decision`],
+//! a truth table); this module keeps everything that touches the world.
+//!
+//! Everything here is behind the [`MergeRunner`] trait, and the engine's gate is
+//! `None` by default. That is not fastidiousness: the production runner spawns
+//! `cargo test --workspace`, and a unit test that reached it would recurse into the
+//! very suite it is running from. Tests inject a fake; only the daemon seats
+//! [`CargoMergeRunner`].
+
+use std::path::Path;
+
+use async_trait::async_trait;
+use hadron_lattice::MergeStrategy;
+
+use crate::snapshot::{git, git_ok};
+use crate::worktree::Worktree;
+
+pub mod ast_healer;
+pub use ast_healer::*;
+
+/// How a branch was brought up to date with `base` **before** the gate tested it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Synced {
+    /// `base` had not moved since the branch was cut — nothing to replay.
+    AlreadyCurrent,
+    /// `base` moved; the branch was replayed on top of it. It may now be EMPTY —
+    /// every commit already applied upstream by another route — which is a no-op
+    /// land, not a failure.
+    Rebased,
+    /// The rebase hit conflicts a machine must not resolve. It was aborted; the
+    /// branch is exactly where the quark left it.
+    Conflicted(String),
+}
+
+/// How a branch reached the default branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Landed {
+    /// Every commit was already on `base` — the work arrived by another route (a
+    /// cherry-pick, a sibling branch), so nothing was merged. Reporting this as a
+    /// fast-forward would tell the human a merge happened that did not.
+    AlreadyLanded,
+    /// The clean case: the default branch had not moved, so history stays linear.
+    FastForward,
+    /// The default branch moved while the quark worked (another quark landed
+    /// first) — the branch was rebased onto it and then fast-forwarded. Under
+    /// concurrency this is the *common* case, not the edge case.
+    RebasedThenFastForward,
+    /// Multi-commit branch collapsed into a single squash commit on base.
+    SquashAndMerge,
+    /// Branch pushed to remote origin and PR opened/updated.
+    GitHubPrOpened(String),
+    /// The rebase hit conflicts a machine must not resolve. Nothing was landed and
+    /// nothing was lost: the branch is exactly where the quark left it.
+    Conflicted(String),
+}
+
+impl Landed {
+    pub fn describe(&self, branch: &str, base: &str) -> String {
+        match self {
+            Landed::AlreadyLanded => {
+                format!("nothing to merge: every commit on `{branch}` is already on `{base}`.")
+            }
+            Landed::FastForward => format!("merged `{branch}` → `{base}` (fast-forward)."),
+            Landed::RebasedThenFastForward => format!(
+                "merged `{branch}` → `{base}` (`{base}` had moved, so the branch was rebased \
+                 onto it and re-tested first)."
+            ),
+            Landed::SquashAndMerge => format!("merged `{branch}` → `{base}` (squash commit)."),
+            Landed::GitHubPrOpened(detail) => format!("mirrored `{branch}` → origin ({detail})."),
+            Landed::Conflicted(err) => {
+                if err.starts_with("Merge gate rejected") {
+                    format!("could not merge `{branch}` → `{base}`:\n\n{err}")
+                } else {
+                    format!(
+                        "could not merge `{branch}` → `{base}`: rebasing onto `{base}` conflicts, and \
+                         a machine must not guess at a resolution. The branch is untouched.\n\n{err}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Live line callback invoked by [`run_tests_within_streaming`] as stdout/stderr
+/// lines arrive from the merge-gate test runner: `(stream, line)` where `stream`
+/// is `"stdout"` or `"stderr"`.
+pub type GateLineSink = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// The seam. `tests` is async (a real one takes minutes); `land` is not (git is
+/// fast, and it must be serialized against the default branch anyway).
+#[async_trait]
+pub trait MergeRunner: Send + Sync {
+    /// Run the workspace tests **in the quark's worktree**, on the branch as it now
+    /// stands. Returns (passed, a tail of the output for the human).
+    async fn tests(&self, wt: &Worktree) -> anyhow::Result<(bool, String)>;
+
+    /// Run workspace tests while streaming stdout/stderr lines to `sink` as they
+    /// arrive. Defaults to [`Self::tests`] so fake runners in unit tests need no
+    /// extra boilerplate.
+    async fn tests_streaming(
+        &self,
+        wt: &Worktree,
+        _sink: Option<GateLineSink>,
+    ) -> anyhow::Result<(bool, String)> {
+        self.tests(wt).await
+    }
+
+    /// Replay the branch on top of `base`, **before** `tests` runs. Defaults to the
+    /// real git rebase: a fake runner exists to stub the expensive `tests`, and a
+    /// fake that also skipped the rebase would stop testing the thing that lands.
+    fn sync(&self, wt: &Worktree, base: &str) -> Synced {
+        sync(wt, base)
+    }
+
+    /// Land the branch on `base`, in `repo_root`.
+    fn land(&self, repo_root: &Path, wt: &Worktree, base: &str) -> anyhow::Result<Landed>;
+
+    /// Land the branch using the specified [`MergeStrategy`].
+    fn land_with_strategy(
+        &self,
+        repo_root: &Path,
+        wt: &Worktree,
+        base: &str,
+        strategy: MergeStrategy,
+    ) -> anyhow::Result<Landed> {
+        match strategy {
+            MergeStrategy::FastForward => self.land(repo_root, wt, base),
+            MergeStrategy::Squash => land_squash(repo_root, wt, base),
+            MergeStrategy::GitHubPr => land_github_pr(repo_root, wt, base),
+        }
+    }
+}
+
+/// True when the repo has any remote configured. FALSE for hadron today (`git
+/// remote -v` is empty), which is why the local `--ff-only` path is the live one
+/// and `git push` + `gh pr create` is the dormant branch.
+pub fn has_remote(repo_root: &Path) -> bool {
+    git_ok(repo_root, &["remote"])
+        .ok()
+        .flatten()
+        .is_some_and(|out| !out.trim().is_empty())
+}
+
+/// Pick the test command from the worktree's own manifest. Checked in a fixed
+/// order because a repo can carry more than one manifest (a Rust workspace with
+/// a `package.json` for its docs site is the common case), and Cargo is checked
+/// FIRST: a `Cargo.toml` beside a `package.json` used to resolve to `npm test`,
+/// which would have run the wrong suite on Hadron's own repo the day anyone added
+/// a docs site. Cargo is also the fallback when no manifest is recognised at all —
+/// a wrong-but-loud `cargo` failure beats silently gating on nothing.
+pub fn detect_runner(worktree_path: &Path) -> (&'static str, &'static [&'static str]) {
+    if worktree_path.join("Cargo.toml").is_file() {
+        ("cargo", &["test", "--workspace"])
+    } else if worktree_path.join("package.json").is_file() {
+        ("npm", &["test"])
+    } else if worktree_path.join("pyproject.toml").is_file()
+        || worktree_path.join("setup.py").is_file()
+    {
+        ("pytest", &[])
+    } else if worktree_path.join("go.mod").is_file() {
+        ("go", &["test", "./..."])
+    } else {
+        ("cargo", &["test", "--workspace"])
+    }
+}
+
+/// Slices the test command down to the transitive closure of affected workspace
+/// crates (`direct ∪ downstream` via zero-subprocess manifest parsing), failing
+/// closed to `cargo test --workspace` on root/member manifest edits, lockfile,
+/// CI/cargo config, non-member files, or when every member is affected.
+pub fn detect_affected_runner(worktree_path: &Path, base: &str) -> (&'static str, Vec<String>) {
+    if !worktree_path.join("Cargo.toml").is_file() {
+        let (p, args) = detect_runner(worktree_path);
+        return (p, args.iter().map(|s| s.to_string()).collect());
+    }
+    let diff_files = match git_ok(
+        worktree_path,
+        &["diff", "--name-only", &format!("{base}...HEAD")],
+    ) {
+        Ok(Some(out)) => out
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let file_refs: Vec<&str> = diff_files.iter().map(|s| s.as_str()).collect();
+    match hadron_forge::ast_blast_radius::resolve_affected_workspace_crates(
+        worktree_path,
+        &file_refs,
+    ) {
+        hadron_forge::ast_blast_radius::AffectedCratesResult::Specific(crates) => {
+            let mut args = vec!["test".to_string()];
+            for c in crates {
+                args.push("-p".to_string());
+                args.push(c);
+            }
+            ("cargo", args)
+        }
+        hadron_forge::ast_blast_radius::AffectedCratesResult::WorkspaceWide(_) => {
+            ("cargo", vec!["test".to_string(), "--workspace".to_string()])
+        }
+    }
+}
+
+/// The production runner: `cargo test --workspace` (or affected slice) and a local `--ff-only` merge.
+pub struct CargoMergeRunner;
+
+#[async_trait]
+impl MergeRunner for CargoMergeRunner {
+    async fn tests(&self, wt: &Worktree) -> anyhow::Result<(bool, String)> {
+        self.tests_streaming(wt, None).await
+    }
+
+    async fn tests_streaming(
+        &self,
+        wt: &Worktree,
+        sink: Option<GateLineSink>,
+    ) -> anyhow::Result<(bool, String)> {
+        let base = crate::snapshot::main_repo_root(&wt.path)
+            .map(|r| crate::worktree::default_branch(&r))
+            .unwrap_or_else(|_| "main".to_string());
+        let (program, args) = detect_affected_runner(&wt.path, &base);
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_tests_within_streaming(wt, program, &arg_refs, GATE_TEST_DEADLINE, sink).await
+    }
+
+    fn land(&self, repo_root: &Path, wt: &Worktree, base: &str) -> anyhow::Result<Landed> {
+        land(repo_root, wt, base)
+    }
+}
+
+/// How many bytes of test output to carry back to the human. The tail, not the
+/// head: a failure's cause is at the end.
+const TAIL_BYTES: usize = 4000;
+
+fn tail(s: &str) -> String {
+    tail_str(s, TAIL_BYTES).to_string()
+}
+
+fn tail_str(s: &str, max_bytes: usize) -> &str {
+    let mut start = s.len().saturating_sub(max_bytes);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
+fn combine_output_tails(stdout: &str, stderr: &str) -> String {
+    let stdout_budget = if stderr.len() < TAIL_BYTES / 2 {
+        TAIL_BYTES.saturating_sub(stderr.len())
+    } else {
+        TAIL_BYTES / 2
+    };
+    let stdout_tail = tail_str(stdout, stdout_budget);
+    let stderr_budget = TAIL_BYTES.saturating_sub(stdout_tail.len());
+    let stderr_tail = tail_str(stderr, stderr_budget);
+    let mut text = String::with_capacity(stdout_tail.len() + stderr_tail.len() + 1);
+    text.push_str(stdout_tail);
+    if !stdout_tail.is_empty() && !stderr_tail.is_empty() && !stdout_tail.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(stderr_tail);
+    tail(&text)
+}
+
+/// How long the gate will wait for a project's test suite before cutting it off.
+///
+/// **The gate runs a command nobody in this repo wrote.** `detect_runner` picks it
+/// from the target project's own manifest, so a hung test in the human's project is
+/// a hung `await` in the daemon — and the gate sits in the dispatch path *ahead* of
+/// `worktree::ensure`, the snapshot and the `Status{Excited}` append, so a wedge here
+/// writes no field event at all: every quark reads as "working…" forever with an
+/// empty field and nothing to point at. `TURN_DEADLINE` does not cover this; it wraps
+/// `quark.excite`, and the gate is outside it. Deliberately under that 30 minutes, so
+/// a wedged gate stays inside the turn budget the human already expects.
+///
+/// Measured cause: a `cargo test --workspace` in a project whose own suite spun
+/// forever kept a daemon from dispatching anything for hours.
+pub const GATE_TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Run an arbitrary command as "the tests", in the worktree, under
+/// [`GATE_TEST_DEADLINE`].
+///
+/// The command is a parameter so this is testable without spawning a real `cargo
+/// test` (which, inside this workspace's own suite, would recurse). The production
+/// call site pins `cargo test --workspace`.
+pub async fn run_tests_with(
+    wt: &Worktree,
+    program: &str,
+    args: &[&str],
+) -> anyhow::Result<(bool, String)> {
+    run_tests_within(wt, program, args, GATE_TEST_DEADLINE).await
+}
+
+/// Per-stream rolling tail ceiling during live line streaming (4× [`TAIL_BYTES`])
+/// so noisy test runs stay O(1) in heap memory while preserving full tail fidelity.
+const STREAM_TAIL_LIMIT: usize = TAIL_BYTES * 4;
+const STREAM_TAIL_KEEP: usize = TAIL_BYTES * 2;
+/// Maximum bytes read per single line chunk before emitting (prevents OOM on
+/// newline-less binary floods).
+const MAX_STREAM_LINE_BYTES: usize = 64 * 1024;
+
+async fn drain_pipe_lines<R: tokio::io::AsyncRead + Unpin>(
+    pipe: R,
+    stream_name: &'static str,
+    sink: Option<GateLineSink>,
+) -> String {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    let mut reader = BufReader::new(pipe);
+    let mut raw = Vec::new();
+    let mut tail_buf = String::new();
+    loop {
+        raw.clear();
+        let read_res = (&mut reader)
+            .take(MAX_STREAM_LINE_BYTES as u64)
+            .read_until(b'\n', &mut raw)
+            .await;
+        match read_res {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&raw);
+                tail_buf.push_str(&text);
+                if tail_buf.len() > STREAM_TAIL_LIMIT {
+                    let mut cut = tail_buf.len().saturating_sub(STREAM_TAIL_KEEP);
+                    while cut < tail_buf.len() && !tail_buf.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    tail_buf.drain(..cut);
+                }
+                if let Some(ref cb) = sink {
+                    let clean = text.trim_end_matches(&['\r', '\n'][..]);
+                    cb(stream_name, clean);
+                }
+            }
+        }
+    }
+    tail_buf
+}
+
+/// [`run_tests_with`] with the deadline as a parameter. Tests use a tiny one.
+pub async fn run_tests_within(
+    wt: &Worktree,
+    program: &str,
+    args: &[&str],
+    deadline: std::time::Duration,
+) -> anyhow::Result<(bool, String)> {
+    run_tests_within_streaming(wt, program, args, deadline, None).await
+}
+
+/// Line-streaming variant of [`run_tests_within`]. Streams stdout and stderr lines
+/// incrementally to `sink` while preserving bounded tail accumulation, process-group
+/// isolation, `kill_on_drop`, `QuarkProbe` timeout dumps, and hard deadline killing.
+pub async fn run_tests_within_streaming(
+    wt: &Worktree,
+    program: &str,
+    args: &[&str],
+    deadline: std::time::Duration,
+    sink: Option<GateLineSink>,
+) -> anyhow::Result<(bool, String)> {
+    let (actual_prog, actual_args) =
+        if let Some((distro, linux_cwd)) = hadron_lattice::wsl::parse_wsl_unc_path(&wt.path) {
+            let string_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            hadron_lattice::wsl::wrap_wsl_command(&distro, &linux_cwd, program, &string_args)
+        } else {
+            (
+                program.to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            )
+        };
+    let is_wsl = hadron_lattice::wsl::is_wsl_unc_path(&wt.path);
+
+    let mut cmd = tokio::process::Command::new(&actual_prog);
+    cmd.args(&actual_args)
+        .current_dir(if is_wsl {
+            std::env::temp_dir()
+        } else {
+            wt.path.clone()
+        })
+        // A test runner that reads stdin would otherwise block on the daemon's own
+        // terminal, which is the same wedge by another route.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // The deadline arm below kills the group explicitly, but that is not the only
+        // way this future dies: cancel the surrounding turn (a reboot, a shutdown) and
+        // `child` is dropped with the child still running. Same guarantee
+        // `ProcessRunner` relies on (`engine/run.rs`'s watchdog comment).
+        .kill_on_drop(true);
+
+    // Ephemeral scrubbed environment from IsolatedSandbox for secure isolation
+    let sandbox = hadron_gatekeeper::IsolatedSandbox::new(&wt.path, Default::default());
+    for (k, v) in sandbox.scrub_environment() {
+        cmd.env(k, v);
+    }
+
+    // **The gate's cost lives or dies on this line** — and so does the disk. See
+    // `worktree::shared_build_env` for why; the quark's own subprocess gets the very
+    // same env, which is the point of it living in one place.
+    let build_env = crate::worktree::shared_build_env(&wt.path);
+    let low_priority = build_env
+        .iter()
+        .find(|(k, _)| k == "HADRON_TEST_LOW_PRIORITY")
+        .map(|(_, v)| v != "0" && v != "false")
+        .unwrap_or(true);
+    if let Some((distro, _)) = hadron_lattice::wsl::parse_wsl_unc_path(&wt.path) {
+        let mut keys = Vec::with_capacity(build_env.len());
+        for (k, v) in build_env {
+            let translated = hadron_lattice::wsl::translate_arg_for_wsl(&distro, &v);
+            cmd.env(&k, translated);
+            keys.push(k);
+        }
+        let wslenv = hadron_lattice::wsl::wslenv_for_keys(keys.iter().map(String::as_str));
+        if !wslenv.is_empty() {
+            cmd.env("WSLENV", wslenv);
+        }
+    } else {
+        cmd.envs(build_env);
+    }
+
+    // Inject cache metadata isolation flags to prevent foreign rlib collisions
+    hadron_gatekeeper::cache_guard::inject_cache_isolation_flags(
+        cmd.as_std_mut(),
+        program,
+        &wt.path,
+    );
+
+    // Its own process group, so the deadline can kill the whole tree rather than just
+    // the launcher. `cargo test` is a launcher: killing it orphans the test binary,
+    // which is exactly the process that was still burning four CPU-hours after the
+    // daemon that started it had given up on it.
+    use hadron_lattice::sys::ConfigureProcessGroup;
+    cmd.as_std_mut()
+        .set_process_group_with_priority(low_priority);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok((
+                false,
+                format!("failed to run the gate's tests ({program}): {e}"),
+            ));
+        }
+    };
+    let pid = child.id();
+    if let Some(pid) = pid {
+        if low_priority {
+            hadron_lattice::sys::lower_process_group_priority(pid);
+        }
+        crate::proc::register(pid);
+    }
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_sink = sink.clone();
+    let stderr_sink = sink;
+
+    let timed = tokio::time::timeout(deadline, async {
+        let stdout_fut = async {
+            match stdout_pipe {
+                Some(pipe) => drain_pipe_lines(pipe, "stdout", stdout_sink).await,
+                None => String::new(),
+            }
+        };
+        let stderr_fut = async {
+            match stderr_pipe {
+                Some(pipe) => drain_pipe_lines(pipe, "stderr", stderr_sink).await,
+                None => String::new(),
+            }
+        };
+        tokio::join!(stdout_fut, stderr_fut, child.wait())
+    })
+    .await;
+
+    let (stdout, stderr, status) = match timed {
+        Ok((stdout, stderr, status_res)) => {
+            if let Some(pid) = pid {
+                crate::proc::unregister(pid);
+            }
+            match status_res {
+                Ok(status) => (stdout, stderr, status),
+                Err(e) => {
+                    return Ok((
+                        false,
+                        format!("failed to run the gate's tests ({program}): {e}"),
+                    ));
+                }
+            }
+        }
+        // **Red, not `Err`.** An `Err` propagates out of `merge_gate` through
+        // `run_until_quiesce`'s `?` into the daemon's "excite error (continuing)" arm,
+        // which loops straight back onto the same branch and hangs again — a wedge
+        // traded for a slow loop. A red gate is a state the engine already handles:
+        // `Status{Blocked}` with a reason, the branch untouched, the quark excitable.
+        Err(_) => {
+            let mut forensic_info = String::new();
+            if let Some(pid) = pid {
+                if let Some(dump) = crate::quark_probe::QuarkProbe::capture_dump(pid) {
+                    forensic_info =
+                        format!("\n\n{}", crate::quark_probe::QuarkProbe::format_dump(&dump));
+                }
+                crate::proc::unregister(pid);
+                kill_process_group(pid);
+            }
+            let _ = child.start_kill();
+            return Ok((
+                false,
+                format!(
+                    "the gate's tests ({program}) did not finish within {}s and were killed. \
+                     The branch is untouched and nothing was landed. A suite that hangs here \
+                     stops the daemon dispatching ANY quark, so fix or exclude the hanging \
+                     test before the next turn.{forensic_info}",
+                    deadline.as_secs(),
+                ),
+            ));
+        }
+    };
+
+    Ok((status.success(), combine_output_tails(&stdout, &stderr)))
+}
+
+/// SIGKILL the whole process group led by `pid` — the launcher *and* everything it
+/// spawned. Best-effort: a group that has already exited is not an error.
+///
+/// Re-exported, not reimplemented: `hadron_lattice::sys` runs process management under the
+/// same rule, and two copies of a kill is one copy that stops matching.
+pub(crate) use hadron_lattice::sys::kill_process_group;
+
+/// Land `wt.branch` on `base` in the parent repo.
+///
+/// **`--ff-only`, never a merge commit.** The gate's whole value is that the
+/// default branch only ever contains tested, approved, linear work; a merge commit
+/// would let two individually-green branches combine into something nobody ran. If
+/// `base` has moved, the branch is rebased onto it — in the quark's own worktree,
+/// so the parent checkout is never touched — and the fast-forward is retried.
+///
+/// A conflicting rebase is aborted and reported. Nothing is deleted: the branch
+/// still points at exactly the commits the quark made.
+pub fn land(repo_root: &Path, wt: &Worktree, base: &str) -> anyhow::Result<Landed> {
+    // Every commit already on `base`. `--ff-only` succeeds here ("Already up to
+    // date") and would report a merge that never happened — the case a branch is in
+    // after `sync` replayed it onto a `base` that had already absorbed its work.
+    if git(
+        repo_root,
+        &["merge-base", "--is-ancestor", &wt.branch, base],
+    )
+    .is_ok()
+    {
+        return Ok(Landed::AlreadyLanded);
+    }
+
+    // Pre-merge security audit via RedTeamAuditor (Standard Model Rule 7)
+    if let Ok(diff_bytes) = git(&wt.path, &["diff", &format!("{base}...{}", wt.branch)]) {
+        let auditor = hadron_gatekeeper::RedTeamAuditor::new();
+        let report = auditor.audit_diff(&diff_bytes);
+        if let hadron_gatekeeper::AuditVerdict::Rejected {
+            critical_count,
+            high_count,
+        } = report.verdict
+        {
+            return Ok(Landed::Conflicted(format!(
+                "Merge gate rejected by RedTeamAuditor: {} critical, {} high security vulnerability(ies) found",
+                critical_count, high_count
+            )));
+        }
+
+        // Pre-merge invariant linting via InvariantLinter (Standard Model Rule 2 & 3)
+        let violations = hadron_gatekeeper::lint_candidate_diff(&diff_bytes);
+        if !violations.is_empty() {
+            let details = violations
+                .iter()
+                .map(|v| {
+                    format!(
+                        "- Invariant `{}` violated in `{}`: {}",
+                        v.rule_name, v.file_path, v.snippet
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(Landed::Conflicted(format!(
+                "Merge gate rejected by InvariantLinter:\n{details}"
+            )));
+        }
+    }
+
+    if let Ok(()) = ff_only(repo_root, &wt.branch) {
+        return Ok(Landed::FastForward);
+    }
+
+    // `base` moved under us. Rebase the quark's branch onto it, in the quark's tree.
+    if let Err(e) = git(&wt.path, &["rebase", base]) {
+        // Attempt AST-aware rebase healing (matching `sync`) before aborting.
+        if !matches!(ast_healer::heal_rebase_conflicts(&wt.path), Ok(true)) {
+            // Leave no half-rebase behind for the next turn to trip over.
+            let _ = git(&wt.path, &["rebase", "--abort"]);
+            return Ok(Landed::Conflicted(format!("{e:#}")));
+        }
+    }
+
+    ff_only(repo_root, &wt.branch)?;
+    Ok(Landed::RebasedThenFastForward)
+}
+
+/// Land `wt.branch` on `base` in the parent repo using the specified strategy.
+pub fn land_with_strategy(
+    repo_root: &Path,
+    wt: &Worktree,
+    base: &str,
+    strategy: MergeStrategy,
+) -> anyhow::Result<Landed> {
+    match strategy {
+        MergeStrategy::FastForward => land(repo_root, wt, base),
+        MergeStrategy::Squash => land_squash(repo_root, wt, base),
+        MergeStrategy::GitHubPr => land_github_pr(repo_root, wt, base),
+    }
+}
+
+fn land_squash(repo_root: &Path, wt: &Worktree, base: &str) -> anyhow::Result<Landed> {
+    if git(
+        repo_root,
+        &["merge-base", "--is-ancestor", &wt.branch, base],
+    )
+    .is_ok()
+    {
+        return Ok(Landed::AlreadyLanded);
+    }
+    if let Err(e) = git(&wt.path, &["rebase", base]) {
+        if !matches!(ast_healer::heal_rebase_conflicts(&wt.path), Ok(true)) {
+            let _ = git(&wt.path, &["rebase", "--abort"]);
+            return Ok(Landed::Conflicted(format!("{e:#}")));
+        }
+    }
+    let commit_msg = format!("squash: merge branch '{}' into '{}'", wt.branch, base);
+    git(repo_root, &["merge", "--squash", &wt.branch])?;
+    git(repo_root, &["commit", "-m", &commit_msg])?;
+    Ok(Landed::SquashAndMerge)
+}
+
+fn land_github_pr(_repo_root: &Path, wt: &Worktree, _base: &str) -> anyhow::Result<Landed> {
+    if !has_remote(&wt.path) {
+        return Ok(Landed::GitHubPrOpened(format!(
+            "No remote origin configured for branch {}",
+            wt.branch
+        )));
+    }
+    git(&wt.path, &["push", "-u", "origin", &wt.branch])?;
+    let pr_url = match git_ok(&wt.path, &["config", "--get", "remote.origin.url"]) {
+        Ok(Some(url)) => format!("Branch {} pushed to origin ({url})", wt.branch),
+        _ => format!("Pushed branch {} to origin", wt.branch),
+    };
+    Ok(Landed::GitHubPrOpened(pr_url))
+}
+
+/// Bring `wt`'s branch up to date with `base` **before** the gate tests it.
+///
+/// **Why before, and not only inside [`land`].** The gate used to test the branch
+/// exactly as the quark left it and rebase only after the tests passed. Two things
+/// fell out of that order, both observed live:
+///
+/// - A branch cut *before* a fix landed on `base` was tested WITHOUT that fix, so it
+///   was reported red on every retry and could never heal: the fix was on `base` and
+///   the branch was never shown it. (`quark/acp-agy/01KYC48…` burned two identical
+///   gate cycles on a `mod nucleus is private` error already fixed on `main`.)
+/// - The reverse: a rebase inside `land` produced a tree nobody had run, while
+///   `Landed::RebasedThenFastForward`'s message told the human it had been
+///   "re-tested first". Rebasing first is what makes that sentence true.
+///
+/// Result of dry-running a rebase or merge against a base branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebasePreview {
+    /// Already up-to-date with base branch.
+    AlreadyUpToDate,
+    /// Can rebase or fast-forward cleanly onto base.
+    Clean {
+        commits_ahead: usize,
+        commits_behind: usize,
+    },
+    /// Conflicts detected when dry-running rebase against base.
+    Conflicts {
+        conflicting_files: Vec<String>,
+        details: String,
+    },
+}
+
+/// Dry-run rebase inspection of `wt_path` against `base` using `git merge-tree`.
+/// Leaves zero repository state behind and produces no file modifications.
+pub fn preview_rebase(wt_path: &Path, base: &str) -> RebasePreview {
+    // 1. Base is already an ancestor of HEAD
+    if git(wt_path, &["merge-base", "--is-ancestor", base, "HEAD"]).is_ok() {
+        return RebasePreview::AlreadyUpToDate;
+    }
+
+    // 2. Count commits ahead and behind
+    let commits_ahead = git(wt_path, &["rev-list", "--count", &format!("{base}..HEAD")])
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let commits_behind = git(wt_path, &["rev-list", "--count", &format!("HEAD..{base}")])
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    // 3. Dry-run merge check via git merge-tree --write-tree
+    match git(wt_path, &["merge-tree", "--write-tree", base, "HEAD"]) {
+        Ok(_) => RebasePreview::Clean {
+            commits_ahead,
+            commits_behind,
+        },
+        Err(e) => {
+            let err_str = e.to_string();
+            let mut conflicting_files = Vec::new();
+            for line in err_str.lines() {
+                if let Some(rest) = line.strip_prefix("CONFLICT (content): Merge conflict in ") {
+                    conflicting_files.push(rest.trim().to_string());
+                } else if line.contains("CONFLICT") {
+                    conflicting_files.push(line.trim().to_string());
+                }
+            }
+            conflicting_files.sort();
+            conflicting_files.dedup();
+            RebasePreview::Conflicts {
+                conflicting_files,
+                details: err_str,
+            }
+        }
+    }
+}
+
+/// A conflict is aborted and reported — a machine must not guess at a resolution —
+/// and nothing is ever deleted: the branch still points at the quark's own commits.
+pub fn sync(wt: &Worktree, base: &str) -> Synced {
+    // `base` is already an ancestor of the branch ⇒ it has not moved under us.
+    if git(&wt.path, &["merge-base", "--is-ancestor", base, "HEAD"]).is_ok() {
+        return Synced::AlreadyCurrent;
+    }
+    if let Err(e) = git(&wt.path, &["rebase", base]) {
+        // Attempt AST-aware rebase healing before aborting
+        if let Ok(true) = ast_healer::heal_rebase_conflicts(&wt.path) {
+            return Synced::Rebased;
+        }
+        // Leave no half-rebase behind for the next turn to trip over.
+        let _ = git(&wt.path, &["rebase", "--abort"]);
+        return Synced::Conflicted(format!("{e:#}"));
+    }
+    Synced::Rebased
+}
+
+/// Discard local uncommitted changes to `Cargo.lock` in `repo_root` ONLY if
+/// `Cargo.lock` is the only modified file. `Cargo.lock` is derived from workspace
+/// `Cargo.toml`s and local rust-analyzer/cargo execution frequently mutates it in the
+/// target checkout, blocking fast-forward merges.
+pub fn discard_local_lockfile_drift(repo_root: &Path) {
+    if let Ok(Some(status)) = git_ok(repo_root, &["status", "--porcelain"]) {
+        let lines: Vec<&str> = status
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.ends_with(".hadron") && !l.contains(".hadron/"))
+            .collect();
+        if lines.len() == 1 {
+            let path_part = lines[0].split_whitespace().last().unwrap_or("");
+            if path_part == "Cargo.lock" {
+                if git(repo_root, &["checkout", "HEAD", "--", "Cargo.lock"]).is_err() {
+                    let _ = std::fs::remove_file(repo_root.join("Cargo.lock"));
+                }
+            }
+        }
+    }
+}
+
+fn ff_only(repo_root: &Path, branch: &str) -> anyhow::Result<()> {
+    discard_local_lockfile_drift(repo_root);
+    git(repo_root, &["merge", "--ff-only", branch])?;
+    Ok(())
+}
+
+/// Result of an atomic multi-branch coupled merge gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoupledLanded {
+    /// All branches combined cleanly and landed on base.
+    Landed {
+        total_branches: usize,
+        strategy: MergeStrategy,
+    },
+    /// A branch could not be integrated due to merge/rebase conflict.
+    Conflicted {
+        failing_branch: String,
+        details: String,
+    },
+    /// The combined test suite failed on the integrated tree.
+    TestsFailed { output_tail: String },
+}
+
+/// Atomically gate and land multiple coupled branches together.
+///
+/// 1. Creates a temporary integration branch off `base`.
+/// 2. Merges all constituent branches sequentially onto the staging branch.
+/// 3. Executes workspace tests on the combined tree.
+/// 4. Fast-forwards `base` to the integration branch if green, and deletes the temporary ref.
+pub async fn land_coupled_branches(
+    repo_root: &Path,
+    branches: &[&str],
+    base: &str,
+    runner: &dyn MergeRunner,
+    strategy: MergeStrategy,
+) -> anyhow::Result<CoupledLanded> {
+    if branches.is_empty() {
+        return Ok(CoupledLanded::Landed {
+            total_branches: 0,
+            strategy,
+        });
+    }
+
+    let staging_tag = ulid::Ulid::new().to_string();
+    let staging_branch = format!("quark/staging-coupled-{staging_tag}");
+
+    // Create staging branch off base
+    git(repo_root, &["branch", &staging_branch, base])?;
+
+    // Create a temporary staging worktree directory
+    let staging_path = std::env::temp_dir().join(format!("hadron-staging-{staging_tag}"));
+    let _ = std::fs::create_dir_all(&staging_path);
+
+    if let Err(e) = git(
+        repo_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            staging_path.to_str().unwrap(),
+            &staging_branch,
+        ],
+    ) {
+        let _ = git(repo_root, &["branch", "-D", &staging_branch]);
+        let _ = std::fs::remove_dir_all(&staging_path);
+        return Err(anyhow::anyhow!("failed to create staging worktree: {e:#}"));
+    }
+
+    // Merge each branch sequentially
+    for branch in branches {
+        if let Err(e) = git(&staging_path, &["merge", "--no-edit", branch]) {
+            // Abort merge, cleanup worktree and branch
+            let _ = git(&staging_path, &["merge", "--abort"]);
+            let _ = git(
+                repo_root,
+                &["worktree", "remove", "-f", staging_path.to_str().unwrap()],
+            );
+            let _ = git(repo_root, &["branch", "-D", &staging_branch]);
+            let _ = std::fs::remove_dir_all(&staging_path);
+            return Ok(CoupledLanded::Conflicted {
+                failing_branch: branch.to_string(),
+                details: format!("{e:#}"),
+            });
+        }
+    }
+
+    // Run tests on the combined tree
+    let wt = Worktree {
+        quark: hadron_lattice::QuarkId::new("coupled-gate"),
+        path: staging_path.clone(),
+        branch: staging_branch.clone(),
+    };
+
+    let (tests_passed, out) = runner.tests(&wt).await?;
+
+    // Remove worktree
+    let _ = git(
+        repo_root,
+        &["worktree", "remove", "-f", staging_path.to_str().unwrap()],
+    );
+    let _ = std::fs::remove_dir_all(&staging_path);
+
+    if !tests_passed {
+        let _ = git(repo_root, &["branch", "-D", &staging_branch]);
+        return Ok(CoupledLanded::TestsFailed { output_tail: out });
+    }
+
+    // Atomically land staging branch onto base
+    let land_res = match strategy {
+        MergeStrategy::FastForward => ff_only(repo_root, &staging_branch),
+        MergeStrategy::Squash => {
+            let commit_msg = format!(
+                "squash: coupled merge of {} branches into '{}'",
+                branches.len(),
+                base
+            );
+            git(repo_root, &["merge", "--squash", &staging_branch])?;
+            git(repo_root, &["commit", "-m", &commit_msg])?;
+            Ok(())
+        }
+        MergeStrategy::GitHubPr => ff_only(repo_root, &staging_branch),
+    };
+
+    let _ = git(repo_root, &["branch", "-D", &staging_branch]);
+
+    land_res?;
+    Ok(CoupledLanded::Landed {
+        total_branches: branches.len(),
+        strategy,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worktree::{self, tests::git_repo};
+    use hadron_lattice::QuarkId;
+
+    fn q(id: &str) -> QuarkId {
+        QuarkId::new(id)
+    }
+
+    #[test]
+    fn has_remote_is_false_for_a_bare_local_repo() {
+        let repo = git_repo();
+        assert!(!has_remote(repo.path()), "a fresh local repo has no remote");
+    }
+
+    /// The live path today: no remote, so a completed branch is fast-forwarded onto
+    /// the default branch locally, and history stays linear.
+    #[test]
+    fn land_ff_merges_locally_when_there_is_no_remote() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "work\n").unwrap();
+        let sha = worktree::commit_turn(&wt, "opus: did the work")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(land(repo.path(), &wt, "main").unwrap(), Landed::FastForward);
+
+        // main now IS the quark's commit — a fast-forward, so history is linear.
+        assert_eq!(git(repo.path(), &["rev-parse", "main"]).unwrap(), sha);
+        assert!(
+            repo.path().join("a.txt").exists(),
+            "the work reached the human's tree"
+        );
+        let merges = git(repo.path(), &["log", "--merges", "--oneline"]).unwrap();
+        assert!(merges.is_empty(), "no merge commit: {merges}");
+    }
+
+    /// The COMMON case under concurrency: a sibling landed first, so `main` moved and
+    /// `--ff-only` refuses. The gate rebases onto the new `main` and retries — it does
+    /// NOT fall back to a merge commit, and it does not lose the quark's work.
+    #[test]
+    fn land_rebases_and_retries_when_the_default_branch_moved() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "opus work\n").unwrap();
+        worktree::commit_turn(&wt, "opus: work").unwrap().unwrap();
+
+        // A sibling lands on main first (a different file — no conflict).
+        std::fs::write(repo.path().join("sibling.txt"), "agy work\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "agy: landed first"]).unwrap();
+
+        assert_eq!(
+            land(repo.path(), &wt, "main").unwrap(),
+            Landed::RebasedThenFastForward,
+            "a plain --ff-only would have failed here"
+        );
+
+        // Both quarks' work is on main, and history is still linear.
+        assert!(repo.path().join("a.txt").exists());
+        assert!(repo.path().join("sibling.txt").exists());
+        assert!(git(repo.path(), &["log", "--merges", "--oneline"])
+            .unwrap()
+            .is_empty());
+    }
+
+    /// **The reason `sync` exists.** A branch cut before a fix landed on `base` must
+    /// be shown that fix BEFORE the gate tests it — otherwise it is tested against a
+    /// tree that no longer exists, reported red, and can never heal itself: the fix is
+    /// on `base` and the branch is never given it. Live cost: two identical gate cycles
+    /// on `quark/acp-agy/01KYC48…` for an error `main` had already fixed.
+    #[test]
+    fn sync_replays_the_branch_onto_a_base_that_moved_so_the_tests_see_the_fix() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "opus work\n").unwrap();
+        worktree::commit_turn(&wt, "opus: work").unwrap().unwrap();
+
+        // The fix lands on main AFTER the branch was cut.
+        std::fs::write(repo.path().join("fix.txt"), "the fix\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "the fix"]).unwrap();
+        assert!(
+            !wt.path.join("fix.txt").exists(),
+            "the branch cannot see it yet"
+        );
+
+        assert_eq!(sync(&wt, "main"), Synced::Rebased);
+        assert!(
+            wt.path.join("fix.txt").exists(),
+            "the gate now tests the fixed tree"
+        );
+        assert!(
+            wt.path.join("a.txt").exists(),
+            "and the quark's own work survives"
+        );
+    }
+
+    /// `base` has not moved: no rebase, no churn, and the branch is left alone.
+    #[test]
+    fn sync_is_a_no_op_when_the_base_has_not_moved() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "opus work\n").unwrap();
+        let sha = worktree::commit_turn(&wt, "opus: work").unwrap().unwrap();
+
+        assert_eq!(sync(&wt, "main"), Synced::AlreadyCurrent);
+        assert_eq!(
+            worktree::head(&wt.path).unwrap(),
+            sha,
+            "no commits were rewritten"
+        );
+    }
+
+    /// The work reached `base` by another route (someone cherry-picked it forward).
+    /// The rebase empties the branch, and `land` must say so instead of reporting a
+    /// fast-forward that never happened — `--ff-only` succeeds here ("Already up to
+    /// date"), so without this the gate reports a merge it did not perform.
+    #[test]
+    fn a_branch_whose_work_already_landed_syncs_empty_and_lands_as_a_no_op() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "opus work\n").unwrap();
+        let sha = worktree::commit_turn(&wt, "opus: work").unwrap().unwrap();
+
+        // main moves on its own AND absorbs the same patch by cherry-pick, so the
+        // copy on main is a different commit carrying an identical diff.
+        std::fs::write(repo.path().join("other.txt"), "meanwhile\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "meanwhile, on main"]).unwrap();
+        git(repo.path(), &["cherry-pick", &sha]).unwrap();
+        assert_ne!(
+            git(repo.path(), &["rev-parse", "main"]).unwrap(),
+            sha,
+            "the copy on main must be a DIFFERENT commit, or this proves nothing"
+        );
+
+        assert_eq!(sync(&wt, "main"), Synced::Rebased);
+        assert_eq!(
+            worktree::commits_ahead(&wt, "main").unwrap(),
+            0,
+            "the rebase drops a patch already upstream"
+        );
+        assert_eq!(
+            land(repo.path(), &wt, "main").unwrap(),
+            Landed::AlreadyLanded
+        );
+    }
+
+    #[test]
+    fn land_with_strategy_squash_collapses_commits() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "commit 1\n").unwrap();
+        worktree::commit_turn(&wt, "opus: commit 1").unwrap();
+        std::fs::write(wt.path.join("b.txt"), "commit 2\n").unwrap();
+        worktree::commit_turn(&wt, "opus: commit 2").unwrap();
+
+        let landed = land_with_strategy(
+            repo.path(),
+            &wt,
+            "main",
+            hadron_lattice::MergeStrategy::Squash,
+        )
+        .unwrap();
+        assert_eq!(landed, Landed::SquashAndMerge);
+
+        let log = git(repo.path(), &["log", "--oneline", "main"]).unwrap();
+        assert!(log.contains("squash: merge branch"));
+    }
+
+    #[test]
+    fn land_with_strategy_github_pr_mirrors_branch() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "commit 1\n").unwrap();
+        worktree::commit_turn(&wt, "opus: commit 1").unwrap();
+
+        let landed = land_with_strategy(
+            repo.path(),
+            &wt,
+            "main",
+            hadron_lattice::MergeStrategy::GitHubPr,
+        )
+        .unwrap();
+        assert!(matches!(landed, Landed::GitHubPrOpened(_)));
+    }
+
+    /// A rebase a machine must not resolve. Report it; preserve the branch.
+    #[test]
+    fn sync_reports_a_conflict_and_leaves_no_half_rebase() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("f.txt"), "opus version\n").unwrap();
+        let sha = worktree::commit_turn(&wt, "opus: edit f").unwrap().unwrap();
+
+        std::fs::write(repo.path().join("f.txt"), "human version\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "human: edit f"]).unwrap();
+
+        assert!(matches!(sync(&wt, "main"), Synced::Conflicted(_)));
+        assert_eq!(
+            worktree::head(&wt.path).unwrap(),
+            sha,
+            "the branch is untouched"
+        );
+        let gitdir = crate::snapshot::git_dir(&wt.path).unwrap();
+        assert!(
+            !gitdir.join("rebase-merge").exists(),
+            "no half-rebase left behind"
+        );
+        assert!(
+            !gitdir.join("rebase-apply").exists(),
+            "no half-rebase left behind"
+        );
+    }
+
+    /// A rebase a machine must not resolve. Report it; preserve the branch.
+    #[test]
+    fn a_conflicting_rebase_is_reported_and_the_branch_is_preserved() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("f.txt"), "opus version\n").unwrap();
+        let sha = worktree::commit_turn(&wt, "opus: edit f").unwrap().unwrap();
+
+        // main edits the SAME file, differently.
+        std::fs::write(repo.path().join("f.txt"), "human version\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "human: edit f"]).unwrap();
+
+        let landed = land(repo.path(), &wt, "main").unwrap();
+        assert!(matches!(landed, Landed::Conflicted(_)), "got {landed:?}");
+
+        // NOTHING was destroyed: the branch still points at the quark's commit, and
+        // the tree is not left mid-rebase.
+        assert_eq!(
+            git(repo.path(), &["rev-parse", "quark/opus/01AAA"]).unwrap(),
+            sha
+        );
+        // The worktree's real git dir — NOT `<path>/.git`, which in a linked worktree
+        // is a file, so joining onto it would make this assertion vacuously true.
+        let gitdir = crate::snapshot::git_dir(&wt.path).unwrap();
+        assert!(
+            !gitdir.join("rebase-merge").exists(),
+            "no half-rebase left behind"
+        );
+        assert!(
+            !gitdir.join("rebase-apply").exists(),
+            "no half-rebase left behind"
+        );
+        // And the human's own file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+            "human version\n"
+        );
+    }
+
+    /// The gate's tests run **in the quark's worktree** — not in the daemon's cwd,
+    /// and not in the human's checkout. Proven with a command that reports where it
+    /// ran, so no real `cargo test` is spawned (that would recurse into this suite).
+    #[tokio::test]
+    async fn the_gate_runs_its_tests_inside_the_quarks_worktree() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+
+        let (passed, out) = run_tests_with(&wt, "pwd", &[]).await.unwrap();
+        assert!(passed);
+        let ran_in = std::path::PathBuf::from(out.trim());
+        assert_eq!(
+            ran_in.canonicalize().unwrap(),
+            wt.path.canonicalize().unwrap(),
+            "the gate must test the quark's branch, in the quark's tree"
+        );
+    }
+
+    /// **The gate's cost.** A quark's worktree has no `target/` of its own, so without
+    /// this the first `cargo test` in each quark's tree is a full cold build of the
+    /// workspace — minutes each, and a duplicate 41 GB artifact tree per quark. The gate
+    /// must point every worktree at the MAIN checkout's `target/`, or the enforcement it
+    /// exists to provide costs more than it is worth.
+    ///
+    /// Asserted by having "the tests" print the variable, so no real cargo is spawned.
+    #[tokio::test]
+    async fn the_gate_reuses_the_main_checkouts_target_dir() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        // Both sides get canonicalized, so the dir has to exist to be resolved.
+        std::fs::create_dir_all(repo.path().join("target")).unwrap();
+
+        let (passed, out) = run_tests_with(&wt, "sh", &["-c", "echo $CARGO_TARGET_DIR"])
+            .await
+            .unwrap();
+        assert!(passed);
+
+        let got = std::path::PathBuf::from(out.trim());
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            repo.path().join("target").canonicalize().unwrap(),
+            "the gate must build into the main checkout's target, not the worktree's"
+        );
+        // And emphatically NOT the worktree's own (cold, duplicated) target dir.
+        assert_ne!(got, wt.path.join("target"));
+    }
+
+    /// **A hung suite must not wedge the daemon.** The gate runs a command chosen from
+    /// the *target project's* manifest, on the dispatch path and ahead of every field
+    /// append — so a suite that never returns stops the daemon dispatching anything at
+    /// all, with no event written to point at. Measured live: a project whose own
+    /// `cargo test` spun forever kept a daemon silent for hours.
+    ///
+    /// Two claims, and the second is the one that costs real machines: the gate gives
+    /// up, and it kills the whole process TREE. `cargo test` is a launcher — killing
+    /// only the launcher orphans the test binary, which is the process that was still
+    /// burning CPU long after the daemon stopped waiting for it.
+    #[tokio::test]
+    async fn a_hung_suite_is_cut_at_the_deadline_and_its_whole_tree_killed() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        let marker = wt.path.join("still-alive");
+
+        // A launcher that outlives nothing of its own but spawns a grandchild which
+        // keeps touching a file — the shape of `cargo test` and its test binary.
+        let script = format!(
+            "sh -c 'while true; do date +%s%N > {}; sleep 0.05; done' & wait",
+            marker.display()
+        );
+        let (passed, out) = run_tests_within(
+            &wt,
+            "sh",
+            &["-c", &script],
+            std::time::Duration::from_millis(400),
+        )
+        .await
+        .unwrap();
+
+        assert!(!passed, "a suite that never finishes is red, not green");
+        assert!(
+            out.contains("did not finish within"),
+            "the human is told what happened: {out}"
+        );
+
+        // The grandchild must be dead: the marker stops moving.
+        let first = std::fs::read_to_string(&marker).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let second = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            first, second,
+            "the grandchild outlived the deadline — killing only the launcher orphans it"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tests_within_streaming_delivers_live_lines_and_enforces_timeout() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01STR").unwrap();
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let captured_sink = std::sync::Arc::clone(&captured);
+        let sink: GateLineSink = std::sync::Arc::new(move |stream, line| {
+            captured_sink
+                .lock()
+                .unwrap()
+                .push((stream.to_string(), line.to_string()));
+        });
+
+        let (passed, tail) = run_tests_within_streaming(
+            &wt,
+            "sh",
+            &[
+                "-c",
+                "echo 'test alpha ... ok'; echo 'warn stderr' >&2; echo 'test beta ... ok'",
+            ],
+            std::time::Duration::from_secs(5),
+            Some(sink),
+        )
+        .await
+        .unwrap();
+
+        assert!(passed);
+        assert!(tail.contains("test alpha ... ok"));
+        assert!(tail.contains("warn stderr"));
+        let lines = captured.lock().unwrap().clone();
+        let stdout_lines: Vec<String> = lines
+            .iter()
+            .filter(|(s, _)| s == "stdout")
+            .map(|(_, l)| l.clone())
+            .collect();
+        let stderr_lines: Vec<String> = lines
+            .iter()
+            .filter(|(s, _)| s == "stderr")
+            .map(|(_, l)| l.clone())
+            .collect();
+        assert_eq!(stdout_lines, vec!["test alpha ... ok", "test beta ... ok"]);
+        assert_eq!(stderr_lines, vec!["warn stderr"]);
+
+        // Streaming runner must also enforce timeout + process-group kill.
+        let marker = wt.path.join("stream-hung-alive");
+        let hung_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let hung_sink_buf = std::sync::Arc::clone(&hung_lines);
+        let hung_sink: GateLineSink = std::sync::Arc::new(move |_, line| {
+            hung_sink_buf.lock().unwrap().push(line.to_string());
+        });
+        let script = format!(
+            "echo 'starting hung test'; sh -c 'while true; do date +%s%N > {}; sleep 0.05; done' & wait",
+            marker.display()
+        );
+        let (hung_passed, hung_out) = run_tests_within_streaming(
+            &wt,
+            "sh",
+            &["-c", &script],
+            std::time::Duration::from_millis(400),
+            Some(hung_sink),
+        )
+        .await
+        .unwrap();
+        assert!(!hung_passed);
+        assert!(hung_out.contains("did not finish within"));
+        assert!(
+            hung_lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("starting hung test")),
+            "line emitted before hang must reach sink live"
+        );
+        let first = std::fs::read_to_string(&marker).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let second = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            first, second,
+            "grandchild must be killed on streaming timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn red_tests_are_reported_as_failure_with_their_output() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+
+        let (passed, out) = run_tests_with(&wt, "sh", &["-c", "echo boom >&2; exit 1"])
+            .await
+            .unwrap();
+        assert!(!passed, "a nonzero exit is a red suite");
+        assert!(out.contains("boom"), "the human gets the output: {out}");
+    }
+
+    #[tokio::test]
+    async fn missing_test_runner_binary_returns_red_instead_of_err_so_gate_never_loops() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+
+        let (passed, out) = run_tests_with(&wt, "hadron-nonexistent-test-runner-xyz", &[])
+            .await
+            .expect("missing test runner binary must return Ok((false, ...)), not Err");
+        assert!(!passed, "missing test runner must be treated as a red gate");
+        assert!(
+            out.contains("failed to run the gate's tests (hadron-nonexistent-test-runner-xyz)"),
+            "diagnostic must name the missing runner: {out}"
+        );
+    }
+
+    #[test]
+    fn combine_output_tails_preserves_stdout_failure_summary_when_stderr_is_verbose() {
+        let stdout = format!(
+            "{}\nfailures:\n    pty::tests::test_pty_resource_cleanup_under_load\ntest result: FAILED. 572 passed; 1 failed\n",
+            "ok line\n".repeat(400)
+        );
+        let stderr = format!(
+            "{}error: test failed, to rerun pass `-p hadron --bin hadron`\n",
+            "14:37:37  chamber  pty: reader thread EOF → '/bin/bash'\n".repeat(150)
+        );
+        let combined = combine_output_tails(&stdout, &stderr);
+        assert!(combined.len() <= TAIL_BYTES);
+        assert!(
+            combined.contains("pty::tests::test_pty_resource_cleanup_under_load"),
+            "stdout failure summary must not be pushed out by verbose stderr logs: {combined}"
+        );
+        assert!(
+            combined.contains("error: test failed, to rerun pass `-p hadron --bin hadron`"),
+            "stderr tail must also be preserved: {combined}"
+        );
+    }
+
+    #[test]
+    fn detect_runner_picks_cargo_for_a_rust_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        assert_eq!(
+            detect_runner(dir.path()),
+            ("cargo", &["test", "--workspace"][..])
+        );
+    }
+
+    #[test]
+    fn detect_runner_picks_npm_for_a_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(detect_runner(dir.path()), ("npm", &["test"][..]));
+    }
+
+    #[test]
+    fn detect_runner_picks_pytest_for_a_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "").unwrap();
+        assert_eq!(detect_runner(dir.path()), ("pytest", &[][..]));
+    }
+
+    #[test]
+    fn detect_runner_picks_go_test_for_a_go_mod() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module x").unwrap();
+        assert_eq!(detect_runner(dir.path()), ("go", &["test", "./..."][..]));
+    }
+
+    #[test]
+    fn detect_runner_defaults_to_cargo_when_no_manifest_is_recognised() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            detect_runner(dir.path()),
+            ("cargo", &["test", "--workspace"][..])
+        );
+    }
+
+    /// The order matters, and it used to be wrong: `package.json` was checked before
+    /// `Cargo.toml`, so a Rust workspace that also carries a JS docs site would have
+    /// gated on `npm test` instead of its own suite.
+    #[test]
+    fn detect_runner_prefers_cargo_over_a_sibling_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(
+            detect_runner(dir.path()),
+            ("cargo", &["test", "--workspace"][..])
+        );
+    }
+
+    fn init_multi_crate_workspace(repo: &Path) {
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/hadron-lattice\", \"crates/hadron-chamber\", \"crates/hadron-leaf\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("crates/hadron-lattice/src")).unwrap();
+        std::fs::write(
+            repo.join("crates/hadron-lattice/Cargo.toml"),
+            "[package]\nname = \"hadron-lattice\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("crates/hadron-chamber/src")).unwrap();
+        std::fs::write(
+            repo.join("crates/hadron-chamber/Cargo.toml"),
+            "[package]\nname = \"hadron\"\nversion = \"0.1.0\"\n[dependencies]\nhadron-lattice = { path = \"../hadron-lattice\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("crates/hadron-leaf/src")).unwrap();
+        std::fs::write(
+            repo.join("crates/hadron-leaf/Cargo.toml"),
+            "[package]\nname = \"hadron-leaf\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        git(repo, &["add", "-A"]).unwrap();
+        git(repo, &["commit", "-q", "-m", "init workspace"]).unwrap();
+    }
+
+    #[test]
+    fn test_detect_affected_runner_slicing() {
+        let repo = git_repo();
+        init_multi_crate_workspace(repo.path());
+
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AFF").unwrap();
+        let crate_dir = wt.path.join("crates").join("hadron-chamber").join("src");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        std::fs::write(crate_dir.join("main.rs"), "fn main() {}\n").unwrap();
+        worktree::commit_turn(&wt, "opus: touched chamber").unwrap();
+
+        let (program, args) = detect_affected_runner(&wt.path, "main");
+        assert_eq!(program, "cargo");
+        assert_eq!(
+            args,
+            vec!["test".to_string(), "-p".to_string(), "hadron".to_string()]
+        );
+    }
+
+    #[test]
+    fn land_discards_a_locally_regenerated_cargo_lock_before_merging() {
+        let repo = git_repo();
+        std::fs::write(repo.path().join("Cargo.lock"), "lock v1\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "init Cargo.lock"]).unwrap();
+
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("Cargo.lock"), "lock v2 by opus\n").unwrap();
+        worktree::commit_turn(&wt, "opus: update Cargo.lock")
+            .unwrap()
+            .unwrap();
+
+        // Local drift in repo_root (only Cargo.lock is dirty)
+        std::fs::write(repo.path().join("Cargo.lock"), "lock v1 mutated locally\n").unwrap();
+
+        assert_eq!(land(repo.path(), &wt, "main").unwrap(), Landed::FastForward);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("Cargo.lock")).unwrap(),
+            "lock v2 by opus\n"
+        );
+    }
+
+    #[test]
+    fn land_still_refuses_when_a_real_file_is_dirty_in_repo_root() {
+        let repo = git_repo();
+        std::fs::write(repo.path().join("Cargo.lock"), "lock v1\n").unwrap();
+        std::fs::write(repo.path().join("real.txt"), "real v1\n").unwrap();
+        git(repo.path(), &["add", "-A"]).unwrap();
+        git(repo.path(), &["commit", "-q", "-m", "init repo"]).unwrap();
+
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+        std::fs::write(wt.path.join("real.txt"), "real v2 by opus\n").unwrap();
+        worktree::commit_turn(&wt, "opus: work on real.txt")
+            .unwrap()
+            .unwrap();
+
+        // Dirty real file in repo_root
+        std::fs::write(repo.path().join("real.txt"), "real v1 dirty\n").unwrap();
+
+        assert!(land(repo.path(), &wt, "main").is_err());
+    }
+
+    struct FakeCoupledRunner(bool);
+
+    #[async_trait]
+    impl MergeRunner for FakeCoupledRunner {
+        async fn tests(&self, _wt: &Worktree) -> anyhow::Result<(bool, String)> {
+            Ok((
+                self.0,
+                if self.0 {
+                    "ok".into()
+                } else {
+                    "tests failed".into()
+                },
+            ))
+        }
+        fn land(&self, repo_root: &Path, wt: &Worktree, base: &str) -> anyhow::Result<Landed> {
+            land(repo_root, wt, base)
+        }
+    }
+
+    #[tokio::test]
+    async fn land_coupled_branches_integrates_multiple_branches_atomically() {
+        let repo = git_repo();
+        let wt1 = worktree::ensure(repo.path(), &q("quark1"), "01A1").unwrap();
+        std::fs::write(wt1.path.join("file1.txt"), "content1\n").unwrap();
+        worktree::commit_turn(&wt1, "quark1: work").unwrap();
+
+        let wt2 = worktree::ensure(repo.path(), &q("quark2"), "01A2").unwrap();
+        std::fs::write(wt2.path.join("file2.txt"), "content2\n").unwrap();
+        worktree::commit_turn(&wt2, "quark2: work").unwrap();
+
+        let runner = FakeCoupledRunner(true);
+        let res = land_coupled_branches(
+            repo.path(),
+            &[&wt1.branch, &wt2.branch],
+            "main",
+            &runner,
+            MergeStrategy::FastForward,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            res,
+            CoupledLanded::Landed {
+                total_branches: 2,
+                strategy: MergeStrategy::FastForward
+            }
+        );
+        assert!(repo.path().join("file1.txt").exists());
+        assert!(repo.path().join("file2.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn land_coupled_branches_aborts_on_conflict() {
+        let repo = git_repo();
+        let wt1 = worktree::ensure(repo.path(), &q("quark1"), "01A1").unwrap();
+        std::fs::write(wt1.path.join("shared.txt"), "version1\n").unwrap();
+        worktree::commit_turn(&wt1, "quark1: shared").unwrap();
+
+        let wt2 = worktree::ensure(repo.path(), &q("quark2"), "01A2").unwrap();
+        std::fs::write(wt2.path.join("shared.txt"), "version2\n").unwrap();
+        worktree::commit_turn(&wt2, "quark2: shared").unwrap();
+
+        let runner = FakeCoupledRunner(true);
+        let res = land_coupled_branches(
+            repo.path(),
+            &[&wt1.branch, &wt2.branch],
+            "main",
+            &runner,
+            MergeStrategy::FastForward,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(res, CoupledLanded::Conflicted { .. }));
+        assert!(!repo.path().join("shared.txt").exists());
+    }
+
+    #[test]
+    fn preview_rebase_detects_up_to_date_and_clean_states() {
+        let repo = git_repo();
+        let wt = worktree::ensure(repo.path(), &q("opus"), "01AAA").unwrap();
+
+        // 1. Fresh worktree right on base -> AlreadyUpToDate
+        let preview = preview_rebase(&wt.path, "main");
+        assert_eq!(preview, RebasePreview::AlreadyUpToDate);
+
+        // 2. Commit on worktree, base has not moved -> Still up to date ancestor check
+        std::fs::write(wt.path.join("file.txt"), "change\n").unwrap();
+        worktree::commit_turn(&wt, "opus: change").unwrap();
+        let preview2 = preview_rebase(&wt.path, "main");
+        assert_eq!(preview2, RebasePreview::AlreadyUpToDate);
+
+        // 3. Move main ahead with orthogonal commit -> Clean preview
+        std::fs::write(repo.path().join("other.txt"), "main commit\n").unwrap();
+        let _ = git(repo.path(), &["add", "other.txt"]);
+        let _ = git(repo.path(), &["commit", "-m", "main: other"]);
+
+        let preview3 = preview_rebase(&wt.path, "main");
+        match preview3 {
+            RebasePreview::Clean {
+                commits_ahead,
+                commits_behind,
+            } => {
+                assert_eq!(commits_ahead, 1);
+                assert_eq!(commits_behind, 1);
+            }
+            _ => panic!("Expected RebasePreview::Clean, got {:?}", preview3),
+        }
+    }
+
+    #[test]
+    fn detect_affected_runner_includes_transitive_downstream_dependents() {
+        let repo = git_repo();
+        let base = worktree::default_branch(repo.path());
+        init_multi_crate_workspace(repo.path());
+
+        let wt = worktree::ensure(repo.path(), &q("tia-quark"), "01TIA").unwrap();
+        let crate_dir = wt.path.join("crates").join("hadron-lattice").join("src");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        std::fs::write(crate_dir.join("nucleus.rs"), "pub fn fact() {}\n").unwrap();
+        worktree::commit_turn(&wt, "tia-quark: nucleus fact").unwrap();
+
+        let (prog, args) = detect_affected_runner(&wt.path, &base);
+        assert_eq!(prog, "cargo");
+        assert_eq!(
+            args,
+            vec!["test", "-p", "hadron", "-p", "hadron-lattice"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn detect_affected_runner_multi_file_leaf_and_manifest_fallback() {
+        let repo = git_repo();
+        let base = worktree::default_branch(repo.path());
+        init_multi_crate_workspace(repo.path());
+
+        let wt = worktree::ensure(repo.path(), &q("tia-multi"), "01TIAM").unwrap();
+        let crate_dir = wt.path.join("crates").join("hadron-chamber").join("src");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        std::fs::write(crate_dir.join("widgets.rs"), "pub fn w() {}\n").unwrap();
+        std::fs::write(crate_dir.join("tests.rs"), "pub fn t() {}\n").unwrap();
+        worktree::commit_turn(&wt, "tia-multi: widgets and tests").unwrap();
+
+        let (prog, args) = detect_affected_runner(&wt.path, &base);
+        assert_eq!(prog, "cargo");
+        assert_eq!(args, vec!["test", "-p", "hadron"]);
+
+        // Editing Cargo.toml must fail closed to full workspace.
+        std::fs::write(
+            wt.path.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/hadron-lattice\", \"crates/hadron-chamber\", \"crates/hadron-leaf\"]\n# touched\n",
+        )
+        .unwrap();
+        worktree::commit_turn(&wt, "tia-multi: root manifest").unwrap();
+        let (prog2, args2) = detect_affected_runner(&wt.path, &base);
+        assert_eq!(prog2, "cargo");
+        assert_eq!(args2, vec!["test", "--workspace"]);
+    }
+}

@@ -1,0 +1,1888 @@
+use std::collections::{HashMap, HashSet};
+
+use hadron_lattice::term::{self, Source};
+use hadron_lattice::{Actor, Event, Flavor, Kind, Mode, QuarkId, QuarkState, TurnOutcome};
+use tokio::task::{AbortHandle, JoinSet};
+
+use crate::field::read_events;
+
+use super::*;
+
+/// Resolve once `quark` has gone quiet for `deadline`, and never before — the
+/// watchdog's clock, and the whole reason [`TURN_DEADLINE`] is not a wall-clock cap.
+///
+/// A "sign of life" is a fresh entry in `<field-dir>/live/<quark>.json`, the file the
+/// adapter already overwrites on every thought chunk and tool call
+/// (`hadron_lattice::live`) — this reuses the swarm's existing liveness signal rather
+/// than inventing a second one, so anything the chamber's Live card can see, the
+/// watchdog can see.
+///
+/// **The start of the turn counts as a sign of life.** A transport that publishes
+/// nothing at all — a CLI seat whose `CliSpec.stream` is `None`, the only shape
+/// `build_seat_watched` leaves unwatched — therefore expires at exactly `deadline`, bit-identical to the
+/// flat timeout this replaced. The change can only ever *extend* a turn, never shorten
+/// one, which is what makes it safe to land on the dispatch path.
+///
+/// Returns how long the silence lasted, so the error can say it.
+/// Grace window after a single `"error"` / `"error message"` step before the silence
+/// watchdog reaps the turn. `agy` CLI retries transient upstream stream `EOF` errors
+/// with a ~64s–85s backoff before `attempt 2` fires and another ~20s–80s to stream the
+/// next `PLANNER_RESPONSE` step, so 180s accommodates backoff + recovery generation while
+/// 3 consecutive error steps still abort immediately in `cli.rs`.
+const ERROR_GRACE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+
+async fn until_silent(
+    live_dir: &std::path::Path,
+    quark: &QuarkId,
+    deadline: std::time::Duration,
+) -> std::time::Duration {
+    until_silent_with_error_grace(live_dir, quark, deadline, ERROR_GRACE_DEADLINE).await
+}
+
+async fn until_silent_with_error_grace(
+    live_dir: &std::path::Path,
+    quark: &QuarkId,
+    deadline: std::time::Duration,
+    error_grace: std::time::Duration,
+) -> std::time::Duration {
+    // Poll well inside `live::STALE_AFTER_SECS`, or a write could go stale between
+    // two ticks and never be seen. Derived from the deadline so a test with a tiny
+    // one exercises this same path rather than a code branch of its own.
+    let mut effective_deadline = deadline;
+    let mut last_sign = std::time::Instant::now();
+    let mut newest_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut in_error_detail = false;
+    loop {
+        let tick = (effective_deadline / 4)
+            .min(std::time::Duration::from_secs(5))
+            .max(std::time::Duration::from_millis(10));
+        tokio::time::sleep(tick).await;
+        if let Some(activity) = hadron_lattice::live::read(live_dir, quark, chrono::Utc::now()) {
+            let is_error_detail = activity.detail == "error message" || activity.detail == "error";
+            if is_error_detail {
+                in_error_detail = true;
+                // Start/refresh the error grace window from when each error step arrived
+                // rather than retroactively counting healthy work or earlier attempts.
+                if newest_seen.is_none_or(|seen| activity.at > seen) {
+                    newest_seen = Some(activity.at);
+                    last_sign = std::time::Instant::now();
+                }
+                effective_deadline = deadline.min(error_grace);
+            } else {
+                in_error_detail = false;
+                effective_deadline = deadline;
+                if newest_seen.is_none_or(|seen| activity.at > seen) {
+                    newest_seen = Some(activity.at);
+                    last_sign = std::time::Instant::now();
+                }
+            }
+        } else if let Some(age) = hadron_lattice::live::last_heartbeat_age(live_dir, quark) {
+            if !in_error_detail && age < last_sign.elapsed() {
+                last_sign = std::time::Instant::now()
+                    .checked_sub(age)
+                    .unwrap_or_else(std::time::Instant::now);
+            }
+        } else if in_error_detail {
+            // The live file was removed (`clear_live` between retry attempts): restore the
+            // normal turn deadline so the fresh retry attempt is not clamped to error_grace.
+            in_error_detail = false;
+            effective_deadline = deadline;
+        }
+        let silent_for = last_sign.elapsed();
+        if silent_for >= effective_deadline {
+            return silent_for;
+        }
+    }
+}
+
+/// Run a quark excitation future guarded by both a silence/liveness watchdog (`stall_deadline`)
+/// and a maximum wall-clock safety ceiling (`max_wall_clock`).
+///
+/// Any stdout line (CLI) or `session/update` notification (ACP) refreshes `<live_dir>/<quark>.json`,
+/// resetting the silence timer so multi-hour turns that actively emit progress are never killed
+/// until `max_wall_clock`, while genuinely stalled/silent turns are reaped after `stall_deadline`.
+pub async fn excite_with_liveness_watchdog<F>(
+    excite_fut: F,
+    live_dir: &std::path::Path,
+    quark: &QuarkId,
+    stall_deadline: std::time::Duration,
+    max_wall_clock: std::time::Duration,
+) -> anyhow::Result<TurnOutcome>
+where
+    F: std::future::Future<Output = anyhow::Result<TurnOutcome>>,
+{
+    tokio::select! {
+        biased;
+        outcome = excite_fut => outcome,
+        silent_for = until_silent(live_dir, quark, stall_deadline) => Err(
+            anyhow::anyhow!(
+                "turn hit the silence deadline with no terminal status: {} \
+                 produced no sign of life for {}s (process gone, or hung with \
+                 no outcome); the engine is ending the turn on its behalf. A \
+                 turn that is still working publishes activity and is never \
+                 reaped — if this fired on healthy work, that quark's \
+                 transport publishes nothing (CLI seats do not).",
+                quark.as_str(),
+                if silent_for >= stall_deadline {
+                    silent_for.as_secs().max(stall_deadline.as_secs())
+                } else {
+                    silent_for.as_secs()
+                },
+            )
+        ),
+        _ = tokio::time::sleep(max_wall_clock) => Err(
+            anyhow::anyhow!(
+                "turn exceeded maximum wall-clock ceiling ({}s) for {}; aborting turn.",
+                max_wall_clock.as_secs(),
+                quark.as_str(),
+            )
+        ),
+    }
+}
+
+/// Maximum resident context tokens before automatic session rotation (`reset_session`),
+/// regardless of `context_window_size`. On 2M-token models (`gemini-3.8-flash`, `gemini-4-argon`),
+/// 70% of the window is 1.4M tokens — far above the ~150k per-request context where a 10-step
+/// tool-calling turn exceeds 2,000,000 input tokens/minute (429 RESOURCE_EXHAUSTED).
+pub const MAX_RESIDENT_CONTEXT_TOKENS: u32 = 150_000;
+
+/// Returns `true` when post-turn context window occupancy reaches or exceeds 70% OR
+/// [`MAX_RESIDENT_CONTEXT_TOKENS`], triggering an automatic session rotation (`reset_session`)
+/// before the next turn so long-running sessions do not suffer context degradation or TPM rate limits.
+pub fn should_rotate_session(usage: &hadron_lattice::Usage) -> bool {
+    usage
+        .context
+        .as_ref()
+        .is_some_and(|c| c.used_percentage >= 70.0 || c.used_tokens >= MAX_RESIDENT_CONTEXT_TOKENS)
+}
+
+/// Whether a quark worktree's superseded branch (`old_assignment`) should be run through
+/// `merge_gate` before cutting the next assignment's branch.
+///
+/// Returns `true` ONLY when `old_assignment` belongs to the active session (after the
+/// most recent `/clear` command in `events`), was NOT superseded by a `Kind::Reboot` of
+/// `target`, and did NOT terminate in `QuarkState::Error` (which only holds a failed turn's
+/// WIP error checkpoint, not a completed assignment). Stale pre-`/clear` or errored branches
+/// are archived (`archive/quark-...`) and detached at `base` instead of gating the new turn.
+pub fn should_gate_superseded_branch(
+    events: &[Event],
+    target: &QuarkId,
+    old_assignment: Option<ulid::Ulid>,
+) -> bool {
+    let Some(old_id) = old_assignment else {
+        return false;
+    };
+    let active_slice = match events
+        .iter()
+        .rposition(|e| matches!(&e.kind, Kind::Command { cmd, .. } if cmd.trim() == "/clear"))
+    {
+        Some(clear_idx) => &events[clear_idx + 1..],
+        None => events,
+    };
+
+    let Some(last_relevant_idx) = active_slice
+        .iter()
+        .rposition(|e| e.id == old_id || e.answers == Some(old_id))
+    else {
+        return false;
+    };
+
+    // If `target` was rebooted after `old_id`, the session was explicitly reset.
+    if active_slice[last_relevant_idx + 1..]
+        .iter()
+        .any(|e| matches!(e.kind, Kind::Reboot) && e.to.as_ref() == Some(target))
+    {
+        return false;
+    }
+
+    // If the last status recorded for `target` on `old_id` was `Error`, its commit is an
+    // automatic error WIP checkpoint (`run.rs`), not a completed turn ready to land.
+    let last_status = active_slice.iter().rev().find_map(|e| {
+        if e.from == Actor::Quark(target.clone()) && (e.answers == Some(old_id) || e.id == old_id) {
+            if let Kind::Status { state } = &e.kind {
+                return Some(*state);
+            }
+        }
+        None
+    });
+    !matches!(last_status, Some(QuarkState::Error))
+}
+
+impl super::Engine {
+    fn format_error_message(&self, quark_id: &QuarkId, err: &anyhow::Error) -> String {
+        let err_text = super::quote_paths(&format!("{err:#}"));
+        let orchestrator = self
+            .roster
+            .iter()
+            .find(|c| c.flavor == Flavor::Orchestrator);
+        if let Some(orch) = orchestrator {
+            if &orch.id != quark_id {
+                return format!(
+                    "@{} Quark `{}` turn errored: {err_text}",
+                    crate::router::ORCHESTRATOR_ALIAS,
+                    quark_id.as_str()
+                );
+            }
+        }
+        format!("Quark `{}` turn errored: {err_text}", quark_id.as_str())
+    }
+
+    /// Dispatch every pending quark turn CONCURRENTLY until the field has no pending
+    /// work **and** no turn is still in flight (quiesce), or the exchange budget is
+    /// exhausted (backstop).
+    ///
+    /// Each pass re-reads the field, computes every pending target, and spawns a turn
+    /// for each one that is not already running — so "@a do X and @b do Y" excites a
+    /// and b at the same time instead of making b wait out a's whole turn. A quark
+    /// only ever runs one turn at a time (`in_flight` + its own `Mutex`); a target
+    /// that is already running is simply left for a later pass.
+    ///
+    /// Quiesce is the *conjunction*: an engine that has nothing pending but is still
+    /// waiting on a running turn must not return, or the daemon would report the team
+    /// idle while it is mid-thought.
+    pub async fn run_until_quiesce(&mut self) -> anyhow::Result<()> {
+        let mut exchanges = 0usize;
+        // Keyed by (seat, lane), not bare `QuarkId`: a seat with a chat lane can have
+        // its `Work` and `Chat` slots in flight at once — that concurrency is Task 6's
+        // whole point. Every non-orchestrator seat only ever inserts `Work`, so this is
+        // byte-for-byte the old single-lane behaviour for every seat without a chat lane.
+        let mut in_flight: HashSet<(QuarkId, Lane)> = HashSet::new();
+        let mut heartbeat_tracker = crate::engine::heartbeat::HeartbeatTracker::new();
+        // The abort handle for each in-flight turn, so the human's force-restart
+        // ([`Kind::Reboot`]) can kill a wedged quark's turn *now* instead of waiting
+        // out the 30-minute deadline. Kept in lockstep with `in_flight`: inserted at
+        // spawn, removed the instant a turn joins or is rebooted.
+        let mut abort_handles: HashMap<(QuarkId, Lane), AbortHandle> = HashMap::new();
+        // When a graceful cancel was requested for an in-flight turn, and when — so a
+        // second poll tick does not re-request it (the point of the slot is ONE
+        // cancel per interruption, not a cancel every 150ms until it resolves), and
+        // so a request that never resolves can be bounded against `CANCEL_DEADLINE`
+        // rather than left to wait out `TURN_DEADLINE`. Cleared wherever the matching
+        // `in_flight` entry is: both `join_next` arms below, and the deadline
+        // fallback itself.
+        let mut cancel_requested: HashMap<(QuarkId, Lane), std::time::Instant> = HashMap::new();
+        // How many events existed when each in-flight turn was dispatched — the
+        // boundary `message_arrived_since` measures "new" against. Without it, a
+        // turn's own dispatch record (`pending_targets` legitimately still calls it
+        // pending every pass it runs) would look identical to a fresh interrupting
+        // message. Kept in lockstep with `in_flight`, same as `cancel_requested`.
+        let mut dispatched_at_len: HashMap<(QuarkId, Lane), usize> = HashMap::new();
+        // Which assignment each in-flight turn was dispatched for, and the task text
+        // it was carrying — so the CANCEL_DEADLINE fallback's `ground` call (Task 9,
+        // Defect 2) can stamp `answers` on the abandoned turn's OWN assignment, not
+        // leave it unstamped. An unstamped Ground falls into `has_answered`'s
+        // "legacy: it spoke after the message" arm, which reads as answering EVERY
+        // earlier unaddressed message — including the very message that caused the
+        // interrupt, silently swallowing it. The task text rides along so an
+        // abandoned turn's work can be handed to `interrupted_task` below instead of
+        // dropped (Task 3 of `.hadron/docs/plans/2026-08-02-fonts-tools-
+        // orchestrator.md`). Kept in lockstep with `in_flight`, same as
+        // `cancel_requested`.
+        let mut dispatched_assignment: HashMap<(QuarkId, Lane), Option<(ulid::Ulid, String)>> =
+            HashMap::new();
+        // A task abandoned mid-turn by a graceful interrupt — keyed by quark only
+        // (not lane: the resumed dispatch may land on a different lane than the one
+        // that was interrupted, and the point is "this quark still owes this work",
+        // not "this lane does"). Populated at BOTH places a turn can end on an
+        // interrupt: the ordinary path (the transport honours `session/cancel`, the
+        // turn resolves normally with `outcome.cancelled == true`, handled in the
+        // `join_next` arm below) and the CANCEL_DEADLINE fallback (the transport
+        // never resolves the request at all, so the turn is aborted destructively).
+        // Either way `finish_turn`/the fallback's own `ground` call terminates the
+        // assignment unconditionally, so without this map the abandoned task is gone
+        // the instant it grounds. Consumed (removed) only once a real dispatch
+        // actually merges it into that quark's next `Driver::task` via
+        // `prompt::frame_interrupted_resumption` — peeked, not removed, on every pass
+        // a merge is attempted, so a target blocked this pass by an unrelated gate
+        // (exclusivity, energy, disabled) does not lose the interrupted task before
+        // it ever reaches a real dispatch.
+        let mut interrupted_task: HashMap<QuarkId, String> = HashMap::new();
+        // The assignment rides along with the turn so that `finish_turn` can stamp
+        // `answers` on what the turn emits. Without it, "has this quark answered the
+        // human?" degenerates into "has it said anything since?", which silently eats
+        // any message the human sends while the quark is already working.
+        let mut turns: JoinSet<(
+            QuarkId,
+            Lane,
+            Option<TurnTree>,
+            Option<ulid::Ulid>,
+            anyhow::Result<TurnOutcome>,
+        )> = JoinSet::new();
+        let mut gates: JoinSet<(
+            QuarkId,
+            Lane,
+            TurnTree,
+            Option<ulid::Ulid>,
+            TurnOutcome,
+            Option<(Vec<String>, String)>,
+            super::merge::GateHeartbeat,
+            anyhow::Result<super::merge::PreGateOutcome>,
+        )> = JoinSet::new();
+        let mut in_gate: HashSet<(QuarkId, Lane)> = HashSet::new();
+        // Tracks workers already dispatched mid-turn from an in-flight orchestrator's
+        // live draft stream so `finish_turn_with_gate` does not re-dispatch them when
+        // the orchestrator's turn eventually completes.
+        let mut mid_turn_dispatched: HashMap<QuarkId, HashSet<QuarkId>> = HashMap::new();
+        // Tracks engine-level auto-retries per (quark, assignment) when a worktree-backed
+        // turn hits a transient stall/silence deadline or stream error, preserving its
+        // branch commits and continuing overnight work without stranding the run.
+        const MAX_TURN_AUTO_RETRIES: usize = 2;
+        let mut turn_auto_retries: HashMap<(QuarkId, Option<ulid::Ulid>), usize> = HashMap::new();
+        // The first turn error wins; siblings still run to completion (and still get
+        // their terminal status) so a single failure can't strand the rest as
+        // forever-Excited in the field.
+        let mut first_err: Option<anyhow::Error> = None;
+        let mut backstop = false;
+
+        self.sync_dag_scheduler_from_plans().await;
+
+        loop {
+            let mut spawned_any = false;
+
+            // Stop *starting* work once we're aborting or out of budget — but keep
+            // looping, so already-running turns are drained rather than dropped.
+            if first_err.is_none() && !backstop {
+                let mut events = read_events(&self.field_path)?;
+
+                // The human's force-restart, serviced on the same re-read the poll
+                // tick loops back to — so a *solo* wedged quark (nothing else pending,
+                // `join_next` blocked forever on its hung turn) is still rescued: the
+                // FIELD_POLL arm fires, we loop, re-read, and abort it here.
+                let rebooted = self
+                    .service_reboots(&events, &mut in_flight, &mut abort_handles)
+                    .await?;
+                // A force-restarted seat's turn is gone whether or not a cancel was
+                // pending for it — drop the bookkeeping so it cannot outlive the
+                // `in_flight` entry it described.
+                for target in &rebooted {
+                    in_gate.remove(&(target.clone(), Lane::Work));
+                    in_gate.remove(&(target.clone(), Lane::Chat));
+                    cancel_requested.remove(&(target.clone(), Lane::Work));
+                    cancel_requested.remove(&(target.clone(), Lane::Chat));
+                    dispatched_at_len.remove(&(target.clone(), Lane::Work));
+                    dispatched_at_len.remove(&(target.clone(), Lane::Chat));
+                    dispatched_assignment.remove(&(target.clone(), Lane::Work));
+                    dispatched_assignment.remove(&(target.clone(), Lane::Chat));
+                    mid_turn_dispatched.remove(target);
+                    // A force-restart is a deliberate human reset of this quark; an
+                    // interrupted task queued up before it must not silently resurface
+                    // on some unrelated later turn.
+                    interrupted_task.remove(target);
+                }
+
+                // Mid-turn live delegation: if an in-flight orchestrator streamed
+                // line-leading `@<worker>` delegations in `activity.full` and has now
+                // transitioned to tool execution (`Doing::Working`) without ending its
+                // turn first, dispatch those workers immediately so they execute in
+                // parallel rather than waiting out the orchestrator's tool steps.
+                if let Some(orch_id) = self.orchestrator_id() {
+                    if in_flight.iter().any(|(id, _)| id == &orch_id) {
+                        let live_dir = hadron_lattice::live::live_dir(&self.field_path);
+                        if let Some(activity) =
+                            hadron_lattice::live::read(&live_dir, &orch_id, chrono::Utc::now())
+                        {
+                            if activity.doing == hadron_lattice::live::Doing::Working {
+                                if let Some(draft) = activity.full.as_deref() {
+                                    let preons = self.loaded_preons();
+                                    let mentioned = crate::router::parse_all_addressees(
+                                        draft,
+                                        &self.roster,
+                                        Some(&orch_id),
+                                        &preons,
+                                    );
+                                    let mut newly_delegated = false;
+                                    for worker_id in mentioned {
+                                        if worker_id == orch_id {
+                                            continue;
+                                        }
+                                        let already =
+                                            mid_turn_dispatched.entry(orch_id.clone()).or_default();
+                                        if already.insert(worker_id.clone()) {
+                                            self.append(Event::new(
+                                                Actor::Quark(orch_id.clone()),
+                                                Some(worker_id),
+                                                Kind::Message {
+                                                    body: draft.to_string(),
+                                                },
+                                            ))
+                                            .await?;
+                                            newly_delegated = true;
+                                        }
+                                    }
+                                    if newly_delegated {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                struct ReadyCandidate {
+                    target: QuarkId,
+                    lane: Lane,
+                    quark: SharedQuark,
+                    driver: Option<Driver>,
+                    branch_assignment: Option<ulid::Ulid>,
+                    resuming_interrupted: bool,
+                }
+                let mut ready_candidates: Vec<ReadyCandidate> = Vec::new();
+
+                for (target, fallback_task) in self.pending_targets(&events) {
+                    // Resolved once, up front, so the in_flight check below and the
+                    // worktree/branch logic further down (which used to call
+                    // `driver_for` a second time) always agree on the same driver.
+                    let mut driver = self.driver_for(
+                        &events,
+                        &target,
+                        fallback_task.as_ref().map(|t| t.task.as_str()),
+                    );
+                    let resuming_interrupted = interrupted_task.contains_key(&target);
+                    // A message arrived mid-turn ADDS work, it does not replace it
+                    // (Task 3 of `.hadron/docs/plans/2026-08-02-fonts-tools-
+                    // orchestrator.md`): if this quark still owes an interrupted task,
+                    // fold it into whatever is driving this dispatch instead of
+                    // letting the grounded assignment (and the message that
+                    // interrupted it) read as the *only* task. Peeked, not removed —
+                    // see `interrupted_task`'s own doc comment for why the actual
+                    // consume happens only once a dispatch is committed to, below.
+                    if let (Some(d), Some(old_task)) =
+                        (driver.as_mut(), interrupted_task.get(&target))
+                    {
+                        d.task =
+                            crate::adapter::prompt::frame_interrupted_resumption(old_task, &d.task);
+                    }
+                    let lane = self.lane_for(&events, &target, driver.as_ref());
+
+                    // One turn per (quark, lane) at a time. A quark that becomes
+                    // pending again while its lane is running is picked up on a later
+                    // pass (its reply, or the event that re-addressed it, is still in
+                    // the field).
+                    //
+                    // `rebooted` guards the just-force-restarted quarks: their `Ground`
+                    // was appended after this `events` snapshot, so on THIS snapshot the
+                    // answered message still reads as pending — dispatching now would
+                    // re-excite the very turn we just aborted. Next read sees the Ground.
+                    let key = (target.clone(), lane);
+                    if in_flight.contains(&key) || rebooted.contains(&target) {
+                        // A newly-pending message for a seat that is already working:
+                        // interrupt it instead of leaving the message queued behind a
+                        // turn that may run for a long time (Task 4 of
+                        // `.hadron/docs/plans/2026-07-31-responsive-orchestrator.md`).
+                        // Only reachable when `in_flight` itself holds `key` (and is not
+                        // already in the post-turn merge gate `in_gate`) — a seat caught
+                        // by the `rebooted` half of the condition was already cleared
+                        // from `in_flight` by `service_reboots` on THIS pass, so there
+                        // is nothing here left to cancel.
+                        if in_flight.contains(&key) && !in_gate.contains(&key) {
+                            if let Some(requested_at) = cancel_requested.get(&key).copied() {
+                                // Already asked once — bound the wait. A transport
+                                // that ignores `session/cancel` (or has none) must
+                                // not wedge this seat for the message's sake; fall
+                                // through to the same destructive abort-and-reset
+                                // `service_reboots` already uses for a human force-
+                                // restart, so the still-unanswered message gets a
+                                // fresh turn on the next pass instead of waiting out
+                                // `TURN_DEADLINE`.
+                                if requested_at.elapsed() >= self.cancel_deadline {
+                                    let abandoned =
+                                        dispatched_assignment.get(&key).cloned().flatten();
+                                    let abandoned_assignment = abandoned.as_ref().map(|(a, _)| *a);
+                                    Self::abort_in_flight(&key, &mut in_flight, &mut abort_handles);
+                                    cancel_requested.remove(&key);
+                                    dispatched_at_len.remove(&key);
+                                    dispatched_assignment.remove(&key);
+                                    let live_dir = hadron_lattice::live::live_dir(&self.field_path);
+                                    let _ = hadron_lattice::live::clear(&live_dir, &target);
+                                    // The abandoned task is not gone — it is handed to
+                                    // the next dispatch for this quark, which merges it
+                                    // with whatever interrupted it (Task 3 of
+                                    // `.hadron/docs/plans/2026-08-02-fonts-tools-
+                                    // orchestrator.md`): "adds work, does not replace
+                                    // it". A blank task (no task-bearing driver at
+                                    // dispatch time) has nothing worth resuming.
+                                    if let Some((_, task)) = abandoned {
+                                        if !task.trim().is_empty() {
+                                            interrupted_task.insert(target.clone(), task);
+                                        }
+                                    }
+                                    // Grounds the abandoned assignment BEFORE
+                                    // taking the quark's lock below — Defect 2 of
+                                    // Task 9 (`.hadron/docs/plans/2026-07-31-
+                                    // responsive-orchestrator.md`): without this,
+                                    // `next_pending` kept finding the old
+                                    // dispatch record unanswered and re-excited
+                                    // the quark onto the STALE task instead of
+                                    // the message that interrupted it. Stamped
+                                    // with the abandoned assignment specifically
+                                    // (not left unanswered/None) — an unstamped
+                                    // Ground reads as answering EVERY earlier
+                                    // message via `has_answered`'s legacy
+                                    // fallback, which silently swallowed the very
+                                    // message that caused the interrupt.
+                                    self.ground(&target, abandoned_assignment).await?;
+                                    // `quark.lock().await` right after an abort,
+                                    // exactly like `service_reboots` already
+                                    // does and documents: `abort()` only marks
+                                    // the task, it does not synchronously drop
+                                    // its `MutexGuard`, but this task's own
+                                    // `.await` here cooperatively yields until
+                                    // the aborted task is next polled and drops
+                                    // it — bounded by the runtime's own
+                                    // scheduling, not a deadlock (Task 9 Step 4;
+                                    // confirmed, not just assumed, by this
+                                    // task's own passing test).
+                                    let quark = self
+                                        .quarks
+                                        .get(&target)
+                                        .and_then(|lanes| lanes.get(lane))
+                                        .cloned();
+                                    if let Some(quark) = quark {
+                                        quark.lock().await.reset_session();
+                                    }
+                                }
+                            } else {
+                                // `pending_targets` resurfaces THIS turn's own still-
+                                // open dispatch record every pass it runs — that is
+                                // exactly what the plain `in_flight` skip has always
+                                // absorbed as a no-op, and is not a reason to cancel
+                                // anything. Only a genuinely new `Message` appended
+                                // since dispatch (`message_arrived_since`) is.
+                                let since = dispatched_at_len.get(&key).copied().unwrap_or(0);
+                                let slot = self.cancel_slots.get(&key).cloned();
+                                if let Some(slot) = slot {
+                                    if slot.is_filled()
+                                        && self.message_arrived_since(&events, &target, since)
+                                    {
+                                        // Commit whatever this turn has written but not
+                                        // yet committed BEFORE asking it to stop (Task 5
+                                        // of `.hadron/docs/plans/2026-07-31-responsive-
+                                        // orchestrator.md`): a cancel that never resolves
+                                        // and falls through to the deadline abort above
+                                        // never reaches `finish_turn`'s own commit, so an
+                                        // interrupted turn with dirty, unversioned work
+                                        // would otherwise strand its branch behind
+                                        // `BlockReason::DirtyWorktree` forever — nothing
+                                        // else in the dispatch loop commits on a quark's
+                                        // behalf. Best-effort: a commit failure here must
+                                        // not stop the cancel itself from being requested.
+                                        if let Some(root) = self.repo_root.clone() {
+                                            let wt_dir = crate::worktree::trees_dir(&root)
+                                                .join(target.as_str());
+                                            if let Some(branch) =
+                                                crate::worktree::current_branch(&wt_dir)
+                                            {
+                                                let wt = crate::worktree::Worktree {
+                                                    quark: target.clone(),
+                                                    path: wt_dir,
+                                                    branch,
+                                                };
+                                                if crate::worktree::is_dirty(&wt.path)
+                                                    .unwrap_or(false)
+                                                {
+                                                    let msg = format!(
+                                                        "{}: WIP snapshot before graceful interrupt",
+                                                        target.as_str()
+                                                    );
+                                                    if let Err(e) =
+                                                        crate::worktree::commit_turn_with_author(
+                                                            &wt,
+                                                            &msg,
+                                                            self.git_author_name.as_deref(),
+                                                            self.git_author_email.as_deref(),
+                                                        )
+                                                    {
+                                                        term::warn(
+                                                            Source::Gluon,
+                                                            &format!(
+                                                                "{} failed to snapshot its dirty worktree \
+                                                                 before interrupt: {e:#}",
+                                                                target.as_str()
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if slot.request_cancel() {
+                                            cancel_requested.insert(key, std::time::Instant::now());
+                                        } else {
+                                            dispatched_at_len.insert(key, events.len());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    if self
+                        .max_concurrent_turns
+                        .is_some_and(|cap| in_flight.len() >= cap)
+                    {
+                        continue;
+                    }
+
+                    // `effective_mode`, not `resolve_mode`: a worker clamped to
+                    // `Auto` under No-Human-Mode must not get the Bypass seat's
+                    // free pass on the exchange backstop either.
+                    let turn_mode = hadron_gatekeeper::effective_mode(
+                        &events,
+                        &target,
+                        self.no_human,
+                        self.is_orchestrator(&target),
+                    );
+                    if turn_mode != Mode::Bypass
+                        && exchanges + ready_candidates.len() >= self.max_exchanges
+                    {
+                        backstop = true;
+                        break;
+                    }
+
+                    // Switched off by the human — the ONE refusal that gets no chat
+                    // message. Every other reroute tells the human something they did
+                    // not already know; this one restates a switch they flipped
+                    // themselves, and it fires once per disabled seat on every `@team`
+                    // broadcast, which is pure noise.
+                    //
+                    // It is NOT a silent drop, which is the failure mode this codebase
+                    // keeps rediscovering: `park_blocked` still writes `Status{Blocked}`,
+                    // so the field records the refusal and the roster shows the seat
+                    // blocked rather than forever-Excited — and the daemon log still
+                    // names it, exactly like the "seated but DISABLED" line at startup.
+                    if !self.is_enabled(&target) {
+                        term::warn(
+                            Source::Gluon,
+                            &format!(
+                                "{} is disabled — skipping the turn addressed to it",
+                                target.as_str()
+                            ),
+                        );
+                        self.park_blocked(&target).await?;
+                        continue;
+                    }
+
+                    if let Some(card) = self.roster.iter().find(|c| c.id == target) {
+                        let human_task = fallback_task.as_ref().map(|t| t.task.as_str());
+                        let task_text = self
+                            .driver_for(&events, &target, human_task)
+                            .map(|d| d.task)
+                            .unwrap_or_else(|| human_task.unwrap_or_default().to_string());
+                        let base = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        let workspace_root = workspace_root_of(&self.field_path, &base);
+                        let repo_skills_dir = workspace_root.join(".hadron").join("skills");
+                        let skill_corpus = crate::skills::load_skills(
+                            self.global_skills_dir.as_deref(),
+                            Some(&repo_skills_dir),
+                        );
+                        if let Some(m) = crate::skills::select_for_target(
+                            &task_text,
+                            &target,
+                            &self.roster,
+                            &skill_corpus,
+                        ) {
+                            if card
+                                .deny_skills
+                                .iter()
+                                .any(|d| d.eq_ignore_ascii_case(&m.id))
+                            {
+                                let msg = format!(
+                                    "@{} does not have skill '{}' enabled (deny_skills); skipping.",
+                                    target.as_str(),
+                                    m.id
+                                );
+                                self.reroute_blocked(&target, &msg).await?;
+                                continue;
+                            }
+                            let turn_mode = hadron_gatekeeper::effective_mode(
+                                &events,
+                                &target,
+                                self.no_human,
+                                self.is_orchestrator(&target),
+                            );
+                            if turn_mode < m.min_mode {
+                                let msg = format!(
+                                    "@{} is in {} mode and cannot run '{}' (requires {} mode); skipping.",
+                                    target.as_str(),
+                                    turn_mode.as_str(),
+                                    m.id,
+                                    m.min_mode.as_str()
+                                );
+                                self.reroute_blocked(&target, &msg).await?;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // The depletion gate is opt-in. A seat is only cut off by a limit
+                    // somebody set — its own `energy_limit` from Settings, or an
+                    // explicit swarm-wide default. With neither, the ledger still
+                    // records the spend; it just does not stop the turn.
+                    if let Some(ledger) = &self.ledger {
+                        let limit = self
+                            .roster
+                            .iter()
+                            .find(|c| c.id == target)
+                            .and_then(|c| c.energy_limit)
+                            .or(self.default_energy_limit);
+                        if let Some(limit) = limit {
+                            if ledger.is_depleted(&target, limit)? {
+                                let msg = format!(
+                                    "Quark {} is depleted (exceeded {} tokens).",
+                                    target.as_str(),
+                                    limit
+                                );
+                                self.reroute_blocked(&target, &msg).await?;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // `driver` was already resolved above (for the lane check) — reused
+                    // here so the branch/worktree logic below agrees with it.
+                    let Some(quark) = self
+                        .quarks
+                        .get(&target)
+                        .and_then(|lanes| lanes.get(lane))
+                        .cloned()
+                    else {
+                        first_err = Some(anyhow::anyhow!(
+                            "no such quark/lane on roster: {} ({lane:?})",
+                            target.as_str()
+                        ));
+                        break;
+                    };
+
+                    // Worktree discipline (on iff `with_git`): the quark works in its
+                    // own checkout, on its own branch, and never in the human's tree.
+                    let mut branch_assignment: Option<ulid::Ulid> = None;
+                    if let Some(root) = self.repo_root.clone() {
+                        // No task-bearing driver ⇒ no assignment ⇒ no branch to cut.
+                        // Refuse rather than commit a quark's work to an unnamed branch.
+                        let Some(driver) = driver.as_ref() else {
+                            self.reroute_blocked_with_severity(
+                                &target,
+                                &format!(
+                                    "{} has no assignment to work on (no task-bearing event drives this turn); refusing to excite it.",
+                                    target.as_str()
+                                ),
+                                hadron_lattice::Severity::Error,
+                            )
+                            .await?;
+                            continue;
+                        };
+
+                        // Gate a superseded assignment branch: if this quark's worktree is sitting
+                        // on a branch from a PREVIOUS assignment that has unlanded commits, gate and
+                        // land that previous branch before cutting the new assignment branch.
+                        //
+                        // Exception: when resuming an interrupted turn (`resuming_interrupted`),
+                        // the previous branch holds half-finished WIP commits from the turn we just
+                        // interrupted. Running `merge_gate` on a half-finished branch would block
+                        // the interrupting message for minutes and likely fail tests; instead,
+                        // `provision_one` carries the WIP branch commits forward onto the new
+                        // assignment branch and gates once when the resumed work completes.
+                        let wt_dir = crate::worktree::trees_dir(&root).join(target.as_str());
+                        if !resuming_interrupted && wt_dir.exists() {
+                            if let Some(old_branch) = crate::worktree::current_branch(&wt_dir) {
+                                let new_branch = crate::worktree::branch_name(
+                                    &target,
+                                    &driver.assignment.to_string(),
+                                );
+                                if old_branch != new_branch {
+                                    let base = crate::worktree::default_branch(&root);
+                                    let old_wt = crate::worktree::Worktree {
+                                        quark: target.clone(),
+                                        path: wt_dir.clone(),
+                                        branch: old_branch.clone(),
+                                    };
+                                    if crate::worktree::commits_ahead(&old_wt, &base).unwrap_or(0)
+                                        > 0
+                                    {
+                                        let parsed_old =
+                                            crate::worktree::parse_assignment_from_branch(
+                                                &old_branch,
+                                            );
+                                        if should_gate_superseded_branch(
+                                            &events, &target, parsed_old,
+                                        ) {
+                                            let old_assignment =
+                                                parsed_old.unwrap_or(driver.assignment);
+                                            let old_turn_tree = TurnTree {
+                                                head_before: crate::worktree::head(&wt_dir),
+                                                wt: old_wt,
+                                                base,
+                                                assignment: old_assignment,
+                                            };
+                                            if self.merge.is_some() {
+                                                self.append(Event::new(
+                                                    Actor::Gluon,
+                                                    None,
+                                                    Kind::Message {
+                                                        body: format!(
+                                                            "gating `{old_branch}` (a previous assignment of `{}`) \
+                                                             before its next turn — this can take minutes.",
+                                                            target.as_str(),
+                                                        ),
+                                                    },
+                                                ))
+                                                .await?;
+                                                match self.merge_gate(&target, &old_turn_tree).await
+                                                {
+                                                    Ok(true) => {
+                                                        events = read_events(&self.field_path)?;
+                                                        let has_pending_handback_or_waiting = events
+                                                            .iter()
+                                                            .rev()
+                                                            .find_map(|e| {
+                                                                if e.from == Actor::Quark(target.clone()) {
+                                                                    if let Kind::Status { state } = &e.kind {
+                                                                        return Some(*state == QuarkState::Waiting);
+                                                                    }
+                                                                }
+                                                                if Self::is_gate_handback(e, &target, old_assignment) {
+                                                                    return Some(true);
+                                                                }
+                                                                None
+                                                            })
+                                                            .unwrap_or(false);
+                                                        if has_pending_handback_or_waiting {
+                                                            spawned_any = true;
+                                                            continue;
+                                                        }
+                                                        branch_assignment = Some(old_assignment);
+                                                    }
+                                                    Ok(false) => {
+                                                        events = read_events(&self.field_path)?;
+                                                    }
+                                                    Err(e) => {
+                                                        self.reroute_blocked_with_severity(
+                                                            &target,
+                                                            &format!(
+                                                                "gating `{old_branch}` (a previous assignment of `{}`) failed: {e:#}",
+                                                                target.as_str()
+                                                            ),
+                                                            hadron_lattice::Severity::Error,
+                                                        )
+                                                        .await?;
+                                                        spawned_any = true;
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            let _ = crate::snapshot::git(
+                                                &wt_dir,
+                                                &["rebase", "--abort"],
+                                            );
+                                            if crate::worktree::is_dirty(&wt_dir).unwrap_or(false) {
+                                                let msg = format!(
+                                                    "{}: WIP snapshot before archiving superseded branch {}",
+                                                    target.as_str(),
+                                                    old_branch
+                                                );
+                                                let _ = crate::worktree::commit_turn(&old_wt, &msg);
+                                            }
+                                            if crate::worktree::detach_at_base(&old_wt, &base)
+                                                .is_ok()
+                                            {
+                                                let _ = crate::worktree::archive_and_prune_branch(
+                                                    &root,
+                                                    &old_branch,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    ready_candidates.push(ReadyCandidate {
+                        target,
+                        lane,
+                        quark,
+                        driver,
+                        branch_assignment,
+                        resuming_interrupted,
+                    });
+                }
+
+                // Provision worktrees for all ready candidates in the batch. When
+                // multiple quarks fan out simultaneously (e.g. `@team` across 50+
+                // seats, or orchestrator + workers in parallel), provisioning runs
+                // concurrently across `spawn_blocking` workers while results are
+                // harvested in deterministic candidate order.
+                type ProvisionedTree = (TurnTree, hadron_lattice::SnapshotRef, String);
+                let mut provisioned: Vec<(
+                    ReadyCandidate,
+                    Option<anyhow::Result<ProvisionedTree>>,
+                )> = Vec::with_capacity(ready_candidates.len());
+
+                if let Some(root) = self.repo_root.clone() {
+                    if !ready_candidates.is_empty() {
+                        let live_dir = hadron_lattice::live::live_dir(&self.field_path);
+                        let provision_one =
+                            |root: PathBuf,
+                             field_path: PathBuf,
+                             target: QuarkId,
+                             assignment: ulid::Ulid,
+                             carry_current_branch: bool|
+                             -> anyhow::Result<ProvisionedTree> {
+                                let _ = hadron_lattice::live::write(
+                                    &field_path,
+                                    &target,
+                                    hadron_lattice::live::Doing::Thinking,
+                                    "provisioning worktree…",
+                                );
+                                let base = crate::worktree::default_branch(&root);
+                                let wt = crate::worktree::ensure_with_base_and_carry(
+                                    &root,
+                                    &target,
+                                    &assignment.to_string(),
+                                    &base,
+                                    carry_current_branch,
+                                )?;
+                                let snap = crate::snapshot::create(
+                                    &wt.path,
+                                    &format!("before {}", target.as_str()),
+                                )?;
+                                let head_before = crate::worktree::head(&wt.path);
+                                let git_diff = if head_before.is_some() {
+                                    let range = format!("{base}...HEAD");
+                                    crate::snapshot::git_ok(&wt.path, &["diff", &range])?
+                                        .unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                let _ = hadron_lattice::live::write(
+                                    &field_path,
+                                    &target,
+                                    hadron_lattice::live::Doing::Thinking,
+                                    "building context…",
+                                );
+                                Ok((
+                                    TurnTree {
+                                        head_before,
+                                        wt,
+                                        base,
+                                        assignment,
+                                    },
+                                    snap,
+                                    git_diff,
+                                ))
+                            };
+
+                        if ready_candidates.len() == 1 {
+                            let cand = ready_candidates.into_iter().next().expect("len == 1");
+                            let assignment = cand.branch_assignment.unwrap_or_else(|| {
+                                cand.driver
+                                    .as_ref()
+                                    .expect("checked driver above")
+                                    .assignment
+                            });
+                            let _ = hadron_lattice::live::publish(
+                                &live_dir,
+                                &hadron_lattice::Activity::new(
+                                    QuarkId::new("gluon"),
+                                    hadron_lattice::live::Doing::Working,
+                                    &format!("provisioning worktree for @{}", cand.target.as_str()),
+                                ),
+                            );
+                            let root_c = root.clone();
+                            let field_c = self.field_path.clone();
+                            let target_c = cand.target.clone();
+                            let carry = cand.resuming_interrupted;
+                            let res = tokio::task::spawn_blocking(move || {
+                                provision_one(root_c, field_c, target_c, assignment, carry)
+                            })
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(anyhow::anyhow!("worktree provisioning task panicked: {e}"))
+                            });
+                            let _ = hadron_lattice::live::clear(&live_dir, &QuarkId::new("gluon"));
+                            provisioned.push((cand, Some(res)));
+                        } else {
+                            let _ = hadron_lattice::live::publish(
+                                &live_dir,
+                                &hadron_lattice::Activity::new(
+                                    QuarkId::new("gluon"),
+                                    hadron_lattice::live::Doing::Working,
+                                    &format!(
+                                        "provisioning {} worktrees in parallel…",
+                                        ready_candidates.len()
+                                    ),
+                                ),
+                            );
+                            let mut handles = Vec::with_capacity(ready_candidates.len());
+                            for cand in &ready_candidates {
+                                let root_c = root.clone();
+                                let field_c = self.field_path.clone();
+                                let target_c = cand.target.clone();
+                                let carry = cand.resuming_interrupted;
+                                let assignment = cand.branch_assignment.unwrap_or_else(|| {
+                                    cand.driver
+                                        .as_ref()
+                                        .expect("checked driver above")
+                                        .assignment
+                                });
+                                handles.push(tokio::task::spawn_blocking(move || {
+                                    provision_one(root_c, field_c, target_c, assignment, carry)
+                                }));
+                            }
+                            for (cand, handle) in ready_candidates.into_iter().zip(handles) {
+                                let res = handle.await.unwrap_or_else(|e| {
+                                    Err(anyhow::anyhow!("worktree provisioning task panicked: {e}"))
+                                });
+                                provisioned.push((cand, Some(res)));
+                            }
+                            let _ = hadron_lattice::live::clear(&live_dir, &QuarkId::new("gluon"));
+                        }
+
+                        // Pre-turn peer conflict radar (run asynchronously on blocking pool only
+                        // when multiple quarks are active concurrently, avoiding 4xN git spawns on solo turns).
+                        if in_flight.len() + provisioned.len() > 1 {
+                            let root_for_conflicts = root.clone();
+                            if let Ok(Ok(conflicts)) = tokio::task::spawn_blocking(move || {
+                                let root_obj = hadron_forge::file::Root::new(root_for_conflicts);
+                                hadron_forge::peers::detect_cross_worktree_conflicts(&root_obj)
+                            })
+                            .await
+                            {
+                                if conflicts.conflicts_detected > 0 {
+                                    term::info(
+                                        Source::Gluon,
+                                        &format!(
+                                            "cross-worktree conflict radar: {} conflicting file entries detected across active peers",
+                                            conflicts.conflicts.len()
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        let locks_path = root.join(".hadron").join("locks.json");
+                        if locks_path.exists() {
+                            let lock_table =
+                                hadron_lattice::locks::IntentLockTable::load_from_file(&locks_path);
+                            let active = lock_table.active_leases();
+                            if !active.is_empty() {
+                                term::info(
+                                    Source::Gluon,
+                                    &format!(
+                                        "pre-turn lease radar: {} active intent leases held",
+                                        active.len()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    for cand in ready_candidates {
+                        provisioned.push((cand, None));
+                    }
+                }
+
+                for (cand, prov) in provisioned {
+                    let ReadyCandidate {
+                        target,
+                        lane,
+                        quark,
+                        driver,
+                        branch_assignment: _,
+                        resuming_interrupted: _,
+                    } = cand;
+                    let mut tree: Option<TurnTree> = None;
+                    let mut git_diff = String::new();
+                    if let Some(prov_res) = prov {
+                        match prov_res {
+                            Ok((turn_tree, snap, diff)) => {
+                                self.append(Event::new(
+                                    Actor::Gluon,
+                                    None,
+                                    Kind::Snapshot {
+                                        git: snap.commit.clone(),
+                                        label: snap.label.clone(),
+                                    },
+                                ))
+                                .await?;
+                                git_diff = diff;
+                                tree = Some(turn_tree);
+                            }
+                            Err(e) => {
+                                let live_dir = hadron_lattice::live::live_dir(&self.field_path);
+                                let _ = hadron_lattice::live::clear(&live_dir, &target);
+                                self.reroute_blocked_with_severity(
+                                    &target,
+                                    &format!(
+                                        "refusing to excite {}: its worktree is not usable — {e:#}",
+                                        target.as_str()
+                                    ),
+                                    hadron_lattice::Severity::Error,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        }
+                    }
+
+                    let projection = self.projection_for(
+                        &events,
+                        &target,
+                        driver.as_ref(),
+                        git_diff,
+                        tree.as_ref().map(|t| t.wt.path.clone()),
+                    );
+
+                    // The DISPATCH RECORD. Who was asked to do what was, until now, only
+                    // ever re-derived from message text on each pass
+                    // (`unaddressed_message_targets`) and never written down, so a brief
+                    // and its result were two unrelated `Message`s with nothing linking
+                    // them. `Kind::Assign` already existed and was constructed nowhere.
+                    //
+                    // Written by `Actor::Gluon` with `answers` = the assignment, so
+                    // `continued_assignment` reads it as a CONTINUATION: `driver_for`
+                    // finds it as the newest task-bearing event addressed to the quark,
+                    // and without that stamp the next turn would take the record's own
+                    // ULID as a new assignment and cut a fresh branch over the live one.
+                    //
+                    // One per assignment, never one per pass: an `Assign` is itself an
+                    // `is_turn_request`, so a duplicate would be a dispatch record that
+                    // re-dispatches. Appended after the projection is built, so the quark
+                    // never reads its own record back as a second instruction.
+                    let mut dispatch_batch = Vec::with_capacity(2);
+                    if let Some(driver) = driver.as_ref() {
+                        let already_recorded = events.iter().any(|e| {
+                            e.to.as_ref() == Some(&target)
+                                && matches!(e.kind, Kind::Assign { .. })
+                                && e.answers == Some(driver.assignment)
+                        });
+                        if !already_recorded {
+                            dispatch_batch.push(
+                                Event::new(
+                                    Actor::Gluon,
+                                    Some(target.clone()),
+                                    Kind::Assign {
+                                        task: driver.task.clone(),
+                                        invariants: driver.invariants.clone(),
+                                    },
+                                )
+                                .with_answers(driver.assignment),
+                            );
+                        }
+                    }
+
+                    // Announce the excitation *before* the turn runs, so the chamber can
+                    // show the quark working while it works. The adapter only returns at
+                    // the end of a turn, so without this the field is silent for the whole
+                    // duration and the quark reads as ignoring the human. Appended after
+                    // the projection is built, so the quark never sees its own status.
+                    // It doubles as the in-flight marker in the field itself: `next_pending`
+                    // and `human_message_targets` both count it as the quark having
+                    // "authored since", so a running quark is never re-selected.
+                    dispatch_batch.push(Event::new(
+                        Actor::Quark(target.clone()),
+                        None,
+                        Kind::Status {
+                            state: QuarkState::Excited,
+                        },
+                    ));
+                    self.append_batch(&dispatch_batch).await?;
+
+                    let turn_id = target.clone();
+                    let turn_tree = tree.clone();
+                    let assignment = driver.as_ref().map(|d| d.assignment);
+                    if let Some(asgn) = assignment {
+                        let task_id = asgn.to_string();
+                        let title = driver.as_ref().map(|d| d.task.as_str()).unwrap_or("Task");
+                        let branch = tree.as_ref().map(|t| t.wt.branch.as_str()).unwrap_or("");
+                        let mut sched = self.dag_scheduler.lock().await;
+                        let matched_id = sched
+                            .tasks
+                            .iter()
+                            .find_map(|(id, t)| {
+                                if (title.to_lowercase().contains(&id.to_lowercase())
+                                    || id.to_lowercase().contains(&title.to_lowercase()))
+                                    && matches!(
+                                        t.state,
+                                        BarrierState::Unblocked | BarrierState::Pending
+                                    )
+                                {
+                                    Some(id.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(task_id);
+
+                        if !sched.tasks.contains_key(&matched_id) {
+                            let _ = sched.add_task(&matched_id, title, &[]);
+                        }
+                        let _ = sched.dispatch_task(&matched_id, target.clone(), branch);
+                    }
+                    let deadline = self.turn_deadline;
+                    let max_wall_clock = self.max_turn_wall_clock;
+                    let live_dir = hadron_lattice::live::live_dir(&self.field_path);
+                    let abort = turns.spawn(async move {
+                        let mut quark = quark.lock().await;
+                        // THE WATCHDOG. A turn that never resolves — its CLI process
+                        // died, or orphaned its stdout pipe to a grandchild so the
+                        // adapter waits forever on an EOF that will never come — would
+                        // otherwise keep this quark in `in_flight` for good: no terminal
+                        // status, no quiesce, no re-dispatch, the quark simply gone.
+                        // On expiry we DROP the turn future (which drops the adapter's
+                        // `Child`, killing a still-live process — see `ProcessRunner`'s
+                        // `kill_on_drop`) and return an error, which lands in the
+                        // existing failed-turn arm below: `Status{Error}`, out of
+                        // `in_flight`, excitable again by the next message.
+                        //
+                        // The lock is acquired OUTSIDE the deadline on purpose: it
+                        // measures the turn, not the wait for a turn slot. And it
+                        // measures SILENCE, not elapsed time — see `excite_with_liveness_watchdog`.
+                        let outcome = excite_with_liveness_watchdog(
+                            quark.excite(projection),
+                            &live_dir,
+                            &turn_id,
+                            deadline,
+                            max_wall_clock,
+                        )
+                        .await;
+                        (turn_id, lane, turn_tree, assignment, outcome)
+                    });
+                    dispatched_at_len.insert((target.clone(), lane), events.len());
+                    dispatched_assignment.insert(
+                        (target.clone(), lane),
+                        driver.as_ref().map(|d| (d.assignment, d.task.clone())),
+                    );
+                    abort_handles.insert((target.clone(), lane), abort);
+                    // Consumed here, not at the merge point above: this is the first
+                    // moment a dispatch for `target` is actually committed to (the
+                    // turn is spawned, `in_flight` is about to gain the key) rather
+                    // than merely attempted — a target that fell through the merge
+                    // but then hit an unrelated gate (exclusivity, energy, disabled)
+                    // this same pass must keep its interrupted task for the next one.
+                    interrupted_task.remove(&target);
+                    heartbeat_tracker.register(target.clone());
+                    in_flight.insert((target, lane));
+                    exchanges += 1;
+                    spawned_any = true;
+                }
+
+                // No-Human-Mode auto-scheduler (spec §2 D). Nothing else is pending
+                // and nothing is in flight — the swarm is *about* to quiesce (the
+                // exact condition the break below checks). Before conceding that,
+                // check whether it is only quiesced because a worker is parked
+                // waiting on the ORCHESTRATOR (not a human) to adjudicate: if so,
+                // put the pending request in front of the orchestrator instead of
+                // stopping. `orchestrator_adjudication_message` is idempotent (at
+                // most one ask per still-pending request), so a real orchestrator
+                // that has no grant tool wired up yet — or a fake/mock quark whose
+                // reply is just a message — fails CLOSED: the ask goes out once,
+                // nothing resumes the worker, and the *next* pass around this same
+                // check sees the ask already made and lets the loop quiesce for a
+                // human, exactly as if the toggle were off. It never spins.
+                if turns.is_empty() && gates.is_empty() && !spawned_any && self.no_human {
+                    if let Some(msg) = self.orchestrator_adjudication_message(&events) {
+                        self.append(msg).await?;
+                        spawned_any = true; // re-loop; the next pass dispatches it
+                    }
+                }
+            }
+
+            // Quiesce is the conjunction: nothing new to start AND nothing running.
+            if turns.is_empty() && gates.is_empty() && !spawned_any {
+                break;
+            }
+
+            // Something is running. Wait for the next turn or merge gate to land — but do
+            // NOT wait only on that: a message can arrive in the field *while* a turn or
+            // merge gate grinds, addressed to a quark that is free. Blocking solely on
+            // `join_next` would queue it behind the running turn or slow test suite, so
+            // handing one quark a long task or `cargo test` would freeze the conversation
+            // with every other quark. So we race `turns.join_next()`, `gates.join_next()`,
+            // and a poll tick, and on a tick we loop back to re-read the field and dispatch
+            // anything newly pending.
+            enum StepEvent {
+                Turn(
+                    Result<
+                        (
+                            QuarkId,
+                            Lane,
+                            Option<TurnTree>,
+                            Option<ulid::Ulid>,
+                            anyhow::Result<TurnOutcome>,
+                        ),
+                        tokio::task::JoinError,
+                    >,
+                ),
+                Gate(
+                    Result<
+                        (
+                            QuarkId,
+                            Lane,
+                            TurnTree,
+                            Option<ulid::Ulid>,
+                            TurnOutcome,
+                            Option<(Vec<String>, String)>,
+                            super::merge::GateHeartbeat,
+                            anyhow::Result<super::merge::PreGateOutcome>,
+                        ),
+                        tokio::task::JoinError,
+                    >,
+                ),
+                Tick,
+            }
+
+            let step = tokio::select! {
+                Some(joined) = turns.join_next(), if !turns.is_empty() => StepEvent::Turn(joined),
+                Some(gated) = gates.join_next(), if !gates.is_empty() => StepEvent::Gate(gated),
+                _ = self.wake_notify.notified() => StepEvent::Tick,
+                _ = tokio::time::sleep(FIELD_POLL) => StepEvent::Tick,
+            };
+
+            match step {
+                StepEvent::Tick => continue,
+                StepEvent::Turn(joined) => match joined {
+                    Ok((target, lane, tree, assignment, Ok(mut outcome))) => {
+                        outcome.message = outcome
+                            .message
+                            .map(|m| crate::adapter::telemetry::deduplicate_turn_message(&m))
+                            .filter(|m| !m.trim().is_empty());
+                        heartbeat_tracker.unregister(&target);
+                        abort_handles.remove(&(target.clone(), lane));
+                        cancel_requested.remove(&(target.clone(), lane));
+                        dispatched_at_len.remove(&(target.clone(), lane));
+                        turn_auto_retries.remove(&(target.clone(), assignment));
+                        let dispatched = dispatched_assignment
+                            .remove(&(target.clone(), lane))
+                            .flatten();
+                        // The graceful cancel's ordinary resolution: the transport honoured
+                        // `session/cancel` and the turn returned normally with
+                        // `outcome.cancelled == true` — this is the common path, NOT the
+                        // CANCEL_DEADLINE fallback above, which only fires when a transport
+                        // never resolves the request at all. `finish_turn` grounds this
+                        // turn's assignment unconditionally (a cancelled turn is still a
+                        // terminal one), so without this the interrupted task is gone the
+                        // instant it grounds. Task 3 of `.hadron/docs/plans/2026-08-02-
+                        // fonts-tools-orchestrator.md`: hand it to `interrupted_task`
+                        // instead, the same as the fallback path does.
+                        if outcome.cancelled {
+                            if let Some((_, task)) = dispatched {
+                                if !task.trim().is_empty() {
+                                    interrupted_task.insert(target.clone(), task);
+                                }
+                            }
+                        }
+
+                        match self.prepare_async_gate(&target, &outcome, tree.as_ref()) {
+                            Ok(Some((t, edit_info, runner, heartbeat))) => {
+                                let key = (target.clone(), lane);
+                                in_gate.insert(key.clone());
+                                {
+                                    let mut sched = self.dag_scheduler.lock().await;
+                                    if let Some(asgn) = assignment {
+                                        let _ = sched.hold_at_gate_barrier(&asgn.to_string());
+                                    }
+                                    for task in sched.tasks.values_mut() {
+                                        if let BarrierState::Running { branch, .. } = &task.state {
+                                            if branch == &t.wt.branch {
+                                                task.state = BarrierState::GateHolding {
+                                                    assigned_quark: target.clone(),
+                                                    branch: t.wt.branch.clone(),
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
+                                let shadow_gate = Arc::clone(&self.shadow_gate);
+                                let gate_semaphore = Arc::clone(&self.gate_semaphore);
+                                let fast_path_docs_only = self.fast_path_docs_only;
+                                let rpc_dispatcher = self.rpc_dispatcher.clone();
+                                let gate_abort = gates.spawn(async move {
+                                    let pre_res = Self::run_pre_gate(
+                                        runner,
+                                        &t,
+                                        &heartbeat,
+                                        &shadow_gate,
+                                        &gate_semaphore,
+                                        fast_path_docs_only,
+                                        rpc_dispatcher,
+                                    )
+                                    .await;
+                                    (
+                                        target, lane, t, assignment, outcome, edit_info, heartbeat,
+                                        pre_res,
+                                    )
+                                });
+                                abort_handles.insert(key, gate_abort);
+                            }
+                            Ok(None) => {
+                                in_flight.remove(&(target.clone(), lane));
+                                let already_dispatched =
+                                    mid_turn_dispatched.remove(&target).unwrap_or_default();
+                                let rotate_session = should_rotate_session(&outcome.usage);
+                                if let Err(err) = self
+                                    .finish_turn_with_gate(
+                                        &target,
+                                        outcome,
+                                        tree.as_ref(),
+                                        assignment,
+                                        None,
+                                        None,
+                                        &already_dispatched,
+                                    )
+                                    .await
+                                {
+                                    if first_err.is_none() {
+                                        first_err = Some(err);
+                                    }
+                                }
+                                if rotate_session {
+                                    if let Some(quark) = self
+                                        .quarks
+                                        .get(&target)
+                                        .and_then(|lanes| lanes.get(lane))
+                                        .cloned()
+                                    {
+                                        term::info(
+                                            Source::Gluon,
+                                            &format!(
+                                                "rotating session for {} (post-turn context >= 70%)",
+                                                target.as_str()
+                                            ),
+                                        );
+                                        quark.lock().await.reset_session();
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                in_flight.remove(&(target.clone(), lane));
+                                mid_turn_dispatched.remove(&target);
+                                if first_err.is_none() {
+                                    first_err = Some(err);
+                                }
+                            }
+                        }
+                    }
+                    Ok((target, lane, tree, assignment, Err(err))) => {
+                        // A failed turn must still leave a terminal status behind, or the
+                        // quark reads as forever-working. Its siblings keep running.
+                        heartbeat_tracker.unregister(&target);
+                        in_flight.remove(&(target.clone(), lane));
+                        abort_handles.remove(&(target.clone(), lane));
+                        cancel_requested.remove(&(target.clone(), lane));
+                        dispatched_at_len.remove(&(target.clone(), lane));
+                        dispatched_assignment.remove(&(target.clone(), lane));
+                        mid_turn_dispatched.remove(&target);
+                        // Always reset the quark's session after a turn error or watchdog abort
+                        // so the next turn never tries to `--resume` a dead/corrupted session.
+                        if let Some(quark) = self
+                            .quarks
+                            .get(&target)
+                            .and_then(|lanes| lanes.get(lane))
+                            .cloned()
+                        {
+                            quark.lock().await.reset_session();
+                        }
+                        let err_str = format!("{err:#}");
+                        if tree.is_some()
+                            && (crate::adapter::cli::is_retryable_cli_error(&err_str)
+                                || err_str
+                                    .to_lowercase()
+                                    .contains("quark stream failed with error steps"))
+                        {
+                            let retries = turn_auto_retries
+                                .entry((target.clone(), assignment))
+                                .or_insert(0);
+                            if *retries < MAX_TURN_AUTO_RETRIES {
+                                *retries += 1;
+                                let attempt_num = *retries;
+                                exchanges = exchanges.saturating_sub(1);
+                                if let Some(t) = tree.as_ref() {
+                                    let _ = crate::worktree::checkpoint_atomic_step(
+                                        &t.wt.path,
+                                        &target,
+                                        &format!(
+                                            "WIP checkpoint before auto-retry {attempt_num}/{MAX_TURN_AUTO_RETRIES}"
+                                        ),
+                                    );
+                                }
+                                let retry_notice = format!(
+                                    "Quark `{}` hit a transient turn stall/error ({}); worktree checkpointed, session reset, and auto-retrying assignment (attempt {attempt_num}/{MAX_TURN_AUTO_RETRIES})…",
+                                    target.as_str(),
+                                    super::quote_paths(&err_str),
+                                );
+                                let _ = self
+                                    .append(
+                                        Event::new(
+                                            Actor::Gluon,
+                                            None,
+                                            Kind::Message { body: retry_notice },
+                                        )
+                                        .with_severity(hadron_lattice::Severity::Warning),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                        }
+                        if let Some(t) = tree.as_ref() {
+                            let _ = crate::worktree::checkpoint_atomic_step(
+                                &t.wt.path,
+                                &target,
+                                "WIP checkpoint before turn error",
+                            );
+                        }
+                        let err_msg = self.format_error_message(&target, &err);
+                        let _ = self
+                            .append(
+                                Event::new(Actor::Gluon, None, Kind::Message { body: err_msg })
+                                    .with_severity(hadron_lattice::Severity::Error),
+                            )
+                            .await;
+                        let grounded = self
+                            .append(
+                                Event::new(
+                                    Actor::Quark(target.clone()),
+                                    None,
+                                    Kind::Status {
+                                        state: QuarkState::Error,
+                                    },
+                                )
+                                .answering(assignment),
+                            )
+                            .await;
+                        if first_err.is_none() {
+                            first_err = Some(err);
+                            if let Err(io_err) = grounded {
+                                first_err = Some(io_err);
+                            }
+                        }
+                    }
+                    Err(join_err) if join_err.is_cancelled() => {
+                        // A turn we aborted on purpose — the human's force-restart. Its
+                        // cleanup (out of `in_flight`, terminal `Ground`, session reset)
+                        // already happened in `service_reboots`; the corpse joining here is
+                        // expected, not a panic. Discard it and keep the siblings running.
+                        // (Distinguishing on `is_cancelled` is what keeps a targeted reboot
+                        // from tripping the ground-everyone path below.)
+                        continue;
+                    }
+                    Err(join_err) => {
+                        // A panicking turn: we cannot tell which quark it was from the
+                        // JoinError alone, so ground every quark still in flight rather than
+                        // strand one Excited, and abort.
+                        abort_handles.clear();
+                        in_gate.clear();
+                        cancel_requested.clear();
+                        dispatched_at_len.clear();
+                        dispatched_assignment.clear();
+                        for (target, _lane) in std::mem::take(&mut in_flight) {
+                            let _ = self
+                                .append(Event::new(
+                                    Actor::Quark(target),
+                                    None,
+                                    Kind::Status {
+                                        state: QuarkState::Error,
+                                    },
+                                ))
+                                .await;
+                        }
+                        let orchestrator = self
+                            .roster
+                            .iter()
+                            .find(|c| c.flavor == Flavor::Orchestrator);
+                        let panic_msg = match orchestrator {
+                            Some(_orch) => format!(
+                                "@{} A quark turn panicked: {join_err}",
+                                crate::router::ORCHESTRATOR_ALIAS
+                            ),
+                            None => format!("A quark turn panicked: {join_err}"),
+                        };
+                        let _ = self
+                            .append(
+                                Event::new(Actor::Gluon, None, Kind::Message { body: panic_msg })
+                                    .with_severity(hadron_lattice::Severity::Error),
+                            )
+                            .await;
+                        if first_err.is_none() {
+                            first_err = Some(anyhow::anyhow!("a quark turn panicked: {join_err}"));
+                        }
+                    }
+                },
+                StepEvent::Gate(gated) => match gated {
+                    Ok((target, lane, t, assignment, outcome, edit_info, heartbeat, pre_res)) => {
+                        let key = (target.clone(), lane);
+                        in_flight.remove(&key);
+                        in_gate.remove(&key);
+                        abort_handles.remove(&key);
+                        let already_dispatched =
+                            mid_turn_dispatched.remove(&target).unwrap_or_default();
+                        let rotate_session = should_rotate_session(&outcome.usage);
+                        match pre_res {
+                            Ok(pre_outcome) => {
+                                {
+                                    let mut sched = self.dag_scheduler.lock().await;
+                                    match &pre_outcome {
+                                        super::merge::PreGateOutcome::Ready {
+                                            passed: true,
+                                            tail,
+                                            ..
+                                        } => {
+                                            if let Some(asgn) = assignment {
+                                                let _ = sched
+                                                    .pass_gate_barrier(&asgn.to_string(), tail);
+                                            }
+                                            let holding_ids: Vec<String> = sched
+                                                .tasks
+                                                .iter()
+                                                .filter_map(|(id, task)| {
+                                                    if matches!(&task.state, BarrierState::GateHolding { branch, .. } if branch == &t.wt.branch) {
+                                                        Some(id.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .collect();
+                                            for id in holding_ids {
+                                                let _ = sched.pass_gate_barrier(&id, tail);
+                                            }
+                                        }
+                                        super::merge::PreGateOutcome::Emptied => {
+                                            if let Some(asgn) = assignment {
+                                                let _ = sched.pass_gate_barrier(
+                                                    &asgn.to_string(),
+                                                    "emptied",
+                                                );
+                                            }
+                                        }
+                                        super::merge::PreGateOutcome::Conflicted(err) => {
+                                            if let Some(asgn) = assignment {
+                                                let _ =
+                                                    sched.fail_gate_barrier(&asgn.to_string(), err);
+                                            }
+                                        }
+                                        super::merge::PreGateOutcome::Ready {
+                                            passed: false,
+                                            ..
+                                        } => {
+                                            if let Some(asgn) = assignment {
+                                                let _ = sched.fail_gate_barrier(
+                                                    &asgn.to_string(),
+                                                    "pre-gate tests failed",
+                                                );
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if let Err(err) = self
+                                    .finish_turn_with_gate(
+                                        &target,
+                                        outcome,
+                                        Some(&t),
+                                        assignment,
+                                        Some(edit_info),
+                                        Some((pre_outcome, heartbeat)),
+                                        &already_dispatched,
+                                    )
+                                    .await
+                                {
+                                    if first_err.is_none() {
+                                        first_err = Some(err);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                drop(heartbeat);
+                                {
+                                    let mut sched = self.dag_scheduler.lock().await;
+                                    if let Some(asgn) = assignment {
+                                        let _ = sched
+                                            .fail_gate_barrier(&asgn.to_string(), &err.to_string());
+                                    }
+                                }
+                                if first_err.is_none() {
+                                    first_err = Some(err);
+                                }
+                            }
+                        }
+                        if rotate_session {
+                            if let Some(quark) = self
+                                .quarks
+                                .get(&target)
+                                .and_then(|lanes| lanes.get(lane))
+                                .cloned()
+                            {
+                                term::info(
+                                    Source::Gluon,
+                                    &format!(
+                                        "rotating session for {} (post-turn context >= 70%)",
+                                        target.as_str()
+                                    ),
+                                );
+                                quark.lock().await.reset_session();
+                            }
+                        }
+                    }
+                    Err(join_err) if join_err.is_cancelled() => {
+                        continue;
+                    }
+                    Err(join_err) => {
+                        abort_handles.clear();
+                        in_gate.clear();
+                        cancel_requested.clear();
+                        dispatched_at_len.clear();
+                        dispatched_assignment.clear();
+                        for (target, _lane) in std::mem::take(&mut in_flight) {
+                            let _ = self
+                                .append(Event::new(
+                                    Actor::Quark(target),
+                                    None,
+                                    Kind::Status {
+                                        state: QuarkState::Error,
+                                    },
+                                ))
+                                .await;
+                        }
+                        let orchestrator = self
+                            .roster
+                            .iter()
+                            .find(|c| c.flavor == Flavor::Orchestrator);
+                        let panic_msg = match orchestrator {
+                            Some(_orch) => format!(
+                                "@{} A quark merge gate panicked: {join_err}",
+                                crate::router::ORCHESTRATOR_ALIAS
+                            ),
+                            None => format!("A quark merge gate panicked: {join_err}"),
+                        };
+                        let _ = self
+                            .append(
+                                Event::new(Actor::Gluon, None, Kind::Message { body: panic_msg })
+                                    .with_severity(hadron_lattice::Severity::Error),
+                            )
+                            .await;
+                        if first_err.is_none() {
+                            first_err =
+                                Some(anyhow::anyhow!("a quark merge gate panicked: {join_err}"));
+                        }
+                    }
+                },
+            }
+        }
+
+        let _ = hadron_lattice::live::clear(
+            &hadron_lattice::live::live_dir(&self.field_path),
+            &QuarkId::new("gluon"),
+        );
+
+        if let Some(err) = first_err {
+            return Err(err);
+        }
+
+        if backstop {
+            self.append(
+                Event::new(
+                    Actor::Gluon,
+                    None,
+                    Kind::Message {
+                        body: format!(
+                            "backstop reached ({} exchanges); returning control to the human.",
+                            self.max_exchanges
+                        ),
+                    },
+                )
+                .with_severity(hadron_lattice::Severity::Warning),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn until_silent_triggers_fast_error_deadline_on_error_activity() {
+        assert_eq!(
+            ERROR_GRACE_DEADLINE,
+            std::time::Duration::from_secs(180),
+            "production error grace deadline must be 180s to accommodate agy's ~64s-85s EOF retry backoff plus next-step generation"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let qid = QuarkId::new("test-quark");
+        let live_dir = temp.path().to_path_buf();
+
+        let activity = hadron_lattice::live::Activity::new(
+            qid.clone(),
+            hadron_lattice::live::Doing::Working,
+            "error message",
+        );
+        crate::adapter::telemetry::TurnTelemetrySink::publish_activity(
+            &live_dir,
+            &mut activity.clone(),
+        );
+
+        let start = std::time::Instant::now();
+        let silent_duration = until_silent_with_error_grace(
+            &live_dir,
+            &qid,
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_millis(80),
+        )
+        .await;
+
+        assert!(
+            silent_duration < std::time::Duration::from_secs(6),
+            "until_silent_with_error_grace must clamp 600s deadline to error_grace after the initial 5s poll tick when activity.detail is 'error message', took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn until_silent_restores_deadline_when_error_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let qid = QuarkId::new("test-quark");
+        let live_dir = temp.path().to_path_buf();
+
+        let mut err_act = hadron_lattice::live::Activity::new(
+            qid.clone(),
+            hadron_lattice::live::Doing::Working,
+            "error message",
+        );
+        crate::adapter::telemetry::TurnTelemetrySink::publish_activity(&live_dir, &mut err_act);
+
+        let live_clone = live_dir.clone();
+        let qid_clone = qid.clone();
+        let excite_fut = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let mut rec_act = hadron_lattice::live::Activity::new(
+                qid_clone,
+                hadron_lattice::live::Doing::Thinking,
+                "thinking: retrying step",
+            );
+            crate::adapter::telemetry::TurnTelemetrySink::publish_activity(
+                &live_clone,
+                &mut rec_act,
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            Ok(TurnOutcome {
+                message: Some("recovered".to_string()),
+                ..Default::default()
+            })
+        };
+
+        let out = excite_with_liveness_watchdog(
+            excite_fut,
+            &live_dir,
+            &qid,
+            std::time::Duration::from_millis(120),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("turn that recovers from error message must not be killed");
+        assert_eq!(out.message.as_deref(), Some("recovered"));
+    }
+}

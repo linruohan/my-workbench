@@ -1,0 +1,793 @@
+use hadron_lattice::{Actor, Event, Flavor, Kind, QuarkId, QuarkState, TurnOutcome};
+
+use crate::field::read_events;
+use crate::router::{parse_addressee, parse_all_addressees};
+
+use super::*;
+
+impl super::Engine {
+    /// Everything that happens *after* a turn returns: energy, the reply (routed by
+    /// its line-leading `@mention`), the permission ask, and the terminal status.
+    ///
+    /// Grounding is skipped on both permission paths, exactly as before: an
+    /// auto-approved quark is re-dispatched by the grant (`to == quark`, so
+    /// `next_pending` re-selects it) and grounds at the end of its *next* turn, and
+    /// an ask-the-human quark ends `Waiting` until a human grant resumes it.
+    /// Refuse to excite `target`, loudly and without stranding it: a Gluon message
+    /// explaining why, then `Status{Blocked}` for the quark. The dispatch loop then
+    /// `continue`s, so the quark's *siblings* still run — the reroute property.
+    ///
+    /// One shape for every refusal (energy depletion, an unusable worktree, a turn
+    /// with no assignment) rather than a new mechanism per reason.
+    pub(super) async fn reroute_blocked(&self, target: &QuarkId, why: &str) -> anyhow::Result<()> {
+        self.reroute_blocked_with_severity(target, why, hadron_lattice::Severity::Warning)
+            .await
+    }
+
+    pub(super) async fn reroute_blocked_with_severity(
+        &self,
+        target: &QuarkId,
+        why: &str,
+        severity: hadron_lattice::Severity,
+    ) -> anyhow::Result<()> {
+        let quoted_why = super::quote_paths(why);
+        let msg = if self
+            .roster
+            .iter()
+            .any(|c| c.flavor == Flavor::Orchestrator && &c.id != target)
+            && !why.starts_with('@')
+        {
+            format!("@{} {quoted_why}", crate::router::ORCHESTRATOR_ALIAS)
+        } else {
+            quoted_why
+        };
+        self.append(
+            Event::new(Actor::Gluon, None, Kind::Message { body: msg }).with_severity(severity),
+        )
+        .await?;
+        self.park_blocked(target).await
+    }
+
+    /// Mark `target` `Blocked` with **no** chat message — the reroute property
+    /// (siblings keep running, the quark is not left forever-Excited) without the
+    /// noise, for a refusal the human has already chosen and does not need told
+    /// about again. The SSOT for the status half of a reroute:
+    /// [`reroute_blocked_with_severity`] appends the message and then calls this,
+    /// so the two can never disagree about what "blocked" writes to the field.
+    pub(super) async fn park_blocked(&self, target: &QuarkId) -> anyhow::Result<()> {
+        let events = read_events(&self.field_path).unwrap_or_default();
+        let already_blocked_and_settled = events.iter().rev().find_map(|e| {
+            if e.from == Actor::Quark(target.clone()) {
+                if let Kind::Status { state } = &e.kind {
+                    return Some(*state == QuarkState::Blocked);
+                }
+            }
+            if e.to.as_ref() == Some(target) && crate::router::is_turn_request(e) {
+                return Some(false);
+            }
+            if matches!(&e.kind, Kind::Message { .. })
+                && e.from != Actor::Quark(target.clone())
+                && e.from != Actor::Gluon
+            {
+                return Some(false);
+            }
+            None
+        });
+        if already_blocked_and_settled == Some(true) {
+            return Ok(());
+        }
+        self.append(Event::new(
+            Actor::Quark(target.clone()),
+            None,
+            Kind::Status {
+                state: QuarkState::Blocked,
+            },
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Check if a completed turn requires running the merge gate, and if so, commit its
+    /// worktree changes now and return `(TurnTree, Option<(Vec<String>, String)>, Arc<dyn MergeRunner>, GateHeartbeat)`
+    /// so `run_until_quiesce` can spawn [`Engine::run_pre_gate`] onto `gates: JoinSet`
+    /// without blocking the main dispatch loop.
+    pub(super) fn prepare_async_gate(
+        &self,
+        target: &QuarkId,
+        outcome: &TurnOutcome,
+        tree: Option<&TurnTree>,
+    ) -> anyhow::Result<
+        Option<(
+            TurnTree,
+            Option<(Vec<String>, String)>,
+            Arc<dyn crate::merge::MergeRunner>,
+            super::merge::GateHeartbeat,
+        )>,
+    > {
+        if outcome.cancelled || outcome.permission.is_some() || self.repo_root.is_none() {
+            return Ok(None);
+        }
+        let Some(runner) = &self.merge else {
+            return Ok(None);
+        };
+        let Some(t) = tree else {
+            return Ok(None);
+        };
+        let preons = self.loaded_preons();
+        let addressees = outcome
+            .message
+            .as_deref()
+            .map(|body| parse_all_addressees(body, &self.roster, Some(target), &preons))
+            .unwrap_or_default();
+        let addressee = outcome
+            .message
+            .as_deref()
+            .and_then(|body| parse_addressee(body, &self.roster, Some(target), &preons))
+            .or_else(|| addressees.first().cloned())
+            .or_else(|| {
+                if !self.is_orchestrator(target) && outcome.message.is_some() {
+                    self.orchestrator_id()
+                } else {
+                    None
+                }
+            });
+        if !self.assignment_complete(target, addressee.as_ref()) {
+            return Ok(None);
+        }
+        let headline = outcome
+            .message
+            .as_deref()
+            .and_then(|m| m.lines().find(|l| !l.trim().is_empty()))
+            .unwrap_or("work")
+            .trim()
+            .chars()
+            .take(72)
+            .collect::<String>();
+        let message = format!("{}: {headline} [{}]", target.as_str(), t.assignment);
+        crate::worktree::commit_turn_with_author(
+            &t.wt,
+            &message,
+            self.git_author_name.as_deref(),
+            self.git_author_email.as_deref(),
+        )?;
+        let head_now = crate::worktree::head(&t.wt.path);
+        let edit_info = if head_now.is_some() && head_now != t.head_before {
+            let git = head_now.unwrap_or_default();
+            let paths = crate::worktree::changed_paths(&t.wt, &t.base)?;
+            Some((paths, git))
+        } else {
+            None
+        };
+        let heartbeat = self.start_gate_heartbeat(target, &t.wt.branch);
+        Ok(Some((t.clone(), edit_info, Arc::clone(runner), heartbeat)))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn finish_turn(
+        &self,
+        target: &QuarkId,
+        outcome: TurnOutcome,
+        tree: Option<&TurnTree>,
+        assignment: Option<ulid::Ulid>,
+    ) -> anyhow::Result<()> {
+        let empty = std::collections::HashSet::new();
+        self.finish_turn_with_gate(target, outcome, tree, assignment, None, None, &empty)
+            .await
+    }
+
+    pub(super) async fn finish_turn_with_gate(
+        &self,
+        target: &QuarkId,
+        mut outcome: TurnOutcome,
+        tree: Option<&TurnTree>,
+        // The message this turn was dispatched to answer. Stamped onto everything the
+        // turn emits, so a reader can ask "is the human still waiting?" and get a fact
+        // rather than an inference from what happens to come after what.
+        assignment: Option<ulid::Ulid>,
+        pre_committed_edit: Option<Option<(Vec<String>, String)>>,
+        pre_gate: Option<(super::merge::PreGateOutcome, super::merge::GateHeartbeat)>,
+        already_dispatched: &std::collections::HashSet<QuarkId>,
+    ) -> anyhow::Result<()> {
+        outcome.message = outcome
+            .message
+            .map(|m| crate::adapter::telemetry::deduplicate_turn_message(&m))
+            .filter(|m| !m.trim().is_empty());
+        // ONE id for everything this turn emits. The reply and the energy report are
+        // separate events, and turns run in parallel — so without this a reader trying
+        // to say "this reply cost X" has only ADJACENCY to join on, and adjacency is
+        // wrong the first time two quarks answer at once. Stamped here, at the single
+        // place a turn's events are written, so they cannot disagree.
+        let turn = ulid::Ulid::new();
+        // A cancelled turn is not a completed one (Task 9 of `.hadron/docs/plans/
+        // 2026-07-31-responsive-orchestrator.md`): `addressee`'s `None` arm below
+        // means "hands back to the human, done" as much as it means "was cut off
+        // mid-work" — an absent message cannot tell the two apart, and
+        // `assignment_complete` used to read a cancelled turn as the former. Read
+        // once, straight off the fact the adapter reported, not re-derived.
+        let cancelled = outcome.cancelled;
+        // Loaded once for the whole turn-completion, not once per `parse_addressee`
+        // call below — both calls resolve mentions in the SAME reply/turn, so one
+        // fresh read of the preons corpus covers both.
+        let preons = self.loaded_preons();
+        // Kept before the reply is moved into the field: the commit message names the
+        // quark, its first line, and the assignment — greppable back to the event.
+        let headline = outcome
+            .message
+            .as_deref()
+            .and_then(|m| m.lines().find(|l| !l.trim().is_empty()))
+            .unwrap_or("work")
+            .trim()
+            .chars()
+            .take(72)
+            .collect::<String>();
+        // Who this reply addresses (its single line-leading `@mention`), if anyone.
+        // If a worker emits a message without an explicit line-leading `@mention`,
+        // fall back to addressing `@orchestrator` so the worker's reply does not drop
+        // unaddressed in the field.
+        let initial_addressees = outcome
+            .message
+            .as_deref()
+            .map(|body| parse_all_addressees(body, &self.roster, Some(target), &preons))
+            .unwrap_or_default();
+        let addressee = outcome
+            .message
+            .as_deref()
+            .and_then(|body| parse_addressee(body, &self.roster, Some(target), &preons))
+            .or_else(|| initial_addressees.first().cloned())
+            .or_else(|| {
+                if !self.is_orchestrator(target) && outcome.message.is_some() {
+                    self.orchestrator_id()
+                } else {
+                    None
+                }
+            });
+
+        let (dispatched_by_orchestrator, conversational_human_origin) =
+            if !self.is_orchestrator(target) {
+                if let Some(assign_id) = assignment {
+                    if let Ok(evs) = read_events(&self.field_path) {
+                        let by_orch = evs.iter().any(|e| {
+                            e.id == assign_id
+                                && matches!(&e.from, Actor::Quark(s) if self.is_orchestrator(s))
+                        });
+                        let conv_human = evs.iter().any(|e| {
+                            e.id == assign_id
+                                && e.from == Actor::Human
+                                && match &e.kind {
+                                    Kind::Message { body } => {
+                                        hadron_lattice::is_conversational_human_turn(body)
+                                    }
+                                    Kind::Assign { task, .. } => {
+                                        hadron_lattice::is_conversational_human_turn(task)
+                                    }
+                                    _ => false,
+                                }
+                        });
+                        (by_orch, conv_human)
+                    } else {
+                        (false, false)
+                    }
+                } else {
+                    (false, false)
+                }
+            } else {
+                (false, false)
+            };
+
+        // THE ONE TOTALLER. No adapter computes this; they report components and
+        // `TokenSpend::fresh` sums the comparable ones (input + output, cache
+        // excluded). `None` means the provider said nothing about tokens — unknown,
+        // which is not the same as zero, so we report nothing rather than a hollow 0.
+        let fresh = outcome.usage.spend.fresh();
+
+        // The event fires when there is *anything* to say — spend, context, or quota.
+        // It used to fire only on `used_tokens > 0`, which meant a provider that
+        // reported context but no tokens had its telemetry silently dropped.
+        if fresh.unwrap_or(0) > 0 || !outcome.usage.is_empty() {
+            if let Some(ledger) = &self.ledger {
+                // The depletion gate reads this ledger (`is_depleted`). It is fed the
+                // cache-excluded figure on purpose: the old cross-provider sum would
+                // have tripped an ACP quark ~200x early on cache reads it never paid
+                // for. See `the-depletion-gate-is-a-loaded-gun` in the shared nucleus index.
+                if let Some(t) = fresh.filter(|t| *t > 0) {
+                    ledger.record_usage(target, t)?;
+                }
+            }
+            // `used_tokens` stays a `u32` on the Kind because the chamber matches
+            // `Kind` exhaustively with no wildcard arm (see the note on `Event.usage`
+            // in `event.rs`): widening the variant would break a crate this one does
+            // not own. The components ride on the envelope's `usage` instead, which is
+            // additive and which every existing reader already ignores safely.
+            self.append(
+                Event::new(
+                    Actor::Quark(target.clone()),
+                    None,
+                    Kind::EnergyReport {
+                        used_tokens: fresh.unwrap_or(0),
+                    },
+                )
+                .with_usage(outcome.usage.clone())
+                .with_turn(turn)
+                .answering(assignment),
+            )
+            .await?;
+        }
+
+        if let Some(body) = outcome.message.as_ref() {
+            if self.is_orchestrator(target) {
+                let body_trimmed = body.trim();
+                if body_trimmed.starts_with("/approve ") || body_trimmed.starts_with("/deny ") {
+                    let parts: Vec<&str> = body_trimmed.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let cmd = parts[0];
+                        let worker_name = parts[1].trim_start_matches('@');
+                        let remember = parts.get(2).map(|s| *s == "remember").unwrap_or(false);
+                        let approved = cmd == "/approve";
+
+                        if let Some(worker_id) = self
+                            .roster
+                            .iter()
+                            .find(|c| {
+                                c.id.as_str() == worker_name
+                                    || c.display_name.as_deref() == Some(worker_name)
+                            })
+                            .map(|c| c.id.clone())
+                        {
+                            let grant_ev = Event::new(
+                                Actor::Quark(target.clone()),
+                                Some(worker_id),
+                                Kind::PermissionGrant { approved, remember },
+                            );
+                            self.append(grant_ev).await?;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(raw_body) = outcome.message {
+            // The reply enters the field whole — the engine does NOT trim it. Brevity is
+            // asked for in the prompt and explained, never enforced by cutting bytes: a
+            // truncated report can hide the one line the human needed (a reported-but-
+            // unread critical issue is worse than a long one). The addressee is parsed
+            // from the reply as written, so what routes is exactly what the field carries.
+            // If a worker turn was dispatched by `@orchestrator` and the worker's reply
+            // omitted an explicit `@mention`, route `to` back to `@orchestrator` so
+            // orchestration never stalls silently.
+            let mut body = crate::router::neutralize_dispatched_mentions(
+                &raw_body,
+                &self.roster,
+                Some(target),
+                &preons,
+                already_dispatched,
+            );
+            let suppress_orch_on_casual = conversational_human_origin
+                && pre_committed_edit
+                    .as_ref()
+                    .and_then(|o| o.as_ref())
+                    .is_none()
+                && !body.contains("**Done**:");
+            if suppress_orch_on_casual {
+                body = self.strip_leading_orchestrator_mention(&body);
+            }
+            let addressees = parse_all_addressees(&body, &self.roster, Some(target), &preons);
+            let to = if suppress_orch_on_casual {
+                None
+            } else if addressees.len() == 1 {
+                Some(addressees[0].clone())
+            } else if addressees.is_empty() && dispatched_by_orchestrator {
+                self.orchestrator_id()
+            } else {
+                None
+            };
+            let event = Event::new(Actor::Quark(target.clone()), to, Kind::Message { body })
+                .with_turn(turn)
+                .answering(assignment);
+            self.append(event).await?;
+        } else if !cancelled && outcome.permission.is_none() && dispatched_by_orchestrator {
+            if let Some(orch) = self.orchestrator_id() {
+                let event = Event::new(
+                    Actor::Gluon,
+                    Some(orch),
+                    Kind::Message {
+                        body: format!(
+                            "@{} Quark `{}` completed its turn with no message output.",
+                            crate::router::ORCHESTRATOR_ALIAS,
+                            target.as_str()
+                        ),
+                    },
+                )
+                .with_turn(turn)
+                .answering(assignment);
+                self.append(event).await?;
+            }
+        }
+
+        // A self-declared permission ask: record it, then let the effective mode
+        // decide. The mode + allow-list are folded from the field as it stands
+        // *before* the req is appended (the req itself must not become its own
+        // remembered rule), but re-read here rather than reused from dispatch time —
+        // a concurrent turn may have moved the field on since.
+        if let Some(ask) = outcome.permission {
+            let events = read_events(&self.field_path)?;
+            let risk = ask.risk;
+            let op = ask.description.clone();
+            self.append(Event::new(
+                Actor::Quark(target.clone()),
+                None,
+                Kind::PermissionReq {
+                    risk,
+                    description: ask.description,
+                },
+            ))
+            .await?;
+            let mode = hadron_gatekeeper::effective_mode(
+                &events,
+                target,
+                self.no_human,
+                self.is_orchestrator(target),
+            );
+            let global = hadron_gatekeeper::global_mode(&events);
+            let mut rules = hadron_gatekeeper::allow_rules(&events);
+            // No deny-rule SOURCE exists in the field yet — no event teaches a
+            // deny the way a remembered `PermissionGrant` teaches an allow — so
+            // this starts empty (same placeholder Task 1/2 shipped with) and is
+            // then folded with the seat's own `commands` config below.
+            // `decide`'s deny-absolute branch is exercised at the matrix level
+            // (`deny_listed_op_never_reaches_orchestrator`).
+            let mut deny = hadron_gatekeeper::DenyRules::new();
+            // Config command rules bite ONLY under No-Human-Mode (the batch
+            // invariant). The WHOLE fold is gated on `no_human`: `decide`'s
+            // toggle-OFF table still consults `allow` for field-taught remembered
+            // grants, so folding config `allowed` in unconditionally would
+            // auto-approve a config-allowed op with the toggle OFF — and
+            // asymmetrically, since `deny` is inert off. Gating both halves keeps
+            // config rules genuinely inert until §2 is activated. (Review C1.)
+            //
+            // SECURITY (review I2/M1): these rules are roster-sourced — a quark
+            // unseated mid-adjudication yields `commands_for → None`, so its deny
+            // is not folded (field-taught rules have no such dependency). And the
+            // patterns match the quark's self-declared `op` string, so a
+            // mis-declared op silently never fires its deny. Both are inherent to
+            // a config allow/deny list layered on a self-declared-op gate.
+            if self.no_human {
+                if let Some(cmds) = self.commands_for(target) {
+                    for p in &cmds.allowed {
+                        rules.insert((target.clone(), p.clone()));
+                    }
+                    for p in &cmds.not_allowed {
+                        deny.insert((target.clone(), p.clone()));
+                    }
+                }
+            }
+            let asker_is_orchestrator = self.orchestrator_id().as_ref() == Some(target);
+            let decision = hadron_gatekeeper::decide(
+                mode,
+                global,
+                self.no_human,
+                risk,
+                &op,
+                target,
+                &rules,
+                &deny,
+            );
+            let decision = if asker_is_orchestrator
+                && decision == hadron_gatekeeper::Decision::AskOrchestrator
+            {
+                hadron_gatekeeper::Decision::AskHuman
+            } else {
+                decision
+            };
+            match decision {
+                hadron_gatekeeper::Decision::AutoApprove => {
+                    // Pre-authorized by the mode: the gluon grants on the
+                    // orchestrator's / human's standing authority.
+                    self.append(Event::new(
+                        Actor::Gluon,
+                        Some(target.clone()),
+                        Kind::PermissionGrant {
+                            approved: true,
+                            remember: false,
+                        },
+                    ))
+                    .await?;
+                    return Ok(());
+                }
+                hadron_gatekeeper::Decision::AskHuman => {
+                    // Pause: mark the quark waiting. The dispatch loop no longer has
+                    // any pending work for it, so once every *other* in-flight turn
+                    // finishes the engine quiesces and the human is asked.
+                    //
+                    // NOTE: deliberately NO commit here. A quark pausing mid-assignment
+                    // for permission is not done — its uncommitted work must still be
+                    // sitting in its worktree when the grant resumes it. That is exactly
+                    // why `worktree::ensure` is idempotent for the same assignment.
+                    self.append(
+                        Event::new(
+                            Actor::Quark(target.clone()),
+                            None,
+                            Kind::Status {
+                                state: QuarkState::Waiting,
+                            },
+                        )
+                        .with_turn(turn)
+                        .answering(assignment),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                hadron_gatekeeper::Decision::AskOrchestrator => {
+                    // No-Human-Mode (toggle on, global Bypass): the SAME park as
+                    // AskHuman — reused verbatim, on purpose. What differs is who
+                    // gets asked: `run_until_quiesce`'s auto-scheduler recomputes
+                    // `decide` for the pending `PermissionReq` once the swarm
+                    // quiesces, and when it still resolves to `AskOrchestrator`
+                    // it dispatches an adjudication turn to the orchestrator seat
+                    // instead of leaving the ask for a human. The RESUME path is
+                    // identical either way: any `PermissionGrant` addressed to
+                    // this quark (human- or orchestrator-authored) re-excites it
+                    // via `next_pending`.
+                    self.append(
+                        Event::new(
+                            Actor::Quark(target.clone()),
+                            None,
+                            Kind::Status {
+                                state: QuarkState::Waiting,
+                            },
+                        )
+                        .with_turn(turn)
+                        .answering(assignment),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // The turn ends on a COMMIT in the quark's branch. Only here, on the Ground
+        // path: both permission branches above return early, uncommitted, on purpose.
+        if let Some(t) = tree {
+            let edit_info = match pre_committed_edit {
+                Some(pre_edit) => pre_edit,
+                None => {
+                    let message = format!("{}: {headline} [{}]", target.as_str(), t.assignment);
+                    crate::worktree::commit_turn_with_author(
+                        &t.wt,
+                        &message,
+                        self.git_author_name.as_deref(),
+                        self.git_author_email.as_deref(),
+                    )?;
+
+                    // Compare HEAD; don't assume WE committed. A Bypass-mode CLI may have run
+                    // `git commit` itself, leaving a clean tree behind an advanced branch —
+                    // `commit_turn` returns `Ok(None)` there, but the work still happened.
+                    let head_now = crate::worktree::head(&t.wt.path);
+                    if head_now.is_some() && head_now != t.head_before {
+                        let git = head_now.unwrap_or_default();
+                        let paths = crate::worktree::changed_paths(&t.wt, &t.base)?;
+                        Some((paths, git))
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some((paths, git)) = edit_info {
+                // `Kind::Edit` has existed in the lattice since day one and was emitted
+                // by nobody. This is what it was for: a quark's work, attributed.
+                self.append(
+                    Event::new(
+                        Actor::Quark(target.clone()),
+                        None,
+                        Kind::Edit {
+                            paths,
+                            git,
+                            summary: headline.clone(),
+                        },
+                    )
+                    .with_turn(turn)
+                    .answering(assignment),
+                )
+                .await?;
+            }
+
+            // The assignment is COMPLETE — so its branch is gated for landing — when the
+            // reply hands back to the human (no `@mention`) OR a worker reports up to the
+            // orchestrator. A worker handing to a peer, or the orchestrator dispatching
+            // down to a worker, is a mid-chain hand-off: the branch stays open, no gate.
+            // Keying on this rather than mention-absence alone is Task 6: before it, a
+            // worker's `@orchestrator`-addressed completion never gated, so its branch
+            // stranded every turn while the swarm believed it had landed.
+            //
+            // `!cancelled` first, and separate from `assignment_complete`: a cancelled
+            // turn's `addressee` is `None` for the same structural reason a genuine
+            // hand-back's is (no message to parse an `@mention` from), so
+            // `assignment_complete` alone cannot exclude it — Task 9.
+            if !cancelled
+                && self.assignment_complete(target, addressee.as_ref())
+                && self.merge.is_some()
+            {
+                let parked = match pre_gate {
+                    Some((pre_outcome, heartbeat)) => {
+                        self.merge_gate_body(target, t, Some(pre_outcome), &heartbeat)
+                            .await?
+                    }
+                    None => self.merge_gate(target, t).await?,
+                };
+                if parked {
+                    if let Some(asgn) = assignment {
+                        let mut sched = self.dag_scheduler.lock().await;
+                        let _ = sched.fail_gate_barrier(&asgn.to_string(), "gate parked");
+                    }
+                    return Ok(()); // the gate parked the quark (Waiting / Blocked)
+                }
+                if let Some(asgn) = assignment {
+                    let mut sched = self.dag_scheduler.lock().await;
+                    let _ = sched.pass_gate_barrier(&asgn.to_string(), &t.wt.branch);
+                }
+            }
+        }
+
+        self.append(
+            Event::new(
+                Actor::Quark(target.clone()),
+                None,
+                Kind::Status {
+                    state: QuarkState::Ground,
+                },
+            )
+            .with_turn(turn)
+            .answering(assignment),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The marker prefix on the auto-scheduler's injected orchestrator turn.
+    /// Load-bearing for idempotency (see [`Engine::orchestrator_adjudication_message`]):
+    /// its presence after a request is what stops the request from being
+    /// re-asked every quiesce pass.
+    const NO_HUMAN_ADJUDICATION_MARKER: &'static str = "[no-human-mode]";
+
+    /// No-Human-Mode's auto-scheduler (spec §2 D step 2). If the field's latest
+    /// `PermissionReq` is still unanswered AND still resolves to
+    /// `Decision::AskOrchestrator` under the field as it stands **right now**
+    /// (mode/global/allow may have moved since the worker asked — re-decided,
+    /// not cached), build the `Message` that puts it in front of the
+    /// orchestrator, injecting the request's own description into the task.
+    /// `None` when there is nothing pending, the pending request resolves to
+    /// something other than `AskOrchestrator` (e.g. it now needs a human, or
+    /// the toggle state changed), there is no orchestrator seat, the asker IS
+    /// the orchestrator (nothing to escalate to), or the orchestrator has
+    /// already been asked about this exact request.
+    ///
+    /// Pure — reads `events`, returns an `Event` to append; does not append it
+    /// itself. `run_until_quiesce` is the one caller and the one that appends.
+    pub(super) fn orchestrator_adjudication_message(&self, events: &[Event]) -> Option<Event> {
+        let req_idx = events
+            .iter()
+            .rposition(|e| matches!(e.kind, Kind::PermissionReq { .. }))?;
+        // Already answered (by anyone, any way) → nothing to schedule.
+        if events[req_idx + 1..]
+            .iter()
+            .any(|e| matches!(e.kind, Kind::PermissionGrant { .. }))
+        {
+            return None;
+        }
+        let Kind::PermissionReq { risk, description } = &events[req_idx].kind else {
+            unreachable!("rposition matched PermissionReq")
+        };
+        // Mirrors `hadron_gatekeeper::pending_permission`'s addressee recovery:
+        // a request not authored by a quark has no one to resume, so no one to
+        // escalate on behalf of either.
+        let Actor::Quark(quark) = &events[req_idx].from else {
+            return None;
+        };
+        let orch = self.orchestrator_id()?;
+        if *quark == orch {
+            return None; // the orchestrator cannot adjudicate its own request
+        }
+        // Idempotent: at most one adjudication ask per still-pending request.
+        // Without this, a real orchestrator with no grant tool yet (or a fake
+        // quark that just replies) would be re-asked every quiesce pass forever.
+        let already_asked = events[req_idx + 1..].iter().any(|e| {
+            e.to.as_ref() == Some(&orch)
+                && matches!(&e.kind, Kind::Message { body } if body.starts_with(Self::NO_HUMAN_ADJUDICATION_MARKER))
+        });
+        if already_asked {
+            return None;
+        }
+
+        // `is_orchestrator = false` here isn't a hardcoded assumption: we already
+        // returned `None` above if `*quark == orch`, so the asker is provably
+        // never the orchestrator seat by this point.
+        let mode = hadron_gatekeeper::effective_mode(
+            events,
+            quark,
+            self.no_human,
+            self.is_orchestrator(quark),
+        );
+        let global = hadron_gatekeeper::global_mode(events);
+        let mut rules = hadron_gatekeeper::allow_rules(events);
+        let mut deny = hadron_gatekeeper::DenyRules::new(); // see the permission-ask gate's comment
+                                                            // Config rules gated on No-Human-Mode — same invariant as the permission-ask
+                                                            // gate (review C1). This path only runs under No-Human-Mode anyway, so the
+                                                            // guard is belt-and-suspenders, but it keeps the fold identical across sites.
+        if self.no_human {
+            if let Some(cmds) = self.commands_for(quark) {
+                for p in &cmds.allowed {
+                    rules.insert((quark.clone(), p.clone()));
+                }
+                for p in &cmds.not_allowed {
+                    deny.insert((quark.clone(), p.clone()));
+                }
+            }
+        }
+        let decision = hadron_gatekeeper::decide(
+            mode,
+            global,
+            self.no_human,
+            *risk,
+            description,
+            quark,
+            &rules,
+            &deny,
+        );
+        if decision != hadron_gatekeeper::Decision::AskOrchestrator {
+            return None; // needs a human (or was resolved another way) — not ours to schedule
+        }
+
+        Some(Event::new(
+            Actor::Gluon,
+            Some(orch),
+            Kind::Message {
+                body: format!(
+                    "{marker} @{quark} is asking for permission to run: {description} (risk: {risk:?}). \
+                     No-Human-Mode is on — a human is not being asked. Review it against the allow/deny \
+                     lists and reply with your decision, addressed to @{quark}.",
+                    marker = Self::NO_HUMAN_ADJUDICATION_MARKER,
+                    quark = quark.as_str(),
+                ),
+            },
+        )
+        // A worker is parked until this is answered — it needs attention, not a
+        // neutral notice, so it carries the same amber the other "you must act"
+        // reroutes do.
+        .with_severity(hadron_lattice::Severity::Warning))
+    }
+
+    /// Strip a leading `@orchestrator` (or orchestrator id / display name) mention
+    /// from a casual conversational worker reply so a direct human greeting like
+    /// `"@team goodnight"` does not show `"@orchestrator Goodnight!"` or excite
+    /// the orchestrator seat unnecessarily.
+    pub(super) fn strip_leading_orchestrator_mention(&self, body: &str) -> String {
+        let trimmed = body.trim_start();
+        let Some(after_at) = trimmed.strip_prefix('@') else {
+            return body.to_string();
+        };
+        let end = after_at
+            .find(|c: char| c.is_whitespace() || c == ':' || c == ',')
+            .unwrap_or(after_at.len());
+        let token = &after_at[..end];
+        let orch_card = self
+            .roster
+            .iter()
+            .find(|c| c.flavor == hadron_lattice::Flavor::Orchestrator);
+        let is_orch_mention = token.eq_ignore_ascii_case(crate::router::ORCHESTRATOR_ALIAS)
+            || orch_card.is_some_and(|c| {
+                c.id.as_str().eq_ignore_ascii_case(token)
+                    || c.display_name
+                        .as_deref()
+                        .is_some_and(|dn| dn.eq_ignore_ascii_case(token))
+            });
+        if !is_orch_mention {
+            return body.to_string();
+        }
+        let rest = after_at[end..].trim_start_matches([':', ',', ' ', '\t', '\r', '\n']);
+        if rest.is_empty() {
+            body.to_string()
+        } else {
+            rest.to_string()
+        }
+    }
+}

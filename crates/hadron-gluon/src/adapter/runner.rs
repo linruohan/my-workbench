@@ -1,0 +1,1275 @@
+use async_trait::async_trait;
+use hadron_lattice::sys::ConfigureProcessGroup;
+use hadron_lattice::TurnOutcome;
+use std::path::PathBuf;
+
+/// A resolved secret env, wrapped so a `Debug` derive on the type that carries it
+/// (`QuarkSpec`, `CliInvocation`) can never accidentally print a VALUE.
+///
+/// `Deref`s to the underlying pairs for iteration/`.envs()`; its own `Debug` prints
+/// only the var NAMES — `["GEMINI_API_KEY=<redacted>"]` — never the value. This is
+/// the ONE place a resolved secret's `Debug` shape is defined (Standard Model rule 3:
+/// one definition, one place), so every carrier redacts identically instead of each
+/// one having to remember to.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct RedactedEnv(pub Vec<(String, String)>);
+
+impl std::fmt::Debug for RedactedEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(k, _)| format!("{k}=<redacted>")))
+            .finish()
+    }
+}
+
+impl std::ops::Deref for RedactedEnv {
+    type Target = Vec<(String, String)>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<(String, String)>> for RedactedEnv {
+    fn from(pairs: Vec<(String, String)>) -> Self {
+        RedactedEnv(pairs)
+    }
+}
+
+/// A single CLI invocation: the program, its args, the text piped to stdin, and
+/// **the directory it runs in**.
+///
+/// `cwd` is deliberately NOT an `Option`. Before it existed, `ProcessRunner` never
+/// called `.current_dir()`, so every `claude`/`agy` subprocess inherited the
+/// *daemon's* cwd — two concurrent quarks editing one checkout, silently. An
+/// `Option` defaulting to `None` would reopen exactly that channel; a required
+/// field makes the compiler ask every construction site where its process runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliInvocation {
+    pub program: String,
+    pub args: Vec<String>,
+    pub stdin: String,
+    pub cwd: PathBuf,
+    /// A seat's resolved secret env — `(name, value)` pairs from `Seat::resolve_env`
+    /// — carried through to `Command::env()` and NOWHERE else. Wrapped in
+    /// `RedactedEnv` so this struct's derived `Debug` cannot leak a value.
+    pub env: RedactedEnv,
+    /// Optional streaming spec.
+    pub stream: Option<hadron_lattice::StreamSpec>,
+    /// Sandbox confinement mode for this execution.
+    pub sandbox: hadron_gatekeeper::SandboxMode,
+}
+
+impl CliInvocation {
+    pub fn resolve_sandboxed_command(&self) -> (String, Vec<String>) {
+        hadron_gatekeeper::resolve_sandboxed_command(
+            &self.cwd,
+            &self.program,
+            &self.args,
+            self.sandbox,
+            false,
+        )
+    }
+
+    /// Resolves the actual command and arguments to be executed.
+    /// First applies sandboxing via [`hadron_gatekeeper::resolve_sandboxed_command`].
+    /// Then, if `cwd` is a WSL UNC path (e.g. `\\wsl.localhost\<distro>\<linux_path>`)
+    /// and the target binary should run inside WSL (installed in WSL or not on the host),
+    /// wraps the execution via `wsl.exe -d <distro> --cd <linux_path> --exec <prog> <args...>`
+    /// using [`hadron_lattice::wsl::wrap_wsl_command`]. If the binary is only installed on
+    /// the Windows host (e.g. Windows `agy.exe`), runs the host binary directly against the
+    /// UNC workspace path.
+    pub fn resolve_execution_command(&self) -> (String, Vec<String>) {
+        if let Some((distro, linux_cwd)) = hadron_lattice::wsl::parse_wsl_unc_path(&self.cwd) {
+            if hadron_lattice::wsl::should_run_in_wsl(&distro, &self.program) {
+                let (prog, args) = self.resolve_sandboxed_command();
+                return hadron_lattice::wsl::wrap_wsl_command(&distro, &linux_cwd, &prog, &args);
+            }
+        }
+        self.resolve_sandboxed_command()
+    }
+}
+
+/// The result of one invocation. Kept CLI-agnostic: session ids and other
+/// per-CLI structure are parsed by the adapter (e.g. `CliQuark`) from
+/// `stdout`, not here — a generic runner cannot know a CLI's output shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliResult {
+    pub stdout: String,
+    pub exit: i32,
+    pub usage: Option<hadron_lattice::TokenSpend>,
+}
+
+/// The single seam where a subprocess is spawned. Faked in tests; real only in
+/// production and `#[ignore]`d smoke tests.
+#[async_trait]
+pub trait CliRunner: Send + Sync {
+    async fn run(&self, inv: CliInvocation) -> anyhow::Result<CliResult>;
+
+    async fn run_streaming(
+        &self,
+        inv: CliInvocation,
+        on_line: &mut (dyn for<'a> FnMut(&'a str) -> bool + Send),
+    ) -> anyhow::Result<CliResult> {
+        let _ = on_line;
+        self.run(inv).await
+    }
+}
+
+/// Map a CLI result's stdout to a turn outcome: trimmed non-empty → a message,
+/// empty/whitespace → no message (a silent turn).
+pub fn reply_to_outcome(result: &CliResult) -> TurnOutcome {
+    let trimmed = result.stdout.trim();
+    let usage = result
+        .usage
+        .as_ref()
+        .map(|spend| hadron_lattice::Usage {
+            spend: spend.clone(),
+            ..Default::default()
+        })
+        .unwrap_or_default();
+    if trimmed.is_empty() {
+        TurnOutcome {
+            message: None,
+            permission: None,
+            usage,
+            ..Default::default()
+        }
+    } else {
+        TurnOutcome {
+            message: Some(trimmed.to_string()),
+            permission: None,
+            usage,
+            ..Default::default()
+        }
+    }
+}
+
+/// Production runner over `tokio::process::Command`. Not unit-tested (it spawns
+/// real processes); covered by Task 6's `#[ignore]`d live tests.
+pub struct ProcessRunner;
+
+/// Ensures a spawned CLI subprocess and its entire process group are unregistered
+/// and terminated if the enclosing future is dropped before `wait()` completes
+/// (for example when `/clear`, `/reboot`, `CANCEL_DEADLINE`, or `until_silent`
+/// aborts an in-flight turn task).
+struct ChildProcessGuard {
+    pid: Option<u32>,
+    wsl_kill_target: Option<(String, String)>,
+    armed: bool,
+}
+
+impl ChildProcessGuard {
+    fn new(pid: Option<u32>, wsl_kill_target: Option<(String, String)>) -> Self {
+        if let Some(p) = pid {
+            crate::proc::register(p);
+        }
+        Self {
+            pid,
+            wsl_kill_target,
+            armed: true,
+        }
+    }
+
+    fn kill_now(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(p) = self.pid {
+            crate::proc::unregister(p);
+            hadron_lattice::sys::process::kill_process_group(p);
+        }
+        if let Some((distro, tag)) = self.wsl_kill_target.take() {
+            reap_wsl_tagged_processes(&distro, &tag);
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        if let Some(p) = self.pid {
+            crate::proc::unregister(p);
+        }
+    }
+}
+
+impl Drop for ChildProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill_now();
+        } else if let Some(p) = self.pid {
+            crate::proc::unregister(p);
+        }
+    }
+}
+
+/// Reap all Linux processes inside `distro` that inherited `HADRON_WSL_TAG=<tag>`.
+/// Terminating `wsl.exe` on Windows via `taskkill` kills the host relay without
+/// signaling the Linux child tree inside WSL2, which otherwise leaves orphaned
+/// `agy` / `language_server_linux_x64` processes running for 10+ minutes.
+fn reap_wsl_tagged_processes(distro: &str, tag: &str) {
+    if tag.is_empty() {
+        return;
+    }
+    let script = concat!(
+        "for e in /proc/[0-9]*/environ; do ",
+        "p=${e#/proc/}; p=${p%/environ}; ",
+        "[ \"$p\" != \"$$\" ] && tr '\\0' '\\n' < \"$e\" 2>/dev/null | grep -qx \"HADRON_WSL_TAG=$1\" && kill -TERM \"$p\" 2>/dev/null; ",
+        "done; sleep 0.1; ",
+        "for e in /proc/[0-9]*/environ; do ",
+        "p=${e#/proc/}; p=${p%/environ}; ",
+        "[ \"$p\" != \"$$\" ] && tr '\\0' '\\n' < \"$e\" 2>/dev/null | grep -qx \"HADRON_WSL_TAG=$1\" && kill -KILL \"$p\" 2>/dev/null; ",
+        "done"
+    );
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.args(["-d", distro, "--exec", "sh", "-c", script, "sh", tag])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.set_process_group();
+    let _ = cmd.spawn();
+}
+
+#[async_trait]
+impl CliRunner for ProcessRunner {
+    async fn run(&self, inv: CliInvocation) -> anyhow::Result<CliResult> {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+
+        let wsl_parsed = hadron_lattice::wsl::parse_wsl_unc_path(&inv.cwd);
+        let (prog, args) = inv.resolve_execution_command();
+        let running_via_wsl = prog == "wsl.exe";
+        let host_cwd = if running_via_wsl {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from(hadron_lattice::sys::paths::strip_unc_prefix(
+                &inv.cwd.to_string_lossy(),
+            ))
+        };
+        let mut child_cmd = tokio::process::Command::new(&prog);
+        child_cmd
+            .args(&args)
+            // THE fix: the CLI runs in the quark's own worktree, not wherever the
+            // daemon happened to be launched from.
+            // If running via WSL, wsl.exe uses `--cd <linux_cwd>` to switch directories,
+            // so we set the host working directory to temp_dir() to avoid UNC issues on Windows host.
+            .current_dir(&host_cwd)
+            // A seat's resolved secrets. This is the ONLY place a resolved value
+            // reaches anything — never argv, never a log line, never the field.
+            .envs(inv.env.iter().map(|(k, v)| {
+                let val = if running_via_wsl {
+                    if let Some((ref distro, _)) = wsl_parsed {
+                        hadron_lattice::wsl::translate_arg_for_wsl(distro, v)
+                    } else {
+                        v.clone()
+                    }
+                } else {
+                    v.clone()
+                };
+                (k.clone(), val)
+            }))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let wsl_kill_target = if running_via_wsl {
+            let tag = ulid::Ulid::new().to_string();
+            child_cmd.env("HADRON_WSL_TAG", &tag);
+            let keys = inv
+                .env
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .chain(std::iter::once("HADRON_WSL_TAG"));
+            let wslenv = hadron_lattice::wsl::wslenv_for_keys(keys);
+            child_cmd.env("WSLENV", wslenv);
+            wsl_parsed.as_ref().map(|(distro, _)| (distro.clone(), tag))
+        } else {
+            None
+        };
+
+        child_cmd.kill_on_drop(true);
+        child_cmd.as_std_mut().set_process_group();
+
+        let mut child = child_cmd
+            .spawn()
+            // A missing `cwd` fails as ENOENT — indistinguishable, in the raw error, from a
+            // missing *program*. That cost a real debugging session: `failed to spawn claude:
+            // No such file or directory` while `claude` sat on PATH, executable. Name the
+            // likelier culprit rather than making the next reader re-derive it.
+            .map_err(|e| {
+                if !running_via_wsl && !host_cwd.is_dir() {
+                    anyhow::anyhow!(
+                        "failed to spawn {}: its working directory {:?} does not exist",
+                        inv.program,
+                        inv.cwd,
+                    )
+                } else {
+                    anyhow::anyhow!("failed to spawn {}: {e}", inv.program)
+                }
+            })?;
+
+        let mut child_guard = ChildProcessGuard::new(child.id(), wsl_kill_target);
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(inv.stdin.as_bytes()).await?;
+            stdin.shutdown().await?; // close stdin so the CLI proceeds
+        }
+
+        if let Some(stream_spec) = &inv.stream {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
+            let stream_format = stream_spec.format.clone();
+
+            let stderr_fut = async move {
+                let mut buf = Vec::new();
+                if let Some(mut pipe) = stderr_pipe {
+                    let _ = pipe.read_to_end(&mut buf).await;
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            };
+            let stdout_fut = async move {
+                let mut usage = None;
+                let mut stdout_accumulated = String::new();
+                if let Some(pipe) = stdout_pipe {
+                    let mut reader = tokio::io::BufReader::new(pipe).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        match &stream_format {
+                            hadron_lattice::StreamFormat::AgyStreamJson => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                    let evt = v.get("event").and_then(|e| e.as_str());
+                                    if evt == Some("agent_response") {
+                                        if let Some(delta) =
+                                            v.get("text_delta").and_then(|t| t.as_str())
+                                        {
+                                            stdout_accumulated.push_str(delta);
+                                        }
+                                    } else if evt == Some("step_update") {
+                                        if let Some(su) = v.get("step_update") {
+                                            if su.get("step_type").and_then(|s| s.as_str())
+                                                == Some("agent_response")
+                                            {
+                                                if let Some(delta) =
+                                                    su.get("text_delta").and_then(|t| t.as_str())
+                                                {
+                                                    stdout_accumulated.push_str(delta);
+                                                }
+                                            }
+                                        }
+                                    } else if evt == Some("result") {
+                                        let res_obj = v.get("result").unwrap_or(&v);
+                                        if stdout_accumulated.is_empty() {
+                                            if let Some(resp) =
+                                                res_obj.get("response").and_then(|r| r.as_str())
+                                            {
+                                                stdout_accumulated.push_str(resp);
+                                            }
+                                        }
+                                        if let Some(u) = res_obj.get("usage") {
+                                            let in_tok = u
+                                                .get("input_tokens")
+                                                .and_then(|n| n.as_u64())
+                                                .map(|n| n as u32);
+                                            let out_tok = u
+                                                .get("output_tokens")
+                                                .and_then(|n| n.as_u64())
+                                                .unwrap_or(0)
+                                                as u32;
+                                            let think_tok = u
+                                                .get("thinking_tokens")
+                                                .and_then(|n| n.as_u64())
+                                                .unwrap_or(0)
+                                                as u32;
+                                            let cache_read = u
+                                                .get("cache_read_tokens")
+                                                .and_then(|n| n.as_u64())
+                                                .map(|n| n as u32);
+                                            usage = Some(hadron_lattice::TokenSpend {
+                                                input: in_tok,
+                                                output: Some(out_tok + think_tok),
+                                                cache_read,
+                                                cache_write: None,
+                                            });
+                                        }
+                                    } else if let Some(delta) =
+                                        v.get("text_delta").and_then(|t| t.as_str())
+                                    {
+                                        stdout_accumulated.push_str(delta);
+                                    }
+                                }
+                            }
+                            hadron_lattice::StreamFormat::Ndjson {
+                                text_delta_path,
+                                input_tokens_path,
+                                output_tokens_path,
+                            } => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                    if let Some(path) = text_delta_path {
+                                        if let Some(delta) =
+                                            v.pointer(path).and_then(|t| t.as_str())
+                                        {
+                                            stdout_accumulated.push_str(delta);
+                                        }
+                                    }
+                                    let in_tok = input_tokens_path
+                                        .as_ref()
+                                        .and_then(|p| v.pointer(p))
+                                        .and_then(|n| n.as_u64())
+                                        .map(|n| n as u32);
+                                    let out_tok = output_tokens_path
+                                        .as_ref()
+                                        .and_then(|p| v.pointer(p))
+                                        .and_then(|n| n.as_u64())
+                                        .map(|n| n as u32);
+                                    if in_tok.is_some() || out_tok.is_some() {
+                                        usage = Some(hadron_lattice::TokenSpend {
+                                            input: in_tok,
+                                            output: out_tok,
+                                            cache_read: None,
+                                            cache_write: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                (stdout_accumulated, usage)
+            };
+            let ((stdout_accumulated, usage), stderr) = tokio::select! {
+                res = async { tokio::join!(stdout_fut, stderr_fut) } => res,
+                _ = async {
+                    let _ = child.wait().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                } => {
+                    ((String::new(), None), String::new())
+                }
+            };
+            let status = child.wait().await?;
+            child_guard.disarm();
+            if !status.success() {
+                let code = status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                let detail = hadron_lattice::wsl::strip_wsl_noise(&stderr);
+                let detail = detail.trim();
+                if detail.is_empty() {
+                    return Err(anyhow::anyhow!("{} exited with {code}", inv.program));
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "{} exited with {code}: {detail}",
+                        inv.program
+                    ));
+                }
+            }
+            Ok(CliResult {
+                stdout: stdout_accumulated,
+                exit: status.code().unwrap_or(0),
+                usage,
+            })
+        } else {
+            let output_res = child.wait_with_output().await;
+            child_guard.disarm();
+            let output = output_res?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if !output.status.success() {
+                let code = output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                return Err(anyhow::anyhow!(
+                    "{} exited with {code}: {}",
+                    inv.program,
+                    stderr.trim()
+                ));
+            }
+
+            Ok(CliResult {
+                stdout,
+                exit: output.status.code().unwrap_or(0),
+                usage: None,
+            })
+        }
+    }
+
+    async fn run_streaming(
+        &self,
+        inv: CliInvocation,
+        on_line: &mut (dyn for<'a> FnMut(&'a str) -> bool + Send),
+    ) -> anyhow::Result<CliResult> {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+        let wsl_parsed = hadron_lattice::wsl::parse_wsl_unc_path(&inv.cwd);
+        let (prog, args) = inv.resolve_execution_command();
+        let running_via_wsl = prog == "wsl.exe";
+        let host_cwd = if running_via_wsl {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from(hadron_lattice::sys::paths::strip_unc_prefix(
+                &inv.cwd.to_string_lossy(),
+            ))
+        };
+        let mut child_cmd = tokio::process::Command::new(&prog);
+        child_cmd
+            .args(&args)
+            .current_dir(&host_cwd)
+            .envs(inv.env.iter().map(|(k, v)| {
+                let val = if running_via_wsl {
+                    if let Some((ref distro, _)) = wsl_parsed {
+                        hadron_lattice::wsl::translate_arg_for_wsl(distro, v)
+                    } else {
+                        v.clone()
+                    }
+                } else {
+                    v.clone()
+                };
+                (k.clone(), val)
+            }))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let wsl_kill_target = if running_via_wsl {
+            let tag = ulid::Ulid::new().to_string();
+            child_cmd.env("HADRON_WSL_TAG", &tag);
+            let keys = inv
+                .env
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .chain(std::iter::once("HADRON_WSL_TAG"));
+            let wslenv = hadron_lattice::wsl::wslenv_for_keys(keys);
+            child_cmd.env("WSLENV", wslenv);
+            wsl_parsed.as_ref().map(|(distro, _)| (distro.clone(), tag))
+        } else {
+            None
+        };
+
+        child_cmd.kill_on_drop(true);
+        child_cmd.as_std_mut().set_process_group();
+
+        let mut child = child_cmd.spawn().map_err(|e| {
+            if !running_via_wsl && !host_cwd.is_dir() {
+                anyhow::anyhow!(
+                    "failed to spawn {}: its working directory {:?} does not exist",
+                    inv.program,
+                    inv.cwd,
+                )
+            } else {
+                anyhow::anyhow!("failed to spawn {}: {e}", inv.program)
+            }
+        })?;
+
+        let mut child_guard = ChildProcessGuard::new(child.id(), wsl_kill_target);
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(inv.stdin.as_bytes()).await?;
+            stdin.shutdown().await?;
+        }
+
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        let stdout_fut = async move {
+            let mut stdout_accumulated = String::new();
+            let mut aborted_early = false;
+            if let Some(pipe) = stdout_pipe {
+                let mut reader = tokio::io::BufReader::new(pipe).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let keep_going = on_line(&line);
+                    stdout_accumulated.push_str(&line);
+                    stdout_accumulated.push('\n');
+                    if !keep_going {
+                        aborted_early = true;
+                        break;
+                    }
+                }
+            }
+            (stdout_accumulated, aborted_early)
+        };
+        let (stdout_accumulated, aborted_early) = tokio::select! {
+            res = stdout_fut => res,
+            _ = async {
+                let _ = child.wait().await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            } => {
+                (String::new(), false)
+            }
+        };
+        if aborted_early {
+            child_guard.kill_now();
+            let _ = child.kill().await;
+        }
+        let stderr = tokio::time::timeout(std::time::Duration::from_millis(500), stderr_handle)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        let status = child.wait().await?;
+        child_guard.disarm();
+        if !status.success() {
+            let code = status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            let detail = hadron_lattice::wsl::strip_wsl_noise(&stderr);
+            let detail = detail.trim();
+            if detail.is_empty() {
+                return Err(anyhow::anyhow!("{} exited with {code}", inv.program));
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{} exited with {code}: {detail}",
+                    inv.program
+                ));
+            }
+        }
+        Ok(CliResult {
+            stdout: stdout_accumulated,
+            exit: status.code().unwrap_or(0),
+            usage: None,
+        })
+    }
+}
+
+/// A deterministic runner for tests: returns queued replies in order and records
+/// every invocation it received.
+#[cfg(test)]
+pub struct FakeRunner {
+    replies: std::sync::Mutex<std::collections::VecDeque<CliResult>>,
+    stream_lines: std::sync::Mutex<std::collections::VecDeque<Vec<String>>>,
+    pub recorded: std::sync::Mutex<Vec<CliInvocation>>,
+}
+
+#[cfg(test)]
+impl FakeRunner {
+    pub fn new(replies: Vec<CliResult>) -> Self {
+        FakeRunner {
+            replies: std::sync::Mutex::new(replies.into_iter().collect()),
+            stream_lines: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            recorded: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_stream_lines(lines: Vec<Vec<String>>) -> Self {
+        FakeRunner {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            stream_lines: std::sync::Mutex::new(lines.into_iter().collect()),
+            recorded: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Convenience: a runner that returns one plain-stdout reply per turn.
+    pub fn with_stdout(stdouts: Vec<&str>) -> Self {
+        Self::new(
+            stdouts
+                .into_iter()
+                .map(|s| CliResult {
+                    stdout: s.to_string(),
+                    exit: 0,
+                    usage: None,
+                })
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl CliRunner for FakeRunner {
+    async fn run(&self, inv: CliInvocation) -> anyhow::Result<CliResult> {
+        self.recorded.lock().unwrap().push(inv);
+        let reply = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("FakeRunner ran out of queued replies"))?;
+        Ok(reply)
+    }
+
+    async fn run_streaming(
+        &self,
+        inv: CliInvocation,
+        on_line: &mut (dyn for<'a> FnMut(&'a str) -> bool + Send),
+    ) -> anyhow::Result<CliResult> {
+        self.recorded.lock().unwrap().push(inv);
+        let queued = self.stream_lines.lock().unwrap().pop_front();
+        if let Some(lines) = queued {
+            let mut full = String::new();
+            for line in &lines {
+                let keep_going = on_line(line);
+                full.push_str(line);
+                full.push('\n');
+                if !keep_going {
+                    break;
+                }
+                // Yield between lines so a test watching `live_dir` concurrently (the
+                // same shape as the real subprocess's genuinely-async line reads) gets
+                // a chance to observe a publish before this loop clears it.
+                tokio::task::yield_now().await;
+            }
+            return Ok(CliResult {
+                stdout: full,
+                exit: 0,
+                usage: None,
+            });
+        }
+        let reply = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("FakeRunner ran out of queued replies"))?;
+        for line in reply.stdout.lines() {
+            if !on_line(line) {
+                break;
+            }
+        }
+        Ok(reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_maps_stdout_to_message() {
+        let some = reply_to_outcome(&CliResult {
+            stdout: "  hello  ".into(),
+            exit: 0,
+            usage: None,
+        });
+        assert_eq!(some.message.as_deref(), Some("hello"));
+        let none = reply_to_outcome(&CliResult {
+            stdout: "   \n ".into(),
+            exit: 0,
+            usage: None,
+        });
+        assert_eq!(none.message, None);
+    }
+
+    // ProcessRunner tests use standard Unix tools (cat/sh), never a real CLI —
+    // local, free, deterministic. They de-risk the actual subprocess plumbing
+    // (stdin piping, stdout capture, nonzero-exit handling) before any live run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_pipes_stdin_to_stdout() {
+        let out = ProcessRunner
+            .run(CliInvocation {
+                program: "cat".into(),
+                args: vec![],
+                stdin: "hello world".into(),
+                cwd: std::env::temp_dir(),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "hello world");
+        assert_eq!(out.exit, 0);
+    }
+
+    /// A nonexistent `cwd` and a nonexistent *program* both surface as ENOENT. The
+    /// error must finger the cwd, or the next reader loses an afternoon to a binary
+    /// that was on PATH all along.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_cwd_blames_the_cwd_and_not_the_program() {
+        let err = ProcessRunner
+            .run(CliInvocation {
+                program: "sh".into(), // on PATH; only the cwd is bad
+                args: vec!["-c".into(), "true".into()],
+                stdin: String::new(),
+                cwd: PathBuf::from("/definitely/not/a/real/directory"),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .expect_err("a missing cwd must fail the spawn");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("working directory") && msg.contains("does not exist"),
+            "error should name the cwd as the culprit, got: {msg}"
+        );
+    }
+
+    /// The direct proof of the whole cwd chain's last link: a spawned process runs
+    /// in the invocation's `cwd`, not the daemon's. Before this, `ProcessRunner`
+    /// never called `.current_dir()` and every quark ran in the human's checkout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_runs_in_the_given_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalize: macOS/WSL temp dirs can be symlinks, and `pwd` prints the
+        // resolved path.
+        let want = dir.path().canonicalize().unwrap();
+        let out = ProcessRunner
+            .run(CliInvocation {
+                program: "pwd".into(),
+                args: vec![],
+                stdin: String::new(),
+                cwd: want.clone(),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.trim(), want.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_errors_on_nonzero_with_stderr() {
+        let err = ProcessRunner
+            .run(CliInvocation {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo boom >&2; exit 3".into()],
+                stdin: String::new(),
+                cwd: std::env::temp_dir(),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("boom"),
+            "stderr should surface in the error: {msg}"
+        );
+        assert!(msg.contains('3'), "exit code should surface: {msg}");
+    }
+
+    /// **The other end of the CLI carry path.** `inv.env` is a seat's resolved secret
+    /// — it must land in the subprocess's actual environment via `Command::envs()`,
+    /// not just ride along inert on the struct.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_passes_env_to_the_subprocess() {
+        let out = ProcessRunner
+            .run(CliInvocation {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo \"$SECRET_VAR\"".into()],
+                stdin: String::new(),
+                cwd: std::env::temp_dir(),
+                env: RedactedEnv(vec![("SECRET_VAR".into(), "s3cr3t-payload".into())]),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.trim(), "s3cr3t-payload");
+    }
+
+    #[tokio::test]
+    async fn fake_runner_returns_in_order_and_records() {
+        let runner = FakeRunner::with_stdout(vec!["first", "second"]);
+        let r1 = runner
+            .run(CliInvocation {
+                program: "claude".into(),
+                args: vec!["-p".into()],
+                stdin: "a".into(),
+                cwd: PathBuf::from("/tmp"),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        let r2 = runner
+            .run(CliInvocation {
+                program: "agy".into(),
+                args: vec![],
+                stdin: "b".into(),
+                cwd: PathBuf::from("/tmp"),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r1.stdout, "first");
+        assert_eq!(r2.stdout, "second");
+
+        let recorded = runner.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].program, "claude");
+        assert_eq!(recorded[0].stdin, "a");
+        assert_eq!(recorded[1].program, "agy");
+    }
+
+    /// **The leak-rules test.** A resolved secret's VALUE must never come back out of
+    /// `{:?}` — not on `CliInvocation`, and not on `RedactedEnv` alone. Only the var
+    /// NAME may appear.
+    #[test]
+    fn resolved_env_is_not_in_debug_output() {
+        let secret_value = "s3cr3t-payload-xyz789";
+        let inv = CliInvocation {
+            program: "agy".into(),
+            args: vec![],
+            stdin: String::new(),
+            cwd: PathBuf::from("/tmp"),
+            env: RedactedEnv(vec![("GEMINI_API_KEY".into(), secret_value.into())]),
+            stream: None,
+            sandbox: hadron_gatekeeper::SandboxMode::Off,
+        };
+        let debug = format!("{inv:?}");
+        assert!(
+            !debug.contains(secret_value),
+            "the secret VALUE leaked into Debug: {debug}"
+        );
+        assert!(
+            debug.contains("GEMINI_API_KEY"),
+            "the var NAME should still be visible: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "must say the value was redacted, not just omit it: {debug}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_parses_agy_stream_json() {
+        let stream_ndjson = concat!(
+            "{\"event\":\"init\",\"session\":\"s1\"}\n",
+            "{\"event\":\"agent_response\",\"text_delta\":\"Hello \"}\n",
+            "{\"event\":\"agent_response\",\"text_delta\":\"world\"}\n",
+            "{\"event\":\"result\",\"response\":\"Hello world\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"thinking_tokens\":2,\"cache_read_tokens\":1}}\n"
+        );
+        let out = ProcessRunner
+            .run(CliInvocation {
+                program: "echo".into(),
+                args: vec!["-n".into(), stream_ndjson.into()],
+                stdin: String::new(),
+                cwd: std::env::temp_dir(),
+                env: RedactedEnv::default(),
+                stream: Some(hadron_lattice::StreamSpec {
+                    format: hadron_lattice::StreamFormat::AgyStreamJson,
+                    flags: vec![],
+                }),
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "Hello world");
+        let u = out.usage.expect("usage spend parsed");
+        assert_eq!(u.input, Some(10));
+        // Note: thinking_tokens (2) is folded into output (5 + 2 = 7) because thinking/reasoning spends output token budget
+        assert_eq!(u.output, Some(7));
+        assert_eq!(u.cache_read, Some(1));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn live_test_agy_stream_json() {
+        let spec = hadron_lattice::StreamSpec {
+            format: hadron_lattice::StreamFormat::AgyStreamJson,
+            flags: vec!["--output-format".into(), "stream-json".into()],
+        };
+        let out = ProcessRunner
+            .run(CliInvocation {
+                program: "agy".into(),
+                args: vec![
+                    "-p".into(),
+                    "reply with OK".into(),
+                    "--output-format".into(),
+                    "stream-json".into(),
+                ],
+                stdin: String::new(),
+                cwd: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+                env: RedactedEnv::default(),
+                stream: Some(spec),
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !out.stdout.is_empty(),
+            "live agy stream-json should return stdout"
+        );
+    }
+
+    #[test]
+    fn test_cli_invocation_sandbox_wrapping() {
+        let inv = CliInvocation {
+            program: "cargo".to_string(),
+            args: vec!["check".to_string()],
+            stdin: String::new(),
+            cwd: PathBuf::from("/home/user/project/.hadron/trees/test"),
+            env: RedactedEnv::default(),
+            stream: None,
+            sandbox: hadron_gatekeeper::SandboxMode::WorktreeOnly,
+        };
+        let wrapped = inv.resolve_sandboxed_command();
+        match hadron_gatekeeper::detect_sandbox_platform() {
+            hadron_gatekeeper::SandboxPlatform::LinuxBwrap => {
+                assert_eq!(wrapped.0, "bwrap");
+                assert!(wrapped.1.contains(&"cargo".to_string()));
+            }
+            hadron_gatekeeper::SandboxPlatform::MacOsSeatbelt => {
+                assert_eq!(wrapped.0, "/usr/bin/sandbox-exec");
+                assert!(wrapped.1.contains(&"-p".to_string()));
+                assert!(wrapped.1.contains(&"cargo".to_string()));
+            }
+            hadron_gatekeeper::SandboxPlatform::WindowsHarness => {
+                assert_eq!(wrapped.0, "powershell.exe");
+                assert!(wrapped.1.contains(&"-NoProfile".to_string()));
+            }
+            hadron_gatekeeper::SandboxPlatform::Fallback => {
+                assert_eq!(wrapped.0, "cargo");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cli_invocation_cross_platform_sandbox_builders() {
+        let cwd = PathBuf::from("/home/user/project/.hadron/trees/test");
+        let mac_args = hadron_gatekeeper::build_macos_sandbox_args(
+            &cwd,
+            "cargo",
+            &["check".to_string()],
+            hadron_gatekeeper::SandboxMode::WorktreeOnly,
+            false,
+        );
+        assert_eq!(mac_args[0], "-p");
+        assert!(mac_args[1].contains("(version 1)"));
+
+        let (win_prog, win_args) = hadron_gatekeeper::build_windows_sandbox_args(
+            &cwd,
+            "cargo.exe",
+            &["check".to_string()],
+            hadron_gatekeeper::SandboxMode::WorktreeOnly,
+            false,
+        );
+        assert_eq!(win_prog, "powershell.exe");
+        assert!(win_args.contains(&"-NoProfile".to_string()));
+    }
+
+    #[test]
+    fn test_cli_invocation_wsl_wrapping() {
+        let inv = CliInvocation {
+            program: "cargo".to_string(),
+            args: vec!["check".to_string(), "--workspace".to_string()],
+            stdin: String::new(),
+            cwd: PathBuf::from(r"\\wsl.localhost\Ubuntu-22.04\home\user\project"),
+            env: RedactedEnv::default(),
+            stream: None,
+            sandbox: hadron_gatekeeper::SandboxMode::Off,
+        };
+        let (prog, args) = inv.resolve_execution_command();
+        assert_eq!(prog, "wsl.exe");
+        assert_eq!(
+            args,
+            vec![
+                "-d",
+                "Ubuntu-22.04",
+                "--cd",
+                "/home/user/project",
+                "--exec",
+                "cargo",
+                "check",
+                "--workspace",
+            ]
+        );
+
+        // With WorktreeOnly (the default when sandbox_mode is omitted in team.json),
+        // WSL execution must use Linux bwrap (or direct WSL fallback) and NEVER powershell.exe.
+        let inv_sandboxed = CliInvocation {
+            program: "agy".to_string(),
+            args: vec!["--print".to_string(), "ok".to_string()],
+            stdin: String::new(),
+            cwd: PathBuf::from(
+                r"\\wsl.localhost\Ubuntu-22.04\home\user\project\.hadron\trees\cli-agy",
+            ),
+            env: RedactedEnv::default(),
+            stream: None,
+            sandbox: hadron_gatekeeper::SandboxMode::WorktreeOnly,
+        };
+        let (s_prog, s_args) = inv_sandboxed.resolve_execution_command();
+        assert_eq!(s_prog, "wsl.exe");
+        assert_eq!(
+            &s_args[0..5],
+            &[
+                "-d",
+                "Ubuntu-22.04",
+                "--cd",
+                "/home/user/project/.hadron/trees/cli-agy",
+                "--exec",
+            ]
+        );
+        assert!(
+            !s_args.iter().any(|a| a.contains("powershell")),
+            "WSL sandboxed invocation must never wrap in powershell.exe: {s_args:?}"
+        );
+        assert!(
+            s_args.contains(&"agy".to_string()),
+            "WSL sandboxed invocation must include target program: {s_args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_executes_worktree_in_bwrap_sandbox() {
+        if !hadron_gatekeeper::is_bwrap_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let git_dir = repo_root.join(".git");
+        let nucleus_dir = repo_root.join(".hadron/nucleus");
+        let wt_dir = repo_root.join(".hadron/trees/cli-agy");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&nucleus_dir).unwrap();
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(repo_root.join("parent_secret.txt"), "parent-only").unwrap();
+
+        let res = ProcessRunner
+            .run(CliInvocation {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "cat {}/HEAD && echo wt-ok > inside.txt && cat inside.txt && (ls {}/parent_secret.txt 2>/dev/null && echo LEAK || echo ISOLATED)",
+                        git_dir.display(),
+                        repo_root.display()
+                    ),
+                ],
+                stdin: String::new(),
+                cwd: wt_dir.clone(),
+                env: RedactedEnv::default(),
+                stream: None,
+                sandbox: hadron_gatekeeper::SandboxMode::WorktreeOnly,
+            })
+            .await
+            .expect("bwrap sandboxed worktree run should succeed");
+        assert!(res.stdout.contains("ref: refs/heads/main"));
+        assert!(res.stdout.contains("wt-ok"));
+        assert!(res.stdout.contains("ISOLATED"));
+        assert!(wt_dir.join("inside.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_streaming_errors_on_nonzero_with_stderr() {
+        let err = ProcessRunner
+            .run(CliInvocation {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo stream-err-detail >&2; exit 2".into()],
+                stdin: String::new(),
+                cwd: std::env::temp_dir(),
+                env: RedactedEnv::default(),
+                stream: Some(hadron_lattice::StreamSpec {
+                    format: hadron_lattice::StreamFormat::AgyStreamJson,
+                    flags: vec![],
+                }),
+                sandbox: hadron_gatekeeper::SandboxMode::Off,
+            })
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stream-err-detail"),
+            "streaming run must include stderr in error message, got: {msg}"
+        );
+        assert!(msg.contains('2'), "exit code should surface: {msg}");
+
+        let err_streaming = ProcessRunner
+            .run_streaming(
+                CliInvocation {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "echo callback-err-detail >&2; exit 4".into()],
+                    stdin: String::new(),
+                    cwd: std::env::temp_dir(),
+                    env: RedactedEnv::default(),
+                    stream: None,
+                    sandbox: hadron_gatekeeper::SandboxMode::Off,
+                },
+                &mut |_line| true,
+            )
+            .await
+            .unwrap_err();
+        let msg2 = err_streaming.to_string();
+        assert!(
+            msg2.contains("callback-err-detail"),
+            "run_streaming must include stderr in error message, got: {msg2}"
+        );
+        assert!(msg2.contains('4'), "exit code should surface: {msg2}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_drop_kills_child_process_group() {
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+        let mut pid_tx = Some(pid_tx);
+        let handle = tokio::spawn(async move {
+            ProcessRunner
+                .run_streaming(
+                    CliInvocation {
+                        program: "sh".into(),
+                        // Spawn a background sleep child inside the shell's process group and print its PID.
+                        args: vec!["-c".into(), "sleep 60 & echo $!; wait".into()],
+                        stdin: String::new(),
+                        cwd: std::env::temp_dir(),
+                        env: RedactedEnv::default(),
+                        stream: None,
+                        sandbox: hadron_gatekeeper::SandboxMode::Off,
+                    },
+                    &mut |line| {
+                        if let Ok(pid) = line.trim().parse::<u32>() {
+                            if let Some(tx) = pid_tx.take() {
+                                let _ = tx.send(pid);
+                            }
+                        }
+                        true
+                    },
+                )
+                .await
+        });
+
+        let grandchild_pid = tokio::time::timeout(std::time::Duration::from_secs(5), pid_rx)
+            .await
+            .expect("timed out waiting for grandchild pid")
+            .expect("pid channel closed");
+        let pid_alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) == 0 };
+        assert!(
+            pid_alive(grandchild_pid),
+            "grandchild sleep should be alive while turn is running"
+        );
+
+        // Simulate `/clear` or `/reboot` aborting the in-flight CLI turn task.
+        handle.abort();
+        let _ = handle.await;
+
+        // Wait briefly for the kernel to reap the killed process group.
+        let mut dead = false;
+        for _ in 0..30 {
+            if !pid_alive(grandchild_pid) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            dead,
+            "aborting the ProcessRunner task must kill the entire child process group (grandchild pid {grandchild_pid} still alive)"
+        );
+    }
+}

@@ -1,15 +1,15 @@
-pub mod agent;
-pub mod inspector;
+// 旧的 AgentPane / InspectorPane / 旧可视化已被 hadron 聊天区与右栏替代，
+// 文件保留在磁盘上备查，但不再参与编译。
+// pub mod agent;
+// pub mod inspector;
 pub mod knowledge;
 mod model_settings;
 pub mod settings;
 mod task_form;
 pub mod tasks;
 pub mod timed;
-mod visualizer;
+// mod visualizer;
 
-pub use agent::*;
-pub use inspector::*;
 pub use knowledge::*;
 pub use settings::*;
 pub use tasks::*;

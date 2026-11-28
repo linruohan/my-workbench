@@ -1,0 +1,59 @@
+//! The Gatekeeper's pure decision core: the permission-mode ladder. It folds the
+//! field's `ModeSet` events into an effective mode per quark (per-quark override
+//! over a global default), learns an allow-list from remembered grants, and
+//! decides whether a proposed op is pre-authorized or must ask a human.
+//!
+//! Intentionally offline and side-effect-free: it does NOT classify commands,
+//! emit events, pause the daemon, or render UI — the engine and chamber do that.
+
+pub mod benchmark_guard;
+pub mod cache_guard;
+pub mod distiller;
+mod gate;
+pub mod invariant_synthesis;
+mod matrix;
+mod merge;
+pub mod mutation;
+pub mod mutation_quark;
+pub mod sandbox;
+pub mod windows;
+
+pub use benchmark_guard::*;
+pub use cache_guard::*;
+pub use distiller::*;
+pub use gate::{
+    any_pending_permission, grant, grant_remembering, pending_permission, PendingPermission,
+};
+pub use hadron_lattice::{Mode, Risk};
+pub use invariant_synthesis::*;
+pub use matrix::{
+    allow_rules, decide, effective_mode, global_mode, has_override, op_matches, resolve_mode,
+    AllowRules, Decision, DenyRules,
+};
+pub use merge::{
+    distill_failure_recovery_lesson, evaluate_benchmark_verdict, lint_candidate_diff,
+    lint_candidate_invariants, merge_approved, merge_decision, merge_op, BlockReason, BranchState,
+    MergeVerdict,
+};
+pub use mutation::*;
+pub use mutation_quark::*;
+pub use sandbox::*;
+pub use windows::*;
+pub mod red_team;
+pub use red_team::*;
+pub mod invariant_linter;
+pub use invariant_linter::*;
+pub mod baseline;
+pub use baseline::*;
+pub mod test_minimizer;
+pub use test_minimizer::*;
+pub mod intent_radar;
+pub use intent_radar::*;
+pub mod nucleus_linter;
+pub use nucleus_linter::*;
+pub mod repo_monitor;
+pub use repo_monitor::*;
+pub mod liveness;
+pub use liveness::{audit_diff_liveness, LivenessReport, UnwiredSymbol};
+pub mod claim_auditor;
+pub use claim_auditor::{audit_evidence_claims, ClaimAuditReport, ClaimVerdict};

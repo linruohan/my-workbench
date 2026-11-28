@@ -10,15 +10,27 @@ description = "Personal workbench desktop UI (GPUI + gpui-kit)"
 name = "my-workbench"
 path = "src/main.rs"
 
+# 与工作台同目录发布的守护进程与 MCP 启动壳：聊天/右栏依赖它们。
+[[bin]]
+name = "hadron-gluon"
+path = "src/bin/hadron-gluon.rs"
+
+[[bin]]
+name = "hadron-forge-mcp"
+path = "src/bin/hadron-forge-mcp.rs"
+
 [dependencies]
 wb-domain.workspace = true
 wb-store.workspace = true
 wb-host.workspace = true
 wb-agent.workspace = true
+# Hadron 聊天区与右侧栏（从 hadron-chamber 移植）。
+wb-hadron = { path = "../wb-hadron" }
+# 与工作台同目录发布的守护进程 / MCP 启动壳（src/bin 中引用）。
+hadron-gluon = { path = "../hadron-gluon" }
+hadron-forge-mcp = { path = "../hadron-forge-mcp" }
 gpui-kit.workspace = true
-gpui-webview.workspace = true
 reqwest_client.workspace = true
-wry.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 jiff = "1.0"

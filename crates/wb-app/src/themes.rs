@@ -215,4 +215,38 @@ mod tests {
         }
         assert_eq!(parse_scrollbar("nope"), None);
     }
+
+    /// 用 gpui-kit 真实的 `ThemeSet` schema 解析仓库里的所有主题文件。
+    /// 任何一个键写错或 JSON 损坏都会在这里直接失败，而不是等到运行时静默回退。
+    #[test]
+    fn all_theme_files_parse_against_real_schema() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../themes");
+        let obsidian_raw = std::fs::read_to_string(dir.join("obsidian.json")).unwrap();
+        let obsidian: gpui_kit::component::ThemeSet = serde_json::from_str(&obsidian_raw).unwrap();
+        let dark = obsidian
+            .themes
+            .iter()
+            .find(|theme| theme.name.as_ref() == "Obsidian")
+            .expect("Obsidian 深色主题必须存在");
+        assert!(dark.is_default, "Obsidian 应为默认主题");
+        assert_eq!(dark.colors.background.as_deref(), Some("#0f0f0f"));
+        assert_eq!(dark.colors.border.as_deref(), Some("#2e2e2e"));
+        assert_eq!(dark.colors.primary.as_deref(), Some("#a87ffb"));
+        assert_eq!(dark.shadow, Some(false), "Hadron 风格不启用模糊阴影");
+
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let set: gpui_kit::component::ThemeSet = serde_json::from_str(&raw)
+                .unwrap_or_else(|err| panic!("{} 解析失败: {err}", path.display()));
+            assert!(
+                !set.themes.is_empty(),
+                "{} 至少需要一个主题",
+                path.display()
+            );
+        }
+    }
 }

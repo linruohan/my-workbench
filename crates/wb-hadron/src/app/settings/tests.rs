@@ -1,0 +1,725 @@
+use super::secrets::{declare_secret_var, secret_status, undeclare_secret_var, SecretStatus};
+use super::*;
+use gpui_kit::component::IndexPath;
+use hadron_lattice::secrets::MemoryStore;
+use hadron_lattice::secrets::SecretStore;
+use hadron_lattice::{Flavor, Seat};
+
+fn seat(id: &str) -> Seat {
+    Seat::cli(QuarkId::new(id), "agy", "gemini-3-pro", Flavor::Worker)
+}
+
+#[test]
+fn declare_secret_var_adds_when_absent() {
+    let mut s = seat("acp-agy");
+    assert!(s.secret_env.is_empty());
+
+    let changed = declare_secret_var(&mut s, "GEMINI_API_KEY");
+
+    assert!(changed, "adding a new var must report a change");
+    assert_eq!(s.secret_env, vec!["GEMINI_API_KEY".to_string()]);
+}
+
+#[test]
+fn declare_secret_var_noop_when_present() {
+    let mut s = seat("acp-agy");
+    s.secret_env.push("GEMINI_API_KEY".to_string());
+
+    let changed = declare_secret_var(&mut s, "GEMINI_API_KEY");
+
+    assert!(!changed, "an already-declared var must not report a change");
+    assert_eq!(
+        s.secret_env,
+        vec!["GEMINI_API_KEY".to_string()],
+        "must not duplicate"
+    );
+}
+
+#[test]
+fn declare_secret_var_ignores_blank() {
+    let mut s = seat("acp-agy");
+    let changed = declare_secret_var(&mut s, "");
+    assert!(!changed);
+    assert!(s.secret_env.is_empty());
+}
+
+#[test]
+fn undeclare_secret_var_removes_when_present() {
+    let mut s = seat("acp-agy");
+    s.secret_env.push("GEMINI_API_KEY".to_string());
+
+    let changed = undeclare_secret_var(&mut s, "GEMINI_API_KEY");
+
+    assert!(changed);
+    assert!(s.secret_env.is_empty());
+}
+
+#[test]
+fn undeclare_secret_var_noop_when_absent() {
+    let mut s = seat("acp-agy");
+    let changed = undeclare_secret_var(&mut s, "GEMINI_API_KEY");
+    assert!(!changed);
+    assert!(s.secret_env.is_empty());
+}
+
+/// The behaviour the masked field's status line depends on: setting a value
+/// via a `SecretStore` flips the status to `Set`, clearing it back to `NotSet` —
+/// exercised against a `MemoryStore`, never a real keychain.
+///
+/// The var name must be one no environment can hold: `secret_status` falls back
+/// to `std::env::var` on a store miss (deliberately — an exported key really is
+/// available), so naming a live var like `GEMINI_API_KEY` made this test fail on
+/// any machine that has one exported, including the merge gate's.
+#[test]
+fn set_then_status_reports_set() {
+    let store = MemoryStore::new();
+    let id = QuarkId::new("acp-agy");
+    let var = "GEMINI_API_KEY_TEST_VAR_NOT_SET_1234";
+
+    assert_eq!(
+        secret_status(&store, &id, var),
+        SecretStatus::NotSet,
+        "unset"
+    );
+
+    store.set(&id, var, "sk-live-value").unwrap();
+    assert_eq!(secret_status(&store, &id, var), SecretStatus::Set, "set");
+
+    store.delete(&id, var).unwrap();
+    assert_eq!(
+        secret_status(&store, &id, var),
+        SecretStatus::NotSet,
+        "cleared"
+    );
+}
+
+/// A store that ERRORS (stands in for no OS credential service, e.g. bare WSL2)
+/// must report `Unavailable`, NOT `NotSet` — otherwise a failed keychain looks
+/// exactly like an unset key and the user has no signal.
+#[test]
+fn store_error_reports_unavailable_not_notset() {
+    struct DeadStore;
+    impl SecretStore for DeadStore {
+        fn get(&self, _: &QuarkId, _: &str) -> anyhow::Result<Option<String>> {
+            anyhow::bail!("no credential service")
+        }
+        fn set(&self, _: &QuarkId, _: &str, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("no credential service")
+        }
+        fn delete(&self, _: &QuarkId, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("no credential service")
+        }
+    }
+    assert_eq!(
+        secret_status(
+            &DeadStore,
+            &QuarkId::new("acp-agy"),
+            "GEMINI_API_KEY_TEST_VAR_NOT_SET_1234"
+        ),
+        SecretStatus::Unavailable,
+    );
+}
+
+#[test]
+fn env_var_reports_set_when_not_in_secret_store() {
+    let store = MemoryStore::new();
+    let id = QuarkId::new("acp-agy");
+    let test_var = "TEST_HADRON_GEMINI_KEY_ENV";
+    std::env::set_var(test_var, "env_test_val");
+
+    assert_eq!(
+        secret_status(&store, &id, test_var),
+        SecretStatus::Set,
+        "must report Set when key is present in process env"
+    );
+
+    std::env::remove_var(test_var);
+}
+
+/// A second seat of the same provider mints a fresh id instead of colliding
+/// with (and silently re-adopting) the first.
+#[test]
+fn a_second_same_provider_seat_gets_a_unique_id() {
+    let existing = vec!["acp-claude".to_string(), "acp-claude-2".to_string()];
+    let taken = |id: &str| existing.iter().any(|e| e == id);
+    // Free base → unchanged.
+    assert_eq!(
+        super::providers::unique_seat_id("acp-codex", &taken),
+        "acp-codex"
+    );
+    // Taken base and taken -2 → the next free suffix.
+    assert_eq!(
+        super::providers::unique_seat_id("acp-claude", &taken),
+        "acp-claude-3"
+    );
+}
+
+#[test]
+fn model_select_delegate_includes_default_and_custom_value() {
+    use gpui_kit::component::searchable_list::SearchableListDelegate;
+    use gpui_kit::component::select::SelectItem;
+    let models = vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()];
+    let delegate = create_model_delegate("Inherit", &models, Some("custom-model-x"));
+
+    assert_eq!(
+        delegate.items_count(0),
+        4,
+        "Inherit + 2 models + 1 custom selected model"
+    );
+    assert_eq!(
+        delegate.item(IndexPath::default().row(0)).unwrap().value,
+        ""
+    );
+    assert_eq!(
+        delegate.item(IndexPath::default().row(0)).unwrap().title(),
+        "Inherit (inherit)"
+    );
+    assert_eq!(
+        delegate.item(IndexPath::default().row(1)).unwrap().value,
+        "gpt-4o"
+    );
+    assert_eq!(
+        delegate.item(IndexPath::default().row(2)).unwrap().value,
+        "gpt-4o-mini"
+    );
+    assert_eq!(
+        delegate.item(IndexPath::default().row(3)).unwrap().value,
+        "custom-model-x"
+    );
+
+    let pos = delegate.position(&gpui_kit::SharedString::from("gpt-4o-mini"));
+    assert_eq!(pos, Some(IndexPath::default().row(2)));
+}
+
+#[test]
+fn supports_model_params_capability_gating_in_settings() {
+    use hadron_lattice::Transport;
+
+    let mut http_seat = Seat::cli(QuarkId::new("ollama"), "http", "llama3", Flavor::Worker);
+    http_seat.transport = Transport::Http;
+    assert!(
+        http_seat.supports_model_params(),
+        "HTTP transport must support model params"
+    );
+
+    let mut cli_seat = Seat::cli(QuarkId::new("claude"), "claude", "opus", Flavor::Worker);
+    cli_seat.transport = Transport::Cli;
+    assert!(
+        !cli_seat.supports_model_params(),
+        "Default CLI seat without param flags must not support model params"
+    );
+}
+
+#[test]
+fn skill_creation_and_deletion_in_repo_and_global_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let team_path = dir.path().join(".hadron").join("team.json");
+    std::fs::create_dir_all(team_path.parent().unwrap()).unwrap();
+    std::fs::write(&team_path, "{}").unwrap();
+
+    let skill_dir = team_path.parent().unwrap().join("skills");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let file_path = skill_dir.join("code-auditor.md");
+    std::fs::write(
+        &file_path,
+        "---\nname: code-auditor\n---\n\n# Skill: code-auditor\n",
+    )
+    .unwrap();
+
+    assert!(file_path.exists());
+    assert!(std::fs::remove_file(&file_path).is_ok());
+    assert!(!file_path.exists());
+}
+
+#[test]
+fn skill_selection_toggles_deny_list() {
+    let mut deny_skills: Vec<String> = vec![];
+    let skill = "writing-plans";
+
+    // 1. Initially empty deny_skills -> skill is selected (ON) by default
+    let denied = deny_skills.iter().any(|d| d.eq_ignore_ascii_case(skill));
+    assert!(!denied, "skill must be selected by default");
+
+    // 2. User unselects skill -> added to deny_skills
+    if !denied {
+        deny_skills.push(skill.to_string());
+    }
+    assert_eq!(deny_skills, vec!["writing-plans".to_string()]);
+
+    // 3. User selects skill back ON -> removed from deny_skills
+    let denied_now = deny_skills.iter().any(|d| d.eq_ignore_ascii_case(skill));
+    assert!(denied_now);
+    if denied_now {
+        deny_skills.retain(|x| !x.eq_ignore_ascii_case(skill));
+    }
+    assert!(
+        deny_skills.is_empty(),
+        "selecting skill back ON must clear it from deny_skills"
+    );
+}
+
+#[test]
+fn settings_target_keys_and_equality() {
+    assert_eq!(SettingsTarget::General.key(), "general");
+    assert_eq!(SettingsTarget::Appearance.key(), "appearance");
+    assert_eq!(SettingsTarget::Execution.key(), "execution");
+    assert_eq!(SettingsTarget::Environment.key(), "environment");
+    assert_eq!(SettingsTarget::Providers.key(), "providers");
+    assert_eq!(SettingsTarget::Skills.key(), "skills");
+    assert_eq!(SettingsTarget::Schedules.key(), "schedules");
+    assert_eq!(SettingsTarget::Human.key(), "human");
+    assert_eq!(
+        SettingsTarget::Quark("acp-agy".to_string()).key(),
+        "acp-agy"
+    );
+
+    assert_eq!(SettingsTarget::Appearance, SettingsTarget::Appearance);
+    assert_ne!(SettingsTarget::Appearance, SettingsTarget::Execution);
+    assert_ne!(SettingsTarget::Execution, SettingsTarget::Environment);
+}
+
+#[test]
+fn general_subtargets_belong_to_general_group() {
+    let is_general_subtarget = |t: &SettingsTarget| {
+        matches!(
+            t,
+            SettingsTarget::General
+                | SettingsTarget::Appearance
+                | SettingsTarget::Execution
+                | SettingsTarget::Environment
+        )
+    };
+
+    assert!(is_general_subtarget(&SettingsTarget::General));
+    assert!(is_general_subtarget(&SettingsTarget::Appearance));
+    assert!(is_general_subtarget(&SettingsTarget::Execution));
+    assert!(is_general_subtarget(&SettingsTarget::Environment));
+    assert!(!is_general_subtarget(&SettingsTarget::Providers));
+    assert!(!is_general_subtarget(&SettingsTarget::Skills));
+    assert!(!is_general_subtarget(&SettingsTarget::Schedules));
+    assert!(!is_general_subtarget(&SettingsTarget::Human));
+    assert!(!is_general_subtarget(&SettingsTarget::Quark(
+        "acp-claude".to_string()
+    )));
+}
+
+#[test]
+fn first_added_quark_automatically_becomes_orchestrator_when_team_has_none() {
+    use hadron_lattice::{resolve_team, Flavor, QuarkId, Seat, Team};
+
+    let mut repo = Team::default();
+    let global = Team::default();
+
+    // Initially no orchestrators in resolved team
+    let has_orch = resolve_team(&repo, &global)
+        .quarks
+        .iter()
+        .any(|s| s.flavor == Flavor::Orchestrator);
+    assert!(!has_orch, "initially empty team has no orchestrator");
+
+    // When 1st quark is added:
+    let mut seat1 = Seat::cli(QuarkId::new("acp-claude"), "claude", "opus", Flavor::Worker);
+    if !has_orch {
+        seat1.flavor = Flavor::Orchestrator;
+    }
+    repo.quarks.push(seat1.clone());
+
+    let resolved = resolve_team(&repo, &global);
+    assert_eq!(resolved.quarks.len(), 1);
+    assert_eq!(
+        resolved.quarks[0].flavor,
+        Flavor::Orchestrator,
+        "1st added quark must automatically be promoted to Orchestrator"
+    );
+
+    // When 2nd quark is added:
+    let has_orch2 = resolve_team(&repo, &global)
+        .quarks
+        .iter()
+        .any(|s| s.flavor == Flavor::Orchestrator);
+    assert!(has_orch2, "now team has an orchestrator");
+
+    let mut seat2 = Seat::cli(QuarkId::new("acp-agy"), "agy", "gemini", Flavor::Worker);
+    if !has_orch2 {
+        seat2.flavor = Flavor::Orchestrator;
+    }
+    repo.quarks.push(seat2.clone());
+
+    let resolved2 = resolve_team(&repo, &global);
+    assert_eq!(resolved2.quarks.len(), 2);
+    assert_eq!(
+        resolved2.quarks[0].flavor,
+        Flavor::Orchestrator,
+        "1st quark remains Orchestrator"
+    );
+    assert_eq!(
+        resolved2.quarks[1].flavor,
+        Flavor::Worker,
+        "2nd quark remains Worker"
+    );
+}
+
+#[test]
+fn first_adopted_catalogue_quark_becomes_orchestrator_when_team_has_none() {
+    use hadron_lattice::{resolve_team, Flavor, QuarkId, Seat, SeatOverride, Team};
+
+    let mut repo = Team::default();
+    let global = Team {
+        quarks: vec![
+            Seat::cli(QuarkId::new("acp-claude"), "claude", "opus", Flavor::Worker),
+            Seat::cli(QuarkId::new("acp-agy"), "agy", "gemini", Flavor::Worker),
+        ],
+        roster: vec![],
+        max_exchanges: None,
+        nucleus_index_budget_kb: None,
+        merge_strategy: None,
+        ..Default::default()
+    };
+
+    // When adopting first quark into empty repo:
+    let has_orch = resolve_team(&repo, &global)
+        .quarks
+        .iter()
+        .any(|s| s.flavor == Flavor::Orchestrator);
+    assert!(!has_orch);
+
+    let flavor_override = if !has_orch {
+        Some(Flavor::Orchestrator)
+    } else {
+        None
+    };
+
+    repo.roster.push(SeatOverride {
+        enabled: Some(true),
+        flavor: flavor_override,
+        ..SeatOverride::role(QuarkId::new("acp-claude"))
+    });
+
+    let resolved = resolve_team(&repo, &global);
+    assert_eq!(resolved.quarks.len(), 1);
+    assert_eq!(
+        resolved.quarks[0].flavor,
+        Flavor::Orchestrator,
+        "First adopted quark in repo without orchestrator must be promoted to Orchestrator"
+    );
+}
+
+#[test]
+fn test_theme_tokens_count_and_categories() {
+    use super::providers::{ThemeCategoryTab, ThemeTokenKey};
+
+    assert_eq!(
+        ThemeTokenKey::ALL.len(),
+        35,
+        "Theme editor must provide all 35 design tokens"
+    );
+
+    let mut surfaces_count = 0;
+    let mut text_accents_count = 0;
+    let mut terminal_count = 0;
+    let mut syntax_count = 0;
+
+    for &token in &ThemeTokenKey::ALL {
+        assert!(!token.label().is_empty());
+        assert!(!token.description().is_empty());
+        assert!(token.matches_category(ThemeCategoryTab::All));
+
+        if token.matches_category(ThemeCategoryTab::Surfaces) {
+            surfaces_count += 1;
+        }
+        if token.matches_category(ThemeCategoryTab::TextAccents) {
+            text_accents_count += 1;
+        }
+        if token.matches_category(ThemeCategoryTab::Terminal) {
+            terminal_count += 1;
+        }
+        if token.matches_category(ThemeCategoryTab::Syntax) {
+            syntax_count += 1;
+        }
+    }
+
+    assert_eq!(surfaces_count, 8, "Surfaces category must contain 8 tokens");
+    assert_eq!(
+        text_accents_count, 10,
+        "Text & Accents category must contain 10 tokens (3 text + 7 accents)"
+    );
+    assert_eq!(terminal_count, 3, "Terminal category must contain 3 tokens");
+    assert_eq!(syntax_count, 14, "Syntax category must contain 14 tokens");
+    assert_eq!(
+        surfaces_count + text_accents_count + terminal_count + syntax_count,
+        35
+    );
+}
+
+#[test]
+fn test_theme_token_get_and_set_hex() {
+    use super::providers::ThemeTokenKey;
+    use crate::config::ThemeDefinition;
+
+    let mut theme = ThemeDefinition::default();
+
+    // Verify initial values from default preset
+    assert_eq!(ThemeTokenKey::CanvasBase.get_hex(&theme), "#0f0f0f");
+    assert_eq!(ThemeTokenKey::TextPrimary.get_hex(&theme), "#ededed");
+    assert_eq!(ThemeTokenKey::TextMuted.get_hex(&theme), "#8e8e8e");
+    assert_eq!(ThemeTokenKey::SyntaxKeyword.get_hex(&theme), "#f97583");
+    assert_eq!(ThemeTokenKey::TermBg.get_hex(&theme), "#0f0f0f");
+
+    // Mutate colors using ThemeTokenKey::set_hex
+    ThemeTokenKey::CanvasBase.set_hex(&mut theme, "#010101".into());
+    ThemeTokenKey::TextPrimary.set_hex(&mut theme, "#ffffff".into());
+    ThemeTokenKey::TextMuted.set_hex(&mut theme, "#555555".into());
+    ThemeTokenKey::SyntaxKeyword.set_hex(&mut theme, "#ff007f".into());
+    ThemeTokenKey::TermBg.set_hex(&mut theme, "#000000".into());
+
+    assert_eq!(theme.surfaces.canvas_base, "#010101");
+    assert_eq!(theme.text.primary, "#ffffff");
+    assert_eq!(theme.text.muted, "#555555");
+    assert_eq!(theme.syntax.keyword, "#ff007f");
+    assert_eq!(theme.terminal.bg, "#000000");
+
+    assert_eq!(ThemeTokenKey::CanvasBase.get_hex(&theme), "#010101");
+    assert_eq!(ThemeTokenKey::TextPrimary.get_hex(&theme), "#ffffff");
+    assert_eq!(ThemeTokenKey::TextMuted.get_hex(&theme), "#555555");
+    assert_eq!(ThemeTokenKey::SyntaxKeyword.get_hex(&theme), "#ff007f");
+    assert_eq!(ThemeTokenKey::TermBg.get_hex(&theme), "#000000");
+}
+
+#[test]
+fn test_sandbox_environment_diagnostics() {
+    let platform = hadron_gatekeeper::detect_sandbox_platform();
+    assert!(!platform.name().is_empty());
+    match platform {
+        hadron_gatekeeper::SandboxPlatform::LinuxBwrap => {
+            assert!(platform.is_isolated());
+            assert!(platform.name().contains("Bubblewrap"));
+        }
+        hadron_gatekeeper::SandboxPlatform::MacOsSeatbelt => {
+            assert!(platform.is_isolated());
+            assert!(platform.name().contains("Apple Seatbelt"));
+        }
+        hadron_gatekeeper::SandboxPlatform::WindowsHarness => {
+            assert!(platform.is_isolated());
+            assert!(platform.name().contains("Windows"));
+        }
+        hadron_gatekeeper::SandboxPlatform::Fallback => {
+            assert!(!platform.is_isolated());
+        }
+    }
+}
+
+#[test]
+fn test_sandbox_settings_mode_and_tag_mapping() {
+    use crate::app::widgets::{next_sandbox_mode, sandbox_hint, sandbox_tag_label};
+    use hadron_lattice::SandboxMode;
+
+    // Verify tag labels
+    assert_eq!(sandbox_tag_label(SandboxMode::WorktreeOnly), "SANDBOX: ON");
+    assert_eq!(sandbox_tag_label(SandboxMode::Strict), "SANDBOX: STRICT");
+    assert_eq!(sandbox_tag_label(SandboxMode::Off), "SANDBOX: OFF");
+
+    // Verify cycling
+    assert_eq!(
+        next_sandbox_mode(SandboxMode::WorktreeOnly),
+        SandboxMode::Strict
+    );
+    assert_eq!(next_sandbox_mode(SandboxMode::Strict), SandboxMode::Off);
+    assert_eq!(
+        next_sandbox_mode(SandboxMode::Off),
+        SandboxMode::WorktreeOnly
+    );
+
+    // Verify dropdown mapping strings
+    let map_label = |mode: SandboxMode| match mode {
+        SandboxMode::WorktreeOnly => "Worktree Only",
+        SandboxMode::Strict => "Strict (Offline)",
+        SandboxMode::Off => "Off (Host Direct)",
+    };
+    assert_eq!(map_label(SandboxMode::WorktreeOnly), "Worktree Only");
+    assert_eq!(map_label(SandboxMode::Strict), "Strict (Offline)");
+    assert_eq!(map_label(SandboxMode::Off), "Off (Host Direct)");
+
+    let parse_label = |val: &str| match val {
+        "Worktree Only" => Some(SandboxMode::WorktreeOnly),
+        "Strict (Offline)" => Some(SandboxMode::Strict),
+        "Off (Host Direct)" => Some(SandboxMode::Off),
+        _ => None,
+    };
+    assert_eq!(
+        parse_label("Worktree Only"),
+        Some(SandboxMode::WorktreeOnly)
+    );
+    assert_eq!(parse_label("Strict (Offline)"), Some(SandboxMode::Strict));
+    assert_eq!(parse_label("Off (Host Direct)"), Some(SandboxMode::Off));
+    assert_eq!(parse_label("Unknown"), None);
+
+    // Verify hints are descriptive and non-empty
+    assert!(sandbox_hint(SandboxMode::WorktreeOnly).contains("worktree"));
+    assert!(sandbox_hint(SandboxMode::Strict).contains("network"));
+    assert!(sandbox_hint(SandboxMode::Off).contains("host"));
+}
+
+#[test]
+fn test_auto_detect_env_provider() {
+    use super::providers::{detect_available_env_provider, EnvProviderCandidate};
+
+    let fake_env = [("ANTHROPIC_API_KEY", "mock-anthropic-key-12345")];
+    let candidate = detect_available_env_provider(&fake_env);
+    assert_eq!(candidate, Some(EnvProviderCandidate::Anthropic));
+
+    let fake_env_openai = [("OPENAI_API_KEY", "mock-openai-key-12345")];
+    let candidate_openai = detect_available_env_provider(&fake_env_openai);
+    assert_eq!(candidate_openai, Some(EnvProviderCandidate::OpenAi));
+
+    let fake_env_gemini = [("GEMINI_API_KEY", "AIzaSyTest")];
+    let candidate_gemini = detect_available_env_provider(&fake_env_gemini);
+    assert_eq!(candidate_gemini, Some(EnvProviderCandidate::Gemini));
+
+    let fake_env_empty: [(&str, &str); 0] = [];
+    assert_eq!(detect_available_env_provider(&fake_env_empty), None);
+}
+
+#[test]
+fn strip_seat_numeric_suffix_and_unique_seat_id_prevent_nested_suffixes() {
+    use super::providers::{strip_seat_numeric_suffix, unique_seat_id};
+
+    assert_eq!(strip_seat_numeric_suffix("acp-claude"), "acp-claude");
+    assert_eq!(strip_seat_numeric_suffix("acp-claude-2"), "acp-claude");
+    assert_eq!(strip_seat_numeric_suffix("acp-claude-15"), "acp-claude");
+    // Suffix 1 or non-numeric is preserved as part of the base name
+    assert_eq!(strip_seat_numeric_suffix("cli-gpt-1"), "cli-gpt-1");
+
+    let existing = ["acp-claude", "acp-claude-2"];
+    let base = strip_seat_numeric_suffix("acp-claude-2");
+    let next = unique_seat_id(base, &|id| existing.contains(&id));
+    assert_eq!(next, "acp-claude-3");
+}
+
+#[test]
+fn test_schedule_registry_caching() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let reg1 = super::overlay::cached_schedule_registry(root);
+    assert_eq!(reg1.jobs.len(), 0);
+
+    let mut reg_new = hadron_lattice::ScheduleRegistry::default();
+    reg_new.jobs.push(hadron_lattice::ScheduledJob {
+        id: "test-job".to_string(),
+        name: "Test Job".to_string(),
+        task_id: "test-task".to_string(),
+        cron: "0 * * * *".to_string(),
+        target: "@orchestrator".to_string(),
+        enabled: true,
+        missed_policy: hadron_lattice::MissedPolicy::Run,
+        last_run_at: None,
+        last_skipped_at: None,
+        overdue_warned_at: None,
+        missing_task_warned: false,
+    });
+    let _ = reg_new.save(root);
+
+    super::overlay::invalidate_schedule_registry_cache();
+    let reg2 = super::overlay::cached_schedule_registry(root);
+    assert_eq!(reg2.jobs.len(), 1);
+    assert_eq!(reg2.jobs[0].id, "test-job");
+}
+
+#[test]
+fn effort_options_hidden_for_cli_agy_gemini_and_effort_baked_models() {
+    use super::{effort_options_for_seat, seat_allows_persisted_effort};
+    use hadron_lattice::{Flavor, QuarkId, Seat};
+
+    let cli_agy = Seat::cli(
+        QuarkId::new("cli-agy"),
+        "agy",
+        "gemini-4-carbon-medium",
+        Flavor::Orchestrator,
+    );
+    assert!(effort_options_for_seat(&cli_agy, None).is_empty());
+    assert!(!seat_allows_persisted_effort(&cli_agy, None));
+
+    let cli_agy_claude = Seat::cli(
+        QuarkId::new("cli-agy-2"),
+        "agy",
+        "claude-opus-5-5-high",
+        Flavor::Worker,
+    );
+    assert!(effort_options_for_seat(&cli_agy_claude, None).is_empty());
+
+    let cli_gemini = Seat::cli(
+        QuarkId::new("cli-gemini"),
+        "gemini",
+        "gemini-3.8-flash",
+        Flavor::Worker,
+    );
+    assert!(effort_options_for_seat(&cli_gemini, None).is_empty());
+
+    let cli_claude = Seat::cli(QuarkId::new("cli-claude"), "claude", "opus", Flavor::Worker);
+    assert_eq!(
+        effort_options_for_seat(&cli_claude, None),
+        vec!["low", "medium", "high", "max"]
+    );
+    assert!(seat_allows_persisted_effort(&cli_claude, None));
+}
+
+#[test]
+fn acp_probe_respects_effort_selector_unless_model_encodes_effort() {
+    use super::{
+        effort_options_for_seat, seat_allows_persisted_effort, AcpModelProbe, AcpModelState,
+    };
+    use hadron_gluon::adapter::acp::{AcpModel, AcpSelectors, ModelSelector};
+    use hadron_lattice::{Flavor, QuarkId, Seat, Transport};
+
+    let mut acp_seat = Seat::cli(
+        QuarkId::new("acp-agy"),
+        "antigravity",
+        "gemini-4-carbon",
+        Flavor::Worker,
+    );
+    acp_seat.transport = Transport::Acp;
+
+    // Before probe finishes: hidden in UI, but persisted effort preserved until probe resolves.
+    assert!(effort_options_for_seat(&acp_seat, None).is_empty());
+    assert!(seat_allows_persisted_effort(&acp_seat, None));
+
+    // Ready probe advertising ThoughtLevel on base model `gemini-4-carbon`: shown.
+    let ready_with_effort = AcpModelProbe {
+        id: "acp-agy".into(),
+        seq: 0,
+        state: AcpModelState::Ready {
+            selectors: AcpSelectors {
+                effort: Some(ModelSelector {
+                    config_id: "thought_level".into(),
+                    current: "medium".into(),
+                    available: vec![
+                        AcpModel {
+                            value: "low".into(),
+                            label: "Low".into(),
+                        },
+                        AcpModel {
+                            value: "medium".into(),
+                            label: "Medium".into(),
+                        },
+                        AcpModel {
+                            value: "high".into(),
+                            label: "High".into(),
+                        },
+                    ],
+                }),
+                ..Default::default()
+            },
+        },
+    };
+    assert_eq!(
+        effort_options_for_seat(&acp_seat, Some(&ready_with_effort)),
+        vec!["low", "medium", "high"]
+    );
+
+    // Switching to an effort-encoded model suppresses the Effort selector even with cached probe.
+    acp_seat.model = "gpt-oss-120b-medium".into();
+    assert!(effort_options_for_seat(&acp_seat, Some(&ready_with_effort)).is_empty());
+    assert!(!seat_allows_persisted_effort(
+        &acp_seat,
+        Some(&ready_with_effort)
+    ));
+}

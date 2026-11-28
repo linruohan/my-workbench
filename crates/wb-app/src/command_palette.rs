@@ -1,5 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::state::{AppNav, AppState};
+use crate::style;
 use crate::views::TasksPane;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -679,12 +680,11 @@ impl Render for CommandPalette {
                 v_flex()
                     .w(px(560.))
                     .max_h(px(420.))
-                    .rounded(cx.theme().radius_lg)
-                    .bg(cx.theme().popover)
+                    .rounded(style::panel_radius(cx))
+                    .bg(style::card(cx))
                     .text_color(cx.theme().popover_foreground)
                     .border_1()
-                    .border_color(cx.theme().border)
-                    .shadow_lg()
+                    .border_color(style::hairline(cx))
                     .p_3()
                     .gap_2()
                     .on_mouse_down(MouseButton::Left, |_, _, _| {})

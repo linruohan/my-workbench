@@ -1,0 +1,1500 @@
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use hadron_lattice::term::{self, Source};
+use hadron_lattice::{
+    live, Activity, ContextUsage, Doing, Kind, Mode, Projection, QuarkId, QuotaBucket, TurnOutcome,
+    Usage,
+};
+
+use agent_client_protocol::schema::v1::{
+    CancelNotification, ContentBlock, ImageContent, InitializeRequest, McpServer, McpServerStdio,
+    NewSessionRequest, PermissionOptionKind, PlanEntryStatus, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallUpdate, ToolKind,
+    Usage as AcpUsage,
+};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
+
+use crate::adapter::registry::{AcpTarget, ResolvedAcpTarget};
+
+use super::model::{
+    classify_request, effort_selector, mode_selector, model_selector, permission_choice,
+    resolve_model, resolve_model_or_split_effort,
+};
+use super::spend::turn_spend_with_context;
+
+/// Build the ACP JSON stdio descriptor `AcpAgent::from_str` parses (see the crate
+/// doc example on `AcpAgent`), with a resolved secret env baked into its `env`
+/// array. `agent_client_protocol::AcpAgent::spawn_process` applies each entry via
+/// `cmd.env(name, value)` before spawning (`agent-client-protocol` 1.2.0,
+/// `acp_agent.rs:185-187`) — this is how a secret VALUE reaches the ACP transport
+/// without ever riding on argv or a bare command string.
+///
+/// Pure and side-effect-free on purpose: no process is spawned here, so it is
+/// unit-testable without touching a real agent.
+pub(super) fn acp_stdio_descriptor(target: &ResolvedAcpTarget, env: &[(String, String)]) -> String {
+    acp_stdio_descriptor_sandboxed(
+        target,
+        env,
+        std::path::Path::new("."),
+        hadron_gatekeeper::SandboxMode::Off,
+    )
+}
+
+pub(super) fn rewrite_windows_bridge_path_to_linux(linux_home: &str, val: &str) -> Option<String> {
+    let norm = val.replace('\\', "/");
+    let marker = "/.hadron/bridges/";
+    let idx = norm.find(marker)?;
+    let suffix = &norm[idx + marker.len()..];
+    let linux_suffix = suffix
+        .replace("/venv/Scripts/python.exe", "/venv/bin/python")
+        .replace("/venv/Scripts/python3.exe", "/venv/bin/python3");
+    Some(format!("{linux_home}/.hadron/bridges/{linux_suffix}"))
+}
+
+pub(super) fn acp_stdio_descriptor_sandboxed(
+    target: &ResolvedAcpTarget,
+    env: &[(String, String)],
+    work_dir: &std::path::Path,
+    mode: hadron_gatekeeper::SandboxMode,
+) -> String {
+    let (raw_prog, raw_args) = (target.program(), target.args());
+    let wsl_parsed = hadron_lattice::wsl::parse_wsl_unc_path(work_dir);
+    // Keep explicit Windows host bridge paths (e.g. `C:\Users\...\.hadron\bridges\agy\venv\Scripts\python.exe`)
+    // on the Windows host when `python.exe` exists there, so Windows Hadron uses the Windows
+    // host environment and Windows Credential Manager keyring. Only rewrite to the in-distro
+    // Linux bridge if the host bridge executable does not exist on the local filesystem.
+    let (effective_prog, effective_args): (String, Vec<String>) = match &wsl_parsed {
+        Some((distro, linux_cwd))
+            if !(hadron_lattice::wsl::is_windows_host_path(raw_prog)
+                && std::path::Path::new(raw_prog).exists()) =>
+        {
+            if let Some(linux_home) = hadron_lattice::wsl::infer_linux_home_from_path(linux_cwd) {
+                if let Some(candidate_prog) =
+                    rewrite_windows_bridge_path_to_linux(&linux_home, raw_prog)
+                {
+                    if hadron_lattice::wsl::wsl_unc_entry_exists(
+                        distro,
+                        std::path::Path::new(&candidate_prog),
+                    ) {
+                        let rewritten_args: Vec<String> = raw_args
+                            .iter()
+                            .map(|a| {
+                                rewrite_windows_bridge_path_to_linux(&linux_home, a)
+                                    .unwrap_or_else(|| a.clone())
+                            })
+                            .collect();
+                        (candidate_prog, rewritten_args)
+                    } else {
+                        (raw_prog.to_string(), raw_args.to_vec())
+                    }
+                } else {
+                    (raw_prog.to_string(), raw_args.to_vec())
+                }
+            } else {
+                (raw_prog.to_string(), raw_args.to_vec())
+            }
+        }
+        _ => (raw_prog.to_string(), raw_args.to_vec()),
+    };
+    let (sandboxed_prog, sandboxed_args) = hadron_gatekeeper::resolve_sandboxed_command(
+        work_dir,
+        &effective_prog,
+        &effective_args,
+        mode,
+        false,
+    );
+    let (program, args) = match &wsl_parsed {
+        Some((distro, linux_cwd))
+            if hadron_lattice::wsl::should_run_in_wsl(distro, &effective_prog) =>
+        {
+            hadron_lattice::wsl::wrap_wsl_command(
+                distro,
+                linux_cwd,
+                &sandboxed_prog,
+                &sandboxed_args,
+            )
+        }
+        _ => (sandboxed_prog, sandboxed_args),
+    };
+    let running_via_wsl = program == "wsl.exe";
+    let wsl_distro = wsl_parsed.map(|(d, _)| d);
+    let mut env_json: Vec<serde_json::Value> = env
+        .iter()
+        .map(|(name, value)| {
+            let val = match (&wsl_distro, running_via_wsl) {
+                (Some(distro), true) => hadron_lattice::wsl::translate_arg_for_wsl(distro, value),
+                _ => value.clone(),
+            };
+            serde_json::json!({ "name": name, "value": val })
+        })
+        .collect();
+    if running_via_wsl && !env.is_empty() {
+        let wslenv = hadron_lattice::wsl::wslenv_for_keys(env.iter().map(|(k, _)| k.as_str()));
+        if !wslenv.is_empty() {
+            env_json.push(serde_json::json!({ "name": "WSLENV", "value": wslenv }));
+        }
+    }
+    serde_json::json!({
+        "type": "stdio",
+        // The descriptor requires a human-readable name; the program itself is a
+        // fine one and carries no secret.
+        "name": program,
+        "command": program,
+        "args": args,
+        "env": env_json,
+    })
+    .to_string()
+}
+
+pub(super) fn descriptor_runs_via_wsl(descriptor_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(descriptor_json)
+        .ok()
+        .and_then(|v| {
+            v.get("command")?
+                .as_str()
+                .map(|c| c.eq_ignore_ascii_case("wsl.exe"))
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve the `cwd` and `hadron-forge-mcp` `(executable, args)` handed to `session/new`.
+///
+/// When Windows `hadron-gluon.exe` launches an ACP agent inside WSL (`running_via_wsl == true`,
+/// e.g. `wsl.exe -d Ubuntu ... --exec /home/.../agy acp`), the agent runs in the Linux
+/// filesystem namespace:
+/// 1. `session_cwd` must be the Linux path (`/home/...`) rather than `\\wsl.localhost\...`.
+/// 2. `hadron-forge-mcp` prefers an in-distro Linux binary (`resolve_wsl_program_path`) with
+///    Linux-translated args, or falls back to invoking the host `hadron-forge-mcp.exe` through
+///    WSL automount (`/mnt/c/.../hadron-forge-mcp.exe`) with Windows UNC args.
+pub(super) fn resolve_session_cwd_and_forge(
+    cwd: &std::path::Path,
+    external: &[hadron_lattice::ExternalRootSpec],
+    host_forge_exe: &std::path::Path,
+    running_via_wsl: bool,
+) -> (PathBuf, PathBuf, Vec<String>) {
+    let wsl_forge = if running_via_wsl {
+        hadron_lattice::wsl::parse_wsl_unc_path(cwd).and_then(|(distro, _)| {
+            hadron_lattice::wsl::resolve_wsl_program_path(&distro, "hadron-forge-mcp")
+        })
+    } else {
+        None
+    };
+    resolve_session_cwd_and_forge_with_wsl_bin(
+        cwd,
+        external,
+        host_forge_exe,
+        running_via_wsl,
+        wsl_forge,
+    )
+}
+
+pub(super) fn resolve_session_cwd_and_forge_with_wsl_bin(
+    cwd: &std::path::Path,
+    external: &[hadron_lattice::ExternalRootSpec],
+    host_forge_exe: &std::path::Path,
+    running_via_wsl: bool,
+    wsl_forge: Option<String>,
+) -> (PathBuf, PathBuf, Vec<String>) {
+    if running_via_wsl {
+        if let Some((distro, linux_cwd)) = hadron_lattice::wsl::parse_wsl_unc_path(cwd) {
+            if let Some(wsl_forge) = wsl_forge {
+                let mut args = vec![linux_cwd.to_string_lossy().replace('\\', "/")];
+                for root in external {
+                    args.push(
+                        if root.writable {
+                            "--external-root-rw"
+                        } else {
+                            "--external-root"
+                        }
+                        .to_string(),
+                    );
+                    args.push(hadron_lattice::wsl::translate_arg_for_wsl(
+                        &distro,
+                        &root.path.to_string_lossy(),
+                    ));
+                }
+                return (linux_cwd, PathBuf::from(wsl_forge), args);
+            }
+            if let Some(mnt_forge) = hadron_lattice::wsl::windows_drive_to_wsl_mnt(host_forge_exe) {
+                return (linux_cwd, mnt_forge, forge_mcp_args(cwd, external));
+            }
+            return (
+                linux_cwd,
+                host_forge_exe.to_path_buf(),
+                forge_mcp_args(cwd, external),
+            );
+        }
+    }
+    (
+        cwd.to_path_buf(),
+        host_forge_exe.to_path_buf(),
+        forge_mcp_args(cwd, external),
+    )
+}
+
+/// Parse the vendor-namespaced Claude rate-limit payload `claude-agent-acp` attaches
+/// to a `usage_update`'s `_meta` (`_claude/rateLimit`), mapped straight from Claude
+/// Code's own `rate_limit_event`. `utilization` is the provider's **own** figure —
+/// exactly the number Option A (recomputing locally from `ledger.db`) could never
+/// match, since server-side limits move with load
+/// (`.hadron/docs/plans/2026-07-24-claude-plan-limits-in-stats.md`). Absent or
+/// malformed `_meta` returns `None` — absent is not zero (see `Usage::quota`'s
+/// honesty rule: empty means the provider reported nothing, not that it is full).
+///
+/// `rateLimitType` is optional in the schema; when absent, key falls back to
+/// `claude-limit`. `utilization` is strictly required: a bucket with no fraction has
+/// no "% left" to show, and inventing one breaks `Usage::quota`'s honesty rule.
+pub(super) fn parse_claude_rate_limit(
+    meta: &serde_json::Map<String, serde_json::Value>,
+) -> Option<QuotaBucket> {
+    let rl = meta.get("_claude/rateLimit")?.as_object()?;
+    let rate_limit_type = rl
+        .get("rateLimitType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("limit");
+    let utilization = rl.get("utilization")?.as_f64()?;
+    let reset_time = rl
+        .get("resetsAt")
+        .and_then(|v| v.as_i64())
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+    Some(QuotaBucket {
+        key: format!("claude-{rate_limit_type}"),
+        remaining_fraction: (1.0 - utilization).clamp(0.0, 1.0),
+        reset_time,
+    })
+}
+
+/// Prepare a [`Projection`] for an ACP turn and render its prompt text.
+///
+/// - When `has_resident_session` is `true` and `turn.field_window` is non-empty, the
+///   resident ACP session already holds the static prefix (`invariants`, `role_body`,
+///   `has_forge_tools`, `nucleus_digest`, `nucleus_index`) from its initial turn, so
+///   [`crate::adapter::prompt::without_static_prefix`] strips those cached static sections
+///   instead of re-appending a duplicate copy to the conversation history every turn.
+/// - Applies [`crate::adapter::cli::fit_prompt_with_sliding_pruner`] so an oversized field
+///   window or git diff is compacted via `SlidingContextPruner` before sending over ACP.
+pub(super) fn prepare_acp_turn_prompt(
+    turn: Projection,
+    self_id: &QuarkId,
+    has_resident_session: bool,
+) -> (Projection, String) {
+    let resuming = has_resident_session && !turn.field_window.is_empty();
+    let effective_turn = if resuming {
+        crate::adapter::prompt::without_static_prefix(turn)
+    } else {
+        turn
+    };
+    let prompt = crate::adapter::cli::fit_prompt_with_sliding_pruner(
+        &effective_turn,
+        self_id,
+        crate::adapter::cli::SAFE_PIPE_PROMPT_BYTES,
+        &crate::sliding_pruner::SlidingPrunerConfig::default(),
+    );
+    (effective_turn, prompt)
+}
+
+/// What a fresh session's quota accumulator starts from: whatever was last
+/// persisted for this quark (see `hadron_lattice::quota`), so a resident agent
+/// that re-boots — or a `/clear`, which drops the session outright — does not
+/// start blind to a still-valid window. `dir` is `None` for a caller with no
+/// field on disk (tests, and any quark this daemon is not watching), matching
+/// `LiveFeed`'s existing convention; that yields an empty accumulator, same as
+/// a quark that has never reported quota.
+pub(super) fn seed_quota(dir: Option<&std::path::Path>, quark: &QuarkId) -> Vec<QuotaBucket> {
+    dir.map(|d| hadron_lattice::quota::load(d, quark))
+        .unwrap_or_default()
+}
+
+/// Merge a freshly-seen bucket into the accumulator — refining an existing
+/// bucket of the same key rather than duplicating it, same rule the pump
+/// already followed — and persist the result so the *next* boot can see it.
+/// Best-effort: a failed write must never fail a turn, which is why this
+/// returns nothing to check.
+pub(super) fn merge_and_persist_bucket(
+    quota: &mut Vec<QuotaBucket>,
+    bucket: QuotaBucket,
+    dir: Option<&std::path::Path>,
+    quark: &QuarkId,
+) {
+    match quota.iter_mut().find(|b| b.key == bucket.key) {
+        Some(existing) => *existing = bucket,
+        None => quota.push(bucket),
+    }
+    if let Some(d) = dir {
+        let _ = hadron_lattice::quota::save(d, quark, quota);
+    }
+}
+
+/// The one-line "what is it doing" a human reads mid-turn. An agent's bare
+/// `title` is often just the tool's name ("Terminal", "Write"), so enrich it:
+/// the kind's verb plus the file being touched, or the actual command line for
+/// a shell call, falling back to the title when the call carries nothing richer.
+pub(super) fn tool_call_detail(call: &ToolCall) -> String {
+    let verb = match call.kind {
+        ToolKind::Read => Some("Reading"),
+        ToolKind::Edit => Some("Editing"),
+        ToolKind::Delete => Some("Deleting"),
+        ToolKind::Move => Some("Moving"),
+        ToolKind::Search => Some("Searching"),
+        ToolKind::Execute => Some("Running"),
+        ToolKind::Think => Some("Thinking"),
+        ToolKind::Fetch => Some("Fetching"),
+        _ => None,
+    };
+    // The file a follow-along client would jump to: the call's first location.
+    let target = call.locations.first().map(|loc| {
+        loc.path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| loc.path.display().to_string())
+    });
+    // A shell call's command line beats its generic "Terminal" title.
+    let command = matches!(call.kind, ToolKind::Execute)
+        .then(|| call.raw_input.as_ref())
+        .flatten()
+        .and_then(|input| input.get("command"))
+        .and_then(|cmd| cmd.as_str())
+        .map(first_line_truncated);
+    match (verb, target, command) {
+        (Some(verb), Some(target), _) => format!("{verb} {target}"),
+        (Some(verb), None, Some(command)) => format!("{verb} `{command}`"),
+        _ => first_line_truncated(&call.title),
+    }
+}
+
+/// What a tool-call **update** adds beyond its opening title: the actual output
+/// as it streams in (a shell command's stdout, a file diff) beats a static verb
+/// that was already published when the call started. `None` means this update
+/// carries nothing new to show (a bare status flip with no content or title) —
+/// the caller should leave the previous detail on screen rather than blank it.
+pub(super) fn tool_call_update_detail(update: &ToolCallUpdate) -> Option<String> {
+    if let Some(last) = update.fields.content.as_ref().and_then(|c| c.last()) {
+        match last {
+            ToolCallContent::Content(c) => {
+                if let ContentBlock::Text(t) = &c.content {
+                    let line = first_line_truncated(&t.text);
+                    if !line.is_empty() {
+                        return Some(line);
+                    }
+                }
+            }
+            ToolCallContent::Diff(d) => {
+                let name = d
+                    .path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| d.path.display().to_string());
+                return Some(format!("Edited {name}"));
+            }
+            // `Terminal` (an embedded terminal reference) and any future
+            // variant carry nothing renderable here without a further lookup.
+            _ => {}
+        }
+    }
+    update
+        .fields
+        .title
+        .as_deref()
+        .map(first_line_truncated)
+        .filter(|s| !s.is_empty())
+}
+
+/// First non-empty line only, cut at 80 **chars** (never bytes — a mid-character
+/// byte cut panics the chamber's label rendering).
+fn first_line_truncated(s: &str) -> String {
+    const MAX: usize = 80;
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.chars().count() > MAX {
+        let cut: String = line.chars().take(MAX).collect();
+        format!("{cut}…")
+    } else {
+        line.to_string()
+    }
+}
+
+/// plan." then, later, the final "@orchestrator Task 2 complete..." report).
+/// The old code `push_str`'d every notification straight onto the last with no
+/// separator, so a report's leading `@mention` landed mid-line, glued onto the
+/// previous notification's final word (`"Committing now.@orchestrator ..."`).
+/// `parse_all_addressees`/`parse_addressee` (router/mod.rs) only recognize a
+/// mention that **starts a line** — by design, so a quark quoting another
+/// quark's handle in prose doesn't spuriously excite it (see
+/// `orchestrator_alias_does_not_name_an_unrelated_card` and friends) — so a
+/// glued-on mention silently routed to nobody and the orchestrator was never
+/// dispatched. A blank line between notifications restores the line-start
+/// Appends a streaming message chunk to an ACP session's transcript.
+///
+/// Ensures that if a chunk starts with an `@` mention, it begins on a new line
+/// so `parse_all_addressees` line-start mention routing succeeds, while
+/// preserving continuous streaming text without inserting spurious mid-sentence
+/// or mid-word newlines.
+#[cfg(test)]
+pub(super) fn append_message_chunk(transcript: &mut String, chunk: &str) {
+    let mut needs_step_break = false;
+    crate::adapter::telemetry::append_message_chunk_with_step_break(
+        transcript,
+        chunk,
+        &mut needs_step_break,
+    );
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(triple >> 18) & 0x3F] as char);
+        out.push(TABLE[(triple >> 12) & 0x3F] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(triple >> 6) & 0x3F] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[triple & 0x3F] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub(super) fn extract_screenshot_images(turn: &Projection) -> Vec<String> {
+    let mut images = Vec::new();
+    let re = match regex::Regex::new(
+        r#"(\.hadron/screenshots/[^\s\)\]'"\`]+|screenshots/[^\s\)\]'"\`]+)"#,
+    ) {
+        Ok(r) => r,
+        Err(_) => return images,
+    };
+    let mut candidates = Vec::new();
+    for cap in re.captures_iter(&turn.task) {
+        if let Some(m) = cap.get(1) {
+            candidates.push(m.as_str().to_string());
+        }
+    }
+    for ev in turn.field_window.iter().rev().take(5) {
+        if let Kind::Message { body } = &ev.kind {
+            for cap in re.captures_iter(body) {
+                if let Some(m) = cap.get(1) {
+                    candidates.push(m.as_str().to_string());
+                }
+            }
+        }
+    }
+    for rel in candidates {
+        let full = if std::path::Path::new(&rel).is_absolute() {
+            PathBuf::from(&rel)
+        } else {
+            turn.cwd.join(&rel)
+        };
+        if full.exists() && full.extension().is_some_and(|ext| ext == "png") {
+            if let Ok(bytes) = std::fs::read(&full) {
+                let b64 = base64_encode(&bytes);
+                if !images.contains(&b64) {
+                    images.push(b64);
+                }
+            }
+        }
+    }
+    images
+}
+
+/// One turn, handed to the resident pump.
+pub(super) struct TurnRequest {
+    prompt: String,
+    images: Vec<String>,
+    reply: tokio::sync::oneshot::Sender<anyhow::Result<TurnReply>>,
+}
+
+/// What the pump got back from one `session/prompt`.
+pub(super) struct TurnReply {
+    text: String,
+    /// The end-turn token usage, when the agent implements the (still unstable)
+    /// `unstable_end_turn_token_usage` extension. `None` if it does not.
+    usage: Option<AcpUsage>,
+    /// The last `usage_update` seen during the turn: context used / window size.
+    context: Option<(u64, u64)>,
+    /// Every Claude rate-limit bucket seen during the turn (vendor `_meta`, keyed by
+    /// `rateLimitType` so a later `usage_update` refines its own bucket rather than
+    /// appending a duplicate). Empty for every non-Claude ACP agent.
+    quota: Vec<QuotaBucket>,
+    stop: StopReason,
+}
+
+/// The live connection: a handle onto the pump thread. Dropping it drops the
+/// channel, which ends the pump's loop, which tears down the connection and reaps
+/// the agent subprocess.
+///
+/// `Clone`: every field is already a `Sender`/`Arc` — cloning shares the same
+/// pump, never spawns a second one. This is what lets `sync_cancel_slot`
+/// (Task 4) hand a `CancelSlot` a cheap clone to call `request_cancel` through,
+/// without going anywhere near the `Mutex<Box<dyn Quark>>` that wraps the
+/// whole `AcpQuark` for the duration of a turn.
+#[derive(Clone)]
+pub(super) struct AcpSession {
+    pub(super) turns: tokio::sync::mpsc::UnboundedSender<TurnRequest>,
+    /// The permission posture the pump should apply, swapped in before each turn.
+    /// Shared because ACP's `session/request_permission` arrives on the *connection*,
+    /// not on the turn, so the handler needs a way to see the current turn's mode.
+    pub(super) mode: Arc<Mutex<Mode>>,
+    /// The model the agent is **actually** running, as the agent itself reported it —
+    /// not the one the seat asked for. `None` means the agent advertised no selector,
+    /// so we genuinely do not know. Absent is not "the default"; it is unknown.
+    pub(super) model: Arc<Mutex<Option<String>>>,
+    /// Signalled to ask the pump to send ACP's own `session/cancel` for whatever
+    /// `session/prompt` is currently in flight. Mirrors `turns`: a channel in,
+    /// serviced from inside the pump thread — never a cloned `cx` driven from a
+    /// foreign runtime (see "Why a channel and not a cloned `cx`" in the plan).
+    pub(super) cancels: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Whether a turn is currently in flight — the same flag the notification
+    /// handler already gates itself on (`in_turn` in `boot`). `request_cancel`
+    /// checks this FIRST so a cancel with nothing running is reported `false`
+    /// rather than silently queued for whatever turn starts next.
+    pub(super) in_turn: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) live: Option<LiveFeed>,
+}
+
+impl AcpSession {
+    /// Ask the pump to cancel whatever `session/prompt` is in flight, via ACP's
+    /// own `session/cancel` — graceful, not `reset_session`: the session and its
+    /// context stay alive, only the current turn is asked to stop.
+    ///
+    /// Returns `false` with no effect when no turn is in flight (or the pump is
+    /// gone) — a cancel with nothing to cancel must never queue up and land on
+    /// whatever turn starts next.
+    pub(super) fn request_cancel(&self) -> bool {
+        if !self.in_turn.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if self.cancels.send(()).is_ok() {
+            if let Some(live) = &self.live {
+                live.publish(Doing::Thinking, "interrupting…");
+            }
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A quark backed by a resident ACP agent.
+/// Publishes what this quark is doing, mid-turn, for the chamber to render.
+///
+/// Cheap to clone (it is moved into the ACP notification handler, which the SDK
+/// drives on its own thread) and **throttled**: an agent emits a thought chunk
+/// every few tokens, and a file write per token would be a hot loop that helps
+/// nobody read faster.
+#[derive(Clone)]
+pub(super) struct LiveFeed {
+    pub(super) dir: PathBuf,
+    pub(super) quark: QuarkId,
+    pub(super) last: Arc<Mutex<Option<Instant>>>,
+    pub(super) active: Arc<std::sync::atomic::AtomicBool>,
+    /// The reply so far, for as long as this turn lasts. Held here rather than read
+    /// back off the last-written activity because the live file is a single
+    /// overwritten slot: a tool call publishes right after a message chunk and would
+    /// otherwise erase the draft, which is exactly what made the chat bubble flicker
+    /// in and out instead of growing.
+    pub(super) draft: Arc<Mutex<Option<String>>>,
+}
+
+impl LiveFeed {
+    /// The minimum gap between two published activities. A tool call ignores it —
+    /// it is the one update the human is actually reading.
+    const THROTTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// Both edges of a turn. The draft is dropped either way: it belongs to the turn
+    /// that produced it, and carrying it into the next one would show the chamber a
+    /// bubble of last turn's reply.
+    pub(super) fn set_active(&self, active: bool) {
+        self.active
+            .store(active, std::sync::atomic::Ordering::Relaxed);
+        *self.draft.lock().unwrap() = None;
+    }
+
+    pub(super) fn publish(&self, doing: Doing, detail: &str) {
+        self.emit(doing, |quark| Activity::new(quark, doing, detail));
+    }
+
+    /// Publish the reply **as it streams**, so the chamber can render a provisional
+    /// chat bubble instead of leaving the human watching tool titles until the turn
+    /// ends. `message` is the accumulated transcript, not the latest chunk — the
+    /// live file is overwritten in place, so each publish must carry the whole thing.
+    ///
+    /// Throttled exactly like a thought chunk (`Doing::Speaking` is not in the forced
+    /// set), which matters more here: an agent emits a chunk every few tokens and this
+    /// payload GROWS, so an unthrottled version would rewrite an ever-larger file
+    /// hundreds of times a turn.
+    pub(super) fn publish_draft(&self, message: &str) {
+        *self.draft.lock().unwrap() = Some(message.to_string());
+        self.emit(Doing::Speaking, |quark| Activity::speaking(quark, message));
+    }
+
+    /// The shared gate both publishers pass through: the turn must be live, the
+    /// throttle must allow it, and a failed write must never kill a turn — this is a
+    /// view, not the record. `build` is a closure so the (potentially large) draft is
+    /// only materialised once the throttle has said yes.
+    ///
+    /// Every activity carries the turn's draft, not just the speaking one: the live
+    /// file is one overwritten slot, so an activity that dropped it would take the
+    /// chat bubble down with it until the next chunk arrived.
+    fn emit(&self, doing: Doing, build: impl FnOnce(QuarkId) -> Activity) {
+        if !self.active.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let forced = matches!(doing, Doing::Working | Doing::Planning);
+        {
+            let mut last = self.last.lock().unwrap();
+            let now = Instant::now();
+            match *last {
+                Some(t) if !forced && now.duration_since(t) < Self::THROTTLE => return,
+                _ => *last = Some(now),
+            }
+        }
+        let mut activity = build(self.quark.clone());
+        if activity.full.is_none() {
+            activity.full = self.draft.lock().unwrap().clone();
+        }
+        crate::adapter::telemetry::TurnTelemetrySink::publish_activity(&self.dir, &mut activity);
+    }
+
+    pub(super) fn clear(&self) {
+        crate::adapter::telemetry::TurnTelemetrySink::clear_live(&self.dir, &self.quark);
+    }
+}
+
+/// Outcome of applying a session config option (`effort`, `mode`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfigOptionOutcome {
+    pub(super) level: term::Level,
+    pub(super) message: String,
+    pub(super) fresh_options: Option<Vec<agent_client_protocol::schema::v1::SessionConfigOption>>,
+}
+
+/// Interpret the agent's response to `session/set_config_option` without
+/// silently logging success on failure.
+pub(super) fn interpret_config_option_response(
+    kind: &str,
+    value: &str,
+    res: Result<
+        agent_client_protocol::schema::v1::SetSessionConfigOptionResponse,
+        agent_client_protocol::Error,
+    >,
+) -> ConfigOptionOutcome {
+    match res {
+        Ok(resp) => ConfigOptionOutcome {
+            level: term::Level::Info,
+            message: format!("{kind} set to {value:?}"),
+            fresh_options: Some(resp.config_options),
+        },
+        Err(e) => ConfigOptionOutcome {
+            level: term::Level::Warn,
+            message: format!("agent refused {kind} {value:?}: {e}"),
+            fresh_options: None,
+        },
+    }
+}
+
+async fn apply_config_selector<F>(
+    kind: &str,
+    want: Option<&str>,
+    offered: &mut Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
+    pick_selector: F,
+    cx: &ConnectionTo<Agent>,
+    sid: &agent_client_protocol::schema::v1::SessionId,
+) where
+    F: FnOnce(
+        &[agent_client_protocol::schema::v1::SessionConfigOption],
+    ) -> Option<super::model::ModelSelector>,
+{
+    let Some(want) = want else { return };
+    let Some(selector) = pick_selector(offered) else {
+        return;
+    };
+    let Some(value) = resolve_model(&selector, want) else {
+        return;
+    };
+    let res = cx
+        .send_request(SetSessionConfigOptionRequest::new(
+            sid.clone(),
+            selector.config_id,
+            value.as_str(),
+        ))
+        .block_task()
+        .await;
+    let outcome = interpret_config_option_response(kind, &value, res);
+    if let Some(fresh) = outcome.fresh_options {
+        *offered = fresh;
+    }
+    term::print(
+        term::Stream::Err,
+        Source::Acp,
+        outcome.level,
+        &outcome.message,
+    );
+}
+
+/// Point a relative or bare-command bridge target at the provisioned `venv` python
+/// path returned by `ensure_bridge_ready`, leaving already-absolute custom overrides alone.
+pub(super) fn apply_bridge_venv_to_target(
+    target: &AcpTarget,
+    venv_py: &std::path::Path,
+) -> AcpTarget {
+    let mut boot_target = target.clone();
+    if !std::path::Path::new(&boot_target.program).is_absolute() {
+        boot_target.program = venv_py.to_string_lossy().into_owned();
+    }
+    boot_target
+}
+
+impl super::AcpQuark {
+    /// Boot the agent and open one session in `cwd`. Blocks until the agent has
+    /// answered `initialize` and `session/new`, so a boot failure (missing `npx`, a
+    /// dead adapter, an unauthenticated CLI) surfaces as a failed turn rather than a
+    /// silent hang.
+    ///
+    /// `cwd` is the quark's own worktree, straight off the `Projection` — ACP's
+    /// `session/new` takes a required `cwd`, so hadron's existing cwd chain lands on
+    /// the protocol with no adaptation.
+    pub(super) fn boot(
+        quark: QuarkId,
+        target: &AcpTarget,
+        cwd: PathBuf,
+        want_model: String,
+        want_effort: Option<String>,
+        want_mode: Option<String>,
+        live: Option<LiveFeed>,
+        quota_dir: Option<PathBuf>,
+        env: Vec<(String, String)>,
+        external_roots: Vec<hadron_lattice::ExternalRootSpec>,
+        sandbox: hadron_gatekeeper::SandboxMode,
+    ) -> anyhow::Result<AcpSession> {
+        let (turns_tx, mut turns_rx) = tokio::sync::mpsc::unbounded_channel::<TurnRequest>();
+        let (cancels_tx, mut cancels_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+
+        let mode = Arc::new(Mutex::new(Mode::default()));
+        let handler_mode = Arc::clone(&mode);
+
+        // What the agent says it is running, written once at boot by the pump.
+        let model = Arc::new(Mutex::new(None::<String>));
+        let pump_model = Arc::clone(&model);
+
+        // Whether a turn is in flight — read by `AcpSession::request_cancel` (outside
+        // the pump thread) and written by the pump itself, so — unlike before — it
+        // must be created out HERE and cloned in, not built fresh inside the `move`
+        // closure below.
+        let in_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pump_in_turn = Arc::clone(&in_turn);
+
+        // `display_command` is what ever appears in a diagnostic — the bare command
+        // line, no secrets. `agent_source` is the JSON stdio descriptor actually
+        // handed to `AcpAgent::from_str`, which is the only place `env`'s resolved
+        // VALUES go: they must never end up in an error string, a log line, or
+        // anything else that could surface them. An empty `env` produces a
+        // `{"env": []}` descriptor, which `AcpAgent`'s stdio spawn treats identically
+        // to the old bare-command path (see `acp_stdio_descriptor_no_env_matches_bare_command`).
+        // `{repo}`-anchored before anything else reads the command: `display_command`
+        // feeds every diagnostic below, so it must show the path we will actually spawn.
+        let target = target.resolved()?;
+        let display_command = target.command_line();
+        // The shared build env goes in ahead of the seat's own: an ACP agent runs
+        // `cargo` in its worktree exactly like a CLI quark does, and without this it
+        // grows a duplicate 37 GB `target/` there (`worktree::shared_build_env`).
+        // Seat env last, so a seat that sets one of these deliberately still wins.
+        let mut spawn_env = crate::worktree::shared_build_env_for_quark(&cwd, quark.as_str());
+        spawn_env.extend(env.iter().cloned());
+        let agent_source = acp_stdio_descriptor_sandboxed(&target, &spawn_env, &cwd, sandbox);
+        // The reply accumulator (`(text, needs_step_break)`) and the context watermark
+        // are written by the notification handler (which the SDK drives on the
+        // connection) and read by the turn pump. Hence the Arcs.
+        let transcript = Arc::new(Mutex::new((String::new(), false)));
+        let context = Arc::new(Mutex::new(None::<(u64, u64)>));
+        let quota = Arc::new(Mutex::new(seed_quota(quota_dir.as_deref(), &quark)));
+        let pump_transcript = Arc::clone(&transcript);
+        let pump_context = Arc::clone(&context);
+        let pump_quota = Arc::clone(&quota);
+
+        // One handle for the happy path (moved into the pump, fired once the session
+        // opens) and one for the failure path (kept out here, fired if the pump dies
+        // before it ever gets that far).
+        let boot_tx = ready_tx.clone();
+        let pump_live = live.clone();
+
+        std::thread::Builder::new()
+            .name("hadron-acp".to_string())
+            .spawn(move || {
+                let live = pump_live;
+                let outcome: anyhow::Result<()> = async_io::block_on(async move {
+                    // NEVER format `agent_source` into an error: it carries the
+                    // resolved secret values. `display_command` is the safe stand-in.
+                    let agent = AcpAgent::from_str(&agent_source)
+                        .map_err(|e| anyhow::anyhow!("bad ACP command {display_command:?}: {e}"))?;
+
+                    // `pump_in_turn` is the SAME `Arc` `AcpSession::request_cancel` reads —
+                    // moved in from outside the thread now, not built fresh in here.
+                    let in_turn = Arc::clone(&pump_in_turn);
+
+                    let connect = agent_client_protocol::Client
+                        .builder()
+                        .name("hadron")
+                        .on_receive_notification(
+                            {
+                                let in_turn = Arc::clone(&in_turn);
+                                async move |n: SessionNotification, _cx| {
+                                    if !in_turn.load(std::sync::atomic::Ordering::Relaxed) {
+                                        return Ok(());
+                                    }
+                                    match n.update {
+                                        // The reply text. `PromptResponse` carries none,
+                                        // so this is the only place a message exists.
+                                        SessionUpdate::AgentMessageChunk(chunk) => {
+                                            if let ContentBlock::Text(t) = chunk.content {
+                                                // Accumulate, then publish the running
+                                                // total as a DRAFT. The transcript is
+                                                // still what `run_turn` returns as the
+                                                // one real `Kind::Message`; this only
+                                                // lets the chamber show it arriving
+                                                // instead of after the fact. Held across
+                                                // the publish would deadlock nothing but
+                                                // does keep the lock over a file write,
+                                                // so the clone is taken and dropped first.
+                                                let draft = {
+                                                    let mut t_lock = transcript.lock().unwrap();
+                                                    let (ref mut buf, ref mut step_break) = *t_lock;
+                                                    crate::adapter::telemetry::append_message_chunk_with_step_break(
+                                                        buf,
+                                                        &t.text,
+                                                        step_break,
+                                                    );
+                                                    crate::adapter::telemetry::deduplicate_turn_message(buf)
+                                                };
+                                                if let Some(feed) = &live {
+                                                    feed.publish_draft(&draft);
+                                                }
+                                            }
+                                        }
+                                        // Real context numbers, including the window SIZE
+                                        // — which the claude CLI never reports.
+                                        SessionUpdate::UsageUpdate(u) => {
+                                            *context.lock().unwrap() = Some((u.used, u.size));
+                                            if let Some(feed) = &live {
+                                                let _ = live::touch_heartbeat(&feed.dir, &feed.quark);
+                                            }
+                                            if let Some(bucket) =
+                                                u.meta.as_ref().and_then(parse_claude_rate_limit)
+                                            {
+                                                merge_and_persist_bucket(
+                                                    &mut quota.lock().unwrap(),
+                                                    bucket,
+                                                    quota_dir.as_deref(),
+                                                    &quark,
+                                                );
+                                            }
+                                        }
+                                        // The agent's reasoning, streamed. Volatile: it
+                                        // is published for the chamber to render live and
+                                        // never written to the field.
+                                        SessionUpdate::AgentThoughtChunk(chunk) => {
+                                            {
+                                                let mut t_lock = transcript.lock().unwrap();
+                                                if !t_lock.0.is_empty() {
+                                                    t_lock.1 = true;
+                                                }
+                                            }
+                                            if let (Some(feed), ContentBlock::Text(t)) =
+                                                (&live, chunk.content)
+                                            {
+                                                let line = first_line_truncated(&t.text);
+                                                if !line.is_empty() {
+                                                    feed.publish(Doing::Thinking, &line);
+                                                }
+                                            }
+                                        }
+                                        // A tool call is the update the human is actually
+                                        // reading — "what is it DOING" — so it is never
+                                        // throttled away.
+                                        SessionUpdate::ToolCall(call) => {
+                                            {
+                                                let mut t_lock = transcript.lock().unwrap();
+                                                if !t_lock.0.is_empty() {
+                                                    t_lock.1 = true;
+                                                }
+                                            }
+                                            if let Some(feed) = &live {
+                                                feed.publish(Doing::Working, &tool_call_detail(&call));
+                                            }
+                                        }
+                                        // A tool call's own output as it runs — the tail of a
+                                        // shell command's stdout, a diff summary — is richer
+                                        // than the static title `ToolCall` published at start.
+                                        SessionUpdate::ToolCallUpdate(update) => {
+                                            {
+                                                let mut t_lock = transcript.lock().unwrap();
+                                                if !t_lock.0.is_empty() {
+                                                    t_lock.1 = true;
+                                                }
+                                            }
+                                            if let (Some(feed), Some(detail)) =
+                                                (&live, tool_call_update_detail(&update))
+                                            {
+                                                feed.publish(Doing::Working, &detail);
+                                            }
+                                        }
+                                        SessionUpdate::Plan(plan) => {
+                                            {
+                                                let mut t_lock = transcript.lock().unwrap();
+                                                if !t_lock.0.is_empty() {
+                                                    t_lock.1 = true;
+                                                }
+                                            }
+                                            if let Some(feed) = &live {
+                                                let step = plan
+                                                    .entries
+                                                    .iter()
+                                                    .find(|e| {
+                                                        e.status == PlanEntryStatus::InProgress
+                                                    })
+                                                    .or_else(|| plan.entries.first());
+                                                if let Some(step) = step {
+                                                    let line = first_line_truncated(&step.content);
+                                                    if !line.is_empty() {
+                                                        feed.publish(Doing::Planning, &line);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Everything else (user echoes, tool-call updates,
+                                        // command lists, mode changes) is protocol
+                                        // bookkeeping with nothing for a human to read.
+                                        _ => {
+                                            if let Some(feed) = &live {
+                                                let _ = live::touch_heartbeat(&feed.dir, &feed.quark);
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                }
+                            },
+                            agent_client_protocol::on_receive_notification!(),
+                        )
+                        .on_receive_request(
+                            async move |req: RequestPermissionRequest, responder, _cx| {
+                                let want = permission_choice(
+                                    *handler_mode.lock().unwrap(),
+                                    classify_request(&req),
+                                );
+                                let chosen = req
+                                    .options
+                                    .iter()
+                                    .find(|o| o.kind == want)
+                                    .or_else(|| {
+                                        req.options
+                                            .iter()
+                                            .find(|o| o.kind == PermissionOptionKind::RejectOnce)
+                                    })
+                                    .map(|o| o.option_id.clone());
+
+                                match chosen {
+                                    Some(id) => responder.respond(RequestPermissionResponse::new(
+                                        RequestPermissionOutcome::Selected(
+                                            SelectedPermissionOutcome::new(id),
+                                        ),
+                                    )),
+                                    None => responder.respond(RequestPermissionResponse::new(
+                                        RequestPermissionOutcome::Cancelled,
+                                    )),
+                                }
+                            },
+                            agent_client_protocol::on_receive_request!(),
+                        )
+                        .connect_with(agent, move |cx: ConnectionTo<Agent>| async move {
+                            let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                .block_task()
+                                .await?;
+                            term::info(
+                                Source::Acp,
+                                &format!(
+                                    "ACP session initialized: agent {:?} (protocol {:?})",
+                                    init.agent_info.as_ref().map(|i| &i.name),
+                                    init.protocol_version
+                                ),
+                            );
+
+                            let forge_bin =
+                                format!("hadron-forge-mcp{}", std::env::consts::EXE_SUFFIX);
+                            let host_forge_exe = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().map(|d| d.join(&forge_bin)))
+                                .unwrap_or_else(|| PathBuf::from(&forge_bin));
+                            let running_via_wsl = descriptor_runs_via_wsl(&agent_source);
+                            let (session_cwd, forge_exe, forge_args) =
+                                resolve_session_cwd_and_forge(
+                                    &cwd,
+                                    &external_roots,
+                                    &host_forge_exe,
+                                    running_via_wsl,
+                                );
+
+                            let mcp_servers = vec![
+                                McpServer::Stdio(
+                                    McpServerStdio::new("hadron-forge-mcp", forge_exe)
+                                        .args(forge_args),
+                                ),
+                                McpServer::Stdio(
+                                    McpServerStdio::new("context7", "npx")
+                                        .args(vec!["-y".to_string(), "@context7/mcp".to_string()]),
+                                ),
+                            ];
+
+                            let session = cx
+                                .send_request(
+                                    NewSessionRequest::new(session_cwd).mcp_servers(mcp_servers),
+                                )
+                                .block_task()
+                                .await?;
+                            let sid = session.session_id;
+
+                            // THE MODEL PICKER. The agent volunteers its models here, in
+                            // `config_options`, and Hadron used to drop them on the floor.
+                            // Ask for the seat's model if the agent offers one that matches.
+                            //
+                            // A model we cannot find is NOT fatal: the agent has its own
+                            // default and a turn on the wrong model beats no turn at all.
+                            // But it must be loud, or the roster will claim a model that
+                            // never ran.
+                            let mut offered = session.config_options.unwrap_or_default();
+                            let mut effective_effort = want_effort;
+                            match model_selector(&offered) {
+                                Some(selector) => {
+                                    let (model_to_set, inferred_effort) =
+                                        resolve_model_or_split_effort(&selector, &want_model);
+                                    if effective_effort.is_none() {
+                                        effective_effort = inferred_effort.clone();
+                                    }
+                                    match model_to_set {
+                                        Some(value) => {
+                                            let set = cx
+                                                .send_request(SetSessionConfigOptionRequest::new(
+                                                    sid.clone(),
+                                                    selector.config_id.clone(),
+                                                    value.as_str(),
+                                                ))
+                                                .block_task()
+                                                .await;
+                                            match set {
+                                                Ok(resp) => {
+                                                    offered = resp.config_options;
+                                                    *pump_model.lock().unwrap() = Some(value.clone());
+                                                    term::info(
+                                                        Source::Acp,
+                                                        &format!(
+                                                            "model set to {value:?} (asked for {want_model:?})"
+                                                        ),
+                                                    );
+                                                }
+                                                Err(e) => term::warn(
+                                                    Source::Acp,
+                                                    &format!(
+                                                        "the agent refused model {value:?}: {e} — \
+                                                         staying on its default {:?}",
+                                                        selector.current
+                                                    ),
+                                                ),
+                                            }
+                                        }
+                                        None => {
+                                            // Either the seat asked for nothing, or it asked
+                                            // for the model already running, or it asked for
+                                            // one this agent does not have.
+                                            *pump_model.lock().unwrap() =
+                                                Some(selector.current.clone());
+                                            if !want_model.trim().is_empty()
+                                                && inferred_effort.is_none()
+                                                && !selector
+                                                    .available
+                                                    .iter()
+                                                    .any(|m| m.value == selector.current
+                                                        && (m.value.eq_ignore_ascii_case(&want_model)
+                                                            || m.label
+                                                                .eq_ignore_ascii_case(&want_model)))
+                                            {
+                                                term::warn(
+                                                    Source::Acp,
+                                                    &format!(
+                                                        "seat asked for model {want_model:?}; \
+                                                         agent runs {:?} and offers {:?}",
+                                                        selector.current,
+                                                        selector
+                                                            .available
+                                                            .iter()
+                                                            .map(|m| &m.value)
+                                                            .collect::<Vec<_>>()
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if !want_model.trim().is_empty() {
+                                        term::warn(
+                                            Source::Acp,
+                                            &format!(
+                                                "seat asked for model {want_model:?} but this \
+                                                 agent advertises no model selector"
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+
+                            let _ = apply_config_selector(
+                                "effort",
+                                effective_effort.as_deref(),
+                                &mut offered,
+                                effort_selector,
+                                &cx,
+                                &sid,
+                            )
+                            .await;
+
+                            let _ = apply_config_selector(
+                                "mode",
+                                want_mode.as_deref(),
+                                &mut offered,
+                                mode_selector,
+                                &cx,
+                                &sid,
+                            )
+                            .await;
+
+                            // The agent is up and has a session. Unblock `boot`.
+                            let _ = ready_tx.send(Ok(()));
+
+                            // THE PUMP. This is what makes the session resident: the
+                            // connection stays open across turns, and each turn is
+                            // just another `session/prompt` on the same `sid`.
+                            while let Some(turn) = turns_rx.recv().await {
+                                // Drain a stale cancel left over from the PREVIOUS turn's
+                                // tail: `request_cancel` checks `in_turn` before sending,
+                                // but the send can still land in the narrow window after
+                                // the previous turn cleared `in_turn` and before this
+                                // `recv()` returned. Undrained, it would fire on a turn it
+                                // was never meant for.
+                                while cancels_rx.try_recv().is_ok() {}
+
+                                {
+                                    let mut t_lock = pump_transcript.lock().unwrap();
+                                    t_lock.0.clear();
+                                    t_lock.1 = false;
+                                }
+                                *pump_context.lock().unwrap() = None;
+                                pump_in_turn.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                                let mut blocks = vec![ContentBlock::Text(TextContent::new(turn.prompt))];
+                                for img_b64 in turn.images {
+                                    blocks.push(ContentBlock::Image(ImageContent::new(img_b64, "image/png")));
+                                }
+                                let prompt_fut = cx
+                                    .send_request(PromptRequest::new(
+                                        sid.clone(),
+                                        blocks,
+                                    ))
+                                    .block_task();
+                                tokio::pin!(prompt_fut);
+
+                                // Race the in-flight prompt against a cancel signal. A
+                                // cancel sends ACP's own `session/cancel` (graceful — the
+                                // agent unwinds and resolves the SAME request with
+                                // `StopReason::Cancelled`) and then keeps looping, still
+                                // awaiting `prompt_fut` — it is never dropped. Dropping it
+                                // is the destructive `reset_session` path this is meant to
+                                // replace.
+                                let sent = loop {
+                                    tokio::select! {
+                                        result = &mut prompt_fut => break result,
+                                        signal = cancels_rx.recv() => {
+                                            if signal.is_some() {
+                                                let _ = cx.send_notification(
+                                                    CancelNotification::new(sid.clone()),
+                                                );
+                                            }
+                                        }
+                                    }
+                                };
+
+                                pump_in_turn.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                                let reply = match sent {
+                                    Ok(resp) => Ok(TurnReply {
+                                        text: pump_transcript.lock().unwrap().0.clone(),
+                                        usage: resp.usage.clone(),
+                                        context: *pump_context.lock().unwrap(),
+                                        quota: pump_quota.lock().unwrap().clone(),
+                                        stop: resp.stop_reason,
+                                    }),
+                                    Err(e) => Err(anyhow::anyhow!("session/prompt failed: {e}")),
+                                };
+                                // A dropped receiver means the engine gave up on this
+                                // turn. Not fatal — keep the session for the next one.
+                                let _ = turn.reply.send(reply);
+                            }
+                            Ok(())
+                        });
+
+                    connect
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ACP connection failed: {e}"))
+                });
+
+                // If we died before `session/new` landed, `boot` is still parked on
+                // `ready_rx`. Hand it the reason instead of letting it block forever.
+                if let Err(e) = outcome {
+                    let _ = boot_tx.send(Err(e));
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn the ACP pump thread: {e}"))?;
+
+        // `recv` errors only if the thread died without reporting — surface that as a
+        // boot failure rather than hanging.
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(AcpSession {
+                turns: turns_tx,
+                mode,
+                model,
+                cancels: cancels_tx,
+                in_turn,
+                live,
+            }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "the ACP agent ({}) exited before opening a session",
+                target.command_line()
+            )),
+        }
+    }
+
+    pub(super) async fn run_turn(&mut self, turn: Projection) -> anyhow::Result<TurnOutcome> {
+        let mode = turn.mode;
+        // If the chat history has been cleared/reset, discard the resident session so the agent boots fresh.
+        if turn.field_window.is_empty() {
+            self.session = None;
+        }
+
+        let (turn, prompt) = prepare_acp_turn_prompt(turn, &self.id, self.session.is_some());
+        // Best-effort, same as quota's persistence right below: a failed write must
+        // never fail a turn.
+        if let Some(dir) = &self.prompt_cost_dir {
+            let breakdown = crate::adapter::prompt::measure(&turn, &self.id);
+            let _ = hadron_lattice::prompt_cost::save(dir, &self.id, &breakdown);
+        }
+
+        // Boot on the first turn, in the quark's own worktree, and keep it.
+        if self.session.is_none() {
+            let boot_target = if crate::adapter::bridge::target_uses_agy_bridge(&self.target) {
+                let venv_py =
+                    tokio::task::spawn_blocking(crate::adapter::bridge::ensure_bridge_ready)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("agy bridge check task panicked: {e}"))??;
+                apply_bridge_venv_to_target(&self.target, &venv_py)
+            } else {
+                self.target.clone()
+            };
+            self.session = Some(Self::boot(
+                self.id.clone(),
+                &boot_target,
+                turn.cwd.clone(),
+                self.model.clone(),
+                self.effort.clone(),
+                self.mode_config.clone(),
+                self.live.clone(),
+                self.quota_dir.clone(),
+                self.env.0.clone(),
+                self.external_roots.clone(),
+                self.sandbox,
+            )?);
+        }
+        // The session is guaranteed `Some` from here on (freshly booted, or already
+        // open) — sync once, rather than at both the reset-on-empty-window branch
+        // and the boot branch separately.
+        self.sync_cancel_slot();
+        let session = self.session.as_ref().expect("just booted");
+
+        // The posture the permission handler will apply for this turn.
+        *session.mode.lock().unwrap() = mode;
+
+        // A resident agent that dies must not wedge the quark forever. Both failure
+        // paths below mean the pump is gone, so drop the session: the NEXT turn then
+        // finds `None` and boots a fresh agent, instead of every later `excite`
+        // erroring on a dead channel for the life of the daemon. The conversation is
+        // lost (it lived in the agent), but the quark recovers — which is exactly
+        // what the one-shot CLI path gets for free by spawning per turn.
+        let images = extract_screenshot_images(&turn);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if session
+            .turns
+            .send(TurnRequest {
+                prompt,
+                images,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            self.session = None;
+            self.sync_cancel_slot();
+            anyhow::bail!("the ACP agent's session is gone (it will re-boot on the next turn)");
+        }
+
+        let reply = match reply_rx.await {
+            Ok(reply) => reply,
+            Err(_) => {
+                self.session = None;
+                self.sync_cancel_slot();
+                anyhow::bail!("the ACP agent died mid-turn (it will re-boot on the next turn)");
+            }
+        };
+        // If session/prompt failed (e.g. WebSocket connection closed or agent exception),
+        // drop the session so the next turn re-boots a fresh session instead of stranding the seat.
+        let reply = match reply {
+            Ok(r) => r,
+            Err(e) => {
+                self.session = None;
+                self.sync_cancel_slot();
+                return Err(e);
+            }
+        };
+
+        // Per-turn spend, by component, from the cumulative or per-turn counters,
+        // falling back to context usage_update when end-turn usage is absent.
+        let (spend, new_watermark) =
+            turn_spend_with_context(self.last_spend, reply.usage.as_ref(), reply.context);
+        self.last_spend = new_watermark;
+
+        // Context, when the agent sent a `usage_update`. NOTE the honesty rule this
+        // codebase already enforces (see `telemetry.rs`): most ACP agents have **no
+        // quota concept at all**, so `quota` stays empty rather than claiming a full
+        // budget. Claude's is the one exception — `reply.quota` carries whatever
+        // vendor `_meta` buckets `parse_claude_rate_limit` found this turn, still
+        // empty for every other agent. `used_percentage` is computed here only
+        // because ACP — unlike agy — does not send one; `size` is the agent's own
+        // reported window, never invented.
+        let usage = Usage {
+            spend,
+            context: reply.context.map(|(used, size)| ContextUsage {
+                used_tokens: used.min(u32::MAX as u64) as u32,
+                context_window_size: size.min(u32::MAX as u64) as u32,
+                used_percentage: if size > 0 {
+                    (used as f64 / size as f64) * 100.0
+                } else {
+                    0.0
+                },
+            }),
+            model: self
+                .session
+                .as_ref()
+                .and_then(|s| s.model.lock().unwrap().clone()),
+            quota: reply.quota,
+        };
+
+        // A refusal or a token wall is a real thing the field should see; a plain
+        // `end_turn` with no text is just a silent turn.
+        let message = message_for_stop(reply.text.trim(), &reply.stop);
+
+        // `message.is_none()` alone cannot tell "cut off mid-work" apart from
+        // "genuinely finished with nothing to say" (`StopReason::EndTurn` with
+        // empty text lands here too) — Task 9 of `.hadron/docs/plans/2026-07-31-
+        // responsive-orchestrator.md`: `finish_turn` used to infer completion from
+        // an absent message, so a graceful cancel read as a hand-back to the
+        // human and could reach the merge gate. `cancelled` carries the fact
+        // explicitly, straight from the one place that actually knows it.
+        let cancelled = matches!(reply.stop, StopReason::Cancelled);
+
+        Ok(TurnOutcome {
+            message,
+            permission: None,
+            usage,
+            cancelled,
+            ..Default::default()
+        })
+    }
+}
+
+/// What the field's `Message` event should carry for one `session/prompt` reply.
+/// Extracted from [`AcpQuark::run_turn`] as a pure function so the three stop-reason
+/// arms are directly testable without booting a resident ACP session.
+///
+/// `StopReason::Cancelled` preserves whatever text the agent had already streamed
+/// before the cancel landed (`append_message_chunk` accumulates every chunk
+/// regardless of how the turn ends) — a graceful cancel mid-response used to discard
+/// it unconditionally, silently losing substantial partial replies. No annotation is
+/// added: `TurnOutcome::cancelled` already carries "this was interrupted" as its own
+/// fact (see the comment on `cancelled` below), so the message stays exactly what was
+/// said. See `.hadron/nucleus/notes/a-graceful-cancel-discarded-partial-text.md`.
+pub(super) fn message_for_stop(text: &str, stop: &StopReason) -> Option<String> {
+    let cleaned = crate::adapter::telemetry::deduplicate_turn_message(text);
+    let trimmed = cleaned.trim();
+    match stop {
+        StopReason::Cancelled | StopReason::EndTurn if trimmed.is_empty() => None,
+        StopReason::Cancelled | StopReason::EndTurn => Some(trimmed.to_string()),
+        other => {
+            let note = format!("[acp: stopped on {other:?}]");
+            Some(if trimmed.is_empty() {
+                note
+            } else {
+                format!("{trimmed}\n\n{note}")
+            })
+        }
+    }
+}
+
+/// The argv `hadron-forge-mcp` is spawned with: the quark's worktree, then one
+/// flag pair per granted external root.
+///
+/// Pure, and tested as such, because the spawn itself only happens inside a live
+/// ACP handshake — the argv IS the whole contract between the seat's allowlist and
+/// the jail that enforces it, and an empty allowlist must reproduce the old single
+/// argument byte for byte.
+pub(super) fn forge_mcp_args(
+    cwd: &std::path::Path,
+    external: &[hadron_lattice::ExternalRootSpec],
+) -> Vec<String> {
+    let mut args = vec![cwd.to_string_lossy().to_string()];
+    for root in external {
+        args.push(
+            if root.writable {
+                "--external-root-rw"
+            } else {
+                "--external-root"
+            }
+            .to_string(),
+        );
+        args.push(root.path.to_string_lossy().to_string());
+    }
+    args
+}
+
+/// Concurrently evaluates a batch of asynchronous tool executions or permission checks.
+pub fn dispatch_batched_tool_calls<I, F>(
+    calls: I,
+) -> impl std::future::Future<Output = Vec<F::Output>>
+where
+    I: IntoIterator<Item = F>,
+    F: std::future::Future,
+{
+    futures::future::join_all(calls)
+}

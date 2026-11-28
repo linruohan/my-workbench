@@ -1,0 +1,3287 @@
+use super::*;
+use gpui_kit::component::ActiveTheme;
+
+/// Which collapsible-diff panel a toggle click targets. The Changes rail and the
+/// per-branch diff share one renderer (`file_diff_rows`) but keep independent
+/// open-row sets, so opening a file in one doesn't open it in the other.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum DiffPanel {
+    Changes,
+    Branch,
+    Commit,
+}
+
+/// Lane colours, cycled by rail column, so the commit graph reads as coloured lanes
+/// rather than monochrome ASCII. Distinct on the near-black field.
+const LANE_COLORS: [u32; 6] = [0x62c073, 0xc778dd, 0xe5c07b, 0xa87ffb, 0x2dd4bf, 0xe06c75];
+/// A commit that has landed in `main` (green) vs one still in flight (rose); a
+/// detached / unknown HEAD is neutral (it has no branch to be merged).
+const MERGED_COLOR: u32 = 0x62c073;
+const UNMERGED_COLOR: u32 = 0xe06c75;
+const NEUTRAL_COLOR: u32 = 0x8e8e8e;
+const ADD_COLOR: u32 = 0x62c073;
+const DEL_COLOR: u32 = 0xe06c75;
+/// One graph rail column width in px when painting vector lanes.
+const LANE_W: f32 = 16.0;
+/// Cap for a `--decorate` ref chip so it cannot squeeze the subject out.
+const DECO_CHIP_MAX_W: f32 = 190.0;
+
+impl super::Chamber {
+    /// The Git rail: local branches (with merged-into-`main` status and click-to-diff),
+    /// every worktree of this repo, and a coloured commit graph — so "is it merged?",
+    /// "what did this branch change?" and "who else has a checkout" are answerable
+    /// without leaving the chamber.
+    pub(super) fn git_tab_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if !self.git_ready && self.git_branches.as_ref().is_none_or(|b| b.is_empty()) {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .p_6()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .max_w(px(380.0))
+                        .w_full()
+                        .p_4()
+                        .gap_3()
+                        .rounded_lg()
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(theme::border())
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .text_color(theme::accent())
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .child(div().child("⚠ Git Workspace Required")),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child("Hadron uses Git worktrees to isolate Quark execution and track swarm progress. This workspace is not yet a Git repository."),
+                        )
+                        .child(
+                            div()
+                                .id("init-git-btn")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(theme::accent())
+                                .text_color(theme::field_base())
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_xs()
+                                .text_center()
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .child("Initialize Git Workspace")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let root = crate::vcs::repo_root_of(&this.path).to_path_buf();
+                                    match crate::vcs::init_repository(&root) {
+                                        Ok(msg) => {
+                                            this.post_chat_message(Actor::Gluon, msg, cx);
+                                            let repo = crate::vcs::repo_root_of(&this.path).to_path_buf();
+                                            this.git_ready = true;
+                                            this.git_ready_verified = true;
+                                            this.git_branches = Some(crate::vcs::list_branches(&repo, "main"));
+                                            this.git_remote_branches =
+                                                Some(crate::vcs::list_remote_branches(&repo, "main"));
+                                            this.git_worktrees = Some(crate::vcs::list_worktrees(&repo));
+                                            this.git_log_graph = crate::vcs::commit_graph(&repo);
+                                            this.rebuild_graph_rows();
+                                        }
+                                        Err(e) => {
+                                            this.post_chat_message(
+                                                Actor::Gluon,
+                                                format!("Failed to initialize git repository: {e}"),
+                                                cx,
+                                            );
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        let selected = self.git_subtab;
+        let subtabs = h_flex()
+            .id("git-capsule-subtabs")
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(theme::tab_bar_bg())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .max_w_full()
+            .overflow_x_scroll()
+            .children(GitSubtab::ALL.map(|t| {
+                let is_selected = t.index() == selected.index();
+                let label = t.label();
+                let ix = t.index();
+                div()
+                    .id(("git-subtab-pill", ix))
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .when(is_selected, |s| {
+                        s.bg(theme::glass_highlight())
+                            .text_color(theme::accent())
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                    })
+                    .when(!is_selected, |s| {
+                        s.text_color(theme::text_muted())
+                            .hover(|h| h.text_color(theme::text()))
+                    })
+                    .text_xs()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.git_subtab = GitSubtab::from_index(ix);
+                        if this.git_subtab == GitSubtab::Changes {
+                            let root = crate::vcs::repo_root_of(&this.path).to_path_buf();
+                            cx.spawn(async move |this, cx| {
+                                let diff = cx
+                                    .background_executor()
+                                    .spawn(async move { crate::vcs::working_diff(&root) })
+                                    .await;
+                                let _ = this.update(cx, |chamber, cx| {
+                                    chamber.working_diff = diff;
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        } else if matches!(
+                            this.git_subtab,
+                            GitSubtab::Worktrees | GitSubtab::Branches
+                        ) {
+                            this.refresh_git_worktrees(cx);
+                        }
+                        cx.notify();
+                    }))
+            }));
+
+        // The Graph subtab virtualizes its own rows, so it owns its scrolling: a
+        // `gpui_kit::list` inside an `overflow_y_scroll` parent is unbounded in height and
+        // would lay out every commit — exactly what the virtual list exists to avoid.
+        let body = match selected {
+            GitSubtab::Branches => div()
+                .id("git-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.git_scroll)
+                .px_3()
+                .pb_3()
+                .child(self.git_branches_section(cx))
+                .into_any_element(),
+            GitSubtab::Worktrees => div()
+                .id("git-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.git_scroll)
+                .px_3()
+                .pb_3()
+                .child(self.git_worktrees_section(cx))
+                .into_any_element(),
+            GitSubtab::Changes => {
+                let selected_commit = self.git_selected_commit.clone();
+                let has_commit_diff = selected_commit.is_some()
+                    && self.git_commit_diff.as_ref().is_some_and(|d| !d.is_empty());
+                let has_working_diff = self.working_diff.as_ref().is_some_and(|d| !d.is_empty());
+
+                let diff_content = if has_commit_diff || has_working_diff {
+                    let mut col = v_flex().w_full().gap_2();
+                    if let Some(commit_hash) = selected_commit.filter(|_| has_commit_diff) {
+                        col = col.child(self.commit_diff_panel(&commit_hash, cx));
+                    }
+                    if let Some(diffs) = self.working_diff.as_ref().filter(|d| !d.is_empty()) {
+                        col = col.child(self.file_diff_rows(
+                            diffs,
+                            &self.changes_open_ixs,
+                            DiffPanel::Changes,
+                            cx,
+                        ));
+                    }
+                    col.into_any_element()
+                } else if self.working_diff.is_some() {
+                    div()
+                        .p_4()
+                        .text_color(theme::text_muted())
+                        .child("No changes in working tree.")
+                        .into_any_element()
+                } else {
+                    div()
+                        .p_4()
+                        .text_color(theme::text_muted())
+                        .child("Loading working tree diff…")
+                        .into_any_element()
+                };
+                div()
+                    .id("changes-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.changes_scroll)
+                    .px_3()
+                    .pb_3()
+                    .child(diff_content)
+                    .into_any_element()
+            }
+            GitSubtab::Graph => div()
+                .size_full()
+                .px_3()
+                .pb_3()
+                .child(self.git_graph_section(cx))
+                .into_any_element(),
+            GitSubtab::Diff3Way => div()
+                .id("git-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.git_scroll)
+                .px_3()
+                .pb_3()
+                .child(self.git_diff_inspector_section(cx))
+                .into_any_element(),
+            GitSubtab::Remote => div()
+                .id("git-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.git_scroll)
+                .px_3()
+                .pb_3()
+                .child(self.git_remote_section(cx))
+                .into_any_element(),
+        };
+        let git_pane = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .text_sm()
+            .text_color(theme::text())
+            .child(body);
+
+        let git_pane = match selected {
+            GitSubtab::Graph => git_pane.vertical_scrollbar(&self.git_graph_list),
+            GitSubtab::Changes => git_pane.vertical_scrollbar(&self.changes_scroll),
+            _ => git_pane.vertical_scrollbar(&self.git_scroll),
+        };
+
+        v_flex()
+            .id("git-tab-panel")
+            .key_context(crate::app::GIT_KEY_CONTEXT)
+            .track_focus(&self.git_focus)
+            .on_action(cx.listener(|this, _: &NextGitSubtab, _, cx| this.cycle_git_subtab(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevGitSubtab, _, cx| this.cycle_git_subtab(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectGitBranches, _, cx| {
+                this.select_git_subtab(GitSubtab::Branches, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitWorktrees, _, cx| {
+                this.select_git_subtab(GitSubtab::Worktrees, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitGraph, _, cx| {
+                this.select_git_subtab(GitSubtab::Graph, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitDiff3Way, _, cx| {
+                this.select_git_subtab(GitSubtab::Diff3Way, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectGitRemote, _, cx| {
+                this.select_git_subtab(GitSubtab::Remote, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextGitItem, _, cx| this.move_git_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevGitItem, _, cx| this.move_git_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &OpenGitItem, _, cx| this.open_git_selection(cx)))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.git_focus, cx);
+                }),
+            )
+            .flex_1()
+            .min_h_0()
+            .child(h_flex().flex_none().px_3().py_2().child(subtabs))
+            .child(git_pane)
+            .into_any_element()
+    }
+
+    fn muted(text: &'static str) -> impl IntoElement {
+        div().text_color(theme::text_muted()).child(text)
+    }
+
+    /// A commit marker: a filled dot plus the short hash, both in `color`. The shared
+    /// motif across branches, worktrees and the graph — status lives in the colour.
+    fn commit_token(
+        head: &str,
+        color: u32,
+        mono_font: &gpui_kit::SharedString,
+    ) -> impl IntoElement {
+        let short: String = head.chars().take(7).collect();
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .items_center()
+            .text_color(gpui_kit::rgb(color))
+            .child(div().child("●"))
+            .child(div().font_family(mono_font.clone()).child(short))
+    }
+
+    // ── Branches ───────────────────────────────────────────────────────────────
+
+    /// Return the ordered list of branch entries visible under the active [`BranchScope`]
+    /// so cursor navigation (`j`/`k` and `Enter`) and row rendering share one index space.
+    pub(in crate::app) fn visible_branches(&self) -> Vec<&crate::vcs::BranchInfo> {
+        let local = self.git_branches.as_deref().unwrap_or(&[]);
+        let remote = self.git_remote_branches.as_deref().unwrap_or(&[]);
+        match self.git_branch_scope {
+            BranchScope::All => local.iter().chain(remote.iter()).collect(),
+            BranchScope::Local => local.iter().collect(),
+            BranchScope::Remote => remote.iter().collect(),
+        }
+    }
+
+    fn render_branch_row(
+        &self,
+        branch: &crate::vcs::BranchInfo,
+        is_remote: bool,
+        cursor_ix: usize,
+        mono_font: &gpui_kit::SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let color = if branch.merged {
+            MERGED_COLOR
+        } else {
+            UNMERGED_COLOR
+        };
+        let is_selected = self.git_selected_branch.as_deref() == Some(branch.name.as_str());
+        let name = branch.name.clone();
+        let is_cursor = self.git_cursor_branch == Some(cursor_ix);
+        let row = h_flex()
+            .id(("branch-row", cursor_ix))
+            .w_full()
+            .gap_2()
+            .items_center()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_surface_raised()))
+            .border_1()
+            .border_color(gpui_kit::transparent_black())
+            .when(is_cursor, |d| {
+                d.bg(theme::bg_surface_raised())
+                    .border_color(theme::accent())
+            })
+            .when(is_selected && !is_cursor, |d| {
+                d.bg(theme::bg_surface_raised())
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                window.focus(&this.git_focus, cx);
+                this.git_cursor_branch = Some(cursor_ix);
+                this.select_branch(name.clone());
+                cx.notify();
+            }))
+            .child(Self::commit_token(&branch.head, color, mono_font))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(branch.is_current, |d| d.text_color(theme::accent()))
+                    .when(is_remote, |d| d.text_color(theme::text()))
+                    .child(branch.name.clone()),
+            )
+            .when(branch.is_current, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(theme::accent_soft())
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(theme::accent())
+                        .child("HEAD"),
+                )
+            })
+            .when(is_remote, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(theme::bg_surface())
+                        .border_1()
+                        .border_color(theme::glass_highlight())
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child("remote"),
+                )
+            });
+
+        // The diff panel is an accordion under the row that was clicked.
+        // Appending it after the whole list instead put it thousands of
+        // pixels below the fold with 126 branches — the click looked dead.
+        let mut entry = v_flex().w_full().child(row);
+        if is_selected {
+            entry = entry.child(self.branch_diff_panel(&branch.name, cx));
+        }
+        entry.into_any_element()
+    }
+
+    fn git_branches_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mono_font = cx.theme().mono_font_family.clone();
+        let local_count = self.git_branches.as_ref().map(|b| b.len()).unwrap_or(0);
+        let remote_count = self
+            .git_remote_branches
+            .as_ref()
+            .map(|b| b.len())
+            .unwrap_or(0);
+        let total_count = local_count + remote_count;
+        let selected_scope = self.git_branch_scope;
+        let fetching = self.git_fetching_remotes;
+
+        let scope_pills = h_flex()
+            .id("git-branch-scope-pills")
+            .items_center()
+            .gap_1()
+            .p_0p5()
+            .rounded_full()
+            .bg(theme::tab_bar_bg())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .children(BranchScope::ALL.map(|scope| {
+                let is_sel = scope == selected_scope;
+                let ix = scope.index();
+                let count = match scope {
+                    BranchScope::All => total_count,
+                    BranchScope::Local => local_count,
+                    BranchScope::Remote => remote_count,
+                };
+                let label = format!("{} ({count})", scope.label());
+                div()
+                    .id(("branch-scope-pill", ix))
+                    .px_2p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_xs()
+                    .when(is_sel, |s| {
+                        s.bg(theme::glass_highlight())
+                            .text_color(theme::accent())
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                    })
+                    .when(!is_sel, |s| {
+                        s.text_color(theme::text_muted())
+                            .hover(|h| h.text_color(theme::text()))
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.git_branch_scope = BranchScope::from_index(ix);
+                        this.git_cursor_branch = None;
+                        cx.notify();
+                    }))
+            }));
+
+        let fetch_btn = div()
+            .id("git-branches-fetch-btn")
+            .flex_none()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(theme::bg_surface())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .text_xs()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .text_color(if fetching {
+                theme::accent()
+            } else {
+                theme::text_muted()
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_surface_raised()).text_color(theme::text()))
+            .child(if fetching { "Fetching…" } else { "↻ Fetch" })
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.git_fetching_remotes {
+                    return;
+                }
+                this.git_fetching_remotes = true;
+                cx.notify();
+                let root = crate::vcs::repo_root_of(&this.path).to_path_buf();
+                cx.spawn(async move |this, cx| {
+                    let (fetch_res, fp, branches, remote_branches, worktrees, graph, remote_info) =
+                        cx.background_executor()
+                            .spawn(async move {
+                                let fetch_res = crate::vcs::fetch_remotes(&root);
+                                let fp = crate::vcs::branch_fingerprint(&root);
+                                let branches = crate::vcs::list_branches(&root, "main");
+                                let remote_branches =
+                                    crate::vcs::list_remote_branches(&root, "main");
+                                let worktrees = crate::vcs::list_worktrees(&root);
+                                let graph = crate::vcs::commit_graph(&root);
+                                let remote_info = crate::vcs::get_remote_tracking_info(&root);
+                                (
+                                    fetch_res,
+                                    fp,
+                                    branches,
+                                    remote_branches,
+                                    worktrees,
+                                    graph,
+                                    remote_info,
+                                )
+                            })
+                            .await;
+                    let _ = this.update(cx, |chamber, cx| {
+                        chamber.git_fetching_remotes = false;
+                        chamber.git_branch_fingerprint = Some(fp);
+                        chamber.git_branches = Some(branches);
+                        chamber.git_remote_branches = Some(remote_branches);
+                        chamber.git_worktrees = Some(worktrees);
+                        chamber.git_log_graph = graph;
+                        chamber.git_remote_info = Some(remote_info);
+                        chamber.rebuild_graph_rows();
+                        match fetch_res {
+                            Ok(msg) => {
+                                chamber.toast_manager.push(ToastKind::Success, msg, None);
+                            }
+                            Err(err) => {
+                                chamber.toast_manager.push(
+                                    ToastKind::Warning,
+                                    format!("Fetch failed: {err}"),
+                                    None,
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }));
+
+        let toolbar = h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .pb_2()
+            .child(scope_pills)
+            .child(fetch_btn);
+
+        let rows: gpui_kit::AnyElement = if self.git_branches.is_none()
+            && self.git_remote_branches.is_none()
+        {
+            Self::muted("Loading branches...").into_any_element()
+        } else {
+            let local = self.git_branches.as_deref().unwrap_or(&[]);
+            let remote = self.git_remote_branches.as_deref().unwrap_or(&[]);
+            match selected_scope {
+                BranchScope::Local => {
+                    if local.is_empty() {
+                        Self::muted("No local branches.").into_any_element()
+                    } else {
+                        let mut list = v_flex().w_full();
+                        for (ix, branch) in local.iter().enumerate() {
+                            list = list
+                                .child(self.render_branch_row(branch, false, ix, &mono_font, cx));
+                        }
+                        list.into_any_element()
+                    }
+                }
+                BranchScope::Remote => {
+                    if remote.is_empty() {
+                        Self::muted("No remote-tracking branches found.").into_any_element()
+                    } else {
+                        let mut list = v_flex().w_full();
+                        for (ix, branch) in remote.iter().enumerate() {
+                            list = list
+                                .child(self.render_branch_row(branch, true, ix, &mono_font, cx));
+                        }
+                        list.into_any_element()
+                    }
+                }
+                BranchScope::All => {
+                    if local.is_empty() && remote.is_empty() {
+                        Self::muted("No local or remote branches.").into_any_element()
+                    } else {
+                        let mut list = v_flex().w_full().gap_2();
+                        let mut local_sec = v_flex().w_full();
+                        local_sec = local_sec.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(theme::text_muted())
+                                .child(format!("LOCAL BRANCHES ({})", local.len())),
+                        );
+                        if local.is_empty() {
+                            local_sec = local_sec.child(
+                                div().px_2().py_1().child(Self::muted("No local branches.")),
+                            );
+                        } else {
+                            for (ix, branch) in local.iter().enumerate() {
+                                local_sec = local_sec.child(
+                                    self.render_branch_row(branch, false, ix, &mono_font, cx),
+                                );
+                            }
+                        }
+                        list = list.child(local_sec);
+
+                        let mut remote_sec = v_flex().w_full();
+                        remote_sec = remote_sec.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(theme::text_muted())
+                                .child(format!("REMOTE BRANCHES ({})", remote.len())),
+                        );
+                        if remote.is_empty() {
+                            remote_sec = remote_sec.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .child(Self::muted("No remote-tracking branches.")),
+                            );
+                        } else {
+                            let offset = local.len();
+                            for (ix, branch) in remote.iter().enumerate() {
+                                remote_sec = remote_sec.child(self.render_branch_row(
+                                    branch,
+                                    true,
+                                    offset + ix,
+                                    &mono_font,
+                                    cx,
+                                ));
+                            }
+                        }
+                        list = list.child(remote_sec);
+                        list.into_any_element()
+                    }
+                }
+            }
+        };
+
+        v_flex().w_full().gap_1().child(toolbar).child(rows)
+    }
+
+    /// Compute (or toggle off) the diff of a branch against `main`. Clicking the
+    /// already-selected branch clears the panel.
+    pub(crate) fn select_branch(&mut self, name: String) {
+        if self.git_selected_branch.as_deref() == Some(name.as_str()) {
+            self.git_selected_branch = None;
+            self.git_branch_diff = None;
+            return;
+        }
+        let root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        self.git_branch_diff = crate::vcs::branch_diff(&root, "main", &name);
+        self.git_branch_open_ixs.clear();
+        self.git_selected_branch = Some(name);
+    }
+
+    /// The changed-files panel for the selected branch: a `N files  +A −R` header over
+    /// the shared collapsible file-diff list.
+    fn branch_diff_panel(&self, branch: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let body: gpui_kit::AnyElement = match &self.git_branch_diff {
+            None => Self::muted("Could not diff this branch against main.").into_any_element(),
+            Some(files) if files.is_empty() => {
+                Self::muted("No changes relative to main.").into_any_element()
+            }
+            Some(files) => {
+                let added: usize = files.iter().map(|f| f.added).sum();
+                let removed: usize = files.iter().map(|f| f.removed).sum();
+                let n = files.len();
+                let stats = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(theme::text_muted())
+                            .child(format!("{n} file{}", if n == 1 { "" } else { "s" })),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui_kit::rgb(ADD_COLOR))
+                            .child(format!("+{added}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui_kit::rgb(DEL_COLOR))
+                            .child(format!("−{removed}")),
+                    );
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(stats)
+                    .child(self.file_diff_rows(
+                        files,
+                        &self.git_branch_open_ixs,
+                        DiffPanel::Branch,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+        };
+
+        let title = branch.to_string();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .mb_2()
+            .ml_2()
+            .mr_2()
+            .pl_3()
+            .pr_3()
+            .py_2()
+            .border_l_2()
+            .border_color(theme::border())
+            .child(
+                h_flex()
+                    .id("branch-diff-close")
+                    .w_full()
+                    .gap_2()
+                    .justify_between()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.git_selected_branch = None;
+                        this.git_branch_diff = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme::accent())
+                            .child(format!("Changes in {title}")),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child("close ×"),
+                    ),
+            )
+            .child(body)
+    }
+
+    /// Compute (or toggle off) the patch diff of a commit. Clicking the
+    /// already-selected commit clears the panel.
+    pub(crate) fn select_commit(&mut self, hash: String) {
+        let previous = self.git_selected_commit.take();
+        let toggled_off = previous.as_deref() == Some(hash.as_str());
+        if toggled_off {
+            self.git_commit_diff = None;
+            self.git_commit_message = None;
+        } else {
+            let root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+            self.git_commit_diff = crate::vcs::commit_diff(&root, &hash);
+            self.git_commit_message = crate::vcs::commit_message(&root, &hash);
+            self.git_commit_open_ixs.clear();
+            self.git_selected_commit = Some(hash.clone());
+        }
+        // Both the row that just closed and the one that just opened changed height.
+        let changed: Vec<&str> = previous
+            .as_deref()
+            .into_iter()
+            .chain((!toggled_off).then_some(hash.as_str()))
+            .collect();
+        for h in changed {
+            self.invalidate_graph_row(h);
+        }
+    }
+
+    /// Open `Git -> Changes` and load both the working tree diff and the turn's commit diff,
+    /// auto-expanding `file_filter` (or all files when `file_filter` is `None`).
+    pub(crate) fn open_turn_diff(
+        &mut self,
+        commit_hint: Option<String>,
+        file_filter: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.prefs.inspector_collapsed = false;
+        self.right_rail_tab = RightRailTab::Git;
+        self.git_subtab = GitSubtab::Changes;
+
+        let target_sha = commit_hint
+            .and_then(|sha| {
+                self.git_graph_rows
+                    .iter()
+                    .find_map(|r| {
+                        r.full_hash
+                            .as_ref()
+                            .filter(|fh| {
+                                fh.starts_with(&sha) || r.hash.as_deref() == Some(sha.as_str())
+                            })
+                            .cloned()
+                    })
+                    .or(Some(sha))
+            })
+            .or_else(|| self.git_selected_commit.clone())
+            .unwrap_or_else(|| "HEAD".to_string());
+
+        let root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let sha_bg = target_sha.clone();
+            let (w_diff, c_diff, c_msg) = cx
+                .background_executor()
+                .spawn(async move {
+                    let w = crate::vcs::working_diff(&root);
+                    let c = crate::vcs::commit_diff(&root, &sha_bg);
+                    let m = crate::vcs::commit_message(&root, &sha_bg);
+                    (w, c, m)
+                })
+                .await;
+            let _ = this.update(cx, |chamber, cx| {
+                let matches_filter = |path: &str, filter: &str| -> bool {
+                    path == filter
+                        || path.ends_with(&format!("/{filter}"))
+                        || path.ends_with(&format!("\\{filter}"))
+                };
+                if let Some(ref files) = w_diff {
+                    chamber.changes_open_ixs.clear();
+                    for (i, d) in files.iter().enumerate() {
+                        if file_filter
+                            .as_deref()
+                            .is_none_or(|f| matches_filter(&d.path, f))
+                        {
+                            chamber.changes_open_ixs.insert(i);
+                        }
+                    }
+                }
+                chamber.working_diff = w_diff;
+
+                if let Some(ref files) = c_diff {
+                    chamber.git_commit_open_ixs.clear();
+                    for (i, d) in files.iter().enumerate() {
+                        if file_filter
+                            .as_deref()
+                            .is_none_or(|f| matches_filter(&d.path, f))
+                        {
+                            chamber.git_commit_open_ixs.insert(i);
+                        }
+                    }
+                    if chamber.git_commit_open_ixs.is_empty() {
+                        for i in 0..files.len() {
+                            chamber.git_commit_open_ixs.insert(i);
+                        }
+                    }
+                }
+                chamber.git_selected_commit = Some(target_sha);
+                chamber.git_commit_diff = c_diff;
+                chamber.git_commit_message = c_msg;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Tell the Graph subtab's virtual list that one row's height changed.
+    ///
+    /// `gpui_kit::list` caches the height it measured for each item and only re-measures
+    /// what it is told about — a selected row grows by its diff panel, so without this
+    /// the list keeps the old height and the rows below it overlap. `splice` (rather
+    /// than `reset`) invalidates the single row and leaves the scroll position alone.
+    fn invalidate_graph_row(&mut self, full_hash: &str) {
+        if let Some(ix) = self
+            .git_graph_rows
+            .iter()
+            .position(|r| r.full_hash.as_deref() == Some(full_hash))
+        {
+            self.git_graph_list.splice(ix..ix + 1, 1);
+        }
+    }
+
+    /// The changed-files panel for the selected commit: a `N files  +A −R` header over
+    /// the shared collapsible file-diff list.
+    fn commit_diff_panel(&self, commit_hash: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let body: gpui_kit::AnyElement = match &self.git_commit_diff {
+            None => Self::muted("Could not load diff for this commit.").into_any_element(),
+            Some(files) if files.is_empty() => {
+                Self::muted("No changes in this commit.").into_any_element()
+            }
+            Some(files) => {
+                let added: usize = files.iter().map(|f| f.added).sum();
+                let removed: usize = files.iter().map(|f| f.removed).sum();
+                let n = files.len();
+                let stats = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(theme::text_muted())
+                            .child(format!("{n} file{}", if n == 1 { "" } else { "s" })),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui_kit::rgb(ADD_COLOR))
+                            .child(format!("+{added}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui_kit::rgb(DEL_COLOR))
+                            .child(format!("−{removed}")),
+                    );
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(stats)
+                    .child(self.file_diff_rows(
+                        files,
+                        &self.git_commit_open_ixs,
+                        DiffPanel::Commit,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+        };
+
+        let short_hash: String = commit_hash.chars().take(7).collect();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .mb_2()
+            .ml_2()
+            .mr_2()
+            .pl_3()
+            .pr_3()
+            .py_2()
+            .border_l_2()
+            .border_color(theme::border())
+            .child(
+                h_flex()
+                    .id("commit-diff-close")
+                    .w_full()
+                    .gap_2()
+                    .justify_between()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.git_selected_commit = None;
+                        this.git_commit_diff = None;
+                        this.git_commit_message = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme::accent())
+                            .child(format!("Changes in commit {short_hash}")),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child("close ×"),
+                    ),
+            )
+            .when_some(self.git_commit_message.as_ref(), |this, msg| {
+                if msg.trim().is_empty() {
+                    return this;
+                }
+                let mut msg_box = v_flex().gap_0p5().w_full();
+                for (ix, line) in msg.lines().enumerate() {
+                    let is_subject = ix == 0;
+                    msg_box = msg_box.child(
+                        div()
+                            .text_xs()
+                            .when(is_subject, |d| {
+                                d.text_color(theme::text())
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                            })
+                            .when(!is_subject, |d| d.text_color(theme::text_muted()))
+                            .child(if line.is_empty() {
+                                " ".to_string()
+                            } else {
+                                line.to_string()
+                            }),
+                    );
+                }
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .p_2()
+                        .rounded_md()
+                        .bg(theme::glass_card())
+                        .border_1()
+                        .border_color(theme::glass_highlight())
+                        .child(msg_box),
+                )
+            })
+            .child(body)
+    }
+
+    // ── Worktrees ────────────────────────────────────────────────────────────────
+
+    /// The branch a worktree row selects when clicked, and the single home of
+    /// "is this row clickable at all" — `None` for a detached HEAD, which has no
+    /// branch to diff and must therefore stay inert rather than look live.
+    pub(crate) fn worktree_selects_branch(wt: &crate::vcs::WorktreeInfo) -> Option<String> {
+        wt.branch.clone()
+    }
+
+    /// Refresh worktrees, local/remote branches, and the active selected branch/worktree diff
+    /// asynchronously on the background executor.
+    pub(crate) fn refresh_git_worktrees(&mut self, cx: &mut Context<Self>) {
+        let root = crate::vcs::repo_root_of(&self.path).to_path_buf();
+        let selected_branch = self.git_selected_branch.clone();
+        let selected_wt_path = self
+            .git_cursor_worktree
+            .and_then(|ix| self.git_worktrees.as_ref()?.get(ix))
+            .map(|wt| wt.path.clone());
+        cx.spawn(async move |this, cx| {
+            let (fp, branches, remote_branches, worktrees, branch_diff_update) = cx
+                .background_executor()
+                .spawn(async move {
+                    let fp = crate::vcs::branch_fingerprint(&root);
+                    let branches = crate::vcs::list_branches(&root, "main");
+                    let remote_branches = crate::vcs::list_remote_branches(&root, "main");
+                    let worktrees = crate::vcs::list_worktrees(&root);
+                    let rotated_branch = selected_wt_path.as_deref().and_then(|wt_path| {
+                        worktrees
+                            .iter()
+                            .find(|wt| wt.path == wt_path)
+                            .and_then(|wt| wt.branch.clone())
+                    });
+                    let active_branch = rotated_branch.or(selected_branch);
+                    let branch_diff_update = active_branch.map(|b| {
+                        let diff = crate::vcs::branch_diff(&root, "main", &b);
+                        (b, diff)
+                    });
+                    (fp, branches, remote_branches, worktrees, branch_diff_update)
+                })
+                .await;
+            let _ = this.update(cx, |chamber, cx| {
+                chamber.git_branch_fingerprint = Some(fp);
+                chamber.git_branches = Some(branches);
+                chamber.git_remote_branches = Some(remote_branches);
+                chamber.git_worktrees = Some(worktrees);
+                if let Some((b, diff)) = branch_diff_update {
+                    if chamber.git_selected_branch.is_some() {
+                        chamber.git_selected_branch = Some(b);
+                        chamber.git_branch_diff = diff;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn git_worktrees_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let refresh_btn = div()
+            .id("git-worktrees-refresh-btn")
+            .px_2p5()
+            .py_0p5()
+            .rounded_full()
+            .bg(theme::tab_bar_bg())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .text_xs()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .text_color(theme::text_muted())
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_surface_raised()).text_color(theme::text()))
+            .child("↻ Refresh")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.refresh_git_worktrees(cx);
+            }));
+
+        let toolbar = h_flex()
+            .w_full()
+            .justify_end()
+            .items_center()
+            .pb_2()
+            .child(refresh_btn);
+
+        let rows: gpui_kit::AnyElement = match &self.git_worktrees {
+            None => Self::muted("Loading worktrees...").into_any_element(),
+            Some(worktrees) if worktrees.is_empty() => {
+                Self::muted("No worktrees.").into_any_element()
+            }
+            Some(worktrees) => {
+                let mono_font = cx.theme().mono_font_family.clone();
+                let mut list = v_flex().w_full().gap_1();
+                for (ix, wt) in worktrees.iter().enumerate() {
+                    // Colour the commit token by the branch's merged status; a
+                    // detached HEAD has no branch to be merged, so it stays neutral.
+                    let color = match self.branch_merged(wt.branch.as_deref()) {
+                        Some(true) => MERGED_COLOR,
+                        Some(false) => UNMERGED_COLOR,
+                        None => NEUTRAL_COLOR,
+                    };
+                    let branch_label = wt.branch.clone().unwrap_or_else(|| "detached".to_string());
+                    // Parity with a branch row: a worktree row selects its branch and
+                    // opens the same diff panel. A detached worktree has no branch, so
+                    // it keeps none of the affordances rather than becoming a dead click.
+                    let selects = Self::worktree_selects_branch(wt);
+                    let is_selected = selects.is_some() && self.git_selected_branch == selects;
+                    let is_cursor = self.git_cursor_worktree == Some(ix);
+                    let card = v_flex()
+                        .id(("worktree-row", ix))
+                        .w_full()
+                        .gap_1()
+                        .py_1()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme::glass_highlight())
+                        .when_some(selects, |d, name| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(theme::bg_surface_raised()))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    window.focus(&this.git_focus, cx);
+                                    this.git_cursor_worktree = Some(ix);
+                                    this.select_branch(name.clone());
+                                    cx.notify();
+                                }))
+                        })
+                        .when(is_cursor, |d| {
+                            d.bg(theme::bg_surface_raised())
+                                .border_1()
+                                .border_color(theme::accent())
+                        })
+                        .when(is_selected && !is_cursor, |d| {
+                            d.bg(theme::bg_surface_raised())
+                        })
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .justify_between()
+                                .items_center()
+                                .child(Self::commit_token(&wt.head, color, &mono_font))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_right()
+                                        .text_color(theme::text_muted())
+                                        .child(branch_label),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .text_xs()
+                                .font_family(mono_font.clone())
+                                .text_color(theme::text_muted())
+                                .child(wt.path.clone()),
+                        );
+                    // The diff panel goes UNDER the row that was clicked, not after the
+                    // whole list — the same accordion the branch rows use, and the same
+                    // reason (a panel below 100 rows reads as a dead click).
+                    let mut entry = v_flex().w_full().child(card);
+                    if let (true, Some(name)) = (is_selected, wt.branch.as_deref()) {
+                        entry = entry.child(self.branch_diff_panel(name, cx));
+                    }
+                    list = list.child(entry);
+                }
+                list.into_any_element()
+            }
+        };
+
+        v_flex().w_full().gap_1().child(toolbar).child(rows)
+    }
+
+    /// Whether a branch (by name) has landed in `main` — looked up in the already-loaded
+    /// branch list. `None` when the branch is unknown or absent (e.g. a detached HEAD).
+    pub(super) fn branch_merged(&self, branch: Option<&str>) -> Option<bool> {
+        let name = branch?;
+        self.git_branches
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .chain(self.git_remote_branches.as_deref().unwrap_or(&[]).iter())
+            .find(|b| b.name == name)
+            .map(|b| b.merged)
+    }
+
+    // ── Graph ────────────────────────────────────────────────────────────────────
+
+    /// Recompute the Graph subtab's rows from the raw `git log --graph` string: parse,
+    /// drop swarm snapshots unless the toggle is on, collapse orphaned connector runs,
+    /// and size the rail gutter from the widest lane.
+    ///
+    /// Derived state on purpose. GPUI re-renders the whole window on every hover
+    /// transition, and doing this work *in* the render was what made the tab lag: an
+    /// uncapped `git log` re-parsed per mouse-move. Call this wherever an input changes
+    /// — the graph string or the snapshot toggle — and never from a render path.
+    pub(in crate::app) fn rebuild_graph_rows(&mut self) {
+        let show_snapshots = self.git_show_snapshots;
+        let rows = match self.git_log_graph.as_deref() {
+            Some(graph) if !graph.trim().is_empty() => {
+                let kept: Vec<crate::vcs::GraphRow> = crate::vcs::parse_graph(graph)
+                    .into_iter()
+                    .filter(|r| show_snapshots || !Self::is_swarm_snapshot(r))
+                    .collect();
+                Self::collapse_connectors(kept)
+            }
+            _ => Vec::new(),
+        };
+        self.git_graph_max_lanes = rows
+            .iter()
+            .flat_map(|r| r.lanes.iter().map(|l| l.from_col.max(l.to_col)))
+            .max()
+            .map_or(1, |m| m + 1);
+        self.git_graph_rows = rows;
+        // Every cached item height belongs to the old row set.
+        self.git_graph_list.reset(self.git_graph_rows.len());
+    }
+
+    /// A `hadron`-authored `before <seat>` commit — the daemon's own pre-turn snapshot.
+    /// Roughly 60% of this repo's history, and never what a human came to the graph for.
+    pub(super) fn is_swarm_snapshot(row: &crate::vcs::GraphRow) -> bool {
+        row.author.as_deref() == Some("hadron") && row.subject.starts_with("before ")
+    }
+
+    fn git_graph_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_snapshots = self.git_show_snapshots;
+        let header = h_flex().w_full().justify_end().items_center().child(
+            h_flex()
+                .id("snapshot-toggle")
+                .gap_1p5()
+                .items_center()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.git_show_snapshots = !this.git_show_snapshots;
+                    this.rebuild_graph_rows();
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if show_snapshots {
+                            theme::accent()
+                        } else {
+                            theme::text_muted()
+                        })
+                        .child(if show_snapshots {
+                            "✓ Swarm snapshots"
+                        } else {
+                            "Swarm snapshots"
+                        }),
+                ),
+        );
+
+        // Rows come from `git_graph_rows` (rebuilt on load and on the snapshot toggle),
+        // never re-parsed here: this function runs on every hover transition.
+        let body: gpui_kit::AnyElement = if self.git_log_graph.is_none() {
+            Self::muted("Failed to load commit graph.").into_any_element()
+        } else if self.git_graph_rows.is_empty() {
+            Self::muted("No commits.").into_any_element()
+        } else {
+            let weak_view = cx.entity().downgrade();
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    gpui_kit::list(self.git_graph_list.clone(), move |ix, _window, cx| {
+                        match weak_view.upgrade() {
+                            Some(view) => view.update(cx, |this, cx| this.graph_row(ix, cx)),
+                            None => div().into_any_element(),
+                        }
+                    })
+                    .size_full(),
+                )
+                .into_any_element()
+        };
+
+        v_flex()
+            .size_full()
+            .gap_1()
+            .text_sm()
+            .child(header.flex_none())
+            .child(body)
+    }
+
+    /// One row of the commit graph, built on demand by the virtual list — so only the
+    /// rows on screen (plus overdraw) ever construct elements or paint a lane canvas.
+    fn graph_row(&self, ix: usize, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(row) = self.git_graph_rows.get(ix) else {
+            return div().into_any_element();
+        };
+        let max_lanes = self.git_graph_max_lanes;
+        let row_h = if row.hash.is_none() { 12.0 } else { 24.0 };
+
+        let mut line = h_flex()
+            .id(("graph-row", ix))
+            .w_full()
+            .gap_2()
+            .items_center()
+            .h(px(row_h))
+            .px_1()
+            .rounded_md()
+            .overflow_hidden()
+            .border_1()
+            .border_color(gpui_kit::transparent_black())
+            .child(Self::render_rail_canvas(row, max_lanes, row_h));
+
+        let Some(hash) = &row.hash else {
+            return line.into_any_element();
+        };
+
+        let full_hash = row.full_hash.clone().unwrap_or_else(|| hash.clone());
+        let is_selected = self.git_selected_commit.as_deref() == Some(full_hash.as_str());
+
+        let lane = row.node_col.unwrap_or(0);
+        let lane_color = LANE_COLORS[lane % LANE_COLORS.len()];
+        line = line.child(
+            div()
+                .flex_none()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_color(gpui_kit::rgb(lane_color))
+                .child(hash.clone()),
+        );
+
+        // Cap displayed ref pills to max 2 + overflow count chip
+        let refs = Self::distinct_refs(&row.decorations);
+        let (display_decos, overflow_count) = if refs.len() > 2 {
+            (&refs[..2], refs.len() - 2)
+        } else {
+            (&refs[..], 0)
+        };
+        for dec in display_decos {
+            line = line.child(Self::ref_pill(dec));
+        }
+        if overflow_count > 0 {
+            let overflow_decos: Vec<crate::vcs::RefDecoration> = refs[2..].to_vec();
+            let elem_id = SharedString::from(format!(
+                "overflow-tags-{}",
+                row.hash.as_deref().unwrap_or("")
+            ));
+            line = line.child(
+                div()
+                    .id(elem_id)
+                    .flex_none()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(gpui_kit::rgba(0x94a3b822))
+                    .text_color(gpui_kit::rgb(0x94a3b8))
+                    .tooltip(move |window, cx| {
+                        let decos = overflow_decos.clone();
+                        Tooltip::element(move |_window, _cx| {
+                            let mut col = v_flex().gap_1().py_0p5();
+                            for dec in &decos {
+                                col = col.child(Self::ref_badge(dec, true));
+                            }
+                            col
+                        })
+                        .build(window, cx)
+                    })
+                    .child(format!("+{}", overflow_count)),
+            );
+        }
+
+        line = line.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(theme::text())
+                .child(row.subject.clone()),
+        );
+        if let Some(author) = &row.author {
+            line = line.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(author.clone()),
+            );
+        }
+        if let Some(date) = &row.relative_date {
+            line = line.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(date.clone()),
+            );
+        }
+
+        let is_cursor = self.git_cursor_graph == Some(ix);
+        let click_hash = full_hash.clone();
+        line = line
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::border()))
+            .when(is_cursor, |d| {
+                d.bg(theme::border()).border_color(theme::accent())
+            })
+            .when(is_selected && !is_cursor, |d| d.bg(theme::border()))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                window.focus(&this.git_focus, cx);
+                this.git_cursor_graph = Some(ix);
+                this.select_commit(click_hash.clone());
+                cx.notify();
+            }));
+
+        let mut entry = v_flex().w_full().child(line);
+        if is_selected {
+            let continuation_rail = Self::render_rail_continuation_canvas(row, max_lanes);
+            let expanded_panel = h_flex()
+                .w_full()
+                .px_1()
+                .border_1()
+                .border_color(gpui_kit::transparent_black())
+                .child(continuation_rail)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(self.commit_diff_panel(&full_hash, cx)),
+                );
+            entry = entry.child(expanded_panel);
+        }
+        entry.into_any_element()
+    }
+
+    /// Render vertical continuation lanes for an expanded commit row's diff panel
+    /// so the commit graph line continues uninterrupted alongside the indented changes panel.
+    fn render_rail_continuation_canvas(
+        row: &crate::vcs::GraphRow,
+        max_lanes: usize,
+    ) -> impl IntoElement {
+        let gutter_w = (max_lanes.max(1) as f32) * LANE_W;
+        let mut active_cols = Vec::new();
+        for lane in &row.lanes {
+            if !active_cols.contains(&lane.to_col) {
+                active_cols.push(lane.to_col);
+            }
+        }
+
+        div().w(px(gutter_w)).h_full().flex_none().child(
+            gpui_kit::canvas(
+                move |bounds, _, _| bounds,
+                move |bounds, _, window, _cx| {
+                    let h = bounds.size.height;
+                    for &col in &active_cols {
+                        let x = bounds.origin.x + px((col as f32) * LANE_W + LANE_W / 2.0);
+                        let y1 = bounds.origin.y;
+                        let _y2 = bounds.origin.y + h;
+                        let color = gpui_kit::rgb(LANE_COLORS[col % LANE_COLORS.len()]);
+
+                        let line_w = px(2.0);
+                        let line_bounds = gpui_kit::Bounds {
+                            origin: gpui_kit::point(x - line_w / 2.0, y1),
+                            size: gpui_kit::size(line_w, h),
+                        };
+                        window.paint_quad(gpui_kit::fill(line_bounds, color));
+                    }
+                },
+            )
+            .size_full(),
+        )
+    }
+
+    /// Render graph lanes and commit dot on a GPUI canvas.
+    fn render_rail_canvas(
+        row: &crate::vcs::GraphRow,
+        max_lanes: usize,
+        row_h: f32,
+    ) -> impl IntoElement {
+        let lanes = row.lanes.clone();
+        let node_col = row.node_col;
+        let gutter_w = (max_lanes.max(1) as f32) * LANE_W;
+
+        div().w(px(gutter_w)).h(px(row_h)).flex_none().child(
+            gpui_kit::canvas(
+                move |bounds, _, _| bounds,
+                move |bounds, _, window, _cx| {
+                    let h = bounds.size.height;
+                    for lane in &lanes {
+                        let x1 =
+                            bounds.origin.x + px((lane.from_col as f32) * LANE_W + LANE_W / 2.0);
+                        let y1 = bounds.origin.y;
+                        let x2 = bounds.origin.x + px((lane.to_col as f32) * LANE_W + LANE_W / 2.0);
+                        let y2 = bounds.origin.y + h;
+                        let color = gpui_kit::rgb(
+                            LANE_COLORS[Self::lane_color_index(lane) % LANE_COLORS.len()],
+                        );
+
+                        if lane.from_col == lane.to_col {
+                            let line_w = px(2.0);
+                            let line_bounds = gpui_kit::Bounds {
+                                origin: gpui_kit::point(x1 - line_w / 2.0, y1),
+                                size: gpui_kit::size(line_w, h),
+                            };
+                            window.paint_quad(gpui_kit::fill(line_bounds, color));
+                        } else {
+                            let mut builder = gpui_kit::PathBuilder::stroke(px(2.0));
+                            builder.move_to(gpui_kit::point(x1, y1));
+                            let mid_y = y1 + (y2 - y1) / 2.0;
+                            builder.cubic_bezier_to(
+                                gpui_kit::point(x2, y2),
+                                gpui_kit::point(x1, mid_y),
+                                gpui_kit::point(x2, mid_y),
+                            );
+                            if let Ok(path) = builder.build() {
+                                window.paint_path(path, color);
+                            }
+                        }
+                    }
+
+                    if let Some(col) = node_col {
+                        let nx = bounds.origin.x + px((col as f32) * LANE_W + LANE_W / 2.0);
+                        let ny = bounds.origin.y + h / 2.0;
+                        let node_color = gpui_kit::rgb(LANE_COLORS[col % LANE_COLORS.len()]);
+
+                        // Outer ring (background field color)
+                        let ring_r = px(5.5);
+                        let ring_bounds = gpui_kit::Bounds {
+                            origin: gpui_kit::point(nx - ring_r, ny - ring_r),
+                            size: gpui_kit::size(ring_r * 2.0, ring_r * 2.0),
+                        };
+                        window.paint_quad(
+                            gpui_kit::fill(ring_bounds, theme::field_base()).corner_radii(ring_r),
+                        );
+
+                        // Inner filled node dot
+                        let dot_r = px(4.0);
+                        let dot_bounds = gpui_kit::Bounds {
+                            origin: gpui_kit::point(nx - dot_r, ny - dot_r),
+                            size: gpui_kit::size(dot_r * 2.0, dot_r * 2.0),
+                        };
+                        window
+                            .paint_quad(gpui_kit::fill(dot_bounds, node_color).corner_radii(dot_r));
+                    }
+                },
+            )
+            // A `canvas` styles itself: its default size is `auto`, which resolves to
+            // ZERO height inside this fixed-height parent (measured: `32px × 0px`).
+            // Every vertical lane quad then had height 0 and vanished, every diagonal
+            // flattened to a horizontal dash, and each node dot centred on the row's
+            // top edge and got clipped to a semicircle — the "graph is still dashes"
+            // regression. The canvas must carry the row's size itself.
+            .w(px(gutter_w))
+            .h(px(row_h)),
+        )
+    }
+
+    /// Determine the color lane index for a lane segment.
+    /// For vertical lines (from_col == to_col), uses from_col.
+    /// For diagonal connectors (merges or branch creation), uses max(from_col, to_col)
+    /// so that a branch connecting to/from main (col 0) is colored with the subbranch's color
+    /// (e.g. blue for col 1) rather than main's color (green for col 0).
+    pub(super) fn lane_color_index(lane: &crate::vcs::LaneSeg) -> usize {
+        lane.from_col.max(lane.to_col)
+    }
+
+    /// Collapse each run of consecutive connector rows into a single strip carrying the
+    /// union of the run's lane segments. Hiding the swarm-snapshot commits leaves their
+    /// connector rows behind, so a merge drew the same `|/` hook once per orphaned row —
+    /// a ladder of repeated curves separated by blank strips. One strip per run draws one
+    /// curve per merge. Approximate by construction: a lane that travels several columns
+    /// across several rows is flattened into one row's worth of segments.
+    fn collapse_connectors(rows: Vec<crate::vcs::GraphRow>) -> Vec<crate::vcs::GraphRow> {
+        let mut out: Vec<crate::vcs::GraphRow> = Vec::with_capacity(rows.len());
+        let mut pending: Option<crate::vcs::GraphRow> = None;
+        for row in rows {
+            if row.hash.is_none() {
+                match &mut pending {
+                    Some(acc) => {
+                        for seg in row.lanes {
+                            if !acc.lanes.contains(&seg) {
+                                acc.lanes.push(seg);
+                            }
+                        }
+                    }
+                    None => pending = Some(row),
+                }
+            } else {
+                out.extend(pending.take());
+                out.push(row);
+            }
+        }
+        out.extend(pending);
+        out
+    }
+
+    /// The ref pills to render for one commit, deduplicated by the *elided* label.
+    /// Eliding `quark/<seat>/<ulid>` down to `<seat>` makes two different branches of
+    /// the same seat render as the same chip, so a commit carrying two `acp-claude-2`
+    /// branches showed `acp-claude-2  acp-claude-2`. Keep the first of each label (git
+    /// lists HEAD and local branches first) so the `+N` chip counts only what is hidden.
+    fn distinct_refs(decos: &[crate::vcs::RefDecoration]) -> Vec<crate::vcs::RefDecoration> {
+        let mut seen = std::collections::HashSet::new();
+        decos
+            .iter()
+            .filter(|d| seen.insert(Self::elide_ref_name(&d.name)))
+            .cloned()
+            .collect()
+    }
+
+    /// Elide long branch names like `quark/cli-agy/01KY8CNJT01HHWB...` -> `cli-agy`.
+    /// Non-quark refs (e.g. `origin/main`, `origin/HEAD`, `main`) are preserved as-is.
+    fn elide_ref_name(name: &str) -> String {
+        if let Some(clean) = name.strip_prefix("quark/") {
+            if let Some((seat, _ulid)) = clean.split_once('/') {
+                return seat.to_string();
+            }
+        }
+        name.to_string()
+    }
+
+    /// A styled ref badge element with decoration kind styling (HEAD, Local, Remote, Tag).
+    fn ref_badge(dec: &crate::vcs::RefDecoration, full_name: bool) -> gpui_kit::Div {
+        let (bg, text_color) = match dec.kind {
+            crate::vcs::RefKind::Head => (theme::success().opacity(0.14), theme::success()),
+            crate::vcs::RefKind::LocalBranch => (theme::accent().opacity(0.14), theme::accent()),
+            crate::vcs::RefKind::RemoteBranch => (theme::info().opacity(0.14), theme::info()),
+            crate::vcs::RefKind::Tag => (theme::warning().opacity(0.14), theme::warning()),
+        };
+
+        let name = if full_name {
+            dec.name.clone()
+        } else {
+            Self::elide_ref_name(&dec.name)
+        };
+
+        let label_element = if dec.kind == crate::vcs::RefKind::Head {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(div().child("●"))
+                .child(div().child(name))
+        } else {
+            h_flex().items_center().child(name)
+        };
+
+        div()
+            .flex_none()
+            .px_1p5()
+            .py_0p5()
+            .rounded_md()
+            .text_xs()
+            .bg(bg)
+            .text_color(text_color)
+            .child(label_element)
+    }
+
+    /// A styled ref pill badge depending on decoration kind (HEAD, Local, Remote, Tag).
+    fn ref_pill(dec: &crate::vcs::RefDecoration) -> impl IntoElement {
+        let full_name = dec.name.clone();
+        Self::ref_badge(dec, false)
+            .id(SharedString::from(format!("ref-pill-{}", dec.name)))
+            .max_w(px(DECO_CHIP_MAX_W))
+            .truncate()
+            .tooltip(move |window, cx| Tooltip::new(full_name.clone()).build(window, cx))
+    }
+
+    // ── Shared collapsible file-diff list (Changes + branch panel, SSOT) ──────────
+
+    /// One collapsible row per changed file: `path  +A −R`, expanding to its hunks.
+    /// Shared by the Changes rail and the per-branch diff so both render identically;
+    /// `panel` only selects which open-row set a toggle click mutates.
+    pub(super) fn file_diff_rows(
+        &self,
+        diffs: &[crate::vcs::FileDiff],
+        open: &std::collections::HashSet<usize>,
+        panel: DiffPanel,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let mut list = v_flex().w_full();
+        for (ix, file) in diffs.iter().enumerate() {
+            let title = h_flex()
+                .flex_1()
+                .gap_2()
+                .items_center()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .child(file.path.clone()),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme::git_added().opacity(0.12))
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(gpui_kit::rgb(ADD_COLOR))
+                                .child(format!("+{}", file.added)),
+                        )
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme::git_deleted().opacity(0.12))
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(gpui_kit::rgb(DEL_COLOR))
+                                .child(format!("−{}", file.removed)),
+                        ),
+                );
+
+            let is_open = open.contains(&ix);
+            let header = h_flex()
+                .id(("diff-file", ix))
+                .w_full()
+                .gap_2()
+                .justify_between()
+                .items_center()
+                .px_2()
+                .py_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::bg_surface_raised()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let set = match panel {
+                        DiffPanel::Changes => &mut this.changes_open_ixs,
+                        DiffPanel::Branch => &mut this.git_branch_open_ixs,
+                        DiffPanel::Commit => &mut this.git_commit_open_ixs,
+                    };
+                    if set.contains(&ix) {
+                        set.remove(&ix);
+                    } else {
+                        set.insert(ix);
+                    }
+                    // This panel is nested inside the selected commit's virtual-list
+                    // row, so opening a file grows that row too.
+                    if panel == DiffPanel::Commit {
+                        if let Some(hash) = this.git_selected_commit.clone() {
+                            this.invalidate_graph_row(&hash);
+                        }
+                    }
+                    cx.notify();
+                }))
+                .child(title)
+                .child(
+                    Icon::new(if is_open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .small()
+                    .text_color(theme::text_muted()),
+                );
+
+            let mut row = v_flex().w_full().child(header);
+            if is_open {
+                let mut lines = v_flex()
+                    .w_full()
+                    .text_sm()
+                    .pt_1()
+                    .pb_2()
+                    .font_family(cx.theme().mono_font_family.clone());
+                for hunk in &file.hunks {
+                    lines = lines.child(
+                        div()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .my_1()
+                            .rounded_sm()
+                            .bg(theme::bg_surface())
+                            .border_y_1()
+                            .border_color(theme::glass_highlight())
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child(hunk.header.clone()),
+                    );
+                    for line in &hunk.lines {
+                        lines = lines.child(match line {
+                            crate::vcs::DiffLine::Context(c) => h_flex()
+                                .w_full()
+                                .items_start()
+                                .child(
+                                    div()
+                                        .w(px(20.0))
+                                        .flex_none()
+                                        .text_color(theme::text_muted())
+                                        .text_xs()
+                                        .child(" "),
+                                )
+                                .child(div().flex_1().min_w_0().text_color(theme::text()).child(
+                                    crate::syntax::highlight_code_line_element(c, Some(&file.path)),
+                                )),
+                            crate::vcs::DiffLine::Added(a) => h_flex()
+                                .w_full()
+                                .items_start()
+                                .bg(theme::git_added().opacity(0.10))
+                                .child(
+                                    div()
+                                        .w(px(20.0))
+                                        .flex_none()
+                                        .text_color(gpui_kit::rgb(ADD_COLOR))
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .child("+"),
+                                )
+                                .child(div().flex_1().min_w_0().text_color(theme::text()).child(
+                                    crate::syntax::highlight_code_line_element(a, Some(&file.path)),
+                                )),
+                            crate::vcs::DiffLine::Removed(r) => h_flex()
+                                .w_full()
+                                .items_start()
+                                .bg(theme::git_deleted().opacity(0.10))
+                                .child(
+                                    div()
+                                        .w(px(20.0))
+                                        .flex_none()
+                                        .text_color(gpui_kit::rgb(DEL_COLOR))
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .child("−"),
+                                )
+                                .child(div().flex_1().min_w_0().text_color(theme::text()).child(
+                                    crate::syntax::highlight_code_line_element(r, Some(&file.path)),
+                                )),
+                        });
+                    }
+                }
+                row = row.child(lines);
+            }
+            list = list.child(row.border_b_1().border_color(theme::glass_highlight()));
+        }
+        list.into_any_element()
+    }
+
+    // ── Delegation ─────────────────────────────────────────────────────────────
+
+    #[allow(dead_code)]
+    fn git_delegation_section(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::app::delegation::DelegationState;
+
+        if self.delegations.is_empty() {
+            return Self::muted("No delegations recorded.").into_any_element();
+        }
+
+        let mut list = v_flex().w_full().gap_2();
+        for (ix, del) in self.delegations.iter().enumerate().rev() {
+            let (from_identity, from_str) = match &del.from {
+                Actor::Human => {
+                    let id = self.resolve_identity("human");
+                    let name = id.name.clone();
+                    (id, name)
+                }
+                Actor::Gluon => {
+                    let id = self.resolve_identity("gluon");
+                    let name = id.name.clone();
+                    (id, name)
+                }
+                Actor::Quark(q) => {
+                    let id = self.resolve_identity(q.as_str());
+                    let name = format!("@{}", id.name);
+                    (id, name)
+                }
+            };
+            let to_identity = self.resolve_identity(del.to.as_str());
+            let to_str = format!("@{}", to_identity.name);
+
+            let (state_color, state_text) = match del.state {
+                DelegationState::Pending => (0xe5c07b, "Pending"),
+                DelegationState::Working => (0xc778dd, "Working"),
+                DelegationState::Completed => (0x62c073, "Completed"),
+                DelegationState::Blocked => (0x8e8e8e, "Blocked"),
+                DelegationState::Error => (0xe06c75, "Error"),
+            };
+
+            let first_line = del.task.lines().next().unwrap_or("").trim();
+            let truncated_task: String = first_line.chars().take(80).collect();
+
+            let card = v_flex()
+                .id(("delegation-row", ix))
+                .w_full()
+                .p_2()
+                .rounded_md()
+                .bg(theme::glass_card())
+                .border_1()
+                .border_color(theme::glass_highlight())
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(from_identity.color)
+                                        .child(from_str),
+                                )
+                                .child(div().text_color(theme::text_muted()).child("➜"))
+                                .child(
+                                    div()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(to_identity.color)
+                                        .child(to_str),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_xs()
+                                .text_color(gpui_kit::rgb(state_color))
+                                .child(div().child("●"))
+                                .child(div().child(state_text)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .truncate()
+                        .child(truncated_task),
+                );
+
+            list = list.child(card);
+        }
+
+        list.into_any_element()
+    }
+
+    // ── Remote & Repository Health ─────────────────────────────────────────────
+
+    fn git_remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let repo_root = crate::vcs::repo_root_of(&self.path);
+        let repo_str = repo_root.display().to_string();
+
+        let mut container = v_flex().w_full().gap_3().pt_1();
+
+        // 1. Header & Actions Bar
+        let header = h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .p_2p5()
+            .rounded_lg()
+            .bg(theme::bg_surface())
+            .border_1()
+            .border_color(theme::border())
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(theme::text())
+                            .child("Workspace Repository"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .truncate()
+                            .child(repo_str),
+                    ),
+            )
+            .child(
+                div()
+                    .id("refresh-remote-btn")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::bg_surface_raised())
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::accent_soft()))
+                    .child(Icon::new(IconName::Globe).small())
+                    .child("Refresh")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh_remote_and_github(cx);
+                    })),
+            );
+        container = container.child(header);
+
+        // 2. Remote Tracking & Sync Card
+        let remote_card = match &self.git_remote_info {
+            None => v_flex()
+                .p_3()
+                .rounded_lg()
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::border())
+                .child(Self::muted("Loading remote tracking info...")),
+            Some(info) => {
+                let mut card = v_flex()
+                    .p_3()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border());
+
+                let header_row = h_flex().w_full().items_center().justify_between().child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(Icon::new(IconName::Globe).small())
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(theme::text())
+                                .child(if info.remote_url.is_empty() {
+                                    "Local Git Tracking".to_string()
+                                } else {
+                                    format!("Remote: {}", info.remote_name)
+                                }),
+                        ),
+                );
+
+                let header_row = if let Some(slug) = &info.repo_slug {
+                    let url_clone = info.remote_url.clone();
+                    header_row.child(
+                        h_flex()
+                            .id("open-remote-url-btn")
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(theme::bg_surface_raised())
+                            .text_xs()
+                            .text_color(theme::accent())
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .child(slug.clone())
+                            .on_click(cx.listener(move |_, _, _, _| {
+                                crate::sys::open_path_or_url(&url_clone);
+                            })),
+                    )
+                } else {
+                    header_row
+                };
+
+                card = card.child(header_row);
+
+                if !info.remote_url.is_empty() {
+                    card = card.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .truncate()
+                            .child(format!("URL: {}", info.remote_url)),
+                    );
+                }
+
+                let sync_row = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(div().text_color(theme::text_muted()).child("Branch:"))
+                            .child(
+                                div()
+                                    .text_color(theme::accent())
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(info.current_branch.clone()),
+                            ),
+                    )
+                    .child(div().text_color(theme::text_muted()).child("•"))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(div().text_color(theme::text_muted()).child("Upstream:"))
+                            .child(
+                                div().text_color(theme::text()).child(
+                                    info.tracking_branch
+                                        .clone()
+                                        .unwrap_or_else(|| "None".to_string()),
+                                ),
+                            ),
+                    );
+                card = card.child(sync_row);
+
+                let status_pill = if info.ahead > 0 || info.behind > 0 {
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .text_xs()
+                        .child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .text_color(gpui_kit::rgb(ADD_COLOR))
+                                .child(format!("↑ {} ahead", info.ahead)),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .text_color(gpui_kit::rgb(DEL_COLOR))
+                                .child(format!("↓ {} behind", info.behind)),
+                        )
+                } else if info.tracking_branch.is_some() {
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(Icon::new(IconName::CircleCheck).small())
+                        .child("Up to date with upstream")
+                } else {
+                    h_flex()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child("No upstream tracking branch configured")
+                };
+
+                card = card.child(status_pill);
+                card
+            }
+        };
+        container = container.child(remote_card);
+
+        // 3. Local Repository Health (Repo Monitor)
+        let health_card = match &self.repo_health_report {
+            None => v_flex()
+                .p_3()
+                .rounded_lg()
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::border())
+                .child(Self::muted("Running repository health check...")),
+            Some(report) => {
+                let mut card = v_flex()
+                    .p_3()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border());
+
+                let (badge_text, badge_bg, badge_fg) = if report.is_healthy() {
+                    ("Clean", theme::bg_surface_raised(), theme::text_muted())
+                } else {
+                    ("Issues Detected", theme::accent_soft(), theme::accent())
+                };
+
+                let card_header = h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(Icon::new(IconName::CircleCheck).small())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::text())
+                                    .child("Local Repository Health"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(badge_bg)
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::BOLD)
+                            .text_color(badge_fg)
+                            .child(badge_text),
+                    );
+                card = card.child(card_header);
+
+                // Drift Item
+                let drift_row = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        Icon::new(if report.has_cargo_lock_drift {
+                            IconName::Info
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .small(),
+                    )
+                    .child(
+                        div()
+                            .text_color(if report.has_cargo_lock_drift {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            })
+                            .child(if report.has_cargo_lock_drift {
+                                "Cargo.lock has uncommitted drift in repository root"
+                            } else {
+                                "Cargo.lock clean (no drift)"
+                            }),
+                    );
+                card = card.child(drift_row);
+
+                // Stale trees Item
+                let stale_count = report.stale_worktrees.len();
+                let stale_row = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        Icon::new(if stale_count > 0 {
+                            IconName::Info
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .small(),
+                    )
+                    .child(
+                        div()
+                            .text_color(if stale_count > 0 {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            })
+                            .child(if stale_count > 0 {
+                                format!("{stale_count} stale worktree(s) marked in .hadron/trees/")
+                            } else {
+                                "No stale worktrees".to_string()
+                            }),
+                    );
+                card = card.child(stale_row);
+
+                // Nucleus Item
+                let nucleus_status = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        Icon::new(if report.nucleus_issues > 0 {
+                            IconName::Info
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .small(),
+                    )
+                    .child(
+                        div()
+                            .text_color(if report.nucleus_issues > 0 {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            })
+                            .child(if report.nucleus_issues > 0 {
+                                format!("Nucleus issues: {} alert(s)", report.nucleus_issues)
+                            } else {
+                                "Nucleus intact (index and lessons in sync)".to_string()
+                            }),
+                    );
+
+                let mut nucleus_header = h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(nucleus_status);
+
+                if report.nucleus_issues > 0 {
+                    let orphans_count = report.nucleus_orphaned_notes.len();
+                    let broken_count = report.nucleus_broken_links.len();
+                    nucleus_header = nucleus_header.child(
+                        h_flex()
+                            .id("dispatch-nucleus-fix")
+                            .gap_1p5()
+                            .items_center()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(theme::bg_surface_raised())
+                            .border_1()
+                            .border_color(theme::border())
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme::accent())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::accent_soft()))
+                            .child(Icon::new(IconName::Bot).small())
+                            .child("Dispatch Fix")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.chat_tab = ChatTab::Chat;
+                                this.post_chat_message(
+                                    Actor::Human,
+                                    format!(
+                                        "@orchestrator /memory-curation Repair nucleus integrity: audit .hadron/nucleus, index {} orphan note(s), prune {} broken link(s), and ensure budget constraints.",
+                                        orphans_count, broken_count
+                                    ),
+                                    cx,
+                                );
+                            })),
+                    );
+                }
+
+                let nucleus_row = v_flex().w_full().gap_1().child(nucleus_header);
+
+                let mut nucleus_details = v_flex()
+                    .pl_5()
+                    .gap_0p5()
+                    .text_xs()
+                    .text_color(theme::text_muted());
+                if report.nucleus_index_bytes > 0 {
+                    let over_badge = if report.nucleus_budget_exceeded {
+                        " [OVER BUDGET]"
+                    } else {
+                        ""
+                    };
+                    nucleus_details = nucleus_details.child(div().child(format!(
+                        "Index budget: {} / {} bytes{}",
+                        report.nucleus_index_bytes, report.nucleus_index_budget, over_badge
+                    )));
+                }
+                for broken in &report.nucleus_broken_links {
+                    nucleus_details = nucleus_details.child(
+                        div()
+                            .text_color(theme::accent())
+                            .child(format!("Broken link: {broken}")),
+                    );
+                }
+                if !report.nucleus_orphaned_notes.is_empty() {
+                    nucleus_details = nucleus_details.child(div().child(format!(
+                        "{} unindexed orphan note(s) in notes/",
+                        report.nucleus_orphaned_notes.len()
+                    )));
+                }
+
+                let mut graph = crate::app::render::nucleus_graph::ForceDirectedGraph::new();
+                for broken in &report.nucleus_broken_links {
+                    graph.add_node(broken, 0.0, 0.0);
+                }
+                for orphan in &report.nucleus_orphaned_notes {
+                    graph.add_node(orphan.to_string_lossy().to_string(), 10.0, 10.0);
+                }
+                graph.step_simulation(100.0, 0.05, 0.9);
+                if !graph.nodes.is_empty() {
+                    nucleus_details = nucleus_details.child(div().child(format!(
+                        "Knowledge graph simulation: {} active nodes tracked",
+                        graph.nodes.len()
+                    )));
+                }
+
+                card = card.child(nucleus_row).child(nucleus_details);
+
+                card
+            }
+        };
+        container = container.child(health_card);
+
+        // 4. GitHub Remote Issues & PRs
+        let github_card = if let Some(info) = &self.git_remote_info {
+            if !info.is_github {
+                v_flex()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border())
+                    .child(Self::muted(
+                        "Remote is not a GitHub repository. Issues & PR tracking requires GitHub.",
+                    ))
+            } else {
+                let mut card = v_flex()
+                    .p_3()
+                    .gap_2p5()
+                    .rounded_lg()
+                    .bg(theme::bg_surface())
+                    .border_1()
+                    .border_color(theme::border());
+
+                let slug = info.repo_slug.as_deref().unwrap_or("GitHub");
+                let gh_header = h_flex().w_full().items_center().justify_between().child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(Icon::new(IconName::Inbox).small())
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(theme::text())
+                                .child(format!("GitHub: {slug}")),
+                        ),
+                );
+                card = card.child(gh_header);
+
+                if let Some(status_msg) = &self.github_status_msg {
+                    card = card.child(
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(theme::accent_soft())
+                            .text_xs()
+                            .text_color(theme::accent())
+                            .child(status_msg.clone()),
+                    );
+                }
+
+                // GitHub Actions workflow runs
+                let actions_summary = match &self.github_actions {
+                    Some(runs) => {
+                        let failed = runs.iter().filter(|r| r.is_failed()).count();
+                        let running = runs.iter().filter(|r| r.is_in_progress()).count();
+                        if failed > 0 {
+                            (format!("{failed} failed"), theme::error())
+                        } else if running > 0 {
+                            (format!("{running} running"), theme::warning())
+                        } else {
+                            (format!("{} recent", runs.len()), theme::success())
+                        }
+                    }
+                    None => ("—".to_string(), theme::text_muted()),
+                };
+                let actions_header = h_flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::text())
+                    .child("GitHub Actions")
+                    .child(div().text_color(actions_summary.1).child(actions_summary.0));
+                card = card.child(actions_header);
+
+                if let Some(runs) = &self.github_actions {
+                    if runs.is_empty() {
+                        card =
+                            card.child(div().pl_2().child(Self::muted("No recent workflow runs.")));
+                    } else {
+                        let mut run_list = v_flex().gap_1p5();
+                        for (ix, run) in runs.iter().take(8).enumerate() {
+                            let url_clone = run.url.clone();
+                            let is_failed = run.is_failed();
+                            let is_running = run.is_in_progress();
+                            let (badge_label, badge_color) = if is_failed {
+                                ("FAIL", theme::error())
+                            } else if is_running {
+                                ("RUN", theme::warning())
+                            } else if run.conclusion.as_deref() == Some("success") {
+                                ("PASS", theme::success())
+                            } else {
+                                ("SKIP", theme::text_muted())
+                            };
+                            let wf_label = if run.workflow_name.is_empty() {
+                                run.title.clone()
+                            } else {
+                                format!("{} · {}", run.workflow_name, run.title)
+                            };
+                            let mut row = h_flex()
+                                .id(("gh-action-row", ix))
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .p_1p5()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .border_1()
+                                .border_color(if is_failed {
+                                    theme::error()
+                                } else {
+                                    theme::border()
+                                })
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .on_click(cx.listener(move |_, _, _, _| {
+                                    crate::sys::open_path_or_url(&url_clone);
+                                }))
+                                .child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::bg_surface())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(badge_color)
+                                        .child(badge_label),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(theme::text())
+                                        .child(wf_label),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(run.head_branch.clone()),
+                                );
+
+                            if is_failed {
+                                let run_id = run.id;
+                                let wf_name = run.workflow_name.clone();
+                                let branch = run.head_branch.clone();
+                                let run_url = run.url.clone();
+                                row = row.child(
+                                    div()
+                                        .id(("gh-action-fix", ix))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::accent_soft())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .cursor_pointer()
+                                        .child("Dispatch Fix")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.chat_tab = ChatTab::Chat;
+                                            this.post_chat_message(
+                                                Actor::Human,
+                                                format!(
+                                                    "@orchestrator Investigate and fix failed GitHub Actions workflow `{wf_name}` (run #{run_id} on branch `{branch}`, {run_url}). Inspect `gh run view {run_id} --log-failed` and remediate the failure."
+                                                ),
+                                                cx,
+                                            );
+                                        })),
+                                );
+                            }
+                            run_list = run_list.child(row);
+                        }
+                        card = card.child(run_list);
+                    }
+                } else {
+                    card = card.child(
+                        div()
+                            .pl_2()
+                            .child(Self::muted("No workflow runs fetched yet.")),
+                    );
+                }
+
+                // Security Warnings (CodeQL & Dependabot)
+                let alerts = self.github_security_alerts.as_deref().unwrap_or(&[]);
+                let alert_count = alerts.len();
+                let security_header = h_flex()
+                    .items_center()
+                    .justify_between()
+                    .pt_1()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::text())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child("Security Warnings (CodeQL & Dependabot)"),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_color(if alert_count > 0 {
+                                        theme::error()
+                                    } else {
+                                        theme::success()
+                                    })
+                                    .child(if alert_count > 0 {
+                                        format!("{alert_count} open")
+                                    } else {
+                                        "0 open".to_string()
+                                    }),
+                            )
+                            .when(alert_count > 0, |actions| {
+                                let alerts_for_all = alerts.to_vec();
+                                let btn_label = if alert_count > 1 {
+                                    "Dispatch Fix All"
+                                } else {
+                                    "Dispatch Fix"
+                                };
+                                actions.child(
+                                    div()
+                                        .id("gh-sec-alerts-dispatch-all")
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::accent_soft())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .cursor_pointer()
+                                        .hover(|s| s.opacity(0.85))
+                                        .child(btn_label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.chat_tab = ChatTab::Chat;
+                                            this.post_chat_message(
+                                                Actor::Human,
+                                                crate::vcs::format_security_alerts_remediation_message(&alerts_for_all),
+                                                cx,
+                                            );
+                                        })),
+                                )
+                            }),
+                    );
+                card = card.child(security_header);
+
+                if let Some(alerts) = &self.github_security_alerts {
+                    if alerts.is_empty() {
+                        card = card.child(
+                            div()
+                                .pl_2()
+                                .child(Self::muted("No open security warnings.")),
+                        );
+                    } else {
+                        let mut alert_list = v_flex().gap_1p5();
+                        for (ix, alert) in alerts.iter().take(10).enumerate() {
+                            let url_clone = alert.url.clone();
+                            let sev_upper = alert.severity.to_ascii_uppercase();
+                            let sev_color = match alert.severity.to_ascii_lowercase().as_str() {
+                                "critical" | "high" | "error" => theme::error(),
+                                "medium" | "warning" => theme::warning(),
+                                _ => theme::accent(),
+                            };
+                            let loc_suffix = alert
+                                .location
+                                .as_deref()
+                                .map(|l| format!(" ({l})"))
+                                .unwrap_or_default();
+                            let alert_title = format!(
+                                "[{}] {}: {}{}",
+                                alert.source, alert.rule_id, alert.summary, loc_suffix
+                            );
+                            let alert_for_fix = alert.clone();
+                            let alert_for_close = alert.clone();
+
+                            let row = h_flex()
+                                .id(("gh-sec-alert-row", ix))
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .p_1p5()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .border_1()
+                                .border_color(sev_color)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .on_click(cx.listener(move |_, _, _, _| {
+                                    crate::sys::open_path_or_url(&url_clone);
+                                }))
+                                .child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::bg_surface())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(sev_color)
+                                        .child(format!("#{} {}", alert.number, sev_upper)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(theme::text())
+                                        .child(alert_title),
+                                )
+                                .child(
+                                    div()
+                                        .id(("gh-sec-alert-fix", ix))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::accent_soft())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .cursor_pointer()
+                                        .child("Dispatch Fix")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.chat_tab = ChatTab::Chat;
+                                            this.post_chat_message(
+                                                Actor::Human,
+                                                alert_for_fix.remediation_prompt(),
+                                                cx,
+                                            );
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id(("gh-sec-alert-close", ix))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::bg_surface())
+                                        .border_1()
+                                        .border_color(theme::border())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                        .text_color(theme::text_secondary())
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme::text()))
+                                        .child("Close")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            let root = crate::vcs::repo_root_of(&this.path).to_path_buf();
+                                            let slug = this
+                                                .git_remote_info
+                                                .as_ref()
+                                                .and_then(|r| r.repo_slug.clone());
+                                            let src = alert_for_close.source.clone();
+                                            let num = alert_for_close.number;
+                                            cx.spawn(async move |this, cx| {
+                                                let src_bg = src.clone();
+                                                let res = cx
+                                                    .background_executor()
+                                                    .spawn(async move {
+                                                        crate::vcs::close_github_security_alert(
+                                                            &root,
+                                                            slug.as_deref(),
+                                                            &src_bg,
+                                                            num,
+                                                            "Closed from Hadron Chamber Security Warnings.",
+                                                        )
+                                                    })
+                                                    .await;
+                                                let _ = this.update(cx, |chamber, cx| {
+                                                    if res.is_ok() {
+                                                        if let Some(list) = &mut chamber.github_security_alerts {
+                                                            list.retain(|a| !(a.number == num && a.source == src));
+                                                        }
+                                                        chamber.github_status_msg = Some(
+                                                            format!("Closed {src} security alert #{num} on GitHub."),
+                                                        );
+                                                    } else if let Err(e) = res {
+                                                        chamber.github_status_msg = Some(e);
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                        })),
+                                );
+                            alert_list = alert_list.child(row);
+                        }
+                        card = card.child(alert_list);
+                    }
+                } else {
+                    card = card.child(
+                        div()
+                            .pl_2()
+                            .child(Self::muted("No security alerts fetched yet.")),
+                    );
+                }
+
+                // Pull requests list
+                let pr_count = self.github_prs.as_ref().map(|p| p.len()).unwrap_or(0);
+                let pr_header = h_flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::text())
+                    .child("Pull Requests")
+                    .child(
+                        div()
+                            .text_color(theme::text_muted())
+                            .child(format!("{pr_count} open")),
+                    );
+                card = card.child(pr_header);
+
+                if let Some(prs) = &self.github_prs {
+                    if prs.is_empty() {
+                        card =
+                            card.child(div().pl_2().child(Self::muted("No open pull requests.")));
+                    } else {
+                        let mut pr_list = v_flex().gap_1p5();
+                        for (ix, pr) in prs.iter().take(10).enumerate() {
+                            let url_clone = pr.url.clone();
+                            let pr_number = pr.number;
+                            let pr_title = pr.title.clone();
+                            let row = h_flex()
+                                .id(("gh-pr-row", ix))
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .p_1p5()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .on_click(cx.listener(move |_, _, _, _| {
+                                    crate::sys::open_path_or_url(&url_clone);
+                                }))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(gpui_kit::rgb(ADD_COLOR))
+                                        .child(format!("#{}", pr.number)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(theme::text())
+                                        .child(pr.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(pr.head_branch.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id(("gh-pr-dispatch", ix))
+                                        .flex_shrink_0()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::accent_soft())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .cursor_pointer()
+                                        .child("Dispatch Fix")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.dispatch_github_pr_review(
+                                                pr_number,
+                                                pr_title.clone(),
+                                                cx,
+                                            );
+                                        })),
+                                );
+                            pr_list = pr_list.child(row);
+                        }
+                        card = card.child(pr_list);
+                    }
+                } else {
+                    card = card.child(div().pl_2().child(Self::muted("No PRs fetched yet.")));
+                }
+
+                // Issues list
+                let issue_count = self.github_issues.as_ref().map(|i| i.len()).unwrap_or(0);
+                let issue_header = h_flex()
+                    .items_center()
+                    .justify_between()
+                    .pt_1()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::text())
+                    .child("Issues")
+                    .child(
+                        div()
+                            .text_color(theme::text_muted())
+                            .child(format!("{issue_count} open")),
+                    );
+                card = card.child(issue_header);
+
+                if let Some(issues) = &self.github_issues {
+                    if issues.is_empty() {
+                        card = card.child(div().pl_2().child(Self::muted("No open issues.")));
+                    } else {
+                        let mut issue_list = v_flex().gap_1p5();
+                        for (ix, issue) in issues.iter().take(10).enumerate() {
+                            let url_clone = issue.url.clone();
+                            let issue_number = issue.number;
+                            let issue_title = issue.title.clone();
+                            let row = h_flex()
+                                .id(("gh-issue-row", ix))
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .p_1p5()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .on_click(cx.listener(move |_, _, _, _| {
+                                    crate::sys::open_path_or_url(&url_clone);
+                                }))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .text_color(theme::accent())
+                                        .child(format!("#{}", issue.number)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(theme::text())
+                                        .child(issue.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(issue.author.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id(("gh-issue-dispatch", ix))
+                                        .flex_shrink_0()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme::accent_soft())
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .cursor_pointer()
+                                        .child("Dispatch")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.dispatch_github_issue(
+                                                issue_number,
+                                                issue_title.clone(),
+                                                cx,
+                                            );
+                                        })),
+                                );
+                            issue_list = issue_list.child(row);
+                        }
+                        card = card.child(issue_list);
+                    }
+                } else {
+                    card = card.child(div().pl_2().child(Self::muted("No issues fetched yet.")));
+                }
+
+                card
+            }
+        } else {
+            v_flex()
+                .p_3()
+                .rounded_lg()
+                .bg(theme::bg_surface())
+                .border_1()
+                .border_color(theme::border())
+                .child(Self::muted("No remote configured for this workspace."))
+        };
+        container = container.child(github_card);
+
+        container
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Chamber;
+    use crate::vcs::{RefDecoration, RefKind, WorktreeInfo};
+
+    fn worktree(branch: Option<&str>) -> WorktreeInfo {
+        WorktreeInfo {
+            path: "/tmp/wt".into(),
+            head: "abc1234".into(),
+            branch: branch.map(str::to_string),
+        }
+    }
+
+    /// Worktree rows used to be inert while branch rows were clickable — the same
+    /// list shape with a different affordance. They select their branch now, which
+    /// makes "is this row clickable" a real decision: a **detached** worktree has no
+    /// branch to select, so it must stay non-interactive rather than become a row
+    /// that looks live and does nothing.
+    #[test]
+    fn a_detached_worktree_row_is_not_clickable() {
+        assert_eq!(
+            Chamber::worktree_selects_branch(&worktree(Some("main"))),
+            Some("main".to_string())
+        );
+        assert_eq!(Chamber::worktree_selects_branch(&worktree(None)), None);
+    }
+
+    fn deco(name: &str, kind: RefKind) -> RefDecoration {
+        RefDecoration {
+            name: name.into(),
+            kind,
+        }
+    }
+
+    /// Two branches of the same seat elide to the same label; the pill row must not
+    /// render that label twice (`acp-claude-2  acp-claude-2` in the Graph tab).
+    #[test]
+    fn distinct_refs_collapses_same_seat_branches() {
+        let decos = vec![
+            deco(
+                "quark/acp-claude-2/01KY8GB52K8CY8YGE8N2TYPNBD",
+                RefKind::LocalBranch,
+            ),
+            deco(
+                "quark/acp-claude-2/01KY8GPXR6JG18VZCQWRNPTN62",
+                RefKind::LocalBranch,
+            ),
+        ];
+        let out = Chamber::distinct_refs(&decos);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "quark/acp-claude-2/01KY8GB52K8CY8YGE8N2TYPNBD");
+    }
+
+    /// Distinct refs survive: HEAD, another seat, and a tag are three different pills.
+    #[test]
+    fn distinct_refs_keeps_different_labels() {
+        let decos = vec![
+            deco("main", RefKind::Head),
+            deco(
+                "quark/cli-agy/01KY8CCE0YZV5X8NXMYNNNJMHF",
+                RefKind::LocalBranch,
+            ),
+            deco("v1.0.0", RefKind::Tag),
+        ];
+        assert_eq!(Chamber::distinct_refs(&decos).len(), 3);
+    }
+
+    #[test]
+    fn elide_ref_name_preserves_remote_branches() {
+        assert_eq!(Chamber::elide_ref_name("origin/main"), "origin/main");
+        assert_eq!(Chamber::elide_ref_name("origin/HEAD"), "origin/HEAD");
+        assert_eq!(
+            Chamber::elide_ref_name("quark/cli-agy/01KY8CCE0YZV5X8NXMYNNNJMHF"),
+            "cli-agy"
+        );
+    }
+
+    #[test]
+    fn ref_badge_builds_for_all_ref_kinds() {
+        let decos = vec![
+            deco("main", RefKind::Head),
+            deco(
+                "quark/cli-agy/01KY8CCE0YZV5X8NXMYNNNJMHF",
+                RefKind::LocalBranch,
+            ),
+            deco("origin/main", RefKind::RemoteBranch),
+            deco("v1.0.0", RefKind::Tag),
+        ];
+        for d in &decos {
+            let _el_short = Chamber::ref_badge(d, false);
+            let _el_full = Chamber::ref_badge(d, true);
+        }
+    }
+
+    fn authored(author: &str, subject: &str) -> crate::vcs::GraphRow {
+        crate::vcs::GraphRow {
+            hash: Some("aaa1111".into()),
+            author: Some(author.into()),
+            subject: subject.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The daemon's pre-turn snapshots are hidden by default — they are ~60% of this
+    /// repo's history and nothing a human came to the graph to read.
+    #[test]
+    fn a_hadron_before_commit_is_a_swarm_snapshot() {
+        assert!(Chamber::is_swarm_snapshot(&authored(
+            "hadron",
+            "before acp-claude"
+        )));
+    }
+
+    /// Both halves of the rule matter: a human's commit that happens to start with
+    /// "before", and a `hadron`-authored commit that is real work, must both survive.
+    #[test]
+    fn only_hadron_authored_before_commits_are_snapshots() {
+        assert!(!Chamber::is_swarm_snapshot(&authored(
+            "Alice",
+            "before we ship, fix this"
+        )));
+        assert!(!Chamber::is_swarm_snapshot(&authored(
+            "hadron",
+            "feat(chamber): real work"
+        )));
+        assert!(!Chamber::is_swarm_snapshot(&crate::vcs::GraphRow::default()));
+    }
+
+    fn connector(lanes: Vec<crate::vcs::LaneSeg>) -> crate::vcs::GraphRow {
+        crate::vcs::GraphRow {
+            lanes,
+            ..Default::default()
+        }
+    }
+
+    fn commit(hash: &str) -> crate::vcs::GraphRow {
+        crate::vcs::GraphRow {
+            hash: Some(hash.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A run of orphaned connector rows (left behind when snapshot commits are hidden)
+    /// collapses to one strip, so a merge draws one curve instead of a ladder of them.
+    #[test]
+    fn collapse_connectors_folds_a_run_into_one_strip() {
+        let seg = crate::vcs::LaneSeg {
+            from_col: 1,
+            to_col: 0,
+        };
+        let trunk = crate::vcs::LaneSeg {
+            from_col: 0,
+            to_col: 0,
+        };
+        let rows = vec![
+            commit("aaa1111"),
+            connector(vec![trunk.clone(), seg.clone()]),
+            connector(vec![trunk.clone(), seg.clone()]),
+            connector(vec![trunk.clone()]),
+            commit("bbb2222"),
+        ];
+        let out = Chamber::collapse_connectors(rows);
+        assert_eq!(out.len(), 3, "one strip between the two commits");
+        assert_eq!(out[1].lanes, vec![trunk, seg]);
+    }
+
+    /// Commit rows are never merged, and a trailing run still renders.
+    #[test]
+    fn collapse_connectors_keeps_commits_and_a_trailing_run() {
+        let trunk = crate::vcs::LaneSeg {
+            from_col: 0,
+            to_col: 0,
+        };
+        let rows = vec![
+            commit("aaa1111"),
+            commit("bbb2222"),
+            connector(vec![trunk.clone()]),
+            connector(vec![trunk.clone()]),
+        ];
+        let out = Chamber::collapse_connectors(rows);
+        assert_eq!(out.len(), 3);
+        assert!(out[2].hash.is_none());
+    }
+
+    #[test]
+    fn lane_color_index_uses_subbranch_color_for_diagonal_connectors() {
+        use crate::vcs::LaneSeg;
+        // Main trunk (col 0) -> green (0)
+        assert_eq!(
+            Chamber::lane_color_index(&LaneSeg {
+                from_col: 0,
+                to_col: 0
+            }),
+            0
+        );
+        // Branch 1 trunk (col 1) -> blue (1)
+        assert_eq!(
+            Chamber::lane_color_index(&LaneSeg {
+                from_col: 1,
+                to_col: 1
+            }),
+            1
+        );
+        // Merge connector (main col 0 -> branch col 1) -> blue (1)
+        assert_eq!(
+            Chamber::lane_color_index(&LaneSeg {
+                from_col: 0,
+                to_col: 1
+            }),
+            1
+        );
+        // Creation connector (branch col 1 -> main col 0) -> blue (1)
+        assert_eq!(
+            Chamber::lane_color_index(&LaneSeg {
+                from_col: 1,
+                to_col: 0
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn render_rail_continuation_canvas_constructs_element() {
+        use crate::vcs::LaneSeg;
+        let row = crate::vcs::GraphRow {
+            lanes: vec![
+                LaneSeg {
+                    from_col: 0,
+                    to_col: 0,
+                },
+                LaneSeg {
+                    from_col: 1,
+                    to_col: 1,
+                },
+            ],
+            ..Default::default()
+        };
+        // Verify continuation canvas helper constructs without panicking for multiple lanes
+        let _elem = Chamber::render_rail_continuation_canvas(&row, 2);
+    }
+
+    #[test]
+    fn render_rail_canvas_constructs_element() {
+        use crate::vcs::LaneSeg;
+        let row = crate::vcs::GraphRow {
+            lanes: vec![
+                LaneSeg {
+                    from_col: 0,
+                    to_col: 0,
+                },
+                LaneSeg {
+                    from_col: 1,
+                    to_col: 1,
+                },
+            ],
+            node_col: Some(0),
+            ..Default::default()
+        };
+        let _elem = Chamber::render_rail_canvas(&row, 2, 24.0);
+    }
+
+    #[test]
+    fn select_commit_populates_message_and_diff() {
+        let root = crate::vcs::repo_root_of(std::path::Path::new("."));
+        let msg = crate::vcs::commit_message(root, "HEAD");
+        let diff = crate::vcs::commit_diff(root, "HEAD");
+        assert!(msg.is_some());
+        assert!(!msg.unwrap().is_empty());
+        assert!(diff.is_some());
+    }
+}

@@ -1,0 +1,3396 @@
+use super::*;
+
+/// One entry in the in-app Changelog overlay, newest first.
+///
+/// `date: None` is the *only* way to say "unreleased" — the version and the badge
+/// used to be two independent arguments, and 0.1.4 shipped to users still wearing
+/// the "Unreleased" badge because the release bumped one and not the other.
+struct Release {
+    version: &'static str,
+    /// `None` renders the "Unreleased" badge; `Some` renders the release date.
+    date: Option<&'static str>,
+    added: &'static [&'static str],
+    changed: &'static [&'static str],
+    fixed: &'static [&'static str],
+}
+
+/// A hand-written summary of `docs/CHANGELOG.md` — shorter lines, same releases.
+/// `tests::the_top_overlay_release_matches_the_changelog_and_the_shipped_version`
+/// fails the gate when the newest entry here drifts from the changelog or from
+/// the version this binary was built at.
+const RELEASES: &[Release] = &[
+    Release {
+        version: "0.33.55",
+        date: Some("2026-11-25"),
+        added: &[
+            "Affected-Crate Smart Gate & Live Merge-Gate Streaming (hadron-forge, hadron-lattice, hadron-gluon, hadron-chamber): Added zero-subprocess transitive workspace crate closure (resolve_affected_workspace_crates) in detect_affected_runner, streamed merge-gate test lines over RpcPushEvent::GateOutput with unified parse_cargo_test_line, and added the Mission > Gate live Test Explorer UI with filter pills, per-test Dispatch Fix, and Retry Gate",
+            "Headless Swarm MCP Bridge (hadron-gluon): Added hadron-gluon --mcp stdio MCP bridge exposing hadron_swarm_status, hadron_swarm_roster, hadron_swarm_dispatch, hadron_field_poll, and hadron_daemon_wake over bounded loopback .hadron/gluon.rpc",
+            "Rule 1 Liveness & Evidence-Claim Gate Advisories (hadron-gatekeeper, hadron-gluon): Added audit_diff_liveness and audit_evidence_claims wired as non-blocking merge-gate advisories",
+            "GitHub Issue & PR Review Dispatch Intake (hadron-chamber): Added off-thread gh issue/PR review detail fetchers and [Dispatch] / [Dispatch Fix] buttons in Git > Remote & Issues",
+            "Nucleus Lesson Usage Ledger & Upgraded DreamDaemon (hadron-lattice, hadron-forge-mcp, hadron-gluon, hadron-chamber): Added schema-v1 .hadron/nucleus/usage.json ledger wired into forge-mcp query_nucleus/read_file, upgraded DreamDaemon to audit orphans, dead links, duplicate slugs, and cold notes on an hourly idle hook, and enriched /dream reporting",
+        ],
+        changed: &[
+            "Dead-Code Pruning (hadron-gatekeeper, hadron-lattice): Pruned zero-caller record_mutation_run and HeadlessReplayer/BisectResult (replay.rs)",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.54",
+        date: Some("2026-11-25"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Loopback Enforcement & Bounded JSON-RPC Frame Deserialization (hadron-lattice, hadron-gluon, hadron-chamber): Enforced LoopbackRpcAddr and 4 KiB metadata / 16 MiB frame caps across .hadron/gluon.rpc, added #[serde(deny_unknown_fields)] and JSON-RPC 2.0 response-ID correlation in JsonRpcCodec::decode_response, and bounded socket reads via Read::take in rpc_client and RpcServer (remediating CodeQL #2)",
+        ],
+    },
+    Release {
+        version: "0.33.53",
+        date: Some("2026-11-13"),
+        added: &[
+            "Cross-Crate SSOT Helpers, Real /scout Search & 24h ACP Registry Refresh (hadron-lattice, hadron-gluon): Added split_model_effort_suffix, is_1m_context_model, Seat::accepts_effort, and delimiter-bounded cmdline_matches_quark_id in hadron-lattice and routed Chamber/Gluon callers onto them; wired real read-only workspace keyword search in /scout (skipping symlinks/binaries/.hadron/.git/target and >512 KiB files) and 24h background ACP registry refresh (fetch_and_cache_registry)",
+        ],
+        changed: &[
+            "Borderless Chat-Inspector Split, Off-Thread UI Polling, Native agy acp Config & Dead-Code Pruning (hadron-chamber, hadron-gluon, hadron-forge): Replaced h_resizable with a borderless floating-island flex split + invisible drag splitter, moved 3-way diff, plan DAG, nucleus graph, bridge checks, and seq-guarded ACP probes off the UI thread, updated native agy acp dynamic config_options refresh + Gemini 4 Hydrogen/Orchestrator fallbacks + WSL UNC translation, and pruned dap, replay.rs, unused Gluon/Chamber modules, and all baseline warnings",
+        ],
+        fixed: &[
+            "Real LSP Definitions, Real VCR Recording & Security Bounds (hadron-forge, hadron-forge-mcp): Wired symbol_definition to cached LspDaemon::discover_and_spawn + Tier-1 AST fallback, gated mock LSP to tests, enforced 32 MiB frame caps, resolve_jailed_path on ensure_open, percent-encoded file:// URIs, and kill_on_drop; wired real VCR target_url recording with 15s timeouts, CRLF rejection, [::1]:port IPv6 support, exact-first Replay matching, and jailed cassette names",
+            "ACP Bridge Boot, Config Error Logging, Per-Turn Spend Deduplication & Slash Commands (hadron-gluon, hadron-chamber): Captured ensure_bridge_ready() venv_py onto non-absolute ACP boot targets, warned on failed effort/mode SetSessionConfigOptionRequest without false set logs, deduplicated per-turn spend_timeline/fold_stats, dropped --no-run from /baseline, ran /nucleus lexical search off-thread, and wired /bakeoff tracked_quarks",
+        ],
+    },
+    Release {
+        version: "0.33.52",
+        date: Some("2026-11-12"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Capability-Gated Effort Selector & agy CLI Model-Encoded Effort (hadron-chamber, hadron-gluon, hadron-lattice): Reverted CliSpec::agy().effort_flag to None, suppressed conflicting --effort CLI flags on agy/Gemini CLI and effort-encoded models (*-low/*-medium/*-high/*-xhigh/*-max, gemini-pro-orchestrator), hid the standalone Effort selector in Settings and Quark Info via effort_options_for_seat, cleared stale effort overrides, and added gemini-4-carbon-* fallback models",
+        ],
+    },
+    Release {
+        version: "0.33.51",
+        date: Some("2026-11-12"),
+        added: &[
+            "Event Log Search & Kind Filters, Live /find Chat Filter, and Red-Gate Triage Cards (hadron-chamber): Added Event Log search (@actor, to:@target, text) with LogKindFilter pills and N / M match counter, live in-place /find (alias /search, Ctrl/Cmd+F, Esc) chat filtering without field writes, and red merge-gate triage cards (Inspect 3-Way Diff, Dispatch Fix, Retry Gate, Abandon)",
+            "Loopback daemon/subscribe Push RPC, Bake-Off Persistence, Build-Cache Binding & Minimized Gate Diagnostics (hadron-lattice, hadron-gluon, hadron-chamber): Added daemon/subscribe + RpcPushEvent push notifications waking FieldPoll within 100ms, BakeOffManager::save_active tournament persistence, BuildCacheMesh::record_worktree_binding, and TestFailureMinimizer + SynthesizedInvariant gate diagnostics",
+        ],
+        changed: &[
+            "Decoupled 256 KiB Pipe Prompt Budget, Ranked Nucleus Shedding, Argv Spillover & Native agy acp Preset (hadron-gluon, hadron-lattice): Added SAFE_PIPE_PROMPT_BYTES (256 KiB) for ACP/stdin CLIs, spilled oversized argv prompts to .hadron/prompts/<id>.md, re-ranked nucleus_index to 2 KiB before shedding, switched Antigravity ACP preset to native agy acp, and added --effort on CliSpec::agy()",
+        ],
+        fixed: &[
+            "agy --statusline Telemetry & Quota Persistence, 1M Claude 5.5 Context Gauge, and Native Windows Maximize/Restore (hadron-gluon, hadron-chamber): Wired --statusline shim and per-turn session --settings + HADRON_STATUSLINE_OUT capture/quota persistence for agy seats (stripping email/plan_tier PII), restored 1M context window sizing for agy and Claude 5.5 / Opus 4.6+ models, and routed Windows titlebar buttons through WindowControlArea::{Min, Max, Close} for native maximize/restore",
+        ],
+    },
+    Release {
+        version: "0.33.50",
+        date: Some("2026-11-06"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Distinct Colors for Inline Code, Quark Mentions, and File Mentions (hadron-chamber): Resolved @mentions render as pink pill badges, file links use amber theme::file_link(), and inline code/commands use purple theme::accent()",
+        ],
+    },
+    Release {
+        version: "0.33.49",
+        date: Some("2026-11-06"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Accent-Colored Quark @mentions Distinct from File Links (hadron-chamber): Resolved @human, @quark, and @alias mentions in push_mention_link now render as bold inline code (**`@name`**) instead of hadron://mention/ links, and markdown_style's inline_code highlight uses theme::accent() on bg_elevated so quark mentions use the active accent color while file mentions stay blue file:// links",
+        ],
+    },
+    Release {
+        version: "0.33.48",
+        date: Some("2026-11-06"),
+        added: &[
+            "Live Worktree Diffs & Refresh (hadron-chamber): vcs::branch_diff includes uncommitted and untracked worktree changes, the selected worktree diff is polled in the background WorkspaceScan::gather, and Git > Worktrees gains a Refresh button",
+        ],
+        changed: &[
+            "Shared Orchestrator Badge & Configured Nucleus Budget (hadron-chamber, hadron-forge, hadron-lattice, hadron-gluon): widgets::orchestrator_badge is shared by the Roster and Processes overlay, and the configured nucleus_index_budget_kb from .hadron/team.json is resolved in the nucleus linters, doctor_body, and quark prompts/skills",
+        ],
+        fixed: &[
+            "/command & @mention Coloring on Upstream gpui-component (hadron-chamber): Resolved @human, @quark, and @alias mentions now render as bold hadron://mention/ links and bare /commands as bold amber inline code (code spans and paths like src/app.rs or /home/user untouched), markdown_style's inline_code highlight is theme::file_link() on bg_elevated, and handle_chat_link_click ignores hadron:// URLs",
+        ],
+    },
+    Release {
+        version: "0.33.47",
+        date: Some("2026-11-06"),
+        added: &[
+            "In-Memory Noto Color Emoji 'm' Charmap Probe Guard (hadron-chamber): Added fonts::noto_color_emoji_with_m_guard, which patches the embedded Noto Color Emoji Format 12 cmap in memory (U+006D -> glyph 1) so upstream gpui_wgpu's 'm' probe no longer purges the emoji face from fontdb, and wired fonts::default_fallbacks() onto the root Chamber and Project Selector views",
+        ],
+        changed: &[
+            "Upstream TextView::on_link_click & Removal of gpui / gpui-component Fork Patches (hadron-chamber, deps): Replaced the forked set_link_handler with upstream TextView::on_link_click via app::handle_chat_link_click across chat and log views (file:// URLs resolve against the active workspace and open in the configured editor), and removed the s0lda/zed and s0lda/gpui-component [patch] overrides from Cargo.toml and Cargo.lock",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.46",
+        date: Some("2026-11-05"),
+        added: &[
+            "User-Adjustable Test & Build CPU Controls (hadron-lattice, hadron-forge, hadron-gluon, hadron-chamber): Added test_low_priority (default true) and test_max_threads (default Auto/uncapped) to Team, lowered OS scheduling priority (nice +10 on Unix/WSL, BELOW_NORMAL_PRIORITY_CLASS on Windows) in merge::run_tests_within and hadron_forge::exec::run_bounded, injected CARGO_BUILD_JOBS, RUST_TEST_THREADS, and RAYON_NUM_THREADS in worktree::shared_build_env, and added the Test & Build CPU Control card in Settings > Executions with priority toggle, thread cap pills (Auto, 1, 2, 4, 8, 16), and max concurrent merge gates pills (1, 2, 4, 8, 16)",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.45",
+        date: Some("2026-11-05"),
+        added: &[
+            "Segmented Processes Modal (LiveProcess vs StandbyQuark), Runner Backing Badges & /proc Worktree Attribution: Added enrich_cmdline_with_worktree_and_env in hadron-lattice::sys::inspect to tag processes via /proc/<pid>/cwd and HADRON_WSL_TAG and seed WSL worktree roots in collect_process_tree; added ProcessSection and quark_backing_badge in hadron-chamber::model and partitioned process_overlay into LIVE OS PROCESSES and STANDBY QUARK SEATS sections with truthful runner backing badges",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.44",
+        date: Some("2026-11-05"),
+        added: &[
+            "Hadron Process Manager (#processes Modal Upgrade), Live Process Tree Telemetry & Windows Binary Metadata: Added ProcessInfo, format_rss, and collect_process_tree in hadron-lattice::sys::inspect, PtyTerminal::process_id() in pty.rs, and ProcessKind + build_full_process_rows in hadron-chamber::model; polled gluon_pid and process trees in FieldPoll::gather and upgraded process_overlay to display Chamber, Gluon, Quark, Terminal, and Subprocess rows with live PID/PPID/RSS badges and Start/Stop/Restart/Focus/Kill/Refresh controls; set Hadron window title and per-binary Windows VERSIONINFO descriptions",
+        ],
+        changed: &[],
+        fixed: &[
+            "CLI Session Rotation (CliQuark::reset_session), WSL Child-Tree Reaping (HADRON_WSL_TAG), Error-Grace Watchdog & Worktree Branch Realignment: Implemented Quark::reset_session on CliQuark so /clear, /reboot, and 70%/150k context rotation reset --continue sessions, tagged WSL CLI processes with HADRON_WSL_TAG via WSLENV and reaped Linux /proc trees on turn abort, raised ERROR_GRACE_DEADLINE to 180s, realigned wt.branch to HEAD in commit_turn_with_author when a quark switches branches, and bounded multi-word @file mentions and WSL UNC file:// URLs",
+        ],
+    },
+    Release {
+        version: "0.33.43",
+        date: Some("2026-11-04"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Zero-Flicker Optimistic Chat Pipeline (FieldWriteQueue), Atomic /clear & UI-Thread Decoupling: Seeded Chamber::new with initial events on WSL, added FIFO FieldWriteQueue with monotonic epoch tracking and atomic io::replace_events so background polls never flash stale messages during message submit or /clear, moved /clear archive and /reset-energy SQLite deletes off the UI thread, and cached 3-way diff hunks, note previews, schedule registries, and skill directory walks",
+            "Surgical Span-Aware ContextGovernor::govern_message & Antigravity <SYSTEM_MESSAGE> Filtering: Added ContextGovernor::govern_message and _strip_system_messages in agy_acp.py to strip <SYSTEM_MESSAGE> background-task wakeup dumps, trim redundant trailing Done stubs, and compact contiguous >25-line compiler/test/terminal dump spans in-place while preserving /commands, Markdown prose, and structured reports verbatim",
+        ],
+    },
+    Release {
+        version: "0.33.42",
+        date: Some("2026-11-04"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Decoupled UI Render Thread, WSL Startup Unfreeze & NUX Badge Stacking: Moved git_ready (is_git_repo + has_commits) and overdue_schedule_jobs (ScheduleRegistry::load) off the GPUI render thread into background WorkspaceScan::gather so every keystroke reads strictly in-memory state, removed synchronous UI-thread RepoMonitor::check_repo and backgrounded compute_nucleus_graph_fingerprint while gating visualizer warming to RightRailTab::Visualizer, and stacked #nux-orchestrator-model-badge and #nux-add-more-quarks-btn beneath the 2. Swarm Seated label",
+        ],
+    },
+    Release {
+        version: "0.33.41",
+        date: Some("2026-11-04"),
+        added: &[
+            "Interactive GPUI NUX Onboarding & Readiness Card: Replaced the empty chat hint with a 3-step onboarding card featuring a 1-click Initialize Git Repository guard, a clickable @orchestrator provider/model badge, 1-click Auto-Detect Agents & Keys, and quick-start mission pills",
+            "Zero-Config CLI Initialization (hadron init) & First-Quark Orchestrator SSOT: Added hadron init / --init and discover_default_seats to initialize Git + .gitignore + root commit and auto-discover installed CLI agents and API keys with the first Quark promoted to Flavor::Orchestrator",
+            "0-Seat Gluon Standby Mode: Removed fatal exit(2) on empty team.json in hadron-gluon so fresh installs stay alive in standby mode and live-reconcile as soon as Quarks are seated",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.40",
+        date: Some("2026-11-04"),
+        added: &[
+            "3D Knowledge Sphere Nucleus Graph, Resizable Bottom Panels & Colored Prompt Anatomy Tooltip: Upgraded Visualizer > Nucleus Graph with a deterministic dual-shell 3D Fibonacci Knowledge Sphere (compute_nucleus_sphere_layout), v_resizable bottom note chip dock and expandable file preview, SSOT prompt_anatomy_colors with colored-dot Tooltip::element breakdown, and sharp Swarm 3D bottom card borders",
+            "Single-Lane Instant Interrupt-and-Resume Job Queue: Collapsed orchestrator seating onto Lane::Work, added Engine::wake_notifier (<1ms interrupt wake via daemon/wake RPC), wired CancelSlot on CliQuark and LocalQuark, and added worktree::ensure_with_base_and_carry to carry forward uncommitted WIP",
+        ],
+        changed: &[
+            "Unified Quark Control Commands: Retired /steer and /cancel slash commands and unified /reboot, /stop, and /kill",
+        ],
+        fixed: &[
+            "Universal Multi-Step Turn Message Deduplication & Multi-Commit Plan Merge Detection: Added append_message_chunk_with_step_break and deduplicate_turn_message across ACP, CLI, and Local Quarks, and updated vcs::is_commit_merged to verify multi-commit plan step annotations against main",
+        ],
+    },
+    Release {
+        version: "0.33.39",
+        date: Some("2026-11-03"),
+        added: &[
+            "Inline Circle-Graph Prompt Anatomy HUD & Live Prompt-Cost Polling: Replaced full-width Prompt Budget & Anatomy bar with a right-aligned inline pill and proportional circle/donut graph alongside #chat-capsule-tabs, scaled arc segments by actual byte usage (prompt_anatomy_fractions), added prompt_cost::load_latest with latest quark marker and mtime fallback, polled it in FieldPoll::gather for live Chamber updates, and measured fitted projections in CliQuark::excite",
+        ],
+        changed: &[],
+        fixed: &[
+            "Prompt-Cost Marker Error Propagation: Propagated prompt-cost marker errors in hadron-lattice to satisfy RedTeamAuditor",
+        ],
+    },
+    Release {
+        version: "0.33.38",
+        date: Some("2026-11-03"),
+        added: &[
+            "Live Mission Plan Refresh, Interactive DAG Dispatch & Remote Branches View: Polled workspace plan content and branch fingerprint while RightRailTab::Mission is open with manual and tab-switch refresh, added interactive DAG wave/task dispatch and prompt anatomy HUD, and added remote branch listing with All/Local/Remote filter pills and a Fetch button in Git > Branches",
+            "Shared Inter-Quark Clipboard, /clip Command & LoopWatchdog: Added hadron_lattice::clipboard (.hadron/clipboard.json) with hadron_forge_clip_put/get/list MCP tools and the /clip slash command (list, put, get, clear), plus hadron_gluon::watchdog::LoopWatchdog in LocalQuark and CliQuark streaming loops",
+            "Session Index Caching, Async /clear Decoupling & Direct Conversational Routing: Cached archived session indices in FieldModel, decoupled /clear UI reset from background worktree cleanup, and suppressed @orchestrator tags on direct casual human turns via Projection::from_human_directly",
+        ],
+        changed: &[
+            "Prompt Budget Shedding Priority: Reordered fit_prompt_to_budget so excess invariants and nucleus_digest are trimmed before shedding nucleus_index or recent field_window events",
+        ],
+        fixed: &[
+            "ContextGovernor Chat Truncation, TransportScrubber False Positives & Parallel Test Races: Removed compact_tool_output from field::append_event/append_events and scoped it strictly to raw tool dumps in SlidingContextPruner, required word boundaries and token length in TransportScrubber::mask_prefix_pattern so hyphenated terms like Task-DAG are preserved, cleared negative merge cache entries on ref updates, and eliminated parallel test races in theme.rs and rpc_client.rs",
+        ],
+    },
+    Release {
+        version: "0.33.37",
+        date: Some("2026-11-02"),
+        added: &[
+            "Skill × Mode Pairing, Multi-Quark Skill Resolution & Interactive Block Recovery: Added min_mode to built-in and custom skills with per-target multi-quark segment matching, split consecutive @quark /skill lines in composer input, and rendered inline Mode-Switch and Quark-Reassign action buttons on Gluon skill block notices",
+            "Config Schema Versioning & Nucleus Graph Refresh: Added CHAMBER_SCHEMA_VERSION=1 on ChamberPrefs and bumped TEAM_SCHEMA_VERSION=2 on Team with automatic migration, plus an interactive Refresh button in the Nucleus Graph HUD",
+        ],
+        changed: &[
+            "Legacy Roles Removal: Stripped deprecated roles, exclusive, role_body, and preferred_role fields and routing helpers across hadron-lattice, hadron-gluon, and hadron-chamber",
+        ],
+        fixed: &[
+            "Nucleus Orphan/Dead-Link Alignment, Live Disk Auto-Refresh & Blocked-Branch Routing: Unified orphan and dead-link detection across Git > Remote & Issues and Visualiser > Nucleus Graph with automatic refresh on .hadron/nucleus/ disk edits, and fixed CancelSlot WIP loops, park_blocked PermissionGrant recovery, and blocked-branch follow-up excitation",
+        ],
+    },
+    Release {
+        version: "0.33.36",
+        date: Some("2026-11-02"),
+        added: &[
+            "Nucleus Graph Inline Header Health Badges & Auto-Retry Worktree Turns: Surfaced inline Orphans, Dead Links, and Healthy status badges in the Nucleus Graph header row alongside mode tabs, and added automatic turn checkpointing and retry (up to MAX_TURN_AUTO_RETRIES=2) on transient stream/silence failures",
+        ],
+        changed: &[
+            "Pre-Provisioning Excitation, Batched Event Writes & Non-Blocking Slash Commands: Populated live activity immediately before worktree provisioning, batched Assign/Excited/Blocked and /clear seed event appends via io::append_events, cached custom skill IDs off the UI thread, and offloaded heavy slash commands and /clear worktree resets to the GPUI background executor",
+        ],
+        fixed: &[
+            "CLI Stream Error Deadlocks & 90s Silence Aborts: Killed child process groups immediately on 3 consecutive CLI error steps so ProcessRunner::run_streaming never hangs on stderr EOF, refreshed live activity timestamps on error retries, emitted 30s background heartbeats during active streaming turns, and refreshed git_diff across CliQuark::excite retries",
+        ],
+    },
+    Release {
+        version: "0.33.35",
+        date: Some("2026-11-01"),
+        added: &[],
+        changed: &[
+            "Visualizer Header HUD Right-Alignment & 2400% Nucleus Graph Max Zoom: Aligned Swarm 3D status info with header tabs using space-between, right-aligned wrapped HUD control rows across Swarm 3D and Nucleus Graph, and raised NUCLEUS_ZOOM_MAX from 8.0 (800%) to 24.0 (2400%)",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.34",
+        date: Some("2026-11-01"),
+        added: &[
+            "Persistent Disk Caching & Startup Revalidation for Dependencies and Nucleus Graph: Added VisualizerGraphsDiskCache (.hadron/cache/visualizer_graphs.json) with FNV-1a metadata fingerprinting, wired Chamber::warm_visualizer_graphs at startup and on workspace/nucleus scans to hydrate cached graphs immediately and rebuild only stale graphs in the background, persisted Nucleus Graph remediation updates, and added a Checking changes badge during background revalidation",
+        ],
+        changed: &[
+            "Stats Tab Cleanup: Removed the redundant Milestone Timeline stepper card from Chamber::stats_view",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.33",
+        date: Some("2026-11-01"),
+        added: &[
+            "Nucleus Graph Zoom/Pan Navigation, Active Filter Canvas Sync & Unified Orphan Note Banner: Added cursor-anchored mouse wheel zoom (0.5x–8.0x), header zoom controls (-, %, +, Reset), left-drag canvas panning, a top-right node hover/selection HUD pill, and 55px spring rest length; filtered 2D canvas nodes and edges by active filter pill (All / Orphans / Dead Links); and moved Orphan Note remediation actions (+ Add to Index, Delete Orphan) into a unified banner above the file preview",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.32",
+        date: Some("2026-11-01"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Antigravity (agy) 1M Context Window, WSL UNC Transcript Resolution & 90s Error Grace: Raised ERROR_GRACE_DEADLINE in until_silent from 30s to 90s so single agy EOF stream retries recover on attempt 2, resolved WSL UNC user homes from work_dir when reading transcript.jsonl, extracted end-of-turn PLANNER_RESPONSE window occupancy in agy_acp.py, and defaulted CLI and ACP Gemini/agy context windows to 1_048_576 (1M tokens)",
+            "Visualizer Dependencies & Nucleus Graph Layout, plus Gitignored @-File Autocompletion: Seeded Nucleus Graph nodes on a golden-angle spiral with independent X/Y scaling, aligned Dependencies Bezier curves and crate cards via normalized coordinates while filtering topology scans strictly to workspace members, and added gitignored @-file autocompletion with leading ./ normalization and muted italic styling",
+        ],
+    },
+    Release {
+        version: "0.33.31",
+        date: Some("2026-11-01"),
+        added: &[
+            "Nucleus Graph Orphan & Dead-Link Curation Actions, Dependencies Mode & Process/Settings Polish: Renamed Crates & Modules to Dependencies with background graph builds, floating crate inspector overlay, and Nucleus Graph centering gravity; added Dead Links filter and one-click orphan/broken-link remediation (+ Add to Index, Delete Orphan, Unlink, + Create Stub); and polished Settings Roster (ACTIVE/CATALOGUE split) and Process Manager / PTY headers",
+        ],
+        changed: &[],
+        fixed: &[
+            "Mid-Turn Transient Stream Error Recovery & False 900s Silence Kill Prevention: Cleared sticky error status in StreamAccumulator on DONE thinking retry steps, reset last_sign when entering the 30s error grace window in until_silent and restored the full deadline on recovery, and treated 'The stream was interrupted' as retryable",
+            "Bare Code Fence Language Fallback & InvariantLinter Hygiene: Defaulted unrecognized bare code fences in infer_code_language to plain text instead of Rust and removed unused cache fields and #[allow(dead_code)] attributes",
+        ],
+    },
+    Release {
+        version: "0.33.30",
+        date: Some("2026-11-01"),
+        added: &[
+            "3-Mode Inspector Visualizer (Swarm 3D | Crates & Modules | Nucleus Graph): Upgraded the Visualizer tab with a 3-mode switcher, adding an interactive layered Crates & Modules dependency canvas with live git blast-radius and intra-crate module drill-down, plus a Lavapipe-cached Nucleus Graph 2D node-link canvas and note inspector",
+            "Workspace Topology Graph Scanner & Crate Layers: Added workspace topology graph scanner, crate layer mapper, nucleus graph hook enrichment, and MCP topology tool integration",
+        ],
+        changed: &[],
+        fixed: &[
+            "Transient CLI Error Retries & Session Reset on Error: Added transient network error detection and exponential retry backoff in CliQuark::excite, resetting resident session state on error so retries start fresh without stale session history",
+            "Quark Error Fast-Abort & Fast Error Liveness Deadline: Added fast abort streaming callback in CliRunner / CliQuark to interrupt long-running CLI streams on step errors, and enforced a fast <=30s liveness deadline in until_silent when activity detail reports an error",
+        ],
+    },
+    Release {
+        version: "0.33.29",
+        date: Some("2026-10-31"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Windows Host CLI & Credential Manager Default on WSL UNC Workspaces: Restored decide_wsl_vs_host fallback in should_run_in_wsl so Windows host CLIs work without duplicate WSL installs, gated probe_wsl_gluon_binary behind HADRON_WSL_GLUON=1 so Windows hadron.exe defaults to its sibling hadron-gluon.exe and Windows Credential Manager, and kept existing Windows host ACP bridges on the host",
+            "Merge Gate Test-Runner I/O Error Handling, Superseded-Branch Loop Guard & Daemon Exit Termination: Converted missing test-runner spawn errors into red gates in run_tests_within, caught superseded-branch merge_gate errors in run_until_quiesce to prevent infinite gate loops, prepended ~/.cargo/bin and ~/.local/bin in IsolatedSandbox::scrub_environment, and hardened Close Gluon on Exit across Windows and WSL",
+        ],
+    },
+    Release {
+        version: "0.33.28",
+        date: Some("2026-10-31"),
+        added: &[
+            "Daemon-First JSON-RPC IPC Server & <1ms Chamber Wakeups: Added RpcServer::bind_and_serve on 127.0.0.1:0 with .hadron/gluon.rpc discovery, daemon/wake, field/poll, engine/status, and swarm/turn/dispatch handlers, wired rpc_client::notify_daemon_wake on message/command submit, and added live Daemon IPC & WSL Bridge status in Settings > Environment",
+            "WSL-Native hadron-gluon Daemon Bridge & Cross-Boundary Spawning: Added probe_wsl_gluon_binary, build_wsl_gluon_command, spawn_gluon_for_field, and terminate_gluon_in_dir so WSL UNC workspaces run an in-distro Linux hadron-gluon daemon on native ext4/inotify when installed with automatic host fallback",
+            "Unified Adapter Stream Telemetry Sink & ACP Vendor Preference: Added AdapterStreamEvent and TurnTelemetrySink across ACP, CLI, and Local adapters plus vendor_prefers_acp in the adapter registry",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.27",
+        date: Some("2026-10-31"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Live Quark Action Single-Line Clamping & Turn Timer Stabilization: Collapsed newlines and capped length in trim_title, humanize_activity_detail, and ACP live updates so multiline tool output never stretches Roster or Chat Live Quark Action rows vertically, anchored elapsed_secs to active_task.asked_at with 1Hz ticks, and added effort-qualified gemini-3.8-flash fallback variants",
+            "Worktree Provisioning Latency, Single-Invocation Atomic Snapshots & Binary-Search Prompt Fitting: Added single-shell create_atomic_sh snapshots with pinned git author fallback, added filesystem fast-paths in default_branch and current_branch, moved solo provision_one to spawn_blocking, binary-searched field_window in fit_prompt_to_budget, and cached sccache/mold probes in OnceLock",
+        ],
+    },
+    Release {
+        version: "0.33.26",
+        date: Some("2026-10-30"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "WSL UNC Tool & ACP Bridge Resolution and cli-agy Authentication Fix: Added fast-path WSL UNC binary discovery in resolve_wsl_program_path, stopped caching transient None/false lookups in should_run_in_wsl and is_wsl_bwrap_available, routed bare POSIX tools (agy, claude, codex, git) and in-distro .hadron/bridges/ targets through wsl.exe so Windows host agy.exe never triggers an OAuth browser timeout on WSL repos, and ran probe_cli_models in std::env::temp_dir()",
+            "Plan List Date-Prefix Sort Alignment: Updated newest_plan_from_list_with_mtime to sort plan files by leading YYYY-MM-DD- date prefix before falling back to modification time",
+            "Release CI macOS Runner Migration: Migrated x86_64-apple-darwin and aarch64-apple-darwin release build jobs from retired macos-14 runner images to macos-15",
+        ],
+    },
+    Release {
+        version: "0.33.25",
+        date: Some("2026-10-30"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Slash Command Routing, @<display_name> Resolution, and /team Roster & Broadcast: Wired /team to display the active roster or broadcast @team <prompt>, changed /nucleus, /radar, and /intercom to Arity::Line, resolved @<display_name> across /spend, /diff, /retry, /approve, /deny, /limit, and /cancel, and added Gluon chat feedback across slash commands",
+            "Windows Binary Self-Update Hardening: Deferred .old* cleanup in install.ps1 until after new binaries are installed, added curl retry/timeout and install.log diagnostics in update.rs, and waited for hadron-gluon exit before relaunching on Windows",
+        ],
+    },
+    Release {
+        version: "0.33.24",
+        date: Some("2026-10-30"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "WSL Host Bridge Execution, Resident Context Cap & Transient Rate-Limit Recovery: Prevented Windows-host bridge executables from being wrapped in wsl.exe on WSL UNC workspaces, capped resident context at 150k tokens with delta prompt stripping on resumed ACP turns, and added automatic session rotation and retry on transient 429 TPM rate limits",
+            "Worktree Session Reset on /clear & Superseded Branch Gating Guards: Detached quark worktrees at base and archived pre-clear or errored WIP branches so /clear and failed turns never trigger stale superseded-branch merge gates",
+            "Vendor-Aware Effort Selector Gating: Added CliSpec::effort_flag and Seat::supports_effort so seats without standalone effort flags (cli-agy, acp-agy, Http, Sdk) omit the Effort selector in Settings and Quark Info",
+            "PTY Reader Thread Cleanup Verification & Merge Gate Output Tail Reservation: Scoped PTY cleanup thread counting to hadron-pty-read with a 2s readiness poll and reserved half of merge gate TAIL_BYTES for stdout so verbose stderr never evicts cargo test failure summaries",
+        ],
+    },
+    Release {
+        version: "0.33.23",
+        date: Some("2026-10-29"),
+        added: &[
+            "Gluon Daemon Restart Controls: Added Restart and Start daemon controls to the Process Manager overlay and the Gluon stopped toast banner",
+        ],
+        changed: &[],
+        fixed: &[
+            "Host PID Liveness Priority on WSL UNC Workspaces: Checked local host PID liveness before WSL /proc/<pid>/comm in is_process_alive_named_in_dir so Windows-spawned hadron-gluon.exe PIDs are recognized on WSL UNC workspaces",
+            "Markdown Documentation Exemption in RedTeamAuditor Code Rules: Skipped Rust code-pattern rules on .md documentation files while preserving secret scanning",
+        ],
+    },
+    Release {
+        version: "0.33.22",
+        date: Some("2026-10-29"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "WSL UNC Path Resolution, Shared .hadron Worktree Routing & ACP WSLENV Forwarding: Resolved WSL UNC paths across worktree cleanup, forge/MCP shared .hadron buses, plans, ledgers, liveness, themes, and skills, and forwarded WSLENV to ACP sessions",
+            "Portable Test Fixtures & RedTeamAuditor Hygiene: Replaced hardcoded developer paths across workspace tests with portable fixtures, propagated remove_file errors in delete_custom_theme, and used Path::parent in mermaid tests",
+        ],
+    },
+    Release {
+        version: "0.33.21",
+        date: Some("2026-10-29"),
+        added: &[
+            "Multi-Turn Token Efficiency, Resident Delta Prompts & Cache Telemetry: Moved static response rules into build_cache_stable_prefix, stripped cached static prefix on resumed CLI turns, split LocalQuark prompt into system/user messages with cache_read/cache_write spend accounting, wired SlidingContextPruner and prompt_cost::save across CLI/HTTP adapters, and extracted cache_read_input_tokens in parse_agy_statusline",
+            "Frozen v1 On-Disk Schemas & Automatic v0-to-v1 Migration: Froze schema v1 for field.jsonl, team.json, schedules.json, and ~/.hadron/themes/*.json with seamless v0 migration and forward-version guards",
+        ],
+        changed: &[
+            "Refined README.md Tagline & 6-Pillar Key Superpowers: Updated header tagline and streamlined Key Superpowers into 6 problem-first pillars including Token-Efficient Swarm Economics",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.20",
+        date: Some("2026-10-28"),
+        added: &[],
+        changed: &[
+            "Retire Redundant Swarm Focus HUD from Chat Pane: Removed the attention_hud header strip from Chamber::chat_pane and deleted attention_hud.rs and model/attention.rs so retired UI cannot be re-wired by dead-code audits",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.19",
+        date: Some("2026-10-28"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Line-Atomic field.jsonl Event Appends & Concatenated Line Recovery: Replaced two-syscall writeln! with a single locked write_all in io::append_event and added a stream deserializer fallback in io::read_new to recover concatenated JSON events on the same line",
+            "Preamble Context Folding into Prompt-Dispatching Slash Commands: Folded preamble text (such as fenced quotes above /team-debate, /debate, /team-brainstorm, /brainstorm, or /goal) into the command argument so context and prompt dispatch together in one unified message",
+        ],
+    },
+    Release {
+        version: "0.33.18",
+        date: Some("2026-10-28"),
+        added: &[
+            "Composer Preview Auto-Scroll & Universal Code Synaptics: Wired deferred auto-scroll on composer preview and tokenized multi-language syntax highlighting across Markdown code blocks, Git diffs, 3-Way Diff, and Time Travel scrubber",
+            "File Tree Explorer CRUD & Context Menu Operations: Added + File / + Folder / Refresh toolbar buttons, inline create/rename modal, and context menu Copy, Cut, Paste, Duplicate, Delete, Copy Relative Path, and Copy @file Mention actions",
+            "Hadron Lab High-Scale Swarm Orchestration, Quark Duplication & Reserved Name Guards: Added Settings -> Hadron Lab scaling controls (turn/gate concurrency, speculative batching, docs fast-path), one-click Quark duplication, and reserved/unique Quark name enforcement",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.17",
+        date: Some("2026-10-28"),
+        added: &[
+            "Scheduled Tasks UI & Settings Management: Added Mission -> Swarm Tasks scheduled tasks list, Settings -> Schedules management view (Add, Edit Prompt, Run Now, Enable/Disable, Remove, MissedPolicy selector), and /schedule add|remove|settings commands",
+            "Security Warnings GitHub Alert Closing: Added gh api --method PATCH alert-closing instructions to Dispatch Fix / Dispatch Fix All, per-alert Close action in Git -> Remote & Issues, and automatic GitHub dismissal for locally remediated Cargo.lock alerts",
+            "Chamber Inspector & Daemon Wiring: Wired DagBarrierScheduler and Engine::serve daemon loop, 3-Way Diff per-hunk stage/reject steering, Time Travel and Artifacts Mission subtabs, 3D Visualizer Live Split-Canvas, and stacked active composer Markdown preview",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.33.16",
+        date: Some("2026-10-27"),
+        added: &[
+            "Batch Security Alerts Remediation (Dispatch Fix All): Added a header-level Dispatch Fix All action in Git -> Remote & Issues -> Security Warnings to pack all open CodeQL and Dependabot alerts into a single @orchestrator remediation turn",
+        ],
+        changed: &[],
+        fixed: &[
+            "Dependabot Alerts #2-#5 (rustls GHSA-h2v8-394m-p7vv, GHSA-c8m5-c952-6cm4, GHSA-w44r-93j7-qv28, GHSA-vp88-798v-h67f) Remediation: Bumped rustls from 0.23.45 to 0.23.46 in Cargo.lock and reconciled open Dependabot alerts against local Cargo.lock versions in vcs.rs",
+        ],
+    },
+    Release {
+        version: "0.33.15",
+        date: Some("2026-10-27"),
+        added: &[
+            "Parallel Swarm Self-Delegation (@self), Mid-Turn Live Dispatch & Concurrent Worktree Provisioning: Added @self and parallel @orchestrator self-delegation, immediate mid-turn worker dispatch on tool start, and concurrent spawn_blocking worktree provisioning",
+            "Recurring & One-Shot Schedules Engine, /schedule Commands & Watchdog/Git Settings: Added .hadron/schedules.toml persistence, 30s schedule ticker, /schedule commands, overdue schedule banners, and Watchdog/Git settings controls",
+            "Composer Markdown Preview, Mid-Sentence Word Suggestions & Wave DAG Scroll Isolation: Added live composer Markdown preview, mid-sentence word completions, and isolated scroll handling in the Mission Plan Wave DAG",
+        ],
+        changed: &[],
+        fixed: &[
+            "Merge-Gate Semaphore Serialization, AST Rebase Healing on Land & Bounded /learn Nudges: Queued concurrent merge gates via gate_semaphore to prevent .cargo-lock stampedes and timeout drift, wired AST rebase healing into merge::land, and bounded /learn nudges",
+        ],
+    },
+    Release {
+        version: "0.33.14",
+        date: Some("2026-10-26"),
+        added: &[
+            "Non-Blocking Async Merge Gate, @orchestrator Error Routing & Detach-on-Land: Offloaded slow merge-gate sync/tests onto a concurrent JoinSet, routed mentionless worker completions/errors to @orchestrator, and detached landed worktrees before branch pruning",
+            "GitHub Actions Workflow Runs & Security Warnings in Git -> Remote & Issues: Added GitHub Actions run status and CodeQL/Dependabot security alert lists with one-click Dispatch Fix actions and titlebar monitor prioritization",
+        ],
+        changed: &[],
+        fixed: &[
+            "Release-Build Readiness Gating for In-App Updates: Verified published GitHub Release platform binary archives via HEAD before showing vX.Y.Z Available and re-polled in background while GitHub Actions builds finish",
+            "Composer Tab/Right Action Capture, Context Window Occupancy & Full-Width Chat Rows: Captured IndentInline/MoveRight on the chat input wrapper for completions, fixed multi-step CLI/ACP context occupancy calculation, and expanded chat rows to full width",
+            "Unified Chronological Plan Selector, Inspector Overflow Guards & Verified Models: Interleaved single-file and suite plans newest-first with active-plan auto-selection, guarded narrow inspector rails, and updated verified model catalogs and demo.gif",
+        ],
+    },
+    Release {
+        version: "0.33.13",
+        date: Some("2026-10-25"),
+        added: &[
+            "Chained Slash Commands & Inline Ghost Completion: Expanded multiple same-line slash commands (/skill1 /skill2), matched mid-line /skill and /steer triggers, and added inline Tab/Right ghost-text completion in the composer",
+            "Liveness Heartbeat Watchdog, Worktree Checkpoints & 70% Context Rotation: Added 15m stall / 4h wall-clock watchdog enforcement, atomic worktree checkpointing before reaping stalled turns, post-turn 70% context rotation, and pre-turn Plan DAG step context injection",
+        ],
+        changed: &[],
+        fixed: &[
+            "Mission Plan Wave DAG Scroll & Cache Stability: Cached parsed Plan DAGs, landed commits, and checkbox progress in CachedPlanDag with persistent ScrollHandles, cross-axis max_h bounds on #dag-waves-row, and (commit <sha>) checkbox parsing",
+            "Repo-Root Custom Skill Discovery & @target Punctuation Stripping: Threaded repo_root into custom skill discovery (.hadron/skills/*.md) and stripped trailing punctuation (,.;:!?) from @target mentions in /steer and chat routing",
+            "ACP/CLI Per-Turn Spend Delta Accounting & 75% ACP Context Rotation: Fixed cumulative vs per-turn token accounting in agy_acp.py and CumulativeSpendTracker, rotated ACP sessions at 75% context fill, and populated CLI Usage.model/context/step telemetry",
+        ],
+    },
+    Release {
+        version: "0.33.12",
+        date: Some("2026-10-25"),
+        added: &[
+            "Customizable Web & File Link Accent Tokens: Added link (#38bdf8 default) and file_link (#e5c07b default) theme tokens across all built-in presets and the Settings Theme Editor, stripped inner backticks from Markdown link labels, and styled file:// links with file_link",
+        ],
+        changed: &[
+            "Chat Typography & Corner Radius Normalization: Applied 1.55 relative line height to chat markdown bodies and normalized pill/card corner radii (rounded_md) across chat, roster, settings, and widgets",
+        ],
+        fixed: &[
+            "Mission Plan Wave DAG Section-Scoped Step IDs: Namespaced Step N checkboxes under their enclosing Task M heading (task-M.N), deduplicated colliding task IDs, and preserved deterministic wave order in TaskGraph::compute_waves",
+            "WSL-Aware file:// Links, Historical Turn Diff Chips & Nucleus Lesson Count: Mapped Linux file:// paths to WSL UNC paths on Windows, wired in-chat commit/file diff chips to load historical commit diffs in Git -> Changes, and fixed WSL Nucleus lesson counts",
+            "Interleaved Swarm Task Completion & WSL Terminal Tab Titles: Matched concurrent turn requests to their specific answers completion event in swarm_tasks, unified duration formatting, and derived WSL/Windows terminal tab titles from the resolved shell",
+            "Transparent & Theme-Aware VTE Terminal Cell Backgrounds: Rendered pty::DEFAULT_BG terminal cells with transparent backgrounds over theme::term_bg() to eliminate dark inner margins and resolved default terminal colors across all theme presets",
+        ],
+    },
+    Release {
+        version: "0.33.11",
+        date: Some("2026-10-25"),
+        added: &[
+            "End-to-End Live Activity Fidelity: Streamed ToolCall chunks from agy_acp.py, preserved Activity.started timestamps across ACP/CLI turns, and replaced generic working... placeholders with active SwarmTask titles and humanized tool strings ($ cmd, read file, edit file)",
+            "Alphabetical Roster Badges & Turn Diff Chips: Added inline gating/+branch badges, phase-colored live activity rows, and context-window fill bars to alphabetically-sorted Roster cards, plus clickable commit (⊕ sha) and file diff (± file) chips in Chat turn cards",
+            "Consolidated Mission & Git Inspector Rails: Unified Plan & Waves, Swarm Tasks, and Nucleus Memory into RightRailTab::Mission and folded working-tree diffs into GitSubtab::Changes",
+            "3D Visualizer Dual-Shell Topology & Live Activity Dock: Added phase-colored 3D excitation halos, orbiting tool satellites, 1.0x seated vs 1.28x catalogue shells, and click-to-snap camera rotation (focus_angles_for_spherical)",
+        ],
+        changed: &[
+            "Pure-Neutral Achromatic Surfaces, Noto Sans Typography & Zero-Blue-Cast Telemetry Palette: Applied #0F0F0F..#2E2E2E neutral surface ladder, #EDEDED/#8E8E8E typography, Noto Sans default UI font, and desaturated telemetry accents (#62C073, #A87FFB, #C778DD, #E5C07B, #E06C75)",
+        ],
+        fixed: &[
+            "Event Log @human Resolution & Window Close Button: Resolved @human to configured human display name in Event Log and kept standard red (#ef4444) on theme::danger() window close button hover",
+        ],
+    },
+    Release {
+        version: "0.33.10",
+        date: Some("2026-10-24"),
+        added: &[],
+        changed: &[
+            "Quark Info Home Tab Consolidation: Merged Identity fields (Role, State, Adoption) and ACP Session Restart into InfoTab::Home and removed InfoTab::Identity so Model and Reasoning Effort selectors appear only once (in Config)",
+            "High-Contrast Telemetry Accent & Typography Palette: Applied #e6edf3 primary text, #8a93a6 secondary text, and telemetry semantic accents (#62c073, #9d7cd8, #38bdf8, #e5c07b, #e06c75) across config.rs and theme.rs while preserving #050505/#0b0b0b obsidian surfaces",
+        ],
+        fixed: &[
+            "Event Log Per-Quark @mention Coloring: Rendered Event Log metadata cells (@from, -> @to, time, kind) with TextView::html instead of TextView::markdown so @mention tokens inherit their per-quark author_color and to_color instead of markdown.rs's pink-400 override",
+            "Remote Archive Tag Push Guard: Added validate_push_args in hadron-gluon::snapshot::git_with_env to block bulk tag pushes (--tags, --follow-tags, --mirror) and internal archive/* or non-release tag pushes",
+        ],
+    },
+    Release {
+        version: "0.33.9",
+        date: Some("2026-10-24"),
+        added: &[
+            "Quark Info Live Model & Reasoning Effort Selectors: Replaced static Model and Effort rows in the Roster > Quark > Info overlay with searchable Select dropdowns backed by background ACP/CLI/HTTP probes and curated vendor fallback models, persisting changes directly via update_seat_config",
+        ],
+        changed: &[],
+        fixed: &[
+            "Shared .hadron Sandbox Binds, CLI Turn Reaping & Render-Thread I/O Elimination: Bound <repo_root>/.hadron/{nucleus,docs,skills,preons,live} in bwrap/Seatbelt with error-checked worktree reconciliation, reaped active CLI subprocesses on /clear and Chamber exit (ChildProcessGuard + SIGTERM), and moved event/plan/nucleus disk reads off the GPUI render thread",
+            "CI Matrix-Gated Release Publication: Split .github/workflows/release.yml into build-release and publish-release (needs: build-release) so GitHub Releases only publish after all 4 target binaries compile cleanly",
+        ],
+    },
+    Release {
+        version: "0.33.8",
+        date: Some("2026-10-24"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Windows Build & Zero-Warning Cleanliness: Replaced missing wsl::shell_escape calls in probe_cli_models with parameterized wsl.exe --exec sh -lc argument passing, silenced non-Unix/Windows compiler warnings across hadron-forge and hadron-chamber, and removed the build.rs icon cargo:warning",
+        ],
+    },
+    Release {
+        version: "0.33.7",
+        date: Some("2026-10-24"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "WSL Sandboxed Execution via Linux Bubblewrap: Routed WSL UNC worktree sandboxing through in-distro Linux bwrap (with /run, /mnt/wsl, user toolchains, and parent .git/.hadron/target mounts) instead of Windows powershell.exe, and excluded /mnt/* Windows interop paths from WSL binary resolution",
+            "WSL Merge Gate & Blast Radius Filtering: Forwarded translated CARGO_TARGET_DIR/CARGO_HOME into WSL merge gate via WSLENV, targeted --bin hadron for hadron package test runs, and exempted .hadron/, docs/, .md, and .txt edits from triggering Rust test rebuilds",
+            "Agy Live Stream Tool Labels & Prompt Budget Retention: Bypassed text-delta throttling on status-only transitions, prioritized file/command arguments in agy_step_label without overwriting active tools on DONE agent_response steps, and preserved recent field messages ahead of reference sections in fit_prompt_to_budget",
+            "WSL UNC Working Directory Display: Normalized WSL UNC and Windows repository root paths to ~/ and forward slashes in format_working_dir and guarded git remote tracking lookup when no remote exists",
+        ],
+    },
+    Release {
+        version: "0.33.6",
+        date: Some("2026-10-24"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Windows PowerShell Native Argument Escaping: Added escape_powershell_native_arg in hadron-gatekeeper so build_windows_sandbox_script escapes embedded double quotes, backslashes, and empty arguments inside PowerShell @(...) arrays without splitting CLI prompts on quotes (fixing 'unexpected argument code found' when spawning Agy on Windows)",
+        ],
+    },
+    Release {
+        version: "0.33.5",
+        date: Some("2026-10-24"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Unadopted Catalogue Quark Adoption & Live Repo Team Re-Resolution: Clicking 'Enable' or 'Make Orchestrator' on an unadopted catalogue quark now adopts and enables it into .hadron/team.json (auto-promoting the first seat to Orchestrator), hides ORCH badges on unadopted rows, and live-resolves newly created repo team.json files in the daemon without restarting",
+            "Superseded /steer Loop Fix & Windows 24 KiB Prompt Budget: Answering a newer addressed /steer request now marks older superseded requests to the same quark as answered to prevent infinite re-dispatch loops, and fit_prompt_to_budget sheds reference sections before '# Your task' under the Windows 24 KiB argv limit",
+        ],
+    },
+    Release {
+        version: "0.33.4",
+        date: Some("2026-10-23"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Global & WSL Catalogue Guard: Added repo_team_for_field and is_global_team_config_path stopping walk-ups at .git root so migrate_repo_to_catalogue never mistakes or wipes a user's global or WSL home ~/.hadron/team.json",
+            "WSL User PATH & Host Binary Fallback: Added resolve_wsl_program_path and should_run_in_wsl to resolve ~/.local/bin, ~/.cargo/bin, and ~/.gemini/antigravity-cli/bin inside WSL, fall back to Windows host binaries when needed, and route hadron-forge exec on WSL UNC paths through wsl.exe --exec",
+            "Cross-OS ACP Bridge & Streaming Diagnostics: Normalized foreign-OS agy_acp.py paths to portable {hadron}/bridges/agy/... tokens, mapped venv/Scripts/python.exe <-> venv/bin/python across hosts, and surfaced stripped stderr details on streaming CLI errors",
+        ],
+    },
+    Release {
+        version: "0.33.3",
+        date: Some("2026-10-14"),
+        added: &[
+            "Windows Console Window Toggle: Added 'Show console window (Windows)' in Settings → Environment & Defaults (default off) to hide the Win32 console window on launch and pass CREATE_NO_WINDOW to child processes",
+        ],
+        changed: &[],
+        fixed: &[
+            "WSL 9P UI Freeze Remediation: Moved field.jsonl, live/, gates/, gluon.lock, and git queries off the UI render thread into background FieldPoll::gather snapshots, fixing infinite loading screens on WSL UNC workspaces",
+            "WSL --exec & Mount Warning Filter: Switched wsl.exe wrapper from '--' to '--exec' to avoid bash -c syntax errors on %(refname:short) and stripped 'wsl: Failed to mount...' lines from git output",
+        ],
+    },
+    Release {
+        version: "0.33.2",
+        date: Some("2026-10-14"),
+        added: &[
+            "WSL Home Folder Picker: Clicking a WSL distro card on the Project Selector or Quick Switcher now opens a folder picker directly in your Linux $HOME (\\\\wsl.localhost\\<distro>\\home\\<user>)",
+            "Project Selector Update Pill: Added the live update notification pill and changelog overlay to the 'Hadron' Project Selector screen",
+        ],
+        changed: &[],
+        fixed: &[
+            "Windows-WSL 9P Freeze & SQLite Lock Fix: Routed WSL UNC SQLite ledgers to host-local ~/.hadron/ledgers/, skipped 9P .cargo-lock LockFileEx calls, and preserved \\\\ prefixes when stripping \\\\?\\UNC\\",
+            "Native WSL Git & Catalogue Merging: Routed git/gh calls on WSL UNC paths through wsl.exe to eliminate 9P stat freezes, replaced per-file exists() checks with git ls-files --deleted, and merged WSL ~/.hadron/team.json catalogues",
+        ],
+    },
+    Release {
+        version: "0.33.1",
+        date: Some("2026-10-13"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Start Menu & Install Dir Guard: Bare launches from %LOCALAPPDATA%\\Programs\\Hadron or binary install dirs now open the Project Selector and prune install dirs from recent projects",
+            "Terminal Selection & Copy: Wired Ctrl+C / Ctrl+Shift+C and right-click context menu (Copy, Copy Screen, Paste) to VTE grid selections with accurate 12px padding hit-testing",
+            "Windows In-Place Self-Update: Renamed locked running .exe binaries to .exe.old before update overwrite with rollback and .exe.old daemon teardown recognition",
+            "Installer & CI Hardening: Defaulted checksum verification to per-asset .sha256 URLs without 404 stderr noise and upgraded GitHub Actions release workflow to Node.js 24 (checkout@v6, action-gh-release@v3)",
+        ],
+    },
+    Release {
+        version: "0.33.0",
+        date: Some("2026-10-13"),
+        added: &[
+            "Project Selector & MRU Launchpad: Zed/VS Code-style Welcome screen with recent projects, git branch/WSL badges, entry removal, and home-directory pollution guard",
+            "Quick Project Switcher & Commands: In-app project switcher modal via Ctrl+O, 3-line menu 'Open Workspace…', /projects, and /open [path]",
+            "Windows-WSL Remote Repositories: Canonical UNC path translation (\\\\wsl.localhost\\<distro>\\<path>) and distro discovery in hadron-lattice::wsl",
+            "Cross-Boundary Execution & WSL PTY: Automatic wsl.exe -d <distro> --cd <path> command wrapping for quark subprocesses, merge gate tests, and interactive Chamber PTY terminals",
+        ],
+        changed: &[
+            "Workspace Menu Consolidation: Routed 'Open Workspace…' menu item to the project switcher modal and removed duplicate titlebar project pill",
+        ],
+        fixed: &[
+            "WSL Picker Anchoring & Clean Builds: Anchored WSL folder/image pickers to Linux $HOME, removed custom-path folder creation fallback, and eliminated all workspace build warnings",
+            "CI Release Matrix: Added libxkbcommon-x11-dev for Linux X11 GPUI builds and updated Intel macOS runner to macos-14",
+        ],
+    },
+    Release {
+        version: "0.32.0",
+        date: Some("2026-10-12"),
+        added: &[
+            "Multi-Platform Distribution: Standalone installers (install.sh, install.ps1) with SHA256 verification and custom app icon packaging",
+            "CLI Flags & Headless Updater: Added --version (-V), --help (-h), and headless hadron update command with install-method detection",
+            "Zero-Config Onboarding: Auto-detection of local Ollama and environment API keys (Anthropic, OpenAI) on initial launch",
+            "CI Release Automation: Multi-platform GitHub Actions matrix building Linux, macOS, and Windows MSVC binaries",
+        ],
+        changed: &[],
+        fixed: &[
+            "Router Turn Completion: Fixed router::is_request_answered for Gluon gate handbacks to resolve continued-assignment dispatch",
+            "Updater Hardening: Eliminated shell string interpolation in update runners, enforcing discrete arguments and semver whitelisting",
+        ],
+    },
+    Release {
+        version: "0.31.1",
+        date: Some("2026-10-11"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "ACP Session Cancellation: Handled session/cancel in agy_acp.py with stopReason: cancelled to cleanly interrupt active turns",
+            "Live Activity Cleanup: Clear stale live cards on cancellation deadline abort and session reset",
+            "Pending Turn Routing: Fixed router::next_pending to match assignment stamps, preventing aborted Ground events from masking interrupting tasks",
+        ],
+    },
+    Release {
+        version: "0.31.0",
+        date: Some("2026-10-11"),
+        added: &[
+            "Architectural Dialectic: Slash commands for /debate, /team-debate, and /settle to conduct read-only trade-off analysis and persist ADRs to .hadron/docs/adr/",
+            "Read-Only Debate Tool Gating: Enforced read-only tool gating via is_tool_allowed during debate turns to prevent premature code churn and spec writing",
+            "Skills Suite Expansion: Added debate, migration-deprecation, benchmarking, and doc-drift-audit workflow procedures",
+            "Standard Model Invariants: Codified Rule 1 live caller verification in verification-before-completion and Hadron chaos failure modes in chaos-testing",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.30.0",
+        date: Some("2026-10-09"),
+        added: &[
+            "Event Log Observability: Full text drag-selection for timestamps, author tags, target badges, and status/kind columns across compact and expanded rows",
+            "Event Log Context Menu: Right-click actions for 'Copy Event Line' ([HH:MM:SS] @actor [➜ @target] [kind] body) and 'Copy Event as JSON' row serialization",
+            "Command Event Persistence: Slash command submission logging and pre/post lifecycle auditing for session resets and /clear operations",
+            "Target Legibility: Formatted target quark badges and labels for force-restart requests and mode transitions in log rows",
+        ],
+        changed: &[],
+        fixed: &[
+            "Merge Gate Test Runner Arity: Enforced single-symbol positional filter bounds for cargo test in detect_affected_runner and TIA target extraction",
+            "Theme Token Test Isolation: Protected theme token test execution with THEME_TEST_MUTEX to eliminate concurrent test races",
+        ],
+    },
+    Release {
+        version: "0.29.0",
+        date: Some("2026-10-09"),
+        added: &[
+            "Cross-Platform Process Sandboxing: Native OS containment across Linux/WSL (Bubblewrap), macOS (Apple Seatbelt), and Windows (PowerShell & Job Objects) with worktree write jailing and credential scrubbing",
+            "Chamber Sandbox Controls: Interactive [SANDBOX: ON / STRICT / OFF] chat input badge with click/F7 toggle, and Settings -> Environment toggle switch and confinement mode selector",
+            "Prompt Cache Alignment: Immutable cache-stable system prompt prefix for 80%+ KV prompt cache hit rates across Claude, Gemini, and OpenAI models",
+            "Frontier LLM Ergonomics: Automated test output transcript folding to .hadron/scratch/, multi-modal base64 screenshot piping, batched parallel tool dispatch, and speculative tournament bake-offs",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.28.2",
+        date: Some("2026-10-08"),
+        added: &[],
+        changed: &[
+            "Dependency Updates: Upgraded rustls (0.23.42 -> 0.23.45) and rustls-webpki (0.103.13 -> 0.103.15) to incorporate upstream security hardening and handshake alignment validation",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.28.1",
+        date: Some("2026-10-08"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Merge Gate Orchestrator Alerting: Automated @orchestrator notification routing on merge gate rejections, rebase conflicts, and test regressions for autonomous recovery loops",
+            "Invariant Linter Diff Scoping: Scoped Ban Allow Dead Code invariant checks strictly to Rust files and attribute syntax to eliminate false positive diff rejections",
+            "Gate Conflict Reconciliation: Matched Landed::Conflicted in land_with_strategy and cleanly returned turn control to worker quarks rather than grounding",
+        ],
+    },
+    Release {
+        version: "0.28.0",
+        date: Some("2026-10-07"),
+        added: &[
+            "Interactive Chamber Suite: Live commands for /preview-rebase, /steer, /scout, /canvas, /intercom, /timelapse, /baseline, and /radar",
+            "Cross-Worktree Collaboration: SharedScratchBus cross-quark scratchpad MCP tools and IntentLockTable distributed peer lease locking",
+            "Resident Tooling: Persistent zero-token LspDaemon symbol definitions, FsTx ACID file transactions, and TreeGuard concurrent mutation protection",
+            "Swarm Orchestration: PortMesh collision-free port allocation, DagBarrierScheduler wave fan-out, and MockSynthesizer schema mocking",
+        ],
+        changed: &[],
+        fixed: &[
+            "Rule 1 Gate Enforcement: Pre-merge InvariantLinter banning dead_code attributes in production paths to eliminate unwired scaffolding",
+            "Merge Gate Hardening: RedTeamAuditor pre-merge diff scanning, CacheGuard compiler salt injection, and IsolatedSandbox environment scrubbing",
+            "AST Conflict Reconciliation: Automated 3-way structural conflict healing for markdown checklists and disjoint import blocks",
+        ],
+    },
+    Release {
+        version: "0.27.0",
+        date: Some("2026-10-07"),
+        added: &[
+            "Tokenized Theme System: 100% tokenized color palette with Nord, Catppuccin, and Gruvbox presets, semantic status tokens, and custom theme variant auto-numbering",
+            "Python ACP Bridge Automation: Automated manifest-backed dependency tracking (BridgeManifest) and /bridge (status | update) chat command",
+            "UI Instrument Polish: Hairline borders on chat capsule tabs, streaming draft accent halos, and titlebar pill outlines",
+            "Color Token Migration: Replaced hardcoded RGB values across widgets, terminal, and chamber views with unified theme tokens",
+        ],
+        changed: &[],
+        fixed: &[
+            "Changelog Overlay Text Wrapping: Constrained bullet containers with flex_1 and min_w_0 to wrap multi-line release notes cleanly within 580px modal bounds",
+            "Git Graph Commit Alignment: Preserved stable 1px border geometry across unselected and selected states to eliminate canvas horizontal jitter",
+            "Quark Info Diagnostics Hygiene: Relocated display server, layer shell, and graphics pipeline diagnostics from Quark Info to Settings -> Environment",
+        ],
+    },
+    Release {
+        version: "0.26.0",
+        date: Some("2026-10-05"),
+        added: &[
+            "Affected-Only Gate Runner: AST blast-radius crate slicing in merge runner, cutting CI/gate turnarounds for localized crate changes",
+            "Built-in Compiler Accelerator: Automated sccache and mold compiler detection and environment injection across worktrees",
+            "Dynamic MCP Tool Schema Pruning: Category-based tool router filtering by active skill to reduce prompt token consumption",
+            "Nucleus Index Auto-Sharding: Automated index partition management and budget monitoring under Rule 9 prompt limits",
+            "Semantic 3-Way AST Merge Healer: Reconciliation of non-overlapping disjoint use imports to prevent false git conflicts",
+            "Inline Diff Steering: Click-to-direct feedback mechanism generating targeted quark steering instructions from diff hunks",
+        ],
+        changed: &[],
+        fixed: &[
+            "ACP Config Options Response: Returned configOptions in session/set_config_option handler to satisfy schema and support gemini-3.8-flash and gemini-3.8-pro fallback models",
+            "Affected Test Slicer Package Mapping: Mapped crates/hadron-chamber directory to package hadron in test runner to ensure targeted cargo test execution",
+        ],
+    },
+    Release {
+        version: "0.25.2",
+        date: Some("2026-10-05"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Rust 1.93 MSRV Enforcement: Declared rust-version = \"1.93\" across workspace manifests and documented toolchain requirements to resolve E0658 slice_as_array build errors (resolves GitHub Issue #2)",
+        ],
+    },
+    Release {
+        version: "0.25.1",
+        date: Some("2026-09-19"),
+        added: &[
+            "Repo Monitor Nucleus Fix Action: Interactive 1-click dispatch action in Git Remote & Issues inspector to fix broken links and prune orphaned memory notes",
+        ],
+        changed: &[],
+        fixed: &[
+            "Nucleus Index Budget Override: Respect custom user budget (e.g. 64 KiB) configured in .hadron/team.json across RepoMonitor and NucleusIntegrityLinter instead of hardcoded 32 KiB default",
+            "Nucleus Linter False Positives: Ignore template placeholders (<slug>) and recognize invariant cross-references in invariants/always.md during link and orphan validation",
+        ],
+    },
+    Release {
+        version: "0.25.0",
+        date: Some("2026-09-18"),
+        added: &[
+            "Git Remote & Issues Inspector: New 'Remote & Issues' subtab in Inspector Git rail with ahead/behind sync tracking, local health diagnostics, and live GitHub PRs/Issues",
+            "Interactive Titlebar Status: Clickable Repo Health and GitHub Sync/Issue count status pills in Chamber titlebar with 1-click drill-down",
+            "Headless Swarm Runner: Standalone CLI batch runner (`hadron run \"<prompt>\"` and `hadron ci --plan <path>`) for CI/CD automation without GPUI",
+            "Speculative Merge Pre-Testing: Async shadow gate test runner and result caching eliminating merge landing lag on worktree turns",
+            "AST-Aware Rebase Healer: Structural conflict resolution for concurrent worktree rebases across non-overlapping AST changes",
+            "Sliding Context Window Pruning: Background turn summarizer preserving prompt cache hits without context blowup",
+            "Tiled PTY Terminal Panes: Horizontal, vertical, and 2x2 grid split layouts in Chamber GPUI terminal tabs",
+            "Repo Monitor & Nucleus Linter: Continuous background repo health checks and nucleus integrity diagnostics (orphans, broken links, 32 KiB budget)",
+        ],
+        changed: &[],
+        fixed: &[
+            "Gracefully handle long-running turn timeouts and ensure prompt timeout notes prevent silent empty completion loops",
+        ],
+    },
+    Release {
+        version: "0.24.1",
+        date: Some("2026-09-16"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Cross-platform PTY openpty compilation on macOS by passing mutable winsize pointer (resolves GitHub Issue #1)",
+            "Restored native Windows MSVC support to repository prerequisites and build documentation",
+        ],
+    },
+    Release {
+        version: "0.24.0",
+        date: Some("2026-09-05"),
+        added: &[
+            "Headless Engine & Wire Protocol: Specification-compliant JSON-RPC 2.0 envelopes and async stream codec in hadron-lattice",
+            "Tokio Actor Bus & Mailbox Routing: Decoupled actor-model event bus and concurrent mailboxes in hadron-gluon",
+            "Headless RPC Dispatcher & Router: Headless JSON-RPC server and method routing for daemon state and tool execution",
+            "Centralized Daemon Nucleus Store: Atomic daemon-held memory notes and index synchronization store in hadron-gluon",
+            "CoW Workspaces & Compiler Isolation: Copy-on-Write worktree scaffolding and sccache compiler target isolation guards",
+            "Architecture Specifications: System Architecture RFC and milestone specifications for decoupled headless engine architecture",
+        ],
+        changed: &[],
+        fixed: &[
+            "Cleaned up compiler warnings for dead code and experimental canvas, intercom, and theme preview models",
+            "Silenced verbose target OS build script warnings in hadron-chamber build.rs",
+        ],
+    },
+    Release {
+        version: "0.23.0",
+        date: Some("2026-09-03"),
+        added: &[
+            "10 Net New Operational Needs: Target cache isolation & CoW hardlink mesh, fast-path peer micro-RPC bus, inotify-backed tree mutation guard, dynamic context budget auto-governor, and diagnostic crash-dump /proc watchdog probe",
+            "In-Process Micro-Transactions & LSP Service: ACID staging buffer (fs_tx) for scratch files and multi-file code modifications, and persistent in-process LSP daemon wrapping rust-analyzer and polyglot language servers",
+            "Test Minimization & Baseline Snapshotting: Semantic assertion failure clustering and diff minimization, and pre-turn test health snapshotter (Rule 5)",
+            "10 Net New Workspace Likes: Sub-channel audio intercom voice bridge (/intercom), synthetic fixture mock synthesizer, visual architectural time-lapse generator (/timelapse), and human intent drift radar (/radar)",
+            "Swarm Collaboration & Autonomy: Dual-cursor pair-quarking mode, idle maintenance dream daemon (/dream), bespoke persona & theme customizer, live interactive GPUI canvas preview (/canvas), and force-directed nucleus graph engine",
+            "Chamber GUI & Slash Command Suite: First-class registration and routing for /home, /canvas, /intercom, /dream, /timelapse, /radar, /baseline, and granular dual-pane hunk staging expansion",
+            "Quark Info Diagnostics: Integrated dedicated Home dashboard and runtime display and layer-shell compatibility inspection in Quark Info",
+        ],
+        changed: &[],
+        fixed: &[
+            "Fixed WSLg Wayland notification crashes by bypassing notify-send and routing exclusively to Windows host toast when zwlr_layer_shell_v1 is unsupported",
+            "Fixed /home slash command routing to reliably resolve target quark and switch Quark Info directly to the Home dashboard",
+        ],
+    },
+    Release {
+        version: "0.22.0",
+        date: Some("2026-08-29"),
+        added: &[
+            "Sound Themes & Acoustic Feedback: 4 distinct acoustic profiles (Classic, Synth, Minimal, Retro 8-Bit) with cross-platform synthetic audio and haptics for chat, turns, and gate events",
+            "Adjustable Settings: Swarm watchdogs (turn silence deadline, activity timeout), PTY cursor styles (Beam/Block/Underline), custom shell & scrollback depth, and native desktop notifications",
+            "Chat Display & Density: Configurable Compact vs Comfortable spacing, 24h/12h/relative timestamp formatting, code word-wrap, and auto-fold reasoning blocks",
+            "Cross-Platform System Clipboard: Native clipboard bridge for Ctrl+C/Cmd+C, 1-click message copy, and context menus via clip.exe, wl-copy, xclip, and pbcopy",
+            "Git & Worktree Automation: Auto-prune worktrees on merge/abandonment and Git author name/email overrides",
+        ],
+        changed: &[],
+        fixed: &[
+            "Fixed chat settings parsing for dropdown labels and connected density/timestamp formatting to immediate view repainting",
+            "Cleaned up compiler warnings for dead code and unused methods in release builds",
+        ],
+    },
+    Release {
+        version: "0.21.0",
+        date: Some("2026-08-29"),
+        added: &[
+            "Next-Gen Swarm Autonomy: Ephemeral port mesh supervisor, bidirectional PTY stdin injection, deterministic network VCR, and AST blast radius test slicing",
+            "Swarm Coordination & Multi-Agent Intelligence: Speculative parallel bake-offs (/bakeoff), peer sub-channels, DAG barrier task scheduling, pre-gate red team auditor (@auditor), and dynamic capability preon hot-swapping",
+            "Nucleus 2.0 & Living Invariants: Local cosine vector search index, invariant linter synthesizer, autonomous background compaction, and global cross-repo sync",
+            "Merge Gate & VCS Superpowers: Speculative pre-merge shadow gate virtualization, turn micro-checkpointing (/rewind), and semantic AST merge driver",
+            "Chamber GUI & Collaboration: Multi-quark live split-canvas state and interactive in-diff steering with partial hunk staging",
+        ],
+        changed: &[],
+        fixed: &[
+            "Reliably resolve and copy selected text from message context menu and hotkey without stripping indentation",
+            "Cleaned up compiler warnings for unwired preview state models across workspace",
+        ],
+    },
+    Release {
+        version: "0.20.0",
+        date: Some("2026-08-28"),
+        added: &[
+            "Universal ACP v2 & Multi-Agent Swarm: Adaptive protocol version handshake (v1/v2), capability negotiation, and expanded preset catalogue",
+            "Concurrent Native Antigravity ACP & SDK Bridge support with custom command/environment resolution",
+            "Multi-Vendor Pricing Matrix: Comprehensive real-time USD token pricing across Claude 3.7/3.5, Gemini 2.0, GPT-4o, o1, o3, DeepSeek V3/R1, Mistral, and Qwen",
+            "Chamber Stats Overhaul: Multi-window telemetry aggregation (24h Day window), rolling cutoffs, live quota tier visualizer, resetsAt countdowns, and context saturation meters",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.19.0",
+        date: Some("2026-08-24"),
+        added: &[
+            "Headless DAP Runtime Debugger: Breakpoint management, execution stepping, call stack inspection, and local variable evaluation (hadron_forge_dap_debug)",
+            "Diagnostic & Trace Slicer: Semantic compaction of backtraces, compiler cascades, and log streams (hadron_forge_trace_slicer)",
+            "Deterministic Network VCR: Loopback-bound HTTP/RPC cassette recording and offline replay (hadron_forge_vcr)",
+            "Micro-Checkpointing: Atomic worktree snapshot saving, diffing, restoration, and pruning (hadron_forge_tree_checkpoint)",
+            "Headless Profiler Runner: Automated CPU/heap execution sampling and SVG flamegraph generation (hadron_forge_profile_runner)",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.18.0",
+        date: Some("2026-08-24"),
+        added: &[
+            "Structured Bug Post-Mortems: Standard post-mortem schema, nucleus hook length bounds (<= 100 chars), and auto-promotion to invariants",
+            "Collapsed Roster filter sync reflecting Active vs All tabs with display-name alphabetical sorting",
+            "Cross-worktree dual-state plan tracking with blue checkmarks for in-branch completed tasks and green for main-landed commits",
+        ],
+        changed: &[],
+        fixed: &[
+            "Multiline slash command argument capture (Arity::Body) preventing split chat messages",
+            "Chat selection and message copy via Ctrl+C / Cmd+C and right-click context menu",
+        ],
+    },
+    Release {
+        version: "0.17.0",
+        date: Some("2026-08-22"),
+        added: &[
+            "Full-color emoji font fallback via patched Zed gpui_wgpu engine (Noto Color Emoji preservation across all fonts)",
+            "Theme Editor Overhaul: Theme naming, custom save/export to ~/.hadron/themes, and 33 design/syntax color tokens",
+            "Multi-terminal grid responsive viewport fitting, per-card scrollback navigation, and ANSI color snapshot rendering",
+            "File Tree preview bottom clearance padding and strict flex container sizing",
+        ],
+        changed: &[],
+        fixed: &[
+            "Emoji glyph routing prioritizing color bitmaps over monochrome Dingbat outlines in Inter and system text fonts",
+            "Multi-terminal grid card vertical stacking and clipping when 3+ terminals are active",
+        ],
+    },
+    Release {
+        version: "0.16.0",
+        date: Some("2026-08-22"),
+        added: &[
+            "/research slash command and structured architectural investigation document lifecycle (.hadron/docs/research/)",
+            "Custom Theme Engine with dynamic runtime palette swapping and live syntax preview in Appearance Settings",
+            "Native markdown badge pills with interactive link navigation (shields.io, badgen)",
+            "Responsive markdown image rendering with zero-copy dimension probing and WSL-aware external viewer",
+        ],
+        changed: &[],
+        fixed: &[
+            "Plan rail viewport bottom clearance and flex container sizing preventing bottom task clipping",
+            "Emoji font preservation preventing cosmic-text font database purges during font picker bold probes",
+        ],
+    },
+    Release {
+        version: "0.15.0",
+        date: Some("2026-08-21"),
+        added: &[
+            "Next-Gen Swarm Orchestration: Hybrid DAG auto-dispatch engine and reactive lockless wakeup event stream",
+            "Real-time heartbeat monitoring, proactive stall recovery, and in-flight worktree rebase streaming",
+            "File-level intent locks, shared-target build cache guard, and zero-friction branch auto-pruning",
+            "Atomic multi-file batch edit transactions, ephemeral scout quarks, and automated visual smoke testing",
+            "Unified 3-way diff inspector, swarm-wide vectorized nucleus search, and time-travel debugging",
+            "Interactive Plan DAG visualizer, scrollable multi-suite plan dropdown, and gitignored file completions",
+            "Roster Active/All filter tabs with keyboard shortcuts and alphabetical quark sorting by display name",
+            "Inlined rail headers with panel toggle buttons and 5-line height bounds on streaming speaking cards",
+            "100% autonomous memory distillation directly into Nucleus notes without proposal bottlenecks",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.14.0",
+        date: Some("2026-08-21"),
+        added: &[
+            "Embedded Symbols file and folder icon theme with 355 multi-color SVG assets across File Tree, Diffs, and Quick Open",
+            "Custom GitHub Dark semantic syntax theme wired into Markdown code blocks, chat bodies, and tree-sitter spans",
+            "Syntax-preserving 3-way and Git diff inspector hunks with palette-aligned gutter tinting",
+            "Chat input auto-scroll to cursor position on multi-line text paste and Shift+Enter",
+            "Unified chamber console logging to structured timestamped format (HH:MM:SS chamber <msg>)",
+            "Code-wrapped mention isolation stripping code fences and inline backticks from Quark routing",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.13.0",
+        date: Some("2026-08-20"),
+        added: &[
+            "Streamlined activity workspace with dedicated live Tasks feed and expanded Event Log inspector",
+            "Multi-plan sibling selector dropdown in Plan view for instant phase switching",
+            "Interactive collapsible Plan Context & Nucleus accordion with one-click file jumping and tab return",
+            "Interactive collapsible Plan Overview objectives card",
+            "3-Way Visual Diff Inspector in Git rail comparing Base, Ours, and Theirs with live clean tree state",
+            "Next-gen swarm engine: dual-execution merge gate, zero-copy CoW worktree provisioning, and gossip bus",
+            "Continuous background mutation quark, ephemeral gate sandbox, and invariant synthesis engine",
+            "Adaptive AST context slicing, multiplexed PTY terminal grid, and token spend flamecharts",
+            "Full annotated Git release tags and automated GitHub Release publication sync",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.12.1",
+        date: Some("2026-08-16"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Mermaid Source Code toggle crash by capturing GPUI state handle during render pass",
+        ],
+    },
+    Release {
+        version: "0.12.0",
+        date: Some("2026-08-16"),
+        added: &[
+            "Native GPUI Mermaid diagram rendering in Markdown for Flowcharts, Sequence, Pie, State, and Class diagrams",
+            "Interactive MermaidCard component with Diagram/Source toggle, copy action, and Lavapipe canvas rendering",
+            "Preview support for .mermaid and .mmd files in file previewers",
+        ],
+        changed: &[],
+        fixed: &[
+            "Noto Color Emoji font fallback chain eliminating tofu replacement boxes on Linux/WSL",
+        ],
+    },
+    Release {
+        version: "0.11.0",
+        date: Some("2026-08-16"),
+        added: &[
+            "Lattice turn rewind, state snapshot diffing, and session branch exploration (hadron_forge_time_travel)",
+            "Adversarial AST mutation runner and test harness kill-rate validator (hadron_forge_mutation_gate)",
+            "Baseline execution timing and CPU flamegraph regression guard (hadron_forge_benchmark_guard)",
+            "Spatial DAG and crate dependency topology visualizer/exporter (hadron_forge_topology_graph)",
+            "Topological task graph optimizer and parallel Quark dispatch scheduler (hadron_forge_task_scheduler)",
+            "Recurring failure pattern analyzer and autonomous preon rule synthesizer (hadron_forge_preon_evolution)",
+            "Per-model context compressor and token spend optimizer (hadron_forge_prompt_distiller)",
+            "Remote ACP worker container offload, status inspector, and runner (hadron_forge_swarm_mesh)",
+            "Distributed P2P event ledger replication and delta synchronization (hadron-lattice sync)",
+            "Interactive shared PTY pairing broker with live steer and observation (hadron_forge_pty_pairing)",
+            "Dynamic pause/resume breakpoints on MCP tool execution and subprocesses (hadron_forge_tool_breakpoints)",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.10.0",
+        date: Some("2026-08-16"),
+        added: &[
+            "Blast radius crate dependency & symbol impact analyzer (hadron_forge_blast_radius)",
+            "Automated git bisection regression finder with custom test predicates (hadron_forge_git_bisect)",
+            "Real-time NDJSON/HTTP IPC wiretap monitor and protocol asserter (hadron_forge_wiretap)",
+            "Tree-sitter structural pattern search & multi-file AST rewriting (hadron_forge_ast_rewrite)",
+            "Sandboxed ephemeral secret vault proxy with automated stream masking (hadron_forge_secret_vault)",
+            "Universal CPU & allocation flamegraph profiler with SVG generation (hadron_forge_flamegraph_profiler)",
+            "Property-based fuzz harness for IPC codecs and protocol serializers (hadron_forge_fuzz_harness)",
+            "Bidirectional Nucleus knowledge graph, link, and invariant analyzer (hadron_forge_nucleus_graph)",
+            "ELF/DWARF binary bloat, symbol size, and section inspector (hadron_forge_binary_bloat)",
+            "Conventional commit analyzer, SemVer bump calculator, and changelog sync (hadron_forge_release_sync)",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.9.1",
+        date: Some("2026-08-16"),
+        added: &[
+            "Windows CLI prompt channel bounds guarding against CreateProcessW command line size limit (os error 206)",
+        ],
+        changed: &[
+            "Quark removal purges global catalogue, repo overrides, and credential store; Roster renders only catalogue quarks",
+            "Precomputed 3D visualizer Fibonacci lattice topology and compound vector path batching (>96% paint call reduction)",
+        ],
+        fixed: &[
+            "Gated test-only Point3D rotation helper methods with #[cfg(test)] for zero release build warnings",
+        ],
+    },
+    Release {
+        version: "0.9.0",
+        date: Some("2026-08-16"),
+        added: &[
+            "Interactive 3D Cosmic Swarm Visualizer tab in Inspector with 3D perspective projection and orbital camera controls",
+            "Fibonacci neural surface constellation wireframe, glowing singularity core, and quantum photon stream",
+            "Accurate active/excited Quark state calculation against live files and in-flight working tasks",
+            "Multi-Protocol Telemetry breakdown tracking ACP, CLI, HTTP, and SDK turns plus granular token metrics",
+            "Cost stat tile warning badge and tooltip notifying partial provider spend telemetry",
+            "Streamlined 1-click Quark onboarding and seating flow for local keyless servers (Ollama, LM Studio)",
+            "Categorized prompt tool documentation across all 62 Forge tools and distilled invariant registry",
+        ],
+        changed: &[],
+        fixed: &[
+            "Refined markdown table styling with rounded borders and polished code block framing",
+        ],
+    },
+    Release {
+        version: "0.8.0",
+        date: Some("2026-08-15"),
+        added: &[
+            "Deterministic DAG Plan Engine (hadron-gluon) for markdown plan parsing and disk state synchronization",
+            "Autonomous Self-Healing Merge Gate (hadron-gluon) with structured compiler diagnostics and remediation guidance",
+            "Autonomous Spec & DAG Plan Compiler (hadron_forge_spec_compile) translating natural language to validated plans",
+            "Visual & Behavioral E2E Asserter (hadron_forge_e2e_assert) for multi-step browser flows and DOM assertions",
+            "Packaging & Live Preview Launcher (hadron_forge_preview_launch) with release builds and loopback health probing",
+            "Autonomous Scaffolder & Dependency Resolver (hadron_forge_scaffold) across Rust, Vite, Python, and Next.js stacks",
+            "Security & Secret Scanner Gate (hadron_forge_security_audit) detecting API secrets, keys, and injection vectors",
+            "Runtime Service & Crash Watchdog (hadron_forge_service_watchdog) for log buffer panic detection and health monitoring",
+            "Acceptance verification gate, peer worktree conflict detector, and autonomous lesson distillation MCP tools",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.7.0",
+        date: Some("2026-08-15"),
+        added: &[
+            "Pre-Flight Merge Gate runner and MCP tool (hadron_forge_preflight_gate) for worktree self-verification",
+            "Cross-worktree peer inspector querying branches, diffs, and symbols (hadron_forge_peer_inspect)",
+            "Nucleus memory and budget linter enforcing 32 KB index limits and note YAML schema (hadron_forge_nucleus_lint)",
+            "AST and LSP symbol hierarchy intelligence and generic querying (hadron_forge_symbol_hierarchy, hadron_forge_lsp_query)",
+            "Atomic multi-branch coupled merge gate validating inter-dependent swarm branches simultaneously",
+            "Headless chamber replay harness and state projection invariant verification",
+            "Attention Required spotlight and field event for urgent human unblock requests",
+            "Automated preset seating, empty-team 1st-quark Orchestrator promotion, and Roster network icon badge",
+        ],
+        changed: &[],
+        fixed: &[
+            "Cleaned compiler warnings in hadron-chamber and streamlined Roster Orchestrator badge",
+        ],
+    },
+    Release {
+        version: "0.6.1",
+        date: Some("2026-08-15"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Wired chat, markdown bodies, headings, and terminal file trees to configured UI font size preferences",
+            "Scoped GPUI test-support to dev-dependencies, preventing LeakDetector panics on exit",
+        ],
+    },
+    Release {
+        version: "0.6.0",
+        date: Some("2026-08-15"),
+        added: &[
+            "8 Built-in Engineering Skills: security-review, architecture-audit, chaos-testing, perf-audit, simplify, api-design, triage, and memory-curation",
+            "Alphabetical slash-command autocomplete with prefix-match ranking and alias deduplication",
+            "Subcategorized General Settings: Appearance (Typography & Themes), Execution (Swarm & Budgets), and Environment",
+            "Quark avatar aura rings rendering seat identity colors during excited turns",
+            "Git Inspector keyboard navigation and bundled Noto Color Emoji font for Linux/WSL",
+        ],
+        changed: &[
+            "Aligned skill paths, progress ledgers, and priority hierarchy with .hadron and Standard Model standards",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.5.0",
+        date: Some("2026-08-15"),
+        added: &[
+            "Developer Power Tools suite: Jailed screenshots, PTY sessions, Mock HTTP/WS, and SQLite engine",
+            "Universal Assistant Absorption (`/absorb`) across foreign assistant memory and configurations",
+            "Canonical documentation for all slash commands and Developer Power Tools MCP tools",
+        ],
+        changed: &[
+            "Neutral Quark naming across commands, glosses, error messages, and documentation",
+            "Automated documentation audit requirement in project release procedure",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.4.0",
+        date: Some("2026-08-14"),
+        added: &[
+            "Background Process Manager with supervisor, PGID isolation, and MCP streaming tools",
+            "3-Tier polyglot code intelligence with Tree-Sitter AST symbols and generic STDIO LSP client",
+            "Polyglot tooling allowlist expansion (Node, Python, Go, Bun) and structured diagnostic parser",
+            "Headless browser verification bridge with accessibility snapshots and visual interaction",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+    Release {
+        version: "0.3.1",
+        date: Some("2026-08-14"),
+        added: &[
+            "Keyboard-first workflow with history navigation, hotkeys, dismiss, and completion cycling",
+            "Modern Chamber UI suite with toasts, theme presets, callouts, and activity micro-capsules",
+            "Surfaced Gluon operations and multi-stage merge gate progress in live activity",
+            "Nucleus linter, channel segmentation, TaskDag scheduler, and AST auto-conflict resolver",
+        ],
+        changed: &[
+            "Vector icons across completions, pills, and callouts, with polished UI layering and diff gutters",
+            "Restored `Ctrl+Tab` focus toggle and updated documentation suite",
+        ],
+        fixed: &[
+            "Terminal focus preservation and direct Escape forwarding to active PTY sessions",
+            "Async stats computation with chart downsampling for smooth software rendering",
+            "Theme preset and accent label configuration persistence and token reactivity",
+        ],
+    },
+    Release {
+        version: "0.3.0",
+        date: Some("2026-08-14"),
+        added: &[
+            "Hub-and-Spoke swarm routing with Orchestrator-exclusive dispatch and worker escalation",
+            "Git Workspace Initializer (`/git-init`) with one-click UI banner in empty workspaces",
+            "Autonomous mission and iterative execution slash commands (`/goal` and `/loop`)",
+            "Automatic Plan tab directory scanning across `.hadron/docs/plans/` and worktrees",
+        ],
+        changed: &[
+            "Posture-aware workflow skills tailored for uninterrupted autonomy in Bypass mode",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.2.9",
+        date: Some("2026-08-13"),
+        added: &[
+            "Interactive file mentions in chat messages rendering as clickable links with path tooltips",
+        ],
+        changed: &[],
+        fixed: &[
+            "Release workflow synchronizes worktree HEAD:main directly with remote origin",
+        ],
+    },
+    Release {
+        version: "0.2.8",
+        date: Some("2026-08-13"),
+        added: &[
+            "Git Graph overflow ref tooltips displaying hidden branch and tag refs as styled badges in a vertical list",
+            "Streaming draft preview line cap (~5 lines) with vertical scrolling in live chat view",
+        ],
+        changed: &[],
+        fixed: &[
+            "Stats tab scroll anchoring at top with dedicated scroll handle and removed background auto-scroll triggers",
+        ],
+    },
+    Release {
+        version: "0.2.7",
+        date: Some("2026-08-13"),
+        added: &[
+            "Automated Peer Review & Quorum Gate (`/review`) enforcing peer review before merge gate",
+            "Adversarial Cross-Examination Lane with structured critic prompt synthesis and change triage",
+            "Dynamic Smart Nucleus Prompt Injector with relevance ranking and token budget enforcement",
+            "Dynamic Preon Synthesis generating on-the-fly markdown specialist personas",
+            "Worktree-isolated `sccache` compilation and thread-safe `WorktreePool`",
+            "3-way semantic AST merge (`merge_rust_ast`) and Test Impact Analysis (TIA)",
+            "Chamber Live Swarm Topology DAG, Event Time-Travel (`/replay`, `/fork-field`), and 3-Way AST Conflict Resolver",
+            "Embedded Semantic Code & Memory Graph with `hadron_forge_semantic_search` MCP tool",
+        ],
+        changed: &[
+            "Reorganized README and Provider Ecosystem around ACP, HTTP, and Cloud transports with 400+ OpenRouter models",
+        ],
+        fixed: &[
+            "Captured stderr in Chamber `/push` command and handled empty output cleanly",
+        ],
+    },
+    Release {
+        version: "0.2.6",
+        date: Some("2026-08-13"),
+        added: &[
+            "Built-in `/release` slash command and builtin `release` skill backing project release automation",
+            "Operational Git slash commands (`/git-status`, `/git-log`, `/push`, `/pr`)",
+            "Configurable Merge Strategy selector (FastForward, Squash, GitHub PR) in Settings UI",
+            "GitHub repository search topics on `s0lda/hadron` (`ai`, `llm`, `ai-agents`, `multi-agent`, `rust`, etc.)",
+        ],
+        changed: &[],
+        fixed: &[
+            "Nucleus Feature Map prompt evaluation and explicit filesystem checking",
+            "VCS spec and plan cleanup (untracked internal `.hadron/docs` files from git index)",
+        ],
+    },
+    Release {
+        version: "0.2.5",
+        date: Some("2026-08-13"),
+        added: &[
+            "File tree preview syntax highlighting for Rust, C++, CSS, JSON, TS, Python, Bash, and source code files",
+            "Unified Skills selection in Settings: enabled by default, unselecting toggles skill to deny list",
+            "Scrollable Sessions submenu and `/clear-history` command preserving token spend telemetry",
+        ],
+        changed: &[
+            "Collapsed Event Log rows to a clean single line with markdown header stripping (expands on click)",
+            "Indented Git Graph commit diffs with continuous rail graph lines and removed redundant Git subtab headers",
+            "Cleaned up Roster panel header and removed misleading Ready status indicator from configured providers",
+        ],
+        fixed: &[],
+    },
+    Release {
+        version: "0.2.4",
+        date: Some("2026-08-12"),
+        added: &[
+            "10 new operational slash commands (`/retry`, `/doctor`, `/prune`, `/compact-nucleus`, `/stop`, `/kill`, `/cancel`, `/gate-cancel`, `/revert`, `/unabandon`)",
+        ],
+        changed: &[
+            "Applied terminal background (`#080808`) across roster cards, live preview cards, and completion overlay",
+            "Refined surface and card tokens to neutral dark obsidian palette (`#050505`, `#141414`, `#101113`, `#fcfcfc`), aligned panel backgrounds, and updated settings input contrast",
+            "Standardized capsule tabs alignment across all view panels, styled terminal sub-tabs, and applied borderless dark tab bar background (`tab_bar_bg`)",
+        ],
+        fixed: &[
+            "Isolated `test_revert_and_unabandon` inside tempdir to prevent auto-revert commits on live repo during test runs",
+        ],
+    },
+    Release {
+        version: "0.2.3",
+        date: Some("2026-08-11"),
+        added: &[
+            "Unified Skills Manager in Settings with collapsible accordion for 15 standard skills",
+            "Slash command completion and execution for built-in and custom skills (`/<skill-id>`)",
+        ],
+        changed: &[],
+        fixed: &[
+            "Antigravity SDK empty prompt validation and trajectory recovery on turn error",
+            "Standardized worktree invariant paths to `.hadron/trees/` and `.hadron/worktrees/`",
+        ],
+    },
+    Release {
+        version: "0.2.2",
+        date: Some("2026-08-11"),
+        added: &[
+            "Dynamic model selection and live SDK model discovery for ACP and CLI Quarks",
+            "Capability-gated advanced model parameters with collapsible Settings accordion",
+            "Expanded replace-by-hash support for 11 AST languages and structural fallback chunking",
+        ],
+        changed: &[],
+        fixed: &[
+            "ACP bridge model resolution and automatic fallback for invalid model strings",
+        ],
+    },
+    Release {
+        version: "0.2.1",
+        date: Some("2026-08-09"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Antigravity Python bridge auto-provisioning and Windows Python launcher (`py.exe`) detection",
+        ],
+    },
+    Release {
+        version: "0.2.0",
+        date: Some("2026-08-08"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Windows PTY terminal initialization, interactive shell execution, and icon resource linking",
+        ],
+    },
+    Release {
+        version: "0.1.9",
+        date: Some("2026-08-07"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "Windows ConPTY terminal initialization and taskbar icon integration",
+        ],
+    },
+    Release {
+        version: "0.1.8",
+        date: Some("2026-08-02"),
+        added: &[
+            "Worker prompt response format template enforcing @orchestrator tag",
+        ],
+        changed: &[],
+        fixed: &[
+            "Prompt cache prefix stability and output formatting for worker quarks",
+        ],
+    },
+    Release {
+        version: "0.1.7",
+        date: Some("2026-08-02"),
+        added: &[
+            "Lexical nucleus lesson recall over notes/*.md using BM25 ranking based on task text",
+        ],
+        changed: &[],
+        fixed: &[
+            "Preserves partial text streaming output on graceful ACP session cancellation",
+            "Preserves remote branch names like origin/main in git graph ref pills",
+        ],
+    },
+    Release {
+        version: "0.1.6",
+        date: Some("2026-08-02"),
+        added: &[
+            "Inter and Cascadia Code ship inside the binary and are registered at startup",
+            "HTTP quarks get a bounded, jailed, streaming forge tool loop instead of prose",
+            "Per-seat temperature, top_p and max_tokens in Settings, persisted in team.json",
+            "Delegation subtab: who asked whom to do what, in each quark's name and colour",
+        ],
+        changed: &[
+            "Tasks tab restyled as glass cards matching the Delegation view",
+            "The terminal cursor is a line beam, not a colour-inverted block",
+        ],
+        fixed: &[
+            "An HTTP quark declares only the tools its permission mode permits",
+            "A message arriving mid-turn adds to the task it interrupts, it does not replace it",
+            "A dirty worktree is snapshotted before the next branch is cut, not refused",
+            "Gluon's own notices quote bare paths and refs so they don't render as commands",
+            "Ollama gets echoed tool arguments as an object, not a string",
+            "An empty content field no longer swallows the whole reasoning stream",
+            "An absolute path inside the worktree is a spelling, not a jail escape",
+            "The mock quark is gone, and an empty team.json no longer resurrects its ghost",
+        ],
+    },
+    Release {
+        version: "0.1.5",
+        date: Some("2026-08-02"),
+        added: &[],
+        changed: &[],
+        fixed: &[
+            "The in-app Changelog dates the shipped release instead of badging it Unreleased",
+        ],
+    },
+    Release {
+        version: "0.1.4",
+        date: Some("2026-08-02"),
+        added: &[
+            "Ollama, LM Studio & Cloud OpenAI-compatible HTTP providers over Transport::Http",
+            "Add-Quark wizard rows for HTTP providers with keyring API key support",
+            "Searchable model picker with pinned Default row in wizard and Settings",
+            "CLI seats stream their step/tool feed, so the Live card moves during a CLI turn",
+            "@-file completion offers gitignored paths, with an icon and path on each row",
+        ],
+        changed: &[],
+        fixed: &[
+            "Enabled rustls-tls on reqwest so cloud endpoints connect over HTTPS",
+            "Fixed LM Studio /v1 endpoint path handling and error response parsing",
+            "Restored Make Orchestrator context menu action for Worker quarks",
+            "The model dropdown and Settings modal paint on opaque surfaces, not glass",
+            "Ollama and OpenRouter seats are wired to live_dir, so they show in the Live card",
+            "Auto-scroll chat input on paste of large text blocks",
+        ],
+    },
+    Release {
+        version: "0.1.3",
+        date: Some("2026-07-27"),
+        added: &[
+            "Unified Swarm Command Deck UI redesign with floating capsule tab bars",
+            "/Command picker chip selection alongside @Quark and @File mentions",
+            "Task time scrubbing and live merge-gate heartbeats",
+            "Live streamed replies directly in chat while tool activity stays in Live card",
+        ],
+        changed: &["Obsidian Graphite theme, soft amethyst accents, and metallic pastel git graph"],
+        fixed: &[],
+    },
+    Release {
+        version: "0.1.2",
+        date: Some("2026-07-26"),
+        added: &[
+            "Graceful turn cancellation & mid-turn interruption for resident ACP sessions",
+            "Automatic Chamber restart after successful self-update",
+            "Silence-based turn watchdog (TURN_DEADLINE)",
+            "Dedicated orchestrator chat lane preserved across reseats",
+        ],
+        changed: &[],
+        fixed: &["Snapshot worktrees on turn interruption to avoid stranding uncommitted edits"],
+    },
+    Release {
+        version: "0.1.1",
+        date: Some("2026-07-25"),
+        added: &[],
+        changed: &[],
+        fixed: &["Self-update workflow installs the exact released tag offered"],
+    },
+    Release {
+        version: "0.1.0",
+        date: Some("2026-07-24"),
+        added: &[
+            "Multi-quark swarm orchestration daemon (hadron-gluon)",
+            "Lattice IPC data layer and ACP adapter engine",
+            "Native GPUI Chamber desktop application",
+        ],
+        changed: &[],
+        fixed: &[],
+    },
+];
+
+impl super::Chamber {
+    /// The completion card: rows floating just above the message box, spanning the
+    /// input's full width. It is a normal render-tree descendant — `.absolute()`
+    /// with `.bottom(100%)` inside the input area's `.relative()` wrapper — so it
+    /// draws *upward* and stays inside the window, unlike the fork's `deferred()`
+    /// menu that painted off the bottom edge (`completion-menu-draws-out-of-bounds`).
+    pub(super) fn completion_card_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = self.completion.as_ref();
+        let mut list = v_flex()
+            .id("completion-card-list")
+            .flex_1()
+            .min_h_0()
+            .max_h(px(280.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.completion_scroll)
+            .p_1()
+            .gap_1();
+
+        if let Some(card) = card {
+            let sel = card.selected.min(card.candidates.len().saturating_sub(1));
+            for (i, cand) in card.candidates.iter().enumerate() {
+                let selected = i == sel;
+                let label = cand.label.clone();
+                let detail = cand.detail.clone();
+                let is_ignored = cand.is_ignored;
+                let label_color = if is_ignored {
+                    theme::text_muted()
+                } else {
+                    theme::text()
+                };
+
+                let left_content = if let Some(stripped) = label.strip_prefix("📄 ") {
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            gpui_kit::img(crate::symbols::file_icon_path(stripped))
+                                .size_3p5()
+                                .flex_none()
+                                .when(is_ignored, |img| img.opacity(0.55)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(label_color)
+                                .when(is_ignored, |d| d.italic())
+                                .child(stripped.to_string()),
+                        )
+                } else if let Some(stripped) = label.strip_prefix("📁 ") {
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            gpui_kit::img(crate::symbols::folder_icon_path(stripped, false))
+                                .size_3p5()
+                                .flex_none()
+                                .when(is_ignored, |img| img.opacity(0.55)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(label_color)
+                                .when(is_ignored, |d| d.italic())
+                                .child(stripped.to_string()),
+                        )
+                } else if label.starts_with('@') {
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(Icon::new(IconName::Bot).small().text_color(theme::accent()))
+                        .child(div().text_sm().text_color(theme::text()).child(label))
+                } else if label.starts_with('/') {
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            Icon::new(IconName::SquareTerminal)
+                                .small()
+                                .text_color(theme::text_muted()),
+                        )
+                        .child(div().text_sm().text_color(theme::text()).child(label))
+                } else if cand.detail == "Session" {
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            Icon::new(IconName::Inbox)
+                                .small()
+                                .text_color(theme::text_muted()),
+                        )
+                        .child(div().text_sm().text_color(theme::text()).child(label))
+                } else {
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(div().text_sm().text_color(theme::text()).child(label))
+                };
+
+                list = list.child(
+                    div()
+                        .id(("completion-row", i))
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .when(selected, |s| s.bg(theme::glass_highlight()))
+                        .hover(|s| s.bg(theme::glass_highlight()))
+                        .child(left_content)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .when(is_ignored, |d| d.italic())
+                                .child(detail),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(c) = this.completion.as_mut() {
+                                c.selected = i;
+                            }
+                            this.accept_completion(window, cx);
+                        })),
+                );
+            }
+        }
+
+        h_flex()
+            .id("completion-card")
+            .absolute()
+            .bottom(gpui_kit::relative(1.0))
+            .left_0()
+            .right_0()
+            .mb_2()
+            .occlude()
+            .max_h(px(280.0))
+            .bg(theme::term_bg())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .rounded_xl()
+            .shadow_lg()
+            .overflow_hidden()
+            .child(list)
+            .vertical_scrollbar(&self.completion_scroll)
+    }
+
+    /// The non-blocking permission toast: when a quark is waiting on the human,
+    /// a banner drops in with Approve / Deny. `None` when nothing is pending.
+    pub(super) fn permission_toast(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let pending = self.view.pending_permission.as_ref()?;
+        let text = format!(
+            "⚠️ {} wants to: {} ({:?})",
+            pending.quark.as_str(),
+            pending.description,
+            pending.risk,
+        );
+        Some(
+            v_flex()
+                .flex_none()
+                .mx_4()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .gap_2()
+                .rounded_lg()
+                .bg(theme::bg_surface_raised())
+                .child(div().text_sm().text_color(theme::text()).child(text))
+                // Buttons on their own row, right-aligned — the question and the
+                // choices no longer fight for the same line.
+                // Outline variants carry the answer's severity: green to approve,
+                // amber for the remembered/always-on choice, red to deny.
+                .child(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("perm-approve")
+                                .outline()
+                                .success()
+                                .label("Approve")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.answer_permission(true, cx)),
+                                ),
+                        )
+                        // "Always allow" remembers this (quark, op) so Auto mode won't ask again.
+                        .child(
+                            Button::new("perm-always")
+                                .outline()
+                                .warning()
+                                .label("Always allow")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.answer_permission_remember(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("perm-deny")
+                                .outline()
+                                .danger()
+                                .label("Deny")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.answer_permission(false, cx)),
+                                ),
+                        ),
+                ),
+        )
+    }
+
+    /// The "gluon stopped" banner: the swarm daemon holds `gluon.lock` exclusively,
+    /// so no quark can take a turn while it's down — a critical, easy-to-miss event
+    /// (a human staring at an idle chat has no other signal). Set on the
+    /// running→stopped edge by the 400ms reload tick (`app::reload::reload_if_changed`),
+    /// cleared on stopped→running or manual dismiss. Same non-blocking toast pattern
+    /// as [`Self::permission_toast`], just a distinct (red) severity color.
+    pub(super) fn gluon_stopped_toast(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.gluon_stopped_notice {
+            return None;
+        }
+        Some(
+            v_flex()
+                .flex_none()
+                .mx_4()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .gap_2()
+                .rounded_lg()
+                .bg(theme::bg_surface_raised())
+                .border_1()
+                .border_color(theme::error())
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().text_color(theme::text()).child(
+                            "⚠️ Gluon stopped — no quark can take a turn until it's restarted.",
+                        ))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(text_button("gluon-stopped-restart", "Restart").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.restart_gluon_daemon(cx);
+                                    }),
+                                ))
+                                .child(text_button("gluon-stopped-dismiss", "Dismiss").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.gluon_stopped_notice = false;
+                                        cx.notify();
+                                    }),
+                                )),
+                        ),
+                ),
+        )
+    }
+
+    /// Floating non-blocking toast notification stack.
+    pub(super) fn render_toasts(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.toast_manager.is_empty() {
+            return None;
+        }
+
+        let toasts: Vec<_> = self.toast_manager.iter().cloned().collect();
+
+        Some(
+            v_flex()
+                .absolute()
+                .top_12()
+                .right_6()
+                .gap_2()
+                .items_end()
+                .max_w(px(380.0))
+                .children(toasts.into_iter().map(|t| {
+                    let toast_id = t.id;
+                    let (icon, border_color, icon_color) = match t.kind {
+                        toasts::ToastKind::Success => {
+                            (IconName::CircleCheck, theme::success(), theme::success())
+                        }
+                        toasts::ToastKind::Info => (IconName::Info, theme::info(), theme::info()),
+                        toasts::ToastKind::Warning => {
+                            (IconName::Info, theme::warning(), theme::warning())
+                        }
+                        toasts::ToastKind::Error => {
+                            (IconName::WindowClose, theme::error(), theme::error())
+                        }
+                    };
+
+                    h_flex()
+                        .id(("toast", toast_id))
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(theme::bg_surface_raised())
+                        .border_1()
+                        .border_color(border_color.opacity(0.4))
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Icon::new(icon).size(px(14.0)).text_color(icon_color))
+                                .child(div().text_xs().text_color(theme::text()).child(t.message)),
+                        )
+                        .child(
+                            div()
+                                .id(("toast-dismiss", toast_id))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_md()
+                                .hover(|h| h.bg(theme::bg_elevated()))
+                                .child(
+                                    Icon::new(IconName::WindowClose)
+                                        .size(px(11.0))
+                                        .text_color(theme::text_muted()),
+                                )
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.dismiss_toast(toast_id, cx);
+                                })),
+                        )
+                })),
+        )
+    }
+
+    /// The About dialog. Every value here is read from the build, not typed in: the
+    /// version comes from the crate's own manifest, so it cannot drift from what
+    /// shipped.
+    pub(super) fn about_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let close = cx.listener(|this, _, _, cx| {
+            this.about_open = false;
+            cx.notify();
+        });
+
+        let adopted = self.view.roster.iter().filter(|r| r.adopted).count();
+        let available = self.view.roster.len().saturating_sub(adopted);
+        let workspace = crate::vcs::repo_root_of(&self.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                crate::vcs::repo_root_of(&self.path)
+                    .to_string_lossy()
+                    .to_string()
+            });
+
+        // Signature brand motif: the four quark energies as a small constellation of dots,
+        // echoing the field's corner glows.
+        let quark_dots = h_flex().gap_1p5().items_center().children(
+            [0xc778ddu32, 0xa87ffb, 0x62c073, 0xe5c07b]
+                .into_iter()
+                .map(|c| {
+                    div()
+                        .size(px(9.0))
+                        .rounded_full()
+                        .bg(rgb(c))
+                        .into_any_element()
+                }),
+        );
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.about_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .occlude()
+                    .w(px(420.0))
+                    .p_5()
+                    .gap_4()
+                    .rounded(INNER_RADIUS)
+                    .bg(theme::glass_card())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, _| {}) // swallow inner clicks
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(quark_dots)
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::text())
+                                    .child("Hadron"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child("A multi-agent operating system. Quarks take turns in one shared workspace, on one shared field."),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1p5()
+                            .child(panel_eyebrow("BUILD"))
+                            .child(kv_row("Version", env!("CARGO_PKG_VERSION")))
+                            .child(kv_row("Licence", "Apache-2.0"))
+                            .child(kv_row("Workspace", workspace))
+                            .child(kv_row(
+                                "Quarks",
+                                format!("{adopted} adopted · {available} available"),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child("Built on GPUI (Zed) and gpui-component (Longbridge), and speaks the Agent Client Protocol."),
+                    )
+                    .child(
+                        div()
+                            .id("about-close")
+                            .self_end()
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::bg_surface_raised())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::glass_highlight()))
+                            .text_sm()
+                            .text_color(theme::text())
+                            .child("Close")
+                            .on_click(close),
+                    ),
+            )
+    }
+
+    /// The Changelog overlay modal displaying release history back to v0.1.0.
+    pub(super) fn changelog_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_section = |release: &'static Release| {
+            let mut sec = v_flex()
+                .w_full()
+                .gap_2()
+                .pb_4()
+                .border_b_1()
+                .border_color(theme::border());
+
+            let mut header = h_flex().w_full().items_center().gap_2();
+            header = header.child(
+                div()
+                    .text_base()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::text())
+                    .child(format!("v{}", release.version)),
+            );
+            header = header.child(match release.date {
+                Some(date) => div().text_xs().text_color(theme::text_muted()).child(date),
+                None => div()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(theme::accent_soft())
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(theme::accent())
+                    .child("Unreleased"),
+            });
+            sec = sec.child(header);
+
+            let render_group = |title: &'static str, items: &[&'static str]| {
+                if items.is_empty() {
+                    return None;
+                }
+                let mut grp = v_flex().w_full().gap_1();
+                grp = grp.child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .text_color(theme::text_secondary())
+                        .child(title),
+                );
+                for item in items {
+                    grp = grp.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_start()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .line_height(gpui_kit::relative(1.4))
+                                    .text_color(theme::text_muted())
+                                    .child("•"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .line_height(gpui_kit::relative(1.4))
+                                    .text_color(theme::text())
+                                    .child(*item),
+                            ),
+                    );
+                }
+                Some(grp)
+            };
+
+            if let Some(grp) = render_group("Added", release.added) {
+                sec = sec.child(grp);
+            }
+            if let Some(grp) = render_group("Changed", release.changed) {
+                sec = sec.child(grp);
+            }
+            if let Some(grp) = render_group("Fixed", release.fixed) {
+                sec = sec.child(grp);
+            }
+
+            sec
+        };
+
+        div()
+            .id("changelog-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.changelog_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .occlude()
+                    .w(px(580.0))
+                    .max_w(gpui_kit::relative(0.9))
+                    .max_h(px(620.0))
+                    .p_5()
+                    .gap_4()
+                    .rounded(INNER_RADIUS)
+                    .bg(theme::glass_card())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, _| {})
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2p5()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::text())
+                                            .child("Changelog"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(theme::bg_surface_raised())
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            .text_color(theme::text_muted())
+                                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("changelog-close-icon")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(24.0))
+                                    .rounded_full()
+                                    .text_color(theme::text_secondary())
+                                    .hover(|s| {
+                                        s.bg(theme::bg_surface_raised()).text_color(theme::text())
+                                    })
+                                    .child(Icon::new(IconName::WindowClose).small())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.changelog_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .id("changelog-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .gap_4()
+                            .pr_2()
+                            .children(RELEASES.iter().map(render_section)),
+                    )
+                    .child(
+                        h_flex().justify_end().child(
+                            div()
+                                .id("changelog-close")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme::bg_surface_raised())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::glass_highlight()))
+                                .text_sm()
+                                .text_color(theme::text())
+                                .child("Close")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.changelog_open = false;
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            )
+    }
+
+    /// Best-effort, read-only probe of whether `hadron-gluon` currently holds
+    /// `gluon.lock` — the same flock check `main.rs` runs once at chamber startup
+    /// (`gluon_running`), made callable live each time the Process Manager opens.
+    /// Any lock this acquires is released immediately; it never blocks the daemon.
+    /// `pub(in crate::app)` (not private) so the 400ms reload tick (`app::reload`,
+    /// a sibling of `app::render`, not a descendant) can poll it for the "gluon
+    /// stopped" banner, not just this module.
+    pub(in crate::app) fn probe_gluon_running(field_path: &std::path::Path) -> bool {
+        let field_dir = hadron_lattice::hadron_dir_of(field_path);
+        let lock_path = field_dir.join("gluon.lock");
+        if !lock_path.exists() {
+            return false;
+        }
+        if let Ok(content) = std::fs::read_to_string(&lock_path) {
+            if let Some(first_line) = content.lines().next() {
+                if let Ok(pid) = first_line.trim().parse::<u32>() {
+                    if hadron_lattice::sys::inspect::is_process_alive_in_dir(pid, &field_dir) {
+                        return true;
+                    }
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+            else {
+                return false;
+            };
+            let fd = file.as_raw_fd();
+            let acquired = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if acquired {
+                unsafe { libc::flock(fd, libc::LOCK_UN) };
+            }
+            !acquired
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Live rows for the Process Manager overlay: Chamber UI, Gluon daemon,
+    /// adopted quark seats, active PTY terminals, and child subprocesses.
+    pub(super) fn resolve_running_processes(&self) -> Vec<crate::model::ProcessRow> {
+        let terminals: Vec<(usize, String, Option<u32>)> = self
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(ix, t)| {
+                let pid = t.term.as_ref().and_then(|pty| pty.process_id());
+                (ix, t.title.clone(), pid)
+            })
+            .collect();
+        crate::model::build_full_process_rows(
+            std::process::id(),
+            self.last_gluon_running,
+            self.last_gluon_pid,
+            &self.view.roster,
+            &terminals,
+            &self.last_hadron_processes,
+        )
+    }
+
+    /// The Process Manager overlay: a dim backdrop (click to dismiss) behind a card
+    /// listing the Chamber UI, Gluon daemon, adopted quark seats, PTY terminals, and
+    /// child subprocesses with live OS PID/PPID/RSS telemetry and lifecycle controls.
+    pub(super) fn process_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::model::{ProcessKind, ProcessSection};
+
+        let rows = self.resolve_running_processes();
+        let now = chrono::Utc::now();
+
+        let active_seats_count = self
+            .view
+            .roster
+            .iter()
+            .filter(|r| r.adopted && r.enabled)
+            .count();
+        let excited_count = self
+            .view
+            .roster
+            .iter()
+            .filter(|r| {
+                r.adopted
+                    && r.enabled
+                    && (matches!(r.state, QuarkState::Excited | QuarkState::Thinking)
+                        || self
+                            .last_live_activities
+                            .get(&r.id)
+                            .and_then(|a| a.as_ref())
+                            .is_some())
+            })
+            .count();
+        let subprocess_count = rows
+            .iter()
+            .filter(|r| matches!(r.kind, ProcessKind::Terminal | ProcessKind::Subprocess))
+            .count();
+        let total_rss_bytes: u64 = rows.iter().filter_map(|r| r.rss_bytes).sum();
+        let restartable_acp_ids: Vec<String> = rows
+            .iter()
+            .filter(|r| r.kind == ProcessKind::Quark && r.can_restart)
+            .map(|r| r.id.clone())
+            .collect();
+
+        let (live_rows, standby_rows): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .partition(|r| r.section == ProcessSection::LiveProcess);
+
+        let sections = [
+            (
+                format!("LIVE OS PROCESSES ({})", live_rows.len()),
+                live_rows,
+            ),
+            (
+                format!(
+                    "STANDBY QUARK SEATS ({}) — NO ACTIVE OS PROCESS",
+                    standby_rows.len()
+                ),
+                standby_rows,
+            ),
+        ];
+
+        let mut list = v_flex().gap_2();
+        for (section_title, section_rows) in sections {
+            if section_rows.is_empty() {
+                continue;
+            }
+            list = list.child(
+                div()
+                    .pt_1()
+                    .px_1()
+                    .text_size(px(10.0))
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme::text_muted())
+                    .child(section_title),
+            );
+            for row in section_rows {
+                let roster_row = (row.kind == ProcessKind::Quark)
+                    .then(|| self.view.roster.iter().find(|r| r.id == row.id))
+                    .flatten();
+                let activity = self
+                    .last_live_activities
+                    .get(&row.id)
+                    .and_then(|a| a.as_ref());
+                let is_gating = row.kind == ProcessKind::Quark
+                    && self
+                        .last_gate_activities
+                        .iter()
+                        .any(|g| g.quark.as_str() == row.id);
+
+                let (dot, status_label) = match row.kind {
+                    ProcessKind::Chamber | ProcessKind::Subprocess => {
+                        (theme::halo_idle(), row.status.clone())
+                    }
+                    ProcessKind::Gluon | ProcessKind::Terminal => {
+                        if row.status == "Running" {
+                            (theme::halo_idle(), "Running".to_string())
+                        } else {
+                            (theme::halo_error(), "Stopped".to_string())
+                        }
+                    }
+                    ProcessKind::Quark => {
+                        if let Some(r) = roster_row {
+                            let effective_state = effective_presence_state(
+                                r.state,
+                                r.adopted,
+                                r.enabled,
+                                activity.is_some(),
+                            );
+                            if r.enabled {
+                                (
+                                    theme::halo_dot(effective_state),
+                                    theme::presence_label(effective_state).to_string(),
+                                )
+                            } else if !r.adopted {
+                                (theme::presence_disabled().into(), "available".to_string())
+                            } else {
+                                (theme::presence_disabled().into(), "disabled".to_string())
+                            }
+                        } else {
+                            (theme::presence_disabled().into(), row.status.clone())
+                        }
+                    }
+                };
+
+                let avatar_or_icon = match row.kind {
+                    ProcessKind::Chamber => div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.0))
+                        .rounded_full()
+                        .bg(theme::bg_surface_raised())
+                        .text_color(theme::accent())
+                        .child(Icon::new(IconName::WindowMaximize).small())
+                        .into_any_element(),
+                    ProcessKind::Gluon => div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.0))
+                        .rounded_full()
+                        .bg(theme::bg_surface_raised())
+                        .text_color(theme::accent())
+                        .child(Icon::new(IconName::Cpu).small())
+                        .into_any_element(),
+                    ProcessKind::Terminal => div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.0))
+                        .rounded_full()
+                        .bg(theme::bg_surface_raised())
+                        .text_color(theme::text_secondary())
+                        .child(Icon::new(IconName::SquareTerminal).small())
+                        .into_any_element(),
+                    ProcessKind::Subprocess => div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.0))
+                        .rounded_full()
+                        .bg(theme::bg_surface_raised())
+                        .text_color(theme::text_muted())
+                        .child(Icon::new(IconName::Network).small())
+                        .into_any_element(),
+                    ProcessKind::Quark => {
+                        let resolved = self.resolve_identity(&row.id);
+                        identity_avatar(&resolved, 28.0).into_any_element()
+                    }
+                };
+
+                let transport_code = match row.kind {
+                    ProcessKind::Chamber => "UI",
+                    ProcessKind::Gluon => "DAEMON",
+                    ProcessKind::Terminal => "PTY",
+                    ProcessKind::Subprocess => "CHILD",
+                    ProcessKind::Quark => roster_row.map(|r| r.transport.code()).unwrap_or("SEAT"),
+                };
+
+                let model_label = roster_row
+                    .map(|r| r.model_label())
+                    .filter(|m| !m.is_empty());
+
+                let is_orchestrator = roster_row.is_some_and(|r| {
+                    r.adopted && r.flavor == Some(hadron_lattice::Flavor::Orchestrator)
+                });
+
+                let pid_badge = row.pid.map(|pid| match row.ppid.filter(|&ppid| ppid > 0) {
+                    Some(ppid) => format!("PID {pid} (PPID {ppid})"),
+                    None => format!("PID {pid}"),
+                });
+                let rss_badge = row
+                    .rss_bytes
+                    .filter(|&b| b > 0)
+                    .map(hadron_lattice::sys::format_rss);
+
+                let subtitle = match row.kind {
+                    ProcessKind::Chamber => row
+                        .command
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| Some("Hadron Chamber GPUI desktop host".to_string())),
+                    ProcessKind::Gluon => activity
+                        .map(|a| a.detail.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| row.command.clone().filter(|s| !s.is_empty()))
+                        .or_else(|| {
+                            Some(if row.enabled {
+                                "Swarm Engine, Router & Merge Gate".to_string()
+                            } else {
+                                "Daemon process not running".to_string()
+                            })
+                        }),
+                    ProcessKind::Terminal | ProcessKind::Subprocess => {
+                        row.command.clone().filter(|s| !s.is_empty())
+                    }
+                    ProcessKind::Quark => {
+                        if is_gating {
+                            Some("Running Merge Gate verification...".to_string())
+                        } else if let Some(act) = activity {
+                            let elapsed = act
+                                .started
+                                .or(Some(act.at))
+                                .map(|st| (now - st).num_seconds().max(0))
+                                .unwrap_or(0);
+                            let detail = act.detail.trim();
+                            let label = if detail.is_empty() {
+                                "thinking"
+                            } else {
+                                detail
+                            };
+                            Some(format!("{label} ({elapsed}s)"))
+                        } else {
+                            row.command.clone().filter(|s| !s.is_empty())
+                        }
+                    }
+                };
+
+                let mut row_actions = h_flex().items_center().gap_1p5();
+                match row.kind {
+                    ProcessKind::Chamber => {}
+                    ProcessKind::Gluon => {
+                        let start_label = if row.enabled { "Restart" } else { "Start" };
+                        row_actions = row_actions.child(
+                            text_button("proc-restart-gluon", start_label).on_click(
+                                cx.listener(|this, _, _, cx| this.restart_gluon_daemon(cx)),
+                            ),
+                        );
+                        if row.can_stop_or_kill {
+                            row_actions =
+                                row_actions.child(text_button("proc-stop-gluon", "Stop").on_click(
+                                    cx.listener(|this, _, _, cx| this.stop_gluon_daemon(cx)),
+                                ));
+                        }
+                    }
+                    ProcessKind::Quark => {
+                        if row.can_stop_or_kill {
+                            let id = row.id.clone();
+                            row_actions = row_actions.child(
+                                text_button(
+                                    SharedString::from(format!("proc-stop-{}", row.id)),
+                                    "Stop",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.reboot_quark(&id, cx);
+                                    },
+                                )),
+                            );
+                        }
+                        if row.can_restart {
+                            let id = row.id.clone();
+                            row_actions = row_actions.child(
+                                text_button(
+                                    SharedString::from(format!("proc-restart-{}", row.id)),
+                                    "Restart",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.reboot_quark(&id, cx);
+                                    },
+                                )),
+                            );
+                        }
+                        if row.can_toggle {
+                            let id = row.id.clone();
+                            let label = if row.enabled { "Disable" } else { "Enable" };
+                            row_actions = row_actions.child(
+                                text_button(
+                                    SharedString::from(format!("proc-toggle-{}", row.id)),
+                                    label,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.toggle_quark_enabled(&id, cx);
+                                    },
+                                )),
+                            );
+                        }
+                        let id_for_settings = row.id.clone();
+                        row_actions = row_actions.child(
+                            div()
+                                .id(SharedString::from(format!("proc-settings-{}", row.id)))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(24.0))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme::border())
+                                .bg(theme::bg_base())
+                                .text_color(theme::text_secondary())
+                                .hover(|s| {
+                                    s.bg(theme::bg_surface_raised()).text_color(theme::text())
+                                })
+                                .cursor_pointer()
+                                .child(Icon::new(IconName::Settings).xsmall())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.process_manager_open = false;
+                                    this.settings_open = true;
+                                    this.select_settings_target(
+                                        SettingsTarget::Quark(id_for_settings.clone()),
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        );
+                    }
+                    ProcessKind::Terminal => {
+                        if let Some(ix) = row
+                            .id
+                            .strip_prefix("pty-")
+                            .and_then(|s| s.parse::<usize>().ok())
+                        {
+                            row_actions = row_actions
+                                .child(
+                                    text_button(
+                                        SharedString::from(format!("proc-focus-{}", row.id)),
+                                        "Focus",
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.focus_terminal_from_processes(ix, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    text_button(
+                                        SharedString::from(format!("proc-kill-{}", row.id)),
+                                        "Kill",
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.close_terminal_from_processes(ix, cx);
+                                        },
+                                    )),
+                                );
+                        }
+                    }
+                    ProcessKind::Subprocess => {
+                        if let Some(pid) = row.pid {
+                            let label = row.label.clone();
+                            row_actions = row_actions.child(
+                                text_button(
+                                    SharedString::from(format!("proc-kill-{}", row.id)),
+                                    "Kill",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.kill_hadron_subprocess(pid, label.clone(), cx);
+                                    },
+                                )),
+                            );
+                        }
+                    }
+                }
+
+                let proc_orch_badge_id = format!("process-orch-badge-{}", row.id);
+                list = list.child(
+                    h_flex()
+                        .id(SharedString::from(format!("proc-row-{}", row.id)))
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2p5()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme::glass_highlight())
+                        .bg(theme::bg_surface())
+                        .hover(|s| s.bg(theme::bg_surface_raised()))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2p5()
+                                .flex_1()
+                                .min_w_0()
+                                .child(avatar_or_icon)
+                                .child(
+                                    v_flex()
+                                        .gap_0p5()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .size(px(7.0))
+                                                        .rounded_full()
+                                                        .flex_shrink_0()
+                                                        .bg(dot),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                        .text_color(theme::text())
+                                                        .truncate()
+                                                        .child(row.label),
+                                                )
+                                                .when(is_orchestrator, |this| {
+                                                    this.child(widgets::orchestrator_badge(
+                                                        proc_orch_badge_id,
+                                                    ))
+                                                })
+                                                .child(
+                                                    div()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(theme::bg_surface_raised())
+                                                        .text_size(px(10.0))
+                                                        .text_color(theme::text_muted())
+                                                        .child(transport_code),
+                                                )
+                                                .when_some(model_label, |this, model| {
+                                                    this.child(
+                                                        div()
+                                                            .px_1p5()
+                                                            .py_0p5()
+                                                            .rounded_sm()
+                                                            .bg(theme::bg_base())
+                                                            .text_size(px(10.0))
+                                                            .text_color(theme::text_secondary())
+                                                            .truncate()
+                                                            .max_w(px(150.0))
+                                                            .child(model),
+                                                    )
+                                                })
+                                                .when_some(
+                                                    pid_badge.or(row.backing_badge),
+                                                    |this, pid_str| {
+                                                        this.child(
+                                                            div()
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(theme::bg_base())
+                                                                .text_size(px(10.0))
+                                                                .text_color(theme::text_muted())
+                                                                .child(pid_str),
+                                                        )
+                                                    },
+                                                )
+                                                .when_some(rss_badge, |this, rss_str| {
+                                                    this.child(
+                                                        div()
+                                                            .px_1p5()
+                                                            .py_0p5()
+                                                            .rounded_sm()
+                                                            .bg(theme::bg_base())
+                                                            .text_size(px(10.0))
+                                                            .text_color(theme::text_secondary())
+                                                            .child(rss_str),
+                                                    )
+                                                }),
+                                        )
+                                        .when_some(subtitle, |this, sub| {
+                                            this.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::text_muted())
+                                                    .truncate()
+                                                    .child(sub),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .flex_shrink_0()
+                                .gap_2p5()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(theme::bg_base())
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .child(status_label),
+                                )
+                                .child(row_actions),
+                        ),
+                );
+            }
+        }
+
+        let summary_strip =
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1()
+                                .rounded_full()
+                                .bg(theme::tab_bar_bg())
+                                .border_1()
+                                .border_color(theme::glass_highlight())
+                                .text_xs()
+                                .text_color(if self.last_gluon_running {
+                                    theme::success()
+                                } else {
+                                    theme::error()
+                                })
+                                .child(if self.last_gluon_running {
+                                    "Daemon Online"
+                                } else {
+                                    "Daemon Stopped"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .px_2p5()
+                                .py_1()
+                                .rounded_full()
+                                .bg(theme::tab_bar_bg())
+                                .border_1()
+                                .border_color(theme::glass_highlight())
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(format!("{active_seats_count} Active Seats")),
+                        )
+                        .when(subprocess_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(theme::tab_bar_bg())
+                                    .border_1()
+                                    .border_color(theme::glass_highlight())
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(format!("{subprocess_count} Subprocesses")),
+                            )
+                        })
+                        .when(total_rss_bytes > 0, |this| {
+                            this.child(
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(theme::tab_bar_bg())
+                                    .border_1()
+                                    .border_color(theme::glass_highlight())
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(format!(
+                                        "Total RSS: {}",
+                                        hadron_lattice::sys::format_rss(total_rss_bytes)
+                                    )),
+                            )
+                        })
+                        .when(excited_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(theme::accent().opacity(0.16))
+                                    .border_1()
+                                    .border_color(theme::accent().opacity(0.4))
+                                    .text_xs()
+                                    .text_color(theme::accent())
+                                    .child(format!("{excited_count} Excited")),
+                            )
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(text_button("proc-refresh", "Refresh").on_click(
+                            cx.listener(|this, _, _, cx| this.refresh_hadron_processes(cx)),
+                        ))
+                        .when(!restartable_acp_ids.is_empty(), |this| {
+                            let ids = restartable_acp_ids.clone();
+                            this.child(
+                                text_button("proc-restart-all-acp", "Restart All ACP").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        for id in &ids {
+                                            this.reboot_quark(id, cx);
+                                        }
+                                    }),
+                                ),
+                            )
+                        }),
+                );
+
+        let card = v_flex()
+            .occlude()
+            .w(px(680.0))
+            .max_h(px(640.0))
+            .p_4()
+            .gap_3()
+            .rounded(INNER_RADIUS)
+            .bg(theme::glass_card())
+            .border_1()
+            .border_color(theme::glass_highlight())
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, _| {}) // swallow inner clicks
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
+                                    .text_color(theme::text())
+                                    .child("Processes"),
+                            )
+                            .child(div().text_xs().text_color(theme::text_muted()).child(
+                                "Chamber, Daemon, Quark Seats, Terminals & Subprocess Tree",
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("processes-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded_full()
+                            .text_color(theme::text_secondary())
+                            .hover(|s| s.bg(theme::bg_surface_raised()).text_color(theme::text()))
+                            .child(Icon::new(IconName::WindowClose).small())
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.toggle_process_manager(cx)),
+                            ),
+                    ),
+            )
+            .child(summary_strip)
+            .child(
+                div()
+                    .id("processes-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list),
+            );
+
+        div()
+            .id("processes-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.toggle_process_manager(cx)),
+            )
+            .child(card)
+    }
+
+    /// The per-quark permission ladder (Ask / Write / Auto / Bypass) as an explicit
+    /// segmented picker for Settings. Unlike the roster's cycle-on-click tag, each rung is
+    /// directly selectable, the current resolved mode is highlighted on its risk colour,
+    /// and a gloss explains what the choice delegates. The leading **Default** rung clears
+    /// any override (`ModeClear`) so the quark follows the global default; the four posture
+    /// rungs each pin a per-quark `ModeSet` override. The daemon honours it next tick.
+    pub(crate) fn mode_select(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        use gpui_kit::component::select::Select;
+
+        let (current, is_override) = self
+            .view
+            .roster
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (r.mode, r.mode_is_override))
+            .unwrap_or((self.view.global_mode, false));
+
+        let current_val = if is_override {
+            format!("{:?}", current)
+        } else {
+            String::new()
+        };
+
+        let key = (id.to_string(), current_val.clone());
+        if self.mode_select_key.as_ref() != Some(&key) {
+            self.mode_select_key = Some(key);
+            let modes = vec![
+                "Ask".to_string(),
+                "Write".to_string(),
+                "Auto".to_string(),
+                "Bypass".to_string(),
+            ];
+            let delegate = create_model_delegate("Default", &modes, Some(&current_val));
+            self.mode_select_state.update(cx, |s, cx| {
+                s.set_items(delegate, window, cx);
+                if !current_val.is_empty() {
+                    s.set_selected_value(&current_val.into(), window, cx);
+                } else {
+                    s.set_selected_value(&"".into(), window, cx);
+                }
+            });
+        }
+
+        v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .child(
+                        div().flex_1().child(
+                            Select::new(&self.mode_select_state)
+                                .w_full()
+                                .placeholder("Select permission mode..."),
+                        ),
+                    )
+                    .child(mode_tag(current, !is_override)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(if is_override {
+                        format!(
+                            "Pinned for this quark ({}) — global setting is overridden.",
+                            mode_label(current)
+                        )
+                    } else {
+                        format!(
+                            "Default — following global setting ({}).",
+                            mode_label(current)
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The Settings overlay: a dim backdrop (click to dismiss) behind a card
+    /// that edits one identity — an avatar switcher, a live preview, a display
+    /// name, a color swatch row, and an image path (image wins over color).
+    /// The keyboard-triggered app menu (F10): the same actions as the hamburger
+    /// dropdown, but reachable without the mouse. A full-bleed backdrop dismisses on
+    /// any outside click (and swallows it); the panel sits under the top-left button.
+    pub(super) fn app_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        fn item(
+            id: &'static str,
+            label: &'static str,
+            on_click: impl Fn(&mut Chamber, &mut Window, &mut Context<Chamber>) + 'static,
+            cx: &mut Context<Chamber>,
+        ) -> gpui_kit::AnyElement {
+            div()
+                .id(id)
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_sm()
+                .text_color(theme::text())
+                .hover(|s| s.bg(theme::bg_surface_raised()))
+                .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation()
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.app_menu_open = false;
+                    on_click(this, window, cx);
+                    cx.notify();
+                }))
+                .child(label)
+                .into_any_element()
+        }
+
+        let sep = || div().h(px(1.0)).w_full().bg(theme::border());
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.app_menu_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .occlude()
+                    .absolute()
+                    .top(px(44.0))
+                    .left(px(12.0))
+                    .w(px(280.0))
+                    .p_2()
+                    .gap_0p5()
+                    .rounded(INNER_RADIUS)
+                    .bg(theme::glass_card())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    // Swallow clicks inside the panel so they don't hit the dismiss backdrop.
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, _| {})
+                    .child(item(
+                        "menu-open-workspace",
+                        "Open Workspace… (Ctrl+O)",
+                        |this, _w, cx| this.toggle_project_switcher(cx),
+                        cx,
+                    ))
+                    .child(sep())
+                    .child(item(
+                        "menu-settings",
+                        "Settings…",
+                        |this, window, cx| this.open_settings(window, cx),
+                        cx,
+                    ))
+                    .child(sep())
+                    .child(item(
+                        "menu-reveal",
+                        "Reveal Workspace in File Manager",
+                        |this, _w, cx| {
+                            this.handle_context_menu_action(
+                                ContextMenuAction::OpenInFolder(String::from(".")),
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(sep())
+                    .child(item(
+                        "menu-about",
+                        "About Hadron",
+                        |this, _w, _cx| this.about_open = true,
+                        cx,
+                    ))
+                    .child(sep())
+                    .child(item("menu-quit", "Quit Hadron", |_t, _w, cx| cx.quit(), cx)),
+            )
+    }
+
+    pub(super) fn project_switcher_overlay(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let current_root = crate::vcs::repo_root_of(&self.path)
+            .to_string_lossy()
+            .to_string();
+        let search_text = self.selector_search.read(cx).value().to_lowercase();
+        let recent_projects = self.prefs.recent_projects.clone();
+        let filtered_projects: Vec<_> = recent_projects
+            .into_iter()
+            .filter(|p| {
+                if search_text.is_empty() {
+                    true
+                } else {
+                    p.display_name.to_lowercase().contains(&search_text)
+                        || p.path.to_lowercase().contains(&search_text)
+                }
+            })
+            .collect();
+
+        let wsl_distros = crate::wsl::list_installed_wsl_distros();
+
+        div()
+            .id("project-switcher-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.project_switcher_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .occlude()
+                    .w(px(580.0))
+                    .max_h(px(520.0))
+                    .p_5()
+                    .gap_3()
+                    .rounded(INNER_RADIUS)
+                    .bg(theme::glass_card())
+                    .border_1()
+                    .border_color(theme::glass_highlight())
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, _| {})
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::Folder).small())
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::text())
+                                            .child("Quick Project Switcher"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(theme::glass_surface())
+                                            .text_color(theme::text_muted())
+                                            .child("Ctrl+O"),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        Button::new("switcher-open-folder")
+                                            .small()
+                                            .icon(IconName::Folder)
+                                            .label("Open Folder…")
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.project_switcher_open = false;
+                                                this.open_workspace(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .p_1()
+                                            .rounded_sm()
+                                            .hover(|s| s.bg(theme::bg_surface_raised()))
+                                            .cursor_pointer()
+                                            .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                                this.project_switcher_open = false;
+                                                cx.notify();
+                                            }))
+                                            .child(Icon::new(IconName::WindowClose).small().text_color(theme::text_muted())),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .child(self.selector_search.clone()),
+                    )
+                    .child(
+                        v_flex()
+                            .id("switcher-projects-list")
+                            .flex_1()
+                            .gap_1p5()
+                            .overflow_y_scroll()
+                            .children(if filtered_projects.is_empty() {
+                                vec![
+                                    div()
+                                        .py_6()
+                                        .text_center()
+                                        .text_color(theme::text_muted())
+                                        .child("No matching projects found.")
+                                        .into_any_element(),
+                                ]
+                            } else {
+                                filtered_projects
+                                    .into_iter()
+                                    .map(|proj| {
+                                        let path = proj.path.clone();
+                                        let path_for_delete = proj.path.clone();
+                                        let is_current = path == current_root;
+                                        let is_wsl = proj.remote.as_ref().and_then(|r| match r {
+                                            config::ProjectRemote::Wsl { distro, .. } => Some(distro.clone()),
+                                            _ => None,
+                                        });
+
+                                        h_flex()
+                                            .id(gpui_kit::ElementId::from(gpui_kit::SharedString::from(format!("switcher-proj-{}", path))))
+                                            .w_full()
+                                            .items_center()
+                                            .justify_between()
+                                            .p_2p5()
+                                            .rounded(INNER_RADIUS)
+                                            .border_1()
+                                            .when(is_current, |s| s.bg(theme::bg_surface_raised()).border_color(theme::accent()))
+                                            .when(!is_current, |s| s.bg(theme::glass_surface()).border_color(theme::glass_highlight()))
+                                            .hover(|s| s.bg(theme::bg_surface_raised()))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener({
+                                                let path = path.clone();
+                                                move |this, _, window, cx| {
+                                                    this.open_project_path(&path, window, cx);
+                                                }
+                                            }))
+                                            .child(
+                                                v_flex()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        h_flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                                    .text_color(theme::text())
+                                                                    .child(proj.display_name),
+                                                            )
+                                                            .children(is_current.then(|| {
+                                                                div()
+                                                                    .text_xs()
+                                                                    .px_1p5()
+                                                                    .py_0p5()
+                                                                    .rounded_sm()
+                                                                    .bg(theme::accent_soft())
+                                                                    .text_color(theme::accent())
+                                                                    .child("Current")
+                                                                    .into_any_element()
+                                                            }))
+                                                            .children(is_wsl.map(|distro| {
+                                                                div()
+                                                                    .text_xs()
+                                                                    .px_1p5()
+                                                                    .py_0p5()
+                                                                    .rounded_sm()
+                                                                    .bg(theme::accent_secondary().opacity(0.20))
+                                                                    .text_color(theme::accent_secondary())
+                                                                    .child(format!("WSL: {distro}"))
+                                                                    .into_any_element()
+                                                            })),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme::text_muted())
+                                                            .child(path),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(gpui_kit::ElementId::from(gpui_kit::SharedString::from(format!("switcher-del-{}", path_for_delete))))
+                                                    .p_1()
+                                                    .rounded_sm()
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.bg(rgba(0xff000033)))
+                                                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                    .on_click(cx.listener({
+                                                        let path_to_del = path_for_delete.clone();
+                                                        move |this, _, _window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.prefs.remove_project(&path_to_del);
+                                                            let _ = config::save(&this.prefs);
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child(
+                                                        Icon::new(IconName::WindowClose)
+                                                            .small()
+                                                            .text_color(theme::text_muted()),
+                                                    ),
+                                            )
+                                            .into_any_element()
+                                    })
+                                    .collect()
+                            }),
+                    )
+                    .children((!wsl_distros.is_empty()).then(|| {
+                        v_flex()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme::glass_highlight())
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child("WSL Distros:"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .children(
+                                        wsl_distros
+                                            .into_iter()
+                                            .map(|d| {
+                                                let distro = d.clone();
+                                                Button::new(gpui_kit::ElementId::from(gpui_kit::SharedString::from(format!("switcher-wsl-{}", d))))
+                                                    .small()
+                                                    .icon(IconName::Globe)
+                                                    .label(d)
+                                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                                        this.open_wsl_distro_picker(distro.clone(), cx);
+                                                    }))
+                                                    .into_any_element()
+                                            }),
+                                    ),
+                            )
+                    })),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RELEASES;
+
+    /// `RELEASES` is a hand-written mirror of `docs/CHANGELOG.md`, and it drifted: the
+    /// 0.1.4 release bumped the changelog and the version but not the overlay, so the
+    /// installed build showed its own shipped release badged "Unreleased". Nothing but
+    /// this test links the three, so it asserts all three agree on the newest release.
+    #[test]
+    fn the_top_overlay_release_matches_the_changelog_and_the_shipped_version() {
+        const CHANGELOG: &str = include_str!("../../../../../docs/CHANGELOG.md");
+
+        let header = CHANGELOG
+            .lines()
+            .find(|line| line.starts_with("## ["))
+            .expect("docs/CHANGELOG.md has a `## [x.y.z] - DATE` release header");
+        let (version, date) = header
+            .trim_start_matches("## [")
+            .split_once("] - ")
+            .expect("the newest changelog entry is dated, not `[Unreleased]`");
+
+        let top = &RELEASES[0];
+        assert_eq!(
+            top.version, version,
+            "overlay's newest release vs docs/CHANGELOG.md"
+        );
+        assert_eq!(
+            top.date,
+            Some(date.trim()),
+            "overlay's release date vs docs/CHANGELOG.md"
+        );
+        assert_eq!(
+            top.version,
+            env!("CARGO_PKG_VERSION"),
+            "overlay's newest release vs the version this binary was built at",
+        );
+    }
+
+    #[test]
+    fn releases_entries_have_valid_items_and_non_empty_bullets() {
+        assert!(!RELEASES.is_empty(), "RELEASES array cannot be empty");
+        for release in RELEASES {
+            assert!(
+                !release.version.is_empty(),
+                "release version cannot be empty"
+            );
+            for item in release
+                .added
+                .iter()
+                .chain(release.changed)
+                .chain(release.fixed)
+            {
+                assert!(!item.trim().is_empty(), "changelog bullet cannot be empty");
+            }
+        }
+    }
+}
