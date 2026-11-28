@@ -79,6 +79,14 @@ fn field_wash(dark: bool) -> impl IntoElement {
     })
 }
 
+struct NavCache {
+    revision: u64,
+    today: String,
+    today_count: usize,
+    inbox_count: usize,
+    projects: Vec<(String, String)>,
+}
+
 pub struct WorkbenchApp {
     state: AppState,
     collapsed: bool,
@@ -92,6 +100,8 @@ pub struct WorkbenchApp {
     settings: Entity<SettingsPane>,
     inspector: Entity<InspectorPane>,
     palette: Entity<CommandPalette>,
+    /// Sidebar counts and project names for the current repo revision and day.
+    nav_cache: Option<NavCache>,
     /// Kept alive so the OS tray icon is not dropped.
     _tray: Option<tray_icon::TrayIcon>,
 }
@@ -223,6 +233,7 @@ impl WorkbenchApp {
             settings,
             inspector,
             palette,
+            nav_cache: None,
             _tray: tray_icon,
         }
     }
@@ -529,34 +540,56 @@ impl Render for WorkbenchApp {
             .state
             .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width));
         let today = self.state.today();
-        let (today_count, inbox_count) = self.state.with(|s| {
-            let mut today_count = 0usize;
-            let mut inbox_count = 0usize;
-            for task in s.repo.tasks() {
-                if task.parent_id.is_some() {
-                    continue;
+        let revision = self.state.with(|s| s.repo.data_revision());
+        let cache_hit = self
+            .nav_cache
+            .as_ref()
+            .is_some_and(|cache| cache.revision == revision && cache.today == today);
+        if !cache_hit {
+            let (today_count, inbox_count, projects) = self.state.with(|s| {
+                let mut today_count = 0usize;
+                let mut inbox_count = 0usize;
+                for task in s.repo.tasks() {
+                    if task.parent_id.is_some() {
+                        continue;
+                    }
+                    if is_today_member(task, &today) {
+                        today_count += 1;
+                    }
+                    if !task.is_done && task.project_id == INBOX_PROJECT_ID {
+                        inbox_count += 1;
+                    }
                 }
-                if is_today_member(task, &today) {
-                    today_count += 1;
-                }
-                if !task.is_done && task.project_id == INBOX_PROJECT_ID {
-                    inbox_count += 1;
-                }
-            }
-            (today_count, inbox_count)
-        });
-        let project_items: Vec<(String, String, bool)> = self.state.with(|s| {
-            s.repo
-                .list_projects()
-                .into_iter()
-                .filter(|p| p.id != INBOX_PROJECT_ID && !p.is_archived)
-                .map(|p| {
-                    let active = nav == AppNav::Projects
-                        && s.active_project_id.as_deref() == Some(p.id.as_str());
-                    (p.id, p.title, active)
-                })
-                .collect()
-        });
+                let projects = s
+                    .repo
+                    .list_projects()
+                    .into_iter()
+                    .filter(|project| project.id != INBOX_PROJECT_ID && !project.is_archived)
+                    .map(|project| (project.id, project.title))
+                    .collect();
+                (today_count, inbox_count, projects)
+            });
+            self.nav_cache = Some(NavCache {
+                revision,
+                today: today.clone(),
+                today_count,
+                inbox_count,
+                projects,
+            });
+        }
+        let cache = self.nav_cache.as_ref().expect("nav cache");
+        let today_count = cache.today_count;
+        let inbox_count = cache.inbox_count;
+        let active_project = self.state.with(|s| s.active_project_id.clone());
+        let project_items: Vec<(String, String, bool)> = cache
+            .projects
+            .iter()
+            .map(|(id, title)| {
+                let active =
+                    nav == AppNav::Projects && active_project.as_deref() == Some(id.as_str());
+                (id.clone(), title.clone(), active)
+            })
+            .collect();
         let palette_open = self.state.with(|s| s.palette_open);
         let notifications_open = self.state.with(|s| s.notifications_open);
         let entity = cx.weak_entity();

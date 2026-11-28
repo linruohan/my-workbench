@@ -22,6 +22,8 @@ pub struct MemoryWorkbenchRepository {
     agent_workspaces: HashMap<String, AgentWorkspace>,
     agent_threads: HashMap<String, AgentThread>,
     agent_messages: HashMap<String, AgentMessage>,
+    /// Message ids grouped by thread, so a transcript does not scan every message.
+    messages_by_thread: HashMap<String, Vec<String>>,
     agent_approvals: HashMap<String, AgentApproval>,
     agent_events: Vec<AgentEvent>,
     dirty: bool,
@@ -66,6 +68,7 @@ impl MemoryWorkbenchRepository {
             agent_workspaces,
             agent_threads: HashMap::new(),
             agent_messages: HashMap::new(),
+            messages_by_thread: HashMap::new(),
             agent_approvals: HashMap::new(),
             agent_events: Vec::new(),
             dirty: false,
@@ -178,6 +181,7 @@ impl MemoryWorkbenchRepository {
             .into_iter()
             .map(|m| (m.id.clone(), m))
             .collect();
+        self.rebuild_message_index();
         self.agent_approvals = snap
             .agent_approvals
             .into_iter()
@@ -186,6 +190,10 @@ impl MemoryWorkbenchRepository {
         self.agent_events = snap.agent_events;
         self.dirty = false;
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn tasks(&self) -> impl Iterator<Item = &Task> {
+        self.tasks.values()
     }
 
     pub fn list_tasks(&self) -> Vec<Task> {
@@ -247,6 +255,10 @@ impl MemoryWorkbenchRepository {
             self.delete_task(&cid);
         }
         self.touch();
+    }
+
+    pub fn get_project(&self, id: &str) -> Option<&Project> {
+        self.projects.get(id)
     }
 
     pub fn list_projects(&self) -> Vec<Project> {
@@ -352,6 +364,10 @@ impl MemoryWorkbenchRepository {
     pub fn set_bucket(&mut self, project_id: &str, bucket: ProjectBucket) {
         self.buckets.insert(project_id.to_string(), bucket);
         self.touch();
+    }
+
+    pub fn get_tag(&self, id: &str) -> Option<&Tag> {
+        self.tags.get(id)
     }
 
     pub fn list_tags(&self) -> Vec<Tag> {
@@ -629,6 +645,24 @@ impl MemoryWorkbenchRepository {
         v
     }
 
+    /// Any workspace root, without cloning the workspace list.
+    pub fn agent_workspace_with_root(&self) -> Option<String> {
+        self.agent_workspaces
+            .values()
+            .find_map(|workspace| workspace.root_path.clone())
+    }
+
+    pub fn get_agent_workspace(&self, id: &str) -> Option<&AgentWorkspace> {
+        self.agent_workspaces.get(id)
+    }
+
+    /// Oldest workspace. The app always keeps at least the default one.
+    pub fn earliest_agent_workspace(&self) -> Option<&AgentWorkspace> {
+        self.agent_workspaces
+            .values()
+            .min_by_key(|ws| ws.created_at)
+    }
+
     pub fn list_agent_threads(&self) -> Vec<AgentThread> {
         let mut v: Vec<_> = self.agent_threads.values().cloned().collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
@@ -712,6 +746,7 @@ impl MemoryWorkbenchRepository {
     pub fn delete_agent_thread(&mut self, id: &str) {
         self.agent_threads.remove(id);
         self.agent_messages.retain(|_, m| m.thread_id != id);
+        self.messages_by_thread.remove(id);
         self.agent_events.retain(|e| e.thread_id != id);
         self.touch();
     }
@@ -763,10 +798,12 @@ impl MemoryWorkbenchRepository {
         if needle.is_empty() {
             return None;
         }
-        let hit = self.agent_messages.values().find(|m| {
-            m.thread_id == thread_id
-                && !m.content.is_empty()
-                && m.content.to_lowercase().contains(&needle)
+        let hit = self.messages_by_thread.get(thread_id).and_then(|ids| {
+            ids.iter().find_map(|id| {
+                let message = self.agent_messages.get(id)?;
+                (!message.content.is_empty() && message.content.to_lowercase().contains(&needle))
+                    .then_some(message)
+            })
         })?;
         let body = hit.content.replace('\n', " ");
         let at = body.to_lowercase().find(&needle).unwrap_or(0);
@@ -775,24 +812,53 @@ impl MemoryWorkbenchRepository {
         Some(format!("…{text}"))
     }
 
+    fn rebuild_message_index(&mut self) {
+        self.messages_by_thread.clear();
+        for message in self.agent_messages.values() {
+            self.messages_by_thread
+                .entry(message.thread_id.clone())
+                .or_default()
+                .push(message.id.clone());
+        }
+    }
+
     pub fn messages_for_thread(&self, thread_id: &str) -> Vec<AgentMessage> {
-        let mut v: Vec<_> = self
-            .agent_messages
-            .values()
-            .filter(|m| m.thread_id == thread_id)
-            .cloned()
-            .collect();
-        v.sort_by_key(|a| a.created_at);
+        let Some(ids) = self.messages_by_thread.get(thread_id) else {
+            return Vec::new();
+        };
+        let mut v = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(message) = self.agent_messages.get(id) {
+                v.push(message.clone());
+            }
+        }
+        v.sort_by_key(|message| message.created_at);
         v
     }
 
     pub fn upsert_agent_message(&mut self, msg: AgentMessage) {
+        if let Some(previous) = self.agent_messages.get(&msg.id) {
+            if previous.thread_id != msg.thread_id {
+                let previous_thread = previous.thread_id.clone();
+                if let Some(bucket) = self.messages_by_thread.get_mut(&previous_thread) {
+                    bucket.retain(|id| id != &msg.id);
+                }
+            }
+        }
+        let bucket = self
+            .messages_by_thread
+            .entry(msg.thread_id.clone())
+            .or_default();
+        if !bucket.iter().any(|id| id == &msg.id) {
+            bucket.push(msg.id.clone());
+        }
         self.agent_messages.insert(msg.id.clone(), msg);
         self.touch();
     }
 
     pub fn clear_agent_messages(&mut self, thread_id: &str) {
         self.agent_messages.retain(|_, m| m.thread_id != thread_id);
+        self.messages_by_thread.remove(thread_id);
         self.agent_approvals.retain(|_, a| a.thread_id != thread_id);
         self.agent_events.retain(|e| e.thread_id != thread_id);
         if let Some(thread) = self.agent_threads.get_mut(thread_id) {
@@ -818,6 +884,7 @@ impl MemoryWorkbenchRepository {
             .retain(|_, a| a.thread_id != thread_id || a.created_at >= summary.created_at);
         self.agent_messages
             .insert(summary.id.clone(), summary.clone());
+        self.rebuild_message_index();
         if let Some(thread) = self.agent_threads.get_mut(thread_id) {
             thread.updated_at = now_ms();
         }
@@ -828,6 +895,7 @@ impl MemoryWorkbenchRepository {
     pub fn truncate_agent_messages_at(&mut self, thread_id: &str, created_at: i64) {
         self.agent_messages
             .retain(|_, m| m.thread_id != thread_id || m.created_at < created_at);
+        self.rebuild_message_index();
         self.agent_approvals
             .retain(|_, a| a.thread_id != thread_id || a.created_at < created_at);
         if let Some(thread) = self.agent_threads.get_mut(thread_id) {

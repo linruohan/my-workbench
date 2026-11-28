@@ -38,6 +38,10 @@ pub struct KnowledgePane {
     state: AppState,
     /// Absolute path and path relative to the library root.
     files: Vec<(String, String)>,
+    /// Bumps when the file list or content-search hits change.
+    listing_rev: u64,
+    tree_sig: String,
+    tree_nodes: Vec<KbTreeNode>,
     /// Slash-separated directory keys that are expanded in the file tree.
     expanded: HashSet<String>,
     loaded_root: Option<String>,
@@ -61,6 +65,11 @@ pub struct KnowledgePane {
     find_word: bool,
     find_case: bool,
     find_regex: bool,
+    doc_lines: usize,
+    doc_chars: usize,
+    outgoing_cache: Vec<(String, Option<String>)>,
+    /// Wikilink targets depend on the file list, so reload marks them stale.
+    outgoing_dirty: bool,
     last_editor_scroll_y: f32,
     last_preview_px: f32,
     _subs: Vec<Subscription>,
@@ -95,6 +104,9 @@ impl KnowledgePane {
         let mut this = Self {
             state,
             files: Vec::new(),
+            listing_rev: 0,
+            tree_sig: String::new(),
+            tree_nodes: Vec::new(),
             expanded: HashSet::new(),
             loaded_root: None,
             editor: editor.clone(),
@@ -115,6 +127,10 @@ impl KnowledgePane {
             find_word: false,
             find_case: false,
             find_regex: false,
+            doc_lines: 1,
+            doc_chars: 0,
+            outgoing_cache: Vec::new(),
+            outgoing_dirty: false,
             last_editor_scroll_y: 0.0,
             last_preview_px: 0.0,
             _subs: Vec::new(),
@@ -136,7 +152,13 @@ impl KnowledgePane {
             this.open_file(&path, window, cx);
         }
         this._subs
-            .push(cx.subscribe(&editor, |_, _, _: &InputEvent, cx| cx.notify()));
+            .push(cx.subscribe(&editor, |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = input.read(cx).value().to_string();
+                    this.refresh_doc_cache(&text);
+                }
+                cx.notify();
+            }));
         this._subs.push(
             cx.subscribe(&this.filter, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -176,11 +198,13 @@ impl KnowledgePane {
         if query.chars().count() < 2 {
             self.filter_query = query;
             self.filter_hits.clear();
+            self.listing_rev = self.listing_rev.wrapping_add(1);
             cx.notify();
             return;
         }
         let Some(root) = self.root() else {
             self.filter_hits.clear();
+            self.listing_rev = self.listing_rev.wrapping_add(1);
             cx.notify();
             return;
         };
@@ -209,6 +233,7 @@ impl KnowledgePane {
                         (hit.path, hit.relative, snippet)
                     })
                     .collect();
+                this.listing_rev = this.listing_rev.wrapping_add(1);
                 cx.notify();
             })
             .ok();
@@ -522,6 +547,8 @@ impl KnowledgePane {
         self.backlink_hits.clear();
         let Some(root_key) = root_key else {
             self.files.clear();
+            self.listing_rev = self.listing_rev.wrapping_add(1);
+            self.outgoing_dirty = true;
             return;
         };
         let root = PathBuf::from(&root_key);
@@ -536,6 +563,8 @@ impl KnowledgePane {
                     return;
                 }
                 this.files = entries.into_iter().map(|e| (e.path, e.relative)).collect();
+                this.listing_rev = this.listing_rev.wrapping_add(1);
+                this.outgoing_dirty = true;
                 cx.notify();
             })
             .ok();
@@ -647,6 +676,7 @@ impl KnowledgePane {
                 self.editor.update(cx, |input, cx| {
                     input.set_value(text.clone(), window, cx);
                 });
+                self.refresh_doc_cache(&text);
                 self.preview.update(cx, |state, cx| {
                     state.set_text(&self.preview_source(&text), cx);
                 });
@@ -849,6 +879,14 @@ impl KnowledgePane {
                 cx.notify();
             }
         }
+    }
+
+    fn refresh_doc_cache(&mut self, text: &str) {
+        let (lines, chars) = doc_stats(text);
+        self.doc_lines = lines;
+        self.doc_chars = chars;
+        self.outgoing_cache = self.outgoing_links(text);
+        self.outgoing_dirty = false;
     }
 
     /// Outgoing wikilinks from `body`: (display label, resolved abs path if any).
@@ -2057,6 +2095,37 @@ fn kb_tree_rows(
     rows
 }
 
+fn ensure_file_tree(pane: &mut KnowledgePane, filter_raw: &str, filter: &str, filtering: bool) {
+    let sig = format!("{}\n{}", pane.listing_rev, filter_raw.trim());
+    if pane.tree_sig == sig {
+        return;
+    }
+    let entries: Vec<(String, String, Option<String>)> = if !filtering {
+        pane.files
+            .iter()
+            .map(|(path, relative)| (path.clone(), relative.clone(), None))
+            .collect()
+    } else if filter.chars().count() >= 2 && pane.filter_query == filter_raw.trim() {
+        if pane.filter_hits.is_empty() {
+            pane.files
+                .iter()
+                .filter(|(_, relative)| relative.to_lowercase().contains(filter))
+                .map(|(path, relative)| (path.clone(), relative.clone(), None))
+                .collect()
+        } else {
+            pane.filter_hits.clone()
+        }
+    } else {
+        pane.files
+            .iter()
+            .filter(|(_, relative)| relative.to_lowercase().contains(filter))
+            .map(|(path, relative)| (path.clone(), relative.clone(), None))
+            .collect()
+    };
+    pane.tree_nodes = build_kb_tree(&entries);
+    pane.tree_sig = sig;
+}
+
 impl Render for KnowledgePane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pending = self.state.with(|s| s.kb_current_file.clone());
@@ -2075,36 +2144,7 @@ impl Render for KnowledgePane {
         let filter_raw = self.filter.read(cx).value().to_string();
         let filter = filter_raw.trim().to_lowercase();
         let filtering = !filter.is_empty();
-        // (path, relative, optional body snippet)
-        let entries: Vec<(String, String, Option<String>)> = if !filtering {
-            self.files
-                .iter()
-                .map(|(p, r)| (p.clone(), r.clone(), None))
-                .collect()
-        } else if filter.chars().count() >= 2 && self.filter_query == filter_raw.trim() {
-            if self.filter_hits.is_empty() {
-                self.files
-                    .iter()
-                    .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
-                    .map(|(p, r)| (p.clone(), r.clone(), None))
-                    .collect()
-            } else {
-                self.filter_hits.clone()
-            }
-        } else if filter.chars().count() >= 2 {
-            self.files
-                .iter()
-                .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
-                .map(|(p, r)| (p.clone(), r.clone(), None))
-                .collect()
-        } else {
-            self.files
-                .iter()
-                .filter(|(_, rel)| rel.to_lowercase().contains(&filter))
-                .map(|(p, r)| (p.clone(), r.clone(), None))
-                .collect()
-        };
-        let tree = build_kb_tree(&entries);
+        ensure_file_tree(self, &filter_raw, &filter, filtering);
         let entity = cx.weak_entity();
         let current = self.current.clone();
         let tree_ctx = KbTreeCtx {
@@ -2116,12 +2156,16 @@ impl Render for KnowledgePane {
                 .filter(|q| !q.is_empty()),
             entity: &entity,
         };
-        let tree_rows = kb_tree_rows(&tree, 0, &tree_ctx, cx);
+        let tree_rows = kb_tree_rows(&self.tree_nodes, 0, &tree_ctx, cx);
         let library_label = self.library_label();
         let library_roots = self.library_roots();
         let current_root = self.root().map(|p| p.to_string_lossy().into_owned());
-        let preview_text = self.editor.read(cx).value().to_string();
-        let (line_count, char_count) = doc_stats(&preview_text);
+        if self.outgoing_dirty {
+            let text = self.editor.read(cx).value().to_string();
+            self.refresh_doc_cache(&text);
+        }
+        let line_count = self.doc_lines;
+        let char_count = self.doc_chars;
         let mode = self.mode;
         let replace_status = self.replace_status.clone();
         let preview_zoom = self.preview_zoom;
@@ -2536,7 +2580,7 @@ impl Render for KnowledgePane {
                         .child({
                             let cur = current.clone().unwrap();
                             self.ensure_backlinks(&cur, cx);
-                            let outgoing = self.outgoing_links(&preview_text);
+                            let outgoing = self.outgoing_cache.clone();
                             let backs = self.backlink_hits.clone();
                             let out_n = outgoing.len();
                             let back_n = backs.len();

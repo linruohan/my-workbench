@@ -20,7 +20,10 @@ use serde_json::Value;
 use std::cell::Cell;
 use std::rc::Rc;
 use uuid::Uuid;
-use wb_agent::{load_credentials, load_providers, save_credentials, save_providers};
+use wb_agent::{
+    CredentialStore, ProviderStore, load_credentials, load_providers, save_credentials,
+    save_providers,
+};
 use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID, ProviderConfig, ProviderKind};
 use wb_host::{list_provider_models, probe_provider_model};
 
@@ -37,6 +40,8 @@ pub(crate) struct ModelEditor {
     base_url_input: Entity<InputState>,
     api_key_input: Entity<InputState>,
     draft: Entity<ModelDraft>,
+    providers: ProviderStore,
+    credentials: CredentialStore,
 }
 
 struct ModelView {
@@ -59,10 +64,6 @@ impl ModelEditor {
         window: &mut Window,
         cx: &mut Context<SettingsPane>,
     ) -> (Self, Vec<Subscription>) {
-        let selected_id = load_providers()
-            .providers
-            .first()
-            .map(|provider| provider.id.clone());
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("供应商名称"));
         let base_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://api.example.com/v1"));
@@ -76,7 +77,7 @@ impl ModelEditor {
         let level_input = draft.read(cx).level.clone();
         let mut editor = Self {
             state,
-            selected_id,
+            selected_id: None,
             renaming: false,
             key_visible: false,
             fetching_ids: Vec::new(),
@@ -87,7 +88,15 @@ impl ModelEditor {
             base_url_input,
             api_key_input,
             draft,
+            providers: ProviderStore::default(),
+            credentials: CredentialStore::default(),
         };
+        editor.reread();
+        editor.selected_id = editor
+            .providers
+            .providers
+            .first()
+            .map(|provider| provider.id.clone());
         editor.bind(window, cx);
         let subs = vec![
             cx.subscribe(&editor.base_url_input, |pane, _, event, cx| {
@@ -118,18 +127,26 @@ impl ModelEditor {
         (editor, subs)
     }
 
+    fn reread(&mut self) {
+        self.providers = load_providers();
+        self.credentials = load_credentials();
+    }
+
     fn bind(&mut self, window: &mut Window, cx: &mut Context<SettingsPane>) {
-        let store = load_providers();
-        let creds = load_credentials();
         let Some(id) = self.selected_id.clone() else {
             return;
         };
-        let Some(provider) = store.providers.iter().find(|provider| provider.id == id) else {
+        let Some(provider) = self
+            .providers
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+        else {
             return;
         };
         let title = provider_title(provider);
         let url = provider.base_url.clone();
-        let key = creds.keys.get(&id).cloned().unwrap_or_default();
+        let key = self.credentials.keys.get(&id).cloned().unwrap_or_default();
         let masked = !self.key_visible;
         self.name_input
             .update(cx, |input, cx| input.set_value(title, window, cx));
@@ -154,13 +171,19 @@ impl ModelEditor {
     }
 
     fn reload(&mut self, window: &mut Window, cx: &mut Context<SettingsPane>) {
-        let store = load_providers();
-        let missing = self
-            .selected_id
-            .as_ref()
-            .is_some_and(|id| store.providers.iter().all(|provider| &provider.id != id));
+        self.reread();
+        let missing = self.selected_id.as_ref().is_some_and(|id| {
+            self.providers
+                .providers
+                .iter()
+                .all(|provider| &provider.id != id)
+        });
         if missing {
-            self.selected_id = store.providers.first().map(|provider| provider.id.clone());
+            self.selected_id = self
+                .providers
+                .providers
+                .first()
+                .map(|provider| provider.id.clone());
         }
         self.renaming = false;
         self.bind(window, cx);
@@ -817,28 +840,30 @@ fn render_model_settings(entity: &WeakEntity<SettingsPane>, cx: &mut App) -> Any
     let Some(pane) = entity.upgrade() else {
         return v_flex().child("设置不可用").into_any_element();
     };
-    let view = {
+    let (view, providers, creds) = {
         let pane = pane.read(cx);
         let editor = &pane.model_editor;
-        ModelView {
-            entity: entity.clone(),
-            state: editor.state.clone(),
-            selected_id: editor.selected_id.clone(),
-            renaming: editor.renaming,
-            key_visible: editor.key_visible,
-            fetching: editor
-                .selected_id
-                .as_ref()
-                .is_some_and(|id| editor.fetching_ids.iter().any(|item| item == id)),
-            testing_refs: editor.testing_refs.clone(),
-            message: editor.message.clone(),
-            name_input: editor.name_input.clone(),
-            base_url_input: editor.base_url_input.clone(),
-            api_key_input: editor.api_key_input.clone(),
-        }
+        (
+            ModelView {
+                entity: entity.clone(),
+                state: editor.state.clone(),
+                selected_id: editor.selected_id.clone(),
+                renaming: editor.renaming,
+                key_visible: editor.key_visible,
+                fetching: editor
+                    .selected_id
+                    .as_ref()
+                    .is_some_and(|id| editor.fetching_ids.iter().any(|item| item == id)),
+                testing_refs: editor.testing_refs.clone(),
+                message: editor.message.clone(),
+                name_input: editor.name_input.clone(),
+                base_url_input: editor.base_url_input.clone(),
+                api_key_input: editor.api_key_input.clone(),
+            },
+            editor.providers.providers.clone(),
+            editor.credentials.clone(),
+        )
     };
-    let providers = load_providers().providers;
-    let creds = load_credentials();
     let selected = providers
         .iter()
         .find(|provider| Some(&provider.id) == view.selected_id.as_ref())

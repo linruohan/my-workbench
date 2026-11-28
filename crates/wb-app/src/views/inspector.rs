@@ -250,7 +250,7 @@ impl InspectorPane {
                     .await;
                 let alive = this
                     .update(async_cx, |this, cx| {
-                        this.reload_git();
+                        this.reload_git(cx);
                         cx.notify();
                     })
                     .is_ok();
@@ -275,12 +275,7 @@ impl InspectorPane {
                 .knowledge_current
                 .clone()
                 .or_else(|| s.prefs.knowledge_roots.first().cloned())
-                .or_else(|| {
-                    s.repo
-                        .list_agent_workspaces()
-                        .into_iter()
-                        .find_map(|workspace| workspace.root_path)
-                })
+                .or_else(|| s.repo.agent_workspace_with_root())
                 .map(PathBuf::from)
         })
     }
@@ -298,17 +293,16 @@ impl InspectorPane {
                 }
             }
             let workspace_id = thread.as_ref().map(|thread| thread.workspace_id.clone());
-            let workspaces = s.repo.list_agent_workspaces();
-            let chosen = workspace_id
-                .as_ref()
-                .and_then(|id| workspaces.iter().find(|workspace| workspace.id == *id))
-                .or_else(|| {
-                    workspaces
-                        .iter()
-                        .find(|workspace| workspace.root_path.is_some())
-                });
-            chosen
+            workspace_id
+                .as_deref()
+                .and_then(|id| s.repo.get_agent_workspace(id))
                 .and_then(|workspace| workspace.root_path.clone())
+                .or_else(|| {
+                    s.repo
+                        .earliest_agent_workspace()
+                        .and_then(|workspace| workspace.root_path.clone())
+                })
+                .or_else(|| s.repo.agent_workspace_with_root())
                 .map(PathBuf::from)
         })
     }
@@ -327,7 +321,7 @@ impl InspectorPane {
             }
             Err(err) => self.git_note = Some(err.to_string()),
         }
-        self.reload_git();
+        self.reload_git(cx);
         self.host.update(cx, |_, cx| cx.notify()).ok();
         cx.notify();
     }
@@ -369,7 +363,7 @@ impl InspectorPane {
             }
             Err(err) => self.git_note = Some(err.to_string()),
         }
-        self.reload_git();
+        self.reload_git(cx);
         self.host
             .update(cx, |app, cx| {
                 app.refresh_agent_branch(cx);
@@ -401,7 +395,7 @@ impl InspectorPane {
         self.root_key = None;
         self.git_note = Some(format!("会话目录已切到 {path}"));
         self.git_section = GitSection::Changes;
-        self.reload_git();
+        self.reload_git(cx);
         self.host
             .update(cx, |app, cx| {
                 app.refresh_agent_branch(cx);
@@ -429,7 +423,7 @@ impl InspectorPane {
         self.state.persist_if_dirty();
     }
 
-    fn sync_root(&mut self) {
+    fn sync_root(&mut self, cx: &mut Context<Self>) {
         let key = self.root().map(|path| path.to_string_lossy().to_string());
         if self.root_key == key {
             return;
@@ -440,12 +434,34 @@ impl InspectorPane {
         self.dir_cache.clear();
         self.scan_root = None;
         self.scan.clear();
-        self.reload_git();
+        self.reload_git(cx);
     }
 
-    fn reload_git(&mut self) {
-        self.git = self.root().as_deref().and_then(git_snapshot);
+    fn reload_git(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root() else {
+            self.git = None;
+            self.git_at = Instant::now();
+            return;
+        };
+        // Stamp first so a paint during the scan does not start another `git` process.
         self.git_at = Instant::now();
+        let root_key = root.to_string_lossy().to_string();
+        cx.spawn(async move |this, cx| {
+            let snap = cx
+                .background_executor()
+                .spawn(async move { git_snapshot(&root) })
+                .await;
+            this.update(cx, |this, cx| {
+                let current = this.root().map(|path| path.to_string_lossy().to_string());
+                if current.as_deref() != Some(root_key.as_str()) {
+                    return;
+                }
+                this.git = snap;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn load_git_diff(&mut self, root: PathBuf, path: String, cx: &mut Context<Self>) {
@@ -551,7 +567,7 @@ impl InspectorPane {
                     Err(err) => err.to_string(),
                 });
                 this.load_git_lists(cx);
-                this.reload_git();
+                this.reload_git(cx);
                 cx.notify();
             });
         })
@@ -608,7 +624,7 @@ impl InspectorPane {
                         .ok();
                 }
                 this.git_note = Some(note);
-                this.reload_git();
+                this.reload_git(cx);
                 this.load_git_lists(cx);
                 cx.notify();
             });
@@ -624,7 +640,7 @@ impl InspectorPane {
             Ok(message) => message,
             Err(err) => err.to_string(),
         });
-        self.reload_git();
+        self.reload_git(cx);
         cx.notify();
     }
 
@@ -720,7 +736,7 @@ impl InspectorPane {
         self.dir_cache.clear();
         self.scan_root = None;
         self.scan.clear();
-        self.reload_git();
+        self.reload_git(cx);
         cx.notify();
     }
 
@@ -786,7 +802,7 @@ impl InspectorPane {
             });
             this.state.persist_prefs();
             this.root_key = None;
-            this.sync_root();
+            this.sync_root(cx);
             cx.notify();
         });
     }
@@ -796,6 +812,8 @@ impl InspectorPane {
         dir: &Path,
         depth: usize,
         current: Option<&str>,
+        agent_nav: bool,
+        root: Option<&Path>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let entries = self.entries(dir);
@@ -850,13 +868,12 @@ impl InspectorPane {
                         }
                     }
                 });
-            let row = if self.state.with(|s| s.nav) == AppNav::Agent {
+            let row = if agent_nav {
                 let menu_path = path.clone();
-                let relative = self
-                    .root()
+                let relative = root
                     .and_then(|root| {
                         Path::new(&path)
-                            .strip_prefix(&root)
+                            .strip_prefix(root)
                             .ok()
                             .map(|rel| rel.to_string_lossy().replace('\\', "/"))
                     })
@@ -937,7 +954,14 @@ impl InspectorPane {
             };
             rows.push(row);
             if open {
-                rows.extend(self.file_rows(Path::new(&entry.path), depth + 1, current, cx));
+                rows.extend(self.file_rows(
+                    Path::new(&entry.path),
+                    depth + 1,
+                    current,
+                    agent_nav,
+                    root,
+                    cx,
+                ));
             }
         }
         rows
@@ -946,9 +970,9 @@ impl InspectorPane {
 
 impl Render for InspectorPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_root();
+        self.sync_root(cx);
         if self.git_at.elapsed() > Duration::from_secs(5) {
-            self.reload_git();
+            self.reload_git(cx);
         }
         let nav = self.state.with(|s| s.nav);
         let collapsed = self.state.with(|s| s.prefs.right_sidebar_collapsed);
@@ -989,7 +1013,14 @@ impl Render for InspectorPane {
             let filter = filter_raw.trim().to_lowercase();
             let current = self.state.with(|s| s.kb_current_file.clone());
             if filter.is_empty() {
-                let rows = self.file_rows(&root, 0, current.as_deref(), cx);
+                let rows = self.file_rows(
+                    &root,
+                    0,
+                    current.as_deref(),
+                    nav == AppNav::Agent,
+                    Some(&root),
+                    cx,
+                );
                 let mut list = v_flex().gap_0p5();
                 if rows.is_empty() {
                     list = list.child(

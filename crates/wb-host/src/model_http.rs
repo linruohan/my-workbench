@@ -1,7 +1,23 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 use wb_domain::ProviderKind;
+
+/// Shared HTTP client for JSON requests and streaming (model list, probe, chat completions, …).
+///
+/// Reusing one client keeps the connection pool alive, so repeated calls to the
+/// same provider reuse an existing TCP/TLS connection instead of paying a fresh
+/// handshake every time. A per-request proxy still needs its own client.
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .expect("shared reqwest client")
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,11 +40,17 @@ pub struct ModelHttpResponse {
 }
 
 pub async fn model_http(req: ModelHttpRequest) -> Result<ModelHttpResponse> {
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
-    if let Some(proxy) = req.proxy.as_deref().filter(|s| !s.is_empty()) {
-        builder = builder.proxy(reqwest::Proxy::all(proxy).context("无效代理地址")?);
-    }
-    let client = builder.build()?;
+    let proxy = req.proxy.as_deref().filter(|s| !s.is_empty());
+    let owned;
+    let client = if let Some(proxy) = proxy {
+        owned = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .proxy(reqwest::Proxy::all(proxy).context("无效代理地址")?)
+            .build()?;
+        &owned
+    } else {
+        shared_http_client()
+    };
     let method = match req.method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "PUT" => reqwest::Method::PUT,
@@ -290,11 +312,16 @@ pub async fn chat_completions_stream(
         );
     }
 
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(180));
-    if let Some(proxy) = proxy.filter(|s| !s.is_empty()) {
-        builder = builder.proxy(reqwest::Proxy::all(proxy).context("无效代理地址")?);
-    }
-    let client = builder.build()?;
+    let owned;
+    let client = if let Some(proxy) = proxy.filter(|s| !s.is_empty()) {
+        owned = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .proxy(reqwest::Proxy::all(proxy).context("无效代理地址")?)
+            .build()?;
+        &owned
+    } else {
+        shared_http_client()
+    };
     let mut request = client
         .post(&url)
         .header("Content-Type", "application/json")

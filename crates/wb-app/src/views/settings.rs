@@ -103,7 +103,12 @@ impl SettingsPane {
         // Speech models are scanned after the window is up: hashing a few
         // hundred megabytes here would delay every cold start.
         let speech_msg = String::new();
-        let tool_catalog = wb_host::read_tool_catalog();
+        let tool_catalog = wb_host::ToolCatalog {
+            tools_dir: String::new(),
+            scanned_at: None,
+            bootstrapped: true,
+            rows: Vec::new(),
+        };
         Self {
             state,
             memory_input,
@@ -529,13 +534,26 @@ impl SettingsPane {
             return;
         }
         self.tools_started = true;
-        let fetch_after = !self.tool_catalog.bootstrapped;
-        let need_scan = self.tool_catalog.scanned_at.is_none();
-        if !fetch_after && !need_scan {
-            return;
-        }
-        self.tools_busy = true;
         cx.spawn(async move |this, cx| {
+            let catalog = cx
+                .background_executor()
+                .spawn(async { wb_host::read_tool_catalog() })
+                .await;
+            let fetch_after = !catalog.bootstrapped;
+            let need_scan = catalog.scanned_at.is_none();
+            this.update(cx, |this, cx| {
+                this.tool_catalog = catalog;
+                cx.notify();
+            })
+            .ok();
+            if !fetch_after && !need_scan {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.tools_busy = true;
+                cx.notify();
+            })
+            .ok();
             let (tx, rx) = std::sync::mpsc::channel();
             let worker = cx.background_executor().spawn(async move {
                 if need_scan {

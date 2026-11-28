@@ -13,7 +13,7 @@ use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{AnimationExt as _, *};
 use gpui_webview::WebView;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -131,6 +131,9 @@ pub struct AgentPane {
     mention_loading: Option<String>,
     mention_selected: usize,
     mention_dismissed: bool,
+    /// Cached last prefix + first matching suffix (prompt_history index)
+    /// so recompute_ghost can skip re-scanning identical prefixes.
+    ghost_prefix_cache: (String, usize),
     /// Show the draft as rendered Markdown above the input.
     composer_preview: bool,
     composer_preview_scroll: ScrollHandle,
@@ -169,6 +172,8 @@ pub struct AgentPane {
     chat_follow: bool,
     /// Last repo snapshot used to paint the sidebar and transcript.
     chat_lists: Option<ChatLists>,
+    /// Workspace root for the current repo revision. Avoids a directory stat on every paint.
+    root_cache: RefCell<Option<(u64, Option<String>)>>,
     ghost_suffix: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -181,6 +186,10 @@ struct ChatLists {
     messages: Arc<Vec<AgentMessage>>,
     workspaces: Arc<Vec<AgentWorkspace>>,
     approvals: Arc<Vec<AgentApproval>>,
+    /// Character count of the newest 30 messages. Stable until the transcript changes.
+    recent_chars: usize,
+    todos: Arc<Vec<wb_domain::AgentSessionTodo>>,
+    goal: Option<wb_domain::AgentSessionGoal>,
 }
 
 impl AgentPane {
@@ -209,6 +218,17 @@ impl AgentPane {
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => b.updated_at.cmp(&a.updated_at),
             });
+            let recent_chars = messages
+                .iter()
+                .rev()
+                .take(30)
+                .map(|message| message.content.chars().count())
+                .sum();
+            let (todos, goal) = threads
+                .iter()
+                .find(|thread| thread_id.as_deref() == Some(thread.id.as_str()))
+                .map(|thread| (thread.session_todos.clone(), thread.session_goal.clone()))
+                .unwrap_or_else(|| (Vec::new(), None));
             ChatLists {
                 revision,
                 thread_id: thread_id.clone(),
@@ -216,6 +236,9 @@ impl AgentPane {
                 messages: Arc::new(messages),
                 workspaces: Arc::new(s.repo.list_agent_workspaces()),
                 approvals: Arc::new(approvals),
+                recent_chars,
+                todos: Arc::new(todos),
+                goal,
             }
         });
         self.chat_lists = Some(lists.clone());
@@ -279,6 +302,8 @@ impl AgentPane {
             mention_loading: None,
             mention_selected: 0,
             mention_dismissed: false,
+            ghost_prefix_cache: (String::new(), 0),
+            ghost_suffix: None,
             composer_preview: false,
             composer_preview_scroll: ScrollHandle::new(),
             drafts: std::collections::HashMap::new(),
@@ -304,7 +329,7 @@ impl AgentPane {
             chat_scroll: ScrollHandle::new(),
             chat_follow: true,
             chat_lists: None,
-            ghost_suffix: None,
+            root_cache: RefCell::new(None),
             host: None,
             _subs: Vec::new(),
         };
@@ -769,7 +794,9 @@ impl AgentPane {
             }
         }
         let proxy = self.state.with(|s| s.prefs.http_proxy.clone());
-        let thread = self.state.with(|s| s.repo.get_agent_thread(&thread_id).cloned());
+        let thread = self
+            .state
+            .with(|s| s.repo.get_agent_thread(&thread_id).cloned());
         let Some(thread) = thread else {
             return;
         };
@@ -1794,7 +1821,10 @@ impl AgentPane {
             return;
         };
         let (title, messages) = self.state.with(|s| {
-            let title = s.repo.get_agent_thread(&tid).map(|t| t.title.clone())
+            let title = s
+                .repo
+                .get_agent_thread(&tid)
+                .map(|t| t.title.clone())
                 .unwrap_or_else(|| "会话".into());
             (title, s.repo.messages_for_thread(&tid))
         });
@@ -2064,9 +2094,9 @@ impl AgentPane {
 
     fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.state.with(|s| {
-            s.active_thread_id.as_deref().and_then(|id| {
-                s.repo.get_agent_thread(id).map(|t| t.title.clone())
-            })
+            s.active_thread_id
+                .as_deref()
+                .and_then(|id| s.repo.get_agent_thread(id).map(|t| t.title.clone()))
         });
         let Some(title) = title else {
             return;
@@ -2363,7 +2393,13 @@ impl AgentPane {
     }
 
     fn workspace_root(&self) -> Option<String> {
-        self.state.with(|s| {
+        let revision = self.state.with(|s| s.repo.data_revision());
+        if let Some((cached_rev, cached)) = self.root_cache.borrow().as_ref() {
+            if *cached_rev == revision {
+                return cached.clone();
+            }
+        }
+        let root = self.state.with(|s| {
             let tid = s.active_thread_id.clone()?;
             let thread = s.repo.get_agent_thread(&tid)?;
             if let Some(cwd) = thread.cwd.clone() {
@@ -2375,7 +2411,9 @@ impl AgentPane {
             s.repo
                 .get_agent_workspace(&workspace_id)
                 .and_then(|w| w.root_path.clone())
-        })
+        });
+        *self.root_cache.borrow_mut() = Some((revision, root.clone()));
+        root
     }
 
     fn accept_slash_if_open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -2530,10 +2568,44 @@ impl AgentPane {
             return;
         }
         let needle = value.as_str();
-        for prev in self.prompt_history.iter().rev() {
+        // Cache lookup: skip re-scanning if the prefix hasn't changed.
+        let last_prefix = &self.ghost_prefix_cache.0;
+        let last_idx = self.ghost_prefix_cache.1;
+        if needle == last_prefix {
+            // Reuse the cached suffix from the matching entry at last_idx
+            if last_idx < self.prompt_history.len() {
+                let prev = &self.prompt_history[last_idx];
+                if prev.starts_with(needle) && prev.len() > needle.len() {
+                    self.ghost_suffix = Some(prev[needle.len()..].to_string());
+                    return;
+                }
+            }
+        }
+        // Full scan: find first matching prompt in reverse order.
+        let mut found_idx = 0usize;
+        for (i, prev) in self.prompt_history.iter().rev().enumerate() {
+            if prev.starts_with(needle) && prev.len() > needle.len() {
+                found_idx = self.prompt_history.len() - 1 - i;
+                break;
+            }
+        }
+        // Cache the winning prefix (or the input itself if nothing matched) and index.
+        let cache_prefix = needle.to_string();
+        let cache_idx = if found_idx > 0
+            && found_idx < self.prompt_history.len()
+            && self.prompt_history[found_idx].starts_with(needle)
+            && self.prompt_history[found_idx].len() > needle.len()
+        {
+            found_idx
+        } else {
+            0
+        };
+        self.ghost_prefix_cache = (cache_prefix, cache_idx);
+        // Now attempt to set suffix from the cached entry.
+        if cache_idx < self.prompt_history.len() {
+            let prev = &self.prompt_history[cache_idx];
             if prev.starts_with(needle) && prev.len() > needle.len() {
                 self.ghost_suffix = Some(prev[needle.len()..].to_string());
-                return;
             }
         }
     }
@@ -2721,15 +2793,8 @@ impl AgentPane {
                     .into_any_element()
             });
 
-        let (todos_all, goal) = self.state.with(|s| {
-            let Some(id) = s.active_thread_id.as_deref() else {
-                return (Vec::new(), None);
-            };
-            (
-                wb_agent::list_todos(&s.repo, id),
-                wb_agent::get_goal(&s.repo, id),
-            )
-        });
+        let todos_all = lists.todos.clone();
+        let goal = lists.goal.clone();
         let goal_chip: Option<AnyElement> = goal.map(|goal| {
             let rounds = match goal.max_rounds {
                 Some(max) => format!("{}/{}", goal.rounds_started, max),
@@ -2837,7 +2902,7 @@ impl AgentPane {
         let slash_hits = self.live_slash(cx);
         let mention_hits = self.live_file_mentions(cx);
         let mention_selected = self.mention_selected;
-        let ctx_used = prompt_char_count(&messages);
+        let ctx_used = lists.recent_chars;
         let ctx_cap = model_context_window(&model_ref).max(1);
         let ctx_pct = ((ctx_used as f32 / ctx_cap as f32) * 100.0).min(999.0);
         let ws_filter = self.workspace_filter.clone();
@@ -2864,11 +2929,10 @@ impl AgentPane {
                     || t.title.to_lowercase().contains(&thread_q)
                     || body_hits.contains(&t.id)
             })
-            .cloned()
             .collect();
         let (match_count, thread_rows) = render_workspace_groups(
-            filtered,
-            (*workspaces).clone(),
+            &filtered,
+            workspaces.as_slice(),
             active.as_deref(),
             &self.collapsed_workspaces,
             &self.revealed_workspaces,
@@ -4968,8 +5032,8 @@ struct WorkspaceListStyle {
 }
 
 fn render_workspace_groups(
-    threads: Vec<AgentThread>,
-    workspaces: Vec<AgentWorkspace>,
+    threads: &[&AgentThread],
+    workspaces: &[AgentWorkspace],
     active: Option<&str>,
     collapsed: &HashSet<String>,
     revealed: &HashSet<String>,
@@ -4984,21 +5048,21 @@ fn render_workspace_groups(
         keep_empty,
     } = *style;
     let known: HashSet<String> = workspaces.iter().map(|w| w.id.clone()).collect();
-    let mut groups: Vec<(Option<AgentWorkspace>, Vec<AgentThread>)> = workspaces
-        .into_iter()
+    let mut groups: Vec<(Option<&AgentWorkspace>, Vec<&AgentThread>)> = workspaces
+        .iter()
         .map(|ws| {
             let rows = threads
                 .iter()
+                .copied()
                 .filter(|t| t.workspace_id == ws.id)
-                .cloned()
                 .collect();
             (Some(ws), rows)
         })
         .collect();
-    let orphans: Vec<_> = threads
+    let orphans: Vec<&AgentThread> = threads
         .iter()
+        .copied()
         .filter(|t| !known.contains(&t.workspace_id))
-        .cloned()
         .collect();
     if !orphans.is_empty() {
         groups.push((None, orphans));
