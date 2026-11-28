@@ -4,8 +4,10 @@ use crate::views::TasksPane;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
-use gpui_kit::*;
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{AnimationExt as _, *};
 use std::path::Path;
+use std::time::Duration;
 use wb_agent::permission_mode_label;
 use wb_domain::{AgentEvent, AgentPermissionMode, NotificationKind, create_id, now_ms};
 use wb_host::{ensure_session_worktree, merge_session_worktree, set_agent_cwd};
@@ -665,7 +667,7 @@ impl Render for CommandPalette {
             .items_start()
             .justify_center()
             .pt_20()
-            .bg(cx.theme().overlay.opacity(0.55))
+            .bg(cx.theme().overlay.opacity(0.62))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -677,23 +679,34 @@ impl Render for CommandPalette {
                 v_flex()
                     .w(px(560.))
                     .max_h(px(420.))
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().background)
+                    .rounded(cx.theme().radius_lg)
+                    .bg(cx.theme().popover)
+                    .text_color(cx.theme().popover_foreground)
                     .border_1()
                     .border_color(cx.theme().border)
+                    .shadow_lg()
                     .p_3()
                     .gap_2()
                     .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                    .with_animation(
+                        "palette-in",
+                        Animation::new(Duration::from_millis(140)),
+                        |panel, delta| panel.opacity(delta).mt(px(10.) * (1. - delta)),
+                    )
                     .child(Input::new(&self.query))
                     .child(v_flex().gap_1().overflow_y_scrollbar().children(
-                        items.into_iter().map(|item| {
+                        items.into_iter().enumerate().map(|(index, item)| {
                             let entity = entity.clone();
                             let label = item.label.clone();
                             let kind = item.kind;
+                            let accent = cx.theme().primary;
                             div()
                                 .id(SharedString::from(item.id.clone()))
                                 .p_2()
                                 .rounded(cx.theme().radius)
+                                .when(index == 0, |row| {
+                                    row.bg(cx.theme().accent).border_l_2().border_color(accent)
+                                })
                                 .hover(|d| d.bg(cx.theme().accent))
                                 .cursor_pointer()
                                 .child(

@@ -28,7 +28,14 @@ pub fn apply_saved_appearance(window: Option<&mut Window>, cx: &mut App) {
         log::warn!("读取外观设置失败: {err}");
         AppPrefs::default()
     });
-    apply_named_theme(prefs.theme_name.as_deref(), cx);
+    let named = prefs
+        .theme_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if !apply_named_theme(named.or(Some("Obsidian")), cx) {
+        apply_named_theme(Some("Obsidian"), cx);
+    }
     apply_theme_pref(prefs.theme_mode, window, cx);
     apply_overrides_from(&prefs, cx);
 }
@@ -158,6 +165,7 @@ fn resolve_themes_dir() -> PathBuf {
             candidates.push(dir.join("themes"));
         }
     }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../themes"));
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("themes"));
         candidates.push(cwd.join("../gpui-kit/themes"));

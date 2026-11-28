@@ -208,7 +208,7 @@ impl Default for AppPrefs {
             right_sidebar_width: RIGHT_SIDEBAR_WIDTH_DEFAULT,
             sidebar_collapsed: false,
             right_sidebar_collapsed: false,
-            theme_mode: ThemeModePref::Light,
+            theme_mode: ThemeModePref::Dark,
             theme_name: None,
             ui_radius: None,
             font_size: None,
@@ -234,8 +234,8 @@ impl Default for AppPrefs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeModePref {
-    #[default]
     Light,
+    #[default]
     Dark,
     /// 跟随操作系统浅色 / 深色
     System,

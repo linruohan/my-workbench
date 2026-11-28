@@ -6,7 +6,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -94,14 +93,6 @@ impl InspectorTab {
             Self::Files => 0,
             Self::Git => 1,
             Self::Events => 2,
-        }
-    }
-
-    fn from_index(index: usize) -> Self {
-        match index {
-            1 => Self::Git,
-            2 => Self::Events,
-            _ => Self::Files,
         }
     }
 }
@@ -811,7 +802,7 @@ impl InspectorPane {
         let mut rows = Vec::new();
         let accent = cx.theme().accent;
         let muted = cx.theme().muted_foreground;
-        let radius = cx.theme().radius;
+        let surface = cx.theme().secondary;
         for entry in entries {
             let is_dir = entry.is_dir;
             let open = is_dir && self.expanded.contains(&entry.path);
@@ -823,13 +814,13 @@ impl InspectorPane {
                 .id(SharedString::from(format!("insp-{path}")))
                 .items_center()
                 .gap_1()
-                .py_0p5()
+                .py_1()
                 .pr_2()
                 .pl(px(8. + depth as f32 * 12.))
-                .rounded(radius)
-                .text_sm()
-                .when(active, |row| row.bg(accent))
-                .hover(|row| row.bg(accent))
+                .rounded_md()
+                .text_xs()
+                .when(active, |row| row.bg(surface).text_color(accent))
+                .hover(|row| row.bg(surface))
                 .cursor_pointer()
                 .child(
                     Icon::new(if is_dir {
@@ -1026,7 +1017,6 @@ impl Render for InspectorPane {
                     .collect();
                 let entity = cx.weak_entity();
                 let accent = cx.theme().accent;
-                let radius = cx.theme().radius;
                 let mut list = v_flex().gap_0p5();
                 if hits.is_empty() {
                     list = list.child(
@@ -1046,11 +1036,13 @@ impl Render for InspectorPane {
                             .items_center()
                             .gap_1()
                             .px_2()
-                            .py_0p5()
-                            .rounded(radius)
-                            .text_sm()
-                            .when(active, |row| row.bg(accent))
-                            .hover(|row| row.bg(accent))
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .when(active, |row| {
+                                row.bg(cx.theme().secondary).text_color(accent)
+                            })
+                            .hover(|row| row.bg(cx.theme().secondary))
                             .cursor_pointer()
                             .child(Icon::new(IconName::File).text_color(muted))
                             .child(div().flex_1().child(entry.relative))
@@ -1097,43 +1089,83 @@ impl Render for InspectorPane {
                 .into_any_element();
         }
 
-        v_flex()
-            .size_full()
+        let host = self.host.clone();
+        let accent = cx.theme().accent;
+        let tabs = h_flex()
+            .id("inspector-capsule-tabs")
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(border)
+            .flex_1()
             .min_w_0()
+            .overflow_x_scrollbar()
+            .children(
+                [
+                    (InspectorTab::Files, "文件".to_string()),
+                    (
+                        InspectorTab::Git,
+                        if change_count > 0 {
+                            format!("Git {change_count}")
+                        } else {
+                            "Git".into()
+                        },
+                    ),
+                    (InspectorTab::Events, "事件".into()),
+                ]
+                .into_iter()
+                .map(|(item, label)| {
+                    let selected = item == tab;
+                    div()
+                        .id(("insp-tab-pill", item.index()))
+                        .flex_shrink_0()
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(selected, |pill| {
+                            pill.bg(border)
+                                .text_color(accent)
+                                .font_weight(gpui::FontWeight::BOLD)
+                        })
+                        .when(!selected, |pill| {
+                            pill.text_color(muted).hover(|pill| pill.text_color(accent))
+                        })
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.tab = item;
+                            cx.notify();
+                        }))
+                }),
+            );
+        let card = v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .rounded_lg()
+            .overflow_hidden()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
-            .border_l_1()
+            .border_1()
             .border_color(border)
             .child(
                 h_flex()
-                    .px_2()
-                    .h(px(44.))
+                    .w_full()
+                    .justify_between()
                     .items_center()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(Icon::new(IconName::Folder).text_color(muted))
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .child(tabs)
                     .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .overflow_hidden()
-                            .child(root_label),
-                    )
-                    .child(
-                        Button::new("insp-refresh")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::RefreshCw)
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    )
-                    .child({
-                        let host = self.host.clone();
                         Button::new("insp-collapse")
                             .xsmall()
                             .ghost()
-                            .icon(IconName::ChevronRight)
+                            .icon(IconName::PanelRight)
                             .tooltip("收起右侧栏")
                             .on_click(move |_, window, app| {
                                 if let Some(e) = host.upgrade() {
@@ -1141,64 +1173,85 @@ impl Render for InspectorPane {
                                         this.toggle_right_collapsed(window, cx)
                                     });
                                 }
-                            })
-                    })
-                    .when(root.is_none(), |row| {
-                        row.child(
-                            Button::new("insp-add")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Plus)
-                                .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
-                        )
-                    }),
+                            }),
+                    ),
             )
-            .child(
-                div().px_2().border_b_1().border_color(border).child(
-                    TabBar::new("insp-tabs")
-                        .underline()
-                        .small()
-                        .w_full()
-                        .selected_index(tab.index())
-                        .child(Tab::new().label("文件"))
-                        .child(Tab::new().label("Git").when(change_count > 0, |tab| {
-                            tab.suffix(
+            .child(match tab {
+                InspectorTab::Files => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        h_flex()
+                            .id("file-tree-toolbar")
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .gap_2()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(border)
+                            .bg(cx.theme().secondary)
+                            .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(change_count.to_string()),
+                                    .flex_1()
+                                    .min_w(px(80.))
+                                    .child(Input::new(&self.filter).cleanable(true)),
                             )
-                        }))
-                        .child(Tab::new().label("事件"))
-                        .on_click(cx.listener(|this, index, _, cx| {
-                            this.tab = InspectorTab::from_index(*index);
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(
-                v_flex().flex_1().min_h_0().child(match tab {
-                    InspectorTab::Files => v_flex()
-                        .size_full()
-                        .child(
-                            div()
-                                .px_2()
-                                .py_2()
-                                .child(Input::new(&self.filter).cleanable(true)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .px_1()
-                                .overflow_y_scrollbar()
-                                .child(file_body),
-                        )
-                        .into_any_element(),
-                    InspectorTab::Git => self.git_panel(git, muted, cx).into_any_element(),
-                    InspectorTab::Events => self.events_panel(muted).into_any_element(),
-                }),
-            )
+                            .child(
+                                div()
+                                    .id("insp-refresh")
+                                    .flex_shrink_0()
+                                    .px_1()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(muted)
+                                    .hover(|item| item.text_color(accent))
+                                    .child("刷新")
+                                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                            )
+                            .when(root.is_none(), |row| {
+                                row.child(
+                                    div()
+                                        .id("insp-add")
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .text_color(muted)
+                                        .hover(|item| item.text_color(accent))
+                                        .child("添加目录")
+                                        .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .truncate()
+                            .child(root_label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p_2()
+                            .overflow_y_scrollbar()
+                            .child(file_body),
+                    )
+                    .into_any_element(),
+                InspectorTab::Git => self.git_panel(git, muted, cx).into_any_element(),
+                InspectorTab::Events => self.events_panel(muted, cx).into_any_element(),
+            });
+
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .p_2()
+            .child(card)
             .into_any_element()
     }
 }
@@ -1208,7 +1261,7 @@ impl InspectorPane {
     fn render_agent_rail(
         &mut self,
         root: Option<PathBuf>,
-        root_label: String,
+        _root_label: String,
         git: Option<GitSnapshot>,
         change_count: usize,
         file_body: AnyElement,
@@ -1218,8 +1271,17 @@ impl InspectorPane {
     ) -> impl IntoElement {
         let tab = self.agent_tab;
         let host = self.host.clone();
-        let pills = h_flex()
+        let surface = cx.theme().secondary;
+        let accent = cx.theme().accent;
+        let tabs = h_flex()
+            .id("right-rail-capsule-tabs")
+            .items_center()
             .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(surface)
+            .border_1()
+            .border_color(border)
             .flex_1()
             .min_w_0()
             .overflow_x_scrollbar()
@@ -1240,20 +1302,20 @@ impl InspectorPane {
                         item.label().to_string()
                     };
                     div()
-                        .id(("agent-rail-tab", item.index()))
+                        .id(("right-rail-tab-pill", item.index()))
                         .flex_shrink_0()
-                        .px_2()
-                        .py_0p5()
+                        .px_3()
+                        .py_1()
                         .rounded_full()
                         .text_xs()
                         .cursor_pointer()
                         .when(selected, |pill| {
-                            pill.bg(cx.theme().accent)
-                                .text_color(cx.theme().accent_foreground)
+                            pill.bg(border)
+                                .text_color(accent)
+                                .font_weight(gpui::FontWeight::BOLD)
                         })
                         .when(!selected, |pill| {
-                            pill.text_color(muted)
-                                .hover(|pill| pill.bg(cx.theme().accent))
+                            pill.text_color(muted).hover(|pill| pill.text_color(accent))
                         })
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1263,24 +1325,28 @@ impl InspectorPane {
                 }),
             );
 
-        v_flex()
-            .size_full()
+        let card = v_flex()
+            .flex_1()
+            .min_h_0()
             .min_w_0()
+            .rounded_lg()
+            .overflow_hidden()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
-            .border_l_1()
+            .border_1()
             .border_color(border)
             .child(
                 h_flex()
-                    .px_2()
-                    .h(px(44.))
+                    .id("inspector-header")
+                    .w_full()
+                    .justify_between()
                     .items_center()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(pills)
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .child(tabs)
                     .child(
-                        Button::new("agent-rail-collapse")
+                        Button::new("inspector-close-btn")
                             .xsmall()
                             .ghost()
                             .icon(IconName::PanelRight)
@@ -1294,15 +1360,6 @@ impl InspectorPane {
                             }),
                     ),
             )
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(muted)
-                    .overflow_hidden()
-                    .child(root_label),
-            )
             .child(match tab {
                 AgentRailTab::Terminal => self
                     .terminal_panel(root, muted, border, cx)
@@ -1315,7 +1372,9 @@ impl InspectorPane {
                 AgentRailTab::Visualizer => {
                     self.visualizer_panel(root, muted, cx).into_any_element()
                 }
-            })
+            });
+
+        v_flex().size_full().min_h_0().min_w_0().p_2().child(card)
     }
 
     fn terminal_panel(
@@ -1357,149 +1416,169 @@ impl InspectorPane {
         let preview_copy = preview.clone();
         let entity = cx.weak_entity();
         let root_open = root.clone();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .gap_2()
-            .px_2()
-            .py_2()
+        let accent = cx.theme().accent;
+        let surface = cx.theme().secondary;
+        let screen_bg = cx.theme().background;
+        let cwd_label = cwd.clone().unwrap_or_default();
+        let sub_tab_bar = h_flex()
+            .id("terminal-capsule-tabs")
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(surface)
+            .border_1()
+            .border_color(border)
+            .max_w_full()
+            .overflow_x_scrollbar()
             .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .overflow_x_scrollbar()
-                    .child(
-                        Button::new("agent-rail-term-new")
-                            .xsmall()
-                            .primary()
-                            .label("新终端")
-                            .on_click(move |_, _, app| {
-                                let Some(view) = entity.upgrade() else { return };
-                                let root = root_open.clone();
-                                view.update(app, |this, cx| {
-                                    this.open_agent_terminal(root.as_deref(), cx)
-                                });
-                            }),
-                    )
-                    .children(terms.into_iter().map(|info| {
-                        let id = info.id.clone();
-                        let selected = self.term_id.as_deref() == Some(id.as_str());
-                        let entity = cx.weak_entity();
-                        let close_entity = entity.clone();
-                        let label = info.shell.rsplit(['/', '\\']).next().unwrap_or(&info.shell);
-                        let close_id = id.clone();
-                        h_flex()
-                            .id(SharedString::from(format!("rail-term-{id}")))
-                            .gap_0p5()
-                            .items_center()
-                            .child(
-                                Button::new(SharedString::from(format!("rail-term-btn-{id}")))
-                                    .xsmall()
-                                    .ghost()
-                                    .label(if info.closed {
-                                        format!("{label} · 已关")
-                                    } else {
-                                        label.to_string()
-                                    })
-                                    .selected(selected)
-                                    .on_click(move |_, _, app| {
-                                        let Some(view) = entity.upgrade() else { return };
-                                        let id = id.clone();
-                                        view.update(app, |this, cx| {
-                                            this.term_id = Some(id);
-                                            cx.notify();
-                                        });
-                                    }),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("rail-term-x-{close_id}")))
-                                    .xsmall()
-                                    .ghost()
-                                    .label("×")
-                                    .on_click(move |_, _, app| {
-                                        let Some(view) = close_entity.upgrade() else {
-                                            return;
-                                        };
-                                        let close_id = close_id.clone();
-                                        view.update(app, |this, cx| {
-                                            this.close_terminal(&close_id, cx)
-                                        });
-                                    }),
-                            )
-                    })),
+                div()
+                    .id("add-terminal-tab")
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_xs()
+                    .bg(accent)
+                    .text_color(cx.theme().accent_foreground)
+                    .child("新终端")
+                    .on_click(move |_, _, app| {
+                        let Some(view) = entity.upgrade() else { return };
+                        let root = root_open.clone();
+                        view.update(app, |this, cx| {
+                            this.open_agent_terminal(root.as_deref(), cx)
+                        });
+                    }),
             )
-            .child(
+            .children(terms.into_iter().map(|info| {
+                let id = info.id.clone();
+                let selected = self.term_id.as_deref() == Some(id.as_str());
+                let entity = cx.weak_entity();
+                let close_entity = entity.clone();
+                let label = info.shell.rsplit(['/', '\\']).next().unwrap_or(&info.shell);
+                let title = if info.closed {
+                    format!("{label} · 已关")
+                } else {
+                    label.to_string()
+                };
+                let close_id = id.clone();
                 h_flex()
-                    .justify_between()
+                    .id(SharedString::from(format!("terminal-tab-{id}")))
+                    .flex_shrink_0()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_xs()
+                    .when(selected, |tab| {
+                        tab.bg(border)
+                            .text_color(accent)
+                            .font_weight(gpui::FontWeight::BOLD)
+                    })
+                    .when(!selected, |tab| {
+                        tab.text_color(muted).hover(|tab| tab.text_color(accent))
+                    })
+                    .on_click(move |_, _, app| {
+                        let Some(view) = entity.upgrade() else { return };
+                        let id = id.clone();
+                        view.update(app, |this, cx| {
+                            this.term_id = Some(id);
+                            cx.notify();
+                        });
+                    })
+                    .child(title)
                     .child(
                         div()
-                            .flex_1()
-                            .text_xs()
+                            .id(SharedString::from(format!("close-terminal-tab-{close_id}")))
+                            .px_1()
+                            .rounded_full()
                             .text_color(muted)
-                            .overflow_hidden()
-                            .child(cwd.unwrap_or_else(|| "还没有终端".into())),
-                    )
-                    .child(
-                        Button::new("agent-term-paste")
-                            .xsmall()
-                            .ghost()
-                            .label("粘贴")
-                            .on_click(cx.listener(|this, _, _, cx| this.paste_terminal(cx))),
-                    )
-                    .child(
-                        Button::new("agent-term-int")
-                            .xsmall()
-                            .ghost()
-                            .label("中断")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let Some(id) = this.term_id.clone() else {
-                                    this.term_note = Some("还没有终端".into());
-                                    cx.notify();
+                            .hover(|tab| tab.bg(surface))
+                            .child("×")
+                            .on_click(move |_, _, app| {
+                                let Some(view) = close_entity.upgrade() else {
                                     return;
                                 };
-                                this.term_note =
-                                    Some(match global_terminals().signal(&id, "INT") {
-                                        Ok(_) => "已发送中断".into(),
-                                        Err(err) => err.to_string(),
-                                    });
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("agent-term-copy")
-                            .xsmall()
-                            .ghost()
-                            .label("复制输出")
-                            .on_click(move |_, _, app| {
-                                app.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    preview_copy.clone(),
-                                ));
+                                let close_id = close_id.clone();
+                                view.update(app, |this, cx| this.close_terminal(&close_id, cx));
                             }),
-                    ),
+                    )
+            }))
+            .child(
+                div()
+                    .id("terminal-paste")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(muted)
+                    .hover(|tab| tab.text_color(accent))
+                    .child("粘贴")
+                    .on_click(cx.listener(|this, _, _, cx| this.paste_terminal(cx))),
             )
             .child(
                 div()
+                    .id("terminal-copy-output")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(muted)
+                    .hover(|tab| tab.text_color(accent))
+                    .child("复制")
+                    .on_click(move |_, _, app| {
+                        app.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            preview_copy.clone(),
+                        ));
+                    }),
+            );
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .p_3()
+            .gap_2()
+            .child(
+                div()
+                    .id("terminal-screen")
                     .flex_1()
                     .min_h_0()
-                    .p_2()
-                    .rounded(cx.theme().radius)
+                    .relative()
+                    .rounded_lg()
+                    .overflow_hidden()
                     .border_1()
                     .border_color(border)
-                    .overflow_y_scrollbar()
-                    .font_family("monospace")
-                    .text_xs()
-                    .child(if preview.is_empty() {
-                        "终端输出会显示在这里".to_string()
-                    } else {
-                        preview
-                    }),
+                    .bg(screen_bg)
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .p_3()
+                                    .overflow_y_scrollbar()
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .child(if preview.is_empty() {
+                                        cwd_label
+                                    } else {
+                                        preview
+                                    }),
+                            )
+                            .child(div().px_3().pb_2().child(Input::new(&self.term_input))),
+                    ),
             )
             .when_some(self.term_note.clone(), |col, note| {
                 col.child(div().text_xs().text_color(muted).child(note))
             })
-            .child(Input::new(&self.term_input))
+            .child(sub_tab_bar)
     }
 
     fn confirm_rename(&mut self, cx: &mut Context<Self>) {
@@ -1606,24 +1685,29 @@ impl InspectorPane {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or(path);
+            let raised = cx.theme().secondary;
             return v_flex()
                 .flex_1()
                 .min_h_0()
                 .child(
                     h_flex()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
                         .justify_between()
                         .items_center()
-                        .border_b_1()
-                        .border_color(border)
-                        .child(div().flex_1().text_xs().overflow_hidden().child(title))
+                        .p_2()
+                        .gap_2()
+                        .bg(raised)
+                        .child(div().flex_1().min_w_0().text_xs().truncate().child(title))
                         .child(
-                            Button::new("agent-file-close")
-                                .xsmall()
-                                .ghost()
-                                .label("关闭")
+                            div()
+                                .id("close-file")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(muted)
+                                .hover(|item| item.text_color(cx.theme().foreground))
+                                .child("关闭")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.file_preview = None;
                                     cx.notify();
@@ -1632,11 +1716,12 @@ impl InspectorPane {
                 )
                 .child(
                     div()
+                        .id("file-tree-open")
                         .flex_1()
                         .min_h_0()
-                        .px_2()
-                        .py_2()
+                        .p_3()
                         .overflow_y_scrollbar()
+                        .bg(cx.theme().background)
                         .font_family("monospace")
                         .text_xs()
                         .child(content),
@@ -1644,78 +1729,121 @@ impl InspectorPane {
                 .into_any_element();
         }
         let note = self.git_note.clone();
+        let renaming = self.rename_from.clone();
+        let accent = cx.theme().accent;
         v_flex()
             .flex_1()
             .min_h_0()
             .child(
                 h_flex()
+                    .id("file-tree-toolbar")
+                    .w_full()
                     .px_2()
-                    .pt_2()
-                    .gap_1()
+                    .py_1()
+                    .gap_2()
                     .items_center()
+                    .border_b_1()
+                    .border_color(border)
+                    .bg(cx.theme().secondary)
                     .child(
-                        Button::new("agent-file-new")
-                            .xsmall()
-                            .ghost()
-                            .label("新建文件")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.create_agent_path(false, cx)),
-                            ),
+                        div()
+                            .flex_1()
+                            .min_w(px(80.))
+                            .child(Input::new(&self.filter).cleanable(true)),
                     )
-                    .child(
-                        Button::new("agent-dir-new")
-                            .xsmall()
-                            .ghost()
-                            .label("新建文件夹")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.create_agent_path(true, cx)),
-                            ),
-                    )
-                    .when(self.rename_from.is_some(), |row| {
-                        row.child(
-                            Button::new("agent-rename-ok")
-                                .xsmall()
-                                .primary()
-                                .label("确认重命名")
-                                .on_click(cx.listener(|this, _, _, cx| this.confirm_rename(cx))),
+                    .child(Self::file_tool(
+                        cx,
+                        "file-tree-new-file",
+                        "新建文件",
+                        muted,
+                        |this, cx| this.create_agent_path(false, cx),
+                    ))
+                    .child(Self::file_tool(
+                        cx,
+                        "file-tree-new-folder",
+                        "新建文件夹",
+                        muted,
+                        |this, cx| this.create_agent_path(true, cx),
+                    ))
+                    .child(Self::file_tool(
+                        cx,
+                        "file-tree-collapse-all",
+                        "折叠",
+                        muted,
+                        |this, cx| {
+                            this.expanded.clear();
+                            cx.notify();
+                        },
+                    ))
+                    .child(Self::file_tool(
+                        cx,
+                        "file-tree-refresh",
+                        "刷新",
+                        muted,
+                        |this, cx| this.refresh(cx),
+                    )),
+            )
+            .when(renaming.is_some(), |col| {
+                col.child(
+                    h_flex()
+                        .id("file-tree-pending-op-bar")
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(accent)
+                        .bg(cx.theme().secondary)
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(accent)
+                                .truncate()
+                                .child("在筛选框里填写新文件名"),
                         )
-                    })
-                    .child(
-                        Button::new("agent-collapse")
-                            .xsmall()
-                            .ghost()
-                            .label("折叠")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.expanded.clear();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("agent-file-refresh")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::RefreshCw)
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .py_2()
-                    .child(Input::new(&self.filter).cleanable(true)),
-            )
+                        .child(Self::file_tool(
+                            cx,
+                            "file-tree-rename-ok",
+                            "确认重命名",
+                            accent,
+                            |this, cx| this.confirm_rename(cx),
+                        )),
+                )
+            })
             .when_some(note, |col, note| {
-                col.child(div().px_2().text_xs().text_color(muted).child(note))
+                col.child(div().px_2().py_1().text_xs().text_color(muted).child(note))
             })
             .child(
                 div()
+                    .id("file-tree-scroll-content")
                     .flex_1()
                     .min_h_0()
-                    .px_1()
+                    .p_2()
                     .overflow_y_scrollbar()
                     .child(file_body),
             )
             .into_any_element()
+    }
+
+    fn file_tool(
+        cx: &mut Context<Self>,
+        id: &'static str,
+        label: &'static str,
+        color: Hsla,
+        action: fn(&mut Self, &mut Context<Self>),
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .px_1()
+            .text_xs()
+            .cursor_pointer()
+            .text_color(color)
+            .hover(|item| item.text_color(cx.theme().foreground))
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
     }
 
     fn open_agent_file(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -1763,45 +1891,66 @@ impl InspectorPane {
         });
         let accent = cx.theme().accent;
         let current = self.mission_tab;
-        let pills = h_flex().px_2().pt_2().gap_1().children(
-            [
-                (MissionTab::Goal, "计划"),
-                (MissionTab::Todos, "待办"),
-                (MissionTab::Gate, "门禁"),
-                (MissionTab::Log, "时间线"),
-                (MissionTab::Artifacts, "产物"),
-            ]
-            .into_iter()
-            .map(|(tab, label)| {
-                let selected = tab == current;
-                div()
-                    .id(SharedString::from(format!("mission-{label}")))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_full()
-                    .text_xs()
-                    .cursor_pointer()
-                    .when(selected, |pill| {
-                        pill.bg(accent).text_color(cx.theme().accent_foreground)
-                    })
-                    .when(!selected, |pill| pill.text_color(muted))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.mission_tab = tab;
-                        cx.notify();
-                    }))
-            }),
-        );
-        let mut body = v_flex().size_full().min_h_0();
+        let border = cx.theme().border;
+        let pills = h_flex()
+            .id("mission-capsule-subtabs")
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(border)
+            .overflow_x_scrollbar()
+            .children(
+                [
+                    (MissionTab::Goal, "计划"),
+                    (MissionTab::Todos, "待办"),
+                    (MissionTab::Gate, "门禁"),
+                    (MissionTab::Log, "时间线"),
+                    (MissionTab::Artifacts, "产物"),
+                ]
+                .into_iter()
+                .map(|(tab, label)| {
+                    let selected = tab == current;
+                    div()
+                        .id(SharedString::from(format!("mission-{label}")))
+                        .flex_shrink_0()
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(selected, |pill| {
+                            pill.bg(border)
+                                .text_color(accent)
+                                .font_weight(gpui::FontWeight::BOLD)
+                        })
+                        .when(!selected, |pill| {
+                            pill.text_color(muted).hover(|pill| pill.text_color(accent))
+                        })
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mission_tab = tab;
+                            cx.notify();
+                        }))
+                }),
+            );
+        let mut body = v_flex().flex_1().min_h_0();
         body = match current {
             MissionTab::Log => body.child(self.timeline_panel(muted, cx)),
-            MissionTab::Gate => body.child(self.gate_panel(muted)),
-            MissionTab::Artifacts => body.child(self.artifacts_panel(muted)),
+            MissionTab::Gate => body.child(self.gate_panel(muted, cx)),
+            MissionTab::Artifacts => body.child(self.artifacts_panel(muted, cx)),
             MissionTab::Todos => body.child(
                 v_flex()
-                    .px_3()
-                    .py_2()
-                    .gap_1()
+                    .mx_3()
+                    .mb_3()
+                    .p_3()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border)
+                    .bg(cx.theme().secondary)
                     .child(
                         div()
                             .text_xs()
@@ -1831,7 +1980,15 @@ impl InspectorPane {
                     })),
             ),
             MissionTab::Goal => {
-                let mut col = v_flex().px_3().py_2().gap_1();
+                let mut col = v_flex()
+                    .mx_3()
+                    .mb_3()
+                    .p_3()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border)
+                    .bg(cx.theme().secondary);
                 col = match goal {
                     Some(goal) => col.child(div().text_sm().child(goal.objective)).child(
                         div().text_xs().text_color(muted).child(format!(
@@ -1889,7 +2046,7 @@ impl InspectorPane {
         v_flex()
             .size_full()
             .min_h_0()
-            .child(pills)
+            .child(h_flex().flex_none().px_3().py_2().child(pills))
             .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(body))
     }
 
@@ -1909,7 +2066,7 @@ impl InspectorPane {
         cx.notify();
     }
 
-    fn gate_panel(&self, muted: Hsla) -> impl IntoElement {
+    fn gate_panel(&self, muted: Hsla, cx: &mut Context<Self>) -> impl IntoElement {
         let events = self.state.with(|s| {
             s.active_thread_id
                 .as_ref()
@@ -1927,7 +2084,15 @@ impl InspectorPane {
             })
             .take(40)
             .collect();
-        let mut body = v_flex().px_3().py_2().gap_1();
+        let mut body = v_flex()
+            .mx_3()
+            .mb_3()
+            .p_3()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary);
         if rows.is_empty() {
             body = body.child(
                 div()
@@ -1943,7 +2108,7 @@ impl InspectorPane {
         }))
     }
 
-    fn artifacts_panel(&self, muted: Hsla) -> impl IntoElement {
+    fn artifacts_panel(&self, muted: Hsla, cx: &mut Context<Self>) -> impl IntoElement {
         let dir = self.root().map(|root| spill_dir(&root));
         let files = dir
             .as_ref()
@@ -1957,7 +2122,15 @@ impl InspectorPane {
                 names.truncate(40);
                 names
             });
-        let mut body = v_flex().px_3().py_2().gap_1();
+        let mut body = v_flex()
+            .mx_3()
+            .mb_3()
+            .p_3()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary);
         match files {
             None => {
                 body = body.child(
@@ -1986,28 +2159,41 @@ impl InspectorPane {
         use crate::views::visualizer;
         let mode = self.viz_mode;
         let accent = cx.theme().accent;
-        let pills = h_flex().px_2().pt_2().gap_1().children(
-            [(0u8, "蜂群三维"), (1, "依赖图"), (2, "核图谱")]
-                .into_iter()
-                .map(|(id, label)| {
-                    div()
-                        .id(("viz-mode", id as usize))
-                        .px_2()
-                        .py_0p5()
-                        .rounded_full()
-                        .text_xs()
-                        .cursor_pointer()
-                        .when(mode == id, |pill| {
-                            pill.bg(accent).text_color(cx.theme().accent_foreground)
-                        })
-                        .when(mode != id, |pill| pill.text_color(muted))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.viz_mode = id;
-                            cx.notify();
-                        }))
-                }),
-        );
+        let border = cx.theme().border;
+        let pills = h_flex()
+            .gap_1()
+            .items_center()
+            .p_1()
+            .rounded_full()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(border)
+            .children(
+                [(0u8, "蜂群三维"), (1, "依赖图"), (2, "核图谱")]
+                    .into_iter()
+                    .map(|(id, label)| {
+                        div()
+                            .id(("viz-mode", id as usize))
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(mode == id, |pill| {
+                                pill.bg(border)
+                                    .text_color(accent)
+                                    .font_weight(gpui::FontWeight::BOLD)
+                            })
+                            .when(mode != id, |pill| {
+                                pill.text_color(muted).hover(|pill| pill.text_color(accent))
+                            })
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.viz_mode = id;
+                                cx.notify();
+                            }))
+                    }),
+            );
         let (summary, canvas_view, detail) = match mode {
             1 => {
                 let key = root.as_ref().map(|path| path.display().to_string());
@@ -2125,18 +2311,53 @@ impl InspectorPane {
             }
         };
         let filter_row = mode == 2;
+        let border = cx.theme().border;
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(pills)
             .child(
                 h_flex()
-                    .px_3()
-                    .pt_1()
+                    .w_full()
+                    .min_w_0()
+                    .flex_wrap()
                     .gap_2()
+                    .justify_between()
                     .items_center()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(pills)
                     .child(div().text_xs().text_color(muted).child(summary))
-                    .when(filter_row, |row| row.child(self.nucleus_filters(cx))),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .when(filter_row, |row| row.child(self.nucleus_filters(cx)))
+                            .child(
+                                div()
+                                    .id("vis-reset-cam")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(cx.theme().secondary)
+                                    .border_1()
+                                    .border_color(border)
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .hover(|item| item.text_color(accent))
+                                    .child("复位")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.viz_yaw = 0.0;
+                                        this.viz_pitch = 0.25;
+                                        this.viz_focus = None;
+                                        this.dep_focus = None;
+                                        this.nucleus_focus = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -2199,6 +2420,8 @@ impl InspectorPane {
                 div()
                     .px_3()
                     .py_2()
+                    .border_t_1()
+                    .border_color(border)
                     .text_xs()
                     .text_color(muted)
                     .child(detail),
@@ -2256,20 +2479,28 @@ impl InspectorPane {
         let total = events.len();
         let shown = self.event_cursor.unwrap_or(total).min(total);
         let cursor = self.event_cursor;
+        let accent = cx.theme().accent;
         v_flex()
-            .gap_2()
+            .flex_1()
+            .min_h_0()
             .child(
                 h_flex()
+                    .w_full()
                     .px_3()
-                    .pt_2()
-                    .gap_2()
+                    .py_2()
+                    .gap_3()
                     .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
                     .child(
-                        Button::new("timeline-older")
-                            .xsmall()
-                            .ghost()
-                            .label("更早")
-                            .disabled(shown == 0)
+                        div()
+                            .id("timeline-older")
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(muted)
+                            .when(shown == 0, |item| item.opacity(0.4))
+                            .hover(|item| item.text_color(accent))
+                            .child("更早")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let total = this.state.with(|s| {
                                     s.active_thread_id
@@ -2278,20 +2509,32 @@ impl InspectorPane {
                                         .unwrap_or(0)
                                 });
                                 let shown = this.event_cursor.unwrap_or(total);
+                                if shown == 0 {
+                                    return;
+                                }
                                 this.event_cursor = Some(shown.saturating_sub(1));
                                 cx.notify();
                             })),
                     )
-                    .child(div().text_xs().text_color(muted).child(if total == 0 {
-                        "还没有记录".to_string()
-                    } else {
-                        format!("看到最近 {shown} / {total} 条")
-                    }))
                     .child(
-                        Button::new("timeline-newer")
-                            .xsmall()
-                            .ghost()
-                            .label("更新")
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(if total == 0 {
+                                "还没有记录".to_string()
+                            } else {
+                                format!("看到最近 {shown} / {total} 条")
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("timeline-newer")
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(muted)
+                            .hover(|item| item.text_color(accent))
+                            .child("更新")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let total = this.state.with(|s| {
                                     s.active_thread_id
@@ -2308,25 +2551,33 @@ impl InspectorPane {
                             })),
                     )
                     .child(
-                        Button::new("timeline-live")
-                            .xsmall()
-                            .ghost()
-                            .label("回到最新")
-                            .disabled(cursor.is_none())
+                        div()
+                            .id("timeline-live")
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(if cursor.is_none() { muted } else { accent })
+                            .when(cursor.is_none(), |item| item.opacity(0.4))
+                            .hover(|item| item.text_color(accent))
+                            .child("回到最新")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.event_cursor = None;
                                 cx.notify();
                             })),
                     ),
             )
-            .child(self.events_panel_limited(muted, shown))
+            .child(self.events_panel_limited(muted, shown, cx))
     }
 
-    fn events_panel(&self, muted: impl Into<Hsla>) -> impl IntoElement {
-        self.events_panel_limited(muted, usize::MAX)
+    fn events_panel(&self, muted: impl Into<Hsla>, cx: &mut Context<Self>) -> impl IntoElement {
+        self.events_panel_limited(muted, usize::MAX, cx)
     }
 
-    fn events_panel_limited(&self, muted: impl Into<Hsla>, limit: usize) -> impl IntoElement {
+    fn events_panel_limited(
+        &self,
+        muted: impl Into<Hsla>,
+        limit: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let muted = muted.into();
         let events = self.state.with(|s| {
             s.active_thread_id
@@ -2335,12 +2586,14 @@ impl InspectorPane {
                 .unwrap_or_default()
         });
         let mut body = v_flex()
-            .size_full()
-            .min_h_0()
-            .px_3()
-            .py_2()
-            .gap_1()
-            .overflow_y_scrollbar();
+            .mx_3()
+            .mb_3()
+            .p_3()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary);
         if events.is_empty() {
             body = body.child(
                 div()
@@ -2404,13 +2657,8 @@ impl InspectorPane {
     ) -> impl IntoElement {
         let muted = muted.into();
         let root = self.root();
-        let mut body = v_flex()
-            .size_full()
-            .min_h_0()
-            .px_3()
-            .py_2()
-            .gap_1()
-            .overflow_y_scrollbar();
+        let mut git_tabs = None;
+        let mut body = v_flex().w_full().px_3().pt_1().pb_3().gap_1();
         match git {
             None => {
                 body = body.child(div().text_xs().text_color(muted).child(if root.is_some() {
@@ -2438,75 +2686,100 @@ impl InspectorPane {
                 if on_agent {
                     let section = self.git_section;
                     let accent = cx.theme().accent;
-                    body = body.child(
-                        h_flex().gap_1().children(
-                            [
-                                (GitSection::Changes, "改动"),
-                                (GitSection::Branches, "分支"),
-                                (GitSection::Worktrees, "工作树"),
-                                (GitSection::Log, "图谱"),
-                                (GitSection::Diff3, "三方差异"),
-                                (GitSection::Remote, "远程"),
-                            ]
-                            .into_iter()
-                            .map(|(item, label)| {
-                                let selected = item == section;
-                                div()
-                                    .id(SharedString::from(format!("git-sec-{label}")))
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .text_xs()
-                                    .cursor_pointer()
-                                    .when(selected, |pill| {
-                                        pill.bg(accent).text_color(cx.theme().accent_foreground)
-                                    })
-                                    .when(!selected, |pill| pill.text_color(muted))
-                                    .child(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.git_section = item;
-                                        if item == GitSection::Diff3 {
-                                            this.load_diff_head(cx);
-                                        } else if item != GitSection::Changes {
-                                            this.load_git_lists(cx);
-                                        }
-                                        cx.notify();
-                                    }))
-                            }),
-                        ),
+                    let border = cx.theme().border;
+                    git_tabs = Some(
+                        h_flex()
+                            .id("git-capsule-subtabs")
+                            .items_center()
+                            .gap_1()
+                            .p_1()
+                            .rounded_full()
+                            .bg(cx.theme().secondary)
+                            .border_1()
+                            .border_color(border)
+                            .overflow_x_scrollbar()
+                            .children(
+                                [
+                                    (GitSection::Changes, "改动"),
+                                    (GitSection::Branches, "分支"),
+                                    (GitSection::Worktrees, "工作树"),
+                                    (GitSection::Log, "图谱"),
+                                    (GitSection::Diff3, "三方差异"),
+                                    (GitSection::Remote, "远程"),
+                                ]
+                                .into_iter()
+                                .map(|(item, label)| {
+                                    let selected = item == section;
+                                    div()
+                                        .id(SharedString::from(format!("git-sec-{label}")))
+                                        .flex_shrink_0()
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_full()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .when(selected, |pill| {
+                                            pill.bg(border)
+                                                .text_color(accent)
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                        })
+                                        .when(!selected, |pill| {
+                                            pill.text_color(muted)
+                                                .hover(|pill| pill.text_color(accent))
+                                        })
+                                        .child(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.git_section = item;
+                                            if item == GitSection::Diff3 {
+                                                this.load_diff_head(cx);
+                                            } else if item != GitSection::Changes {
+                                                this.load_git_lists(cx);
+                                            }
+                                            cx.notify();
+                                        }))
+                                }),
+                            ),
                     );
                     if section == GitSection::Branches {
                         let scope = self.branch_scope;
                         let accent = cx.theme().accent;
                         body = body.child(
-                            h_flex().gap_1().children(
-                                [
-                                    (BranchScope::All, "全部"),
-                                    (BranchScope::Local, "本地"),
-                                    (BranchScope::Remote, "远程"),
-                                ]
-                                .into_iter()
-                                .map(|(item, label)| {
-                                    let selected = item == scope;
-                                    div()
-                                        .id(SharedString::from(format!("branch-scope-{label}")))
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .when(selected, |pill| {
-                                            pill.bg(accent).text_color(cx.theme().accent_foreground)
-                                        })
-                                        .when(!selected, |pill| pill.text_color(muted))
-                                        .child(label)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.branch_scope = item;
-                                            this.load_git_lists(cx);
-                                            cx.notify();
-                                        }))
-                                }),
-                            ),
+                            h_flex()
+                                .gap_1()
+                                .p_1()
+                                .rounded_full()
+                                .bg(cx.theme().secondary)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .children(
+                                    [
+                                        (BranchScope::All, "全部"),
+                                        (BranchScope::Local, "本地"),
+                                        (BranchScope::Remote, "远程"),
+                                    ]
+                                    .into_iter()
+                                    .map(|(item, label)| {
+                                        let selected = item == scope;
+                                        div()
+                                            .id(SharedString::from(format!("branch-scope-{label}")))
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .when(selected, |pill| {
+                                                pill.bg(accent)
+                                                    .text_color(cx.theme().accent_foreground)
+                                            })
+                                            .when(!selected, |pill| pill.text_color(muted))
+                                            .child(label)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.branch_scope = item;
+                                                this.load_git_lists(cx);
+                                                cx.notify();
+                                            }))
+                                    }),
+                                ),
                         );
                         body = body.child(
                             Button::new("git-fetch-branches")
@@ -2556,7 +2829,7 @@ impl InspectorPane {
                                     })
                                 })
                         }));
-                        return body;
+                        // Fall through so the section keeps the tab bar and scroll pane.
                     }
                     if section == GitSection::Log {
                         let rows = self.git_log.clone();
@@ -2582,7 +2855,7 @@ impl InspectorPane {
                                     view.update(app, |this, cx| this.load_commit(rev, cx));
                                 })
                         }));
-                        return body;
+                        // Fall through so the section keeps the tab bar and scroll pane.
                     }
                     if section == GitSection::Diff3 {
                         if let Some(note) = self.git_note.clone() {
@@ -2600,7 +2873,7 @@ impl InspectorPane {
                                     .child("这里比较工作区、HEAD，以及已暂存的内容统计"),
                             );
                         }
-                        return body;
+                        // Fall through so the section keeps the tab bar and scroll pane.
                     }
                     if section == GitSection::Worktrees {
                         let rows = self.git_worktrees.clone();
@@ -2649,7 +2922,7 @@ impl InspectorPane {
                                     view.update(app, |this, cx| this.use_worktree(path, cx));
                                 })
                         }));
-                        return body;
+                        // Fall through so the section keeps the tab bar and scroll pane.
                     }
                     if section == GitSection::Remote {
                         let mut seen = HashSet::new();
@@ -2706,7 +2979,7 @@ impl InspectorPane {
                                     });
                                 })
                         }));
-                        return body;
+                        // Fall through so the section keeps the tab bar and scroll pane.
                     }
                 }
                 let session_tree = root.as_ref().is_some_and(|path| {
@@ -2749,7 +3022,12 @@ impl InspectorPane {
                     body = body.child(
                         v_flex()
                             .max_h(px(240.))
-                            .gap_1()
+                            .p_3()
+                            .gap_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
                             .child(
                                 h_flex()
                                     .justify_between()
@@ -2805,10 +3083,12 @@ impl InspectorPane {
                             .id(SharedString::from(format!("git-{path}")))
                             .gap_2()
                             .items_center()
-                            .py_0p5()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
                             .text_xs()
                             .cursor_pointer()
-                            .hover(|row| row.bg(cx.theme().accent))
+                            .hover(|row| row.bg(cx.theme().secondary))
                             .child(div().w(px(28.)).text_color(muted).child(
                                 if change.status.is_empty() {
                                     "·".to_string()
@@ -2853,6 +3133,13 @@ impl InspectorPane {
                 }
             }
         }
-        body
+        v_flex()
+            .id("git-tab-panel")
+            .size_full()
+            .min_h_0()
+            .when_some(git_tabs, |col, tabs| {
+                col.child(h_flex().flex_none().px_3().py_2().child(tabs))
+            })
+            .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(body))
     }
 }

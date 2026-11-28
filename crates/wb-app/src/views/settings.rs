@@ -30,6 +30,8 @@ pub struct SettingsPane {
     pub(crate) model_editor: ModelEditor,
     _model_subs: Vec<Subscription>,
     font_count: usize,
+    /// System font enumeration stays off the startup path.
+    fonts_ready: bool,
     speech_msg: String,
     /// Per-engine status, keyed by engine id.
     speech_statuses: Vec<wb_host::SpeechStatus>,
@@ -97,7 +99,7 @@ impl SettingsPane {
                 .default_value(hooks_val)
         });
         let (model_editor, model_subs) = ModelEditor::new(state.clone(), window, cx);
-        let font_count = list_system_fonts().map(|f| f.len()).unwrap_or(0);
+        let font_count = 0;
         // Speech models are scanned after the window is up: hashing a few
         // hundred megabytes here would delay every cold start.
         let speech_msg = String::new();
@@ -113,6 +115,7 @@ impl SettingsPane {
             model_editor,
             _model_subs: model_subs,
             font_count,
+            fonts_ready: false,
             speech_msg,
             speech_statuses: Vec::new(),
             speech_busy: None,
@@ -713,11 +716,19 @@ impl SettingsPane {
             skills_msg: self.skills_msg.clone(),
         };
 
+        // 侧栏对齐 Hadron：常规（含外观）→ 执行 → 环境 → 模型 → 技能，
+        // 工作台多出来的 Agent 配置和关于页接在后面。
         let mut pages = vec![
             general_page(state.clone(), entity.clone()),
-            appearance_page(state.clone(), entity.clone(), theme_name, font_count)
-                .section("基础设置"),
-            notify_page(state.clone(), entity.clone()).section("基础设置"),
+            appearance_page(state.clone(), entity.clone(), theme_name, font_count).section("常规"),
+            tools_ui::tools_page(
+                entity.clone(),
+                self.tool_catalog.clone(),
+                self.tool_filter,
+                self.tools_busy,
+            )
+            .section("执行"),
+            notify_page(state.clone(), entity.clone()).section("执行"),
             voice_page(
                 state.clone(),
                 entity.clone(),
@@ -731,20 +742,11 @@ impl SettingsPane {
                     scanning: self.speech_scanning,
                 },
             )
-            .section("基础设置"),
+            .section("环境"),
+            data_page(state.clone(), entity.clone(), data_msg).section("环境"),
         ];
-        pages.extend(agent_pages(state.clone(), entity.clone(), agent));
-        pages.push(
-            tools_ui::tools_page(
-                entity.clone(),
-                self.tool_catalog.clone(),
-                self.tool_filter,
-                self.tools_busy,
-            )
-            .section("Agent"),
-        );
-        pages.push(data_page(state, entity.clone(), data_msg).section("数据与关于"));
-        pages.push(about_page().section("数据与关于"));
+        pages.extend(agent_pages(state, entity, agent));
+        pages.push(about_page().section("关于"));
         pages
     }
 }
@@ -791,8 +793,8 @@ fn remind_choices() -> Vec<(SharedString, SharedString)> {
     .collect()
 }
 
-fn agent_nav(page: SettingPage) -> SettingPage {
-    page.section("Agent").resettable(false)
+fn in_section(page: SettingPage, section: &'static str) -> SettingPage {
+    page.section(section).resettable(false)
 }
 
 fn general_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPage {
@@ -835,7 +837,7 @@ fn general_page(state: AppState, entity: WeakEntity<SettingsPane>) -> SettingPag
     let note_entity = entity;
 
     SettingPage::new("常规")
-        .section("基础设置")
+        .section("常规")
         .icon(Icon::new(IconName::Settings2))
         .default_open(true)
         .resettable(false)
@@ -1199,9 +1201,11 @@ fn appearance_page(
                             },
                         ),
                     )
-                    .description(format!(
-                        "留空使用系统界面字体。已扫描系统字体 {font_count} 个。"
-                    )),
+                    .description(if font_count == 0 {
+                        "留空使用系统界面字体。正在扫描系统字体…".to_string()
+                    } else {
+                        format!("留空使用系统界面字体。已扫描系统字体 {font_count} 个。")
+                    }),
                 )
                 .item(
                     SettingItem::new(
@@ -2006,7 +2010,7 @@ fn agent_pages(
     let skills_entity = entity.clone();
     let _ = state;
     vec![
-        agent_nav(
+        in_section(
             model_page(model_entity).group(
                 SettingGroup::new().title("代理").in_nav(false).item(
                     SettingItem::new(
@@ -2035,8 +2039,15 @@ fn agent_pages(
                     .description("只影响模型请求。例如 http://127.0.0.1:7890，留空则不走代理。"),
                 ),
             ),
+            "模型",
         ),
-        agent_nav(
+        in_section(skills_page(skills_state, skills_entity, skills_msg), "技能"),
+        in_section(
+            plugins_page(plugins_dirs.clone(), dirs_entity.clone()),
+            "技能",
+        ),
+        in_section(commands_page(), "技能"),
+        in_section(
             SettingPage::new("个性化")
                 .icon(Icon::new(IconName::User))
                 .group(
@@ -2062,8 +2073,9 @@ fn agent_pages(
                         .keywords(["人格", "system", "提示"]),
                     ),
                 ),
+            "Agent",
         ),
-        agent_nav(
+        in_section(
             SettingPage::new("记忆")
                 .icon(Icon::new(IconName::BookOpen))
                 .group(
@@ -2126,21 +2138,28 @@ fn agent_pages(
                         .keywords(["记忆", "memory"]),
                     ),
                 ),
+            "Agent",
         ),
-        agent_nav(subagents_page(
-            subagents_json.clone(),
-            json_entity.clone(),
-            agent_json_msg.clone(),
-        )),
-        agent_nav(plugins_page(plugins_dirs.clone(), dirs_entity.clone())),
-        agent_nav(mcp_page(
-            mcp_json.clone(),
-            json_entity.clone(),
-            agent_json_msg.clone(),
-        )),
-        agent_nav(skills_page(skills_state, skills_entity, skills_msg)),
-        agent_nav(commands_page()),
-        agent_nav(hooks_page(hooks_json.clone(), json_entity, agent_json_msg)),
+        in_section(
+            subagents_page(
+                subagents_json.clone(),
+                json_entity.clone(),
+                agent_json_msg.clone(),
+            ),
+            "Agent",
+        ),
+        in_section(
+            mcp_page(
+                mcp_json.clone(),
+                json_entity.clone(),
+                agent_json_msg.clone(),
+            ),
+            "Agent",
+        ),
+        in_section(
+            hooks_page(hooks_json.clone(), json_entity, agent_json_msg),
+            "Agent",
+        ),
     ]
 }
 
@@ -2836,10 +2855,25 @@ impl Render for SettingsPane {
             self.speech_started = true;
             self.refresh_speech(cx);
         }
+        if !self.fonts_ready {
+            self.fonts_ready = true;
+            cx.spawn(async move |this, cx| {
+                let count = cx
+                    .background_executor()
+                    .spawn(async { list_system_fonts().map(|fonts| fonts.len()).unwrap_or(0) })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.font_count = count;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         div().size_full().child(
             Settings::new("wb-settings")
                 .search_placeholder("搜索设置")
-                .sidebar_width(px(240.))
+                .sidebar_width(px(220.))
                 .with_group_variant(GroupBoxVariant::Fill)
                 .leading({
                     let state = self.state.clone();

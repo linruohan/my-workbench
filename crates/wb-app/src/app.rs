@@ -11,7 +11,7 @@ use gpui_kit::component::sidebar::{
 };
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use gpui_kit::{AnimationExt as _, *};
 use std::time::Duration;
 use wb_domain::{
     INBOX_PROJECT_ID, NotificationStatus, RIGHT_SIDEBAR_WIDTH_MAX, RIGHT_SIDEBAR_WIDTH_MIN,
@@ -33,6 +33,50 @@ fn recording_chip(bg: Hsla, fg: Hsla) -> impl IntoElement {
         .bg(bg)
         .text_color(fg)
         .child("正在录音… 松开 CapsLock 结束")
+        .with_animation(
+            "recording-pulse",
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |chip, delta| {
+                let wave = if delta < 0.5 {
+                    delta * 2.
+                } else {
+                    (1. - delta) * 2.
+                };
+                chip.opacity(0.55 + wave * 0.45)
+            },
+        )
+}
+
+/// Corner washes in the same hues Hadron keeps on the black field: violet and green
+/// at low alpha, so the canvas stays dark but is not a flat fill.
+fn field_wash(dark: bool) -> impl IntoElement {
+    div().absolute().size_full().when(dark, |layer| {
+        layer
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(520.))
+                    .bg(linear_gradient(
+                        135.,
+                        linear_color_stop(rgba(0xa87ffb24), 0.),
+                        linear_color_stop(rgba(0x00000000), 1.),
+                    )),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .size(px(480.))
+                    .bg(linear_gradient(
+                        315.,
+                        linear_color_stop(rgba(0x62c07318), 0.),
+                        linear_color_stop(rgba(0x00000000), 1.),
+                    )),
+            )
+    })
 }
 
 pub struct WorkbenchApp {
@@ -102,11 +146,20 @@ impl WorkbenchApp {
         })
         .detach();
 
-        // PTT 录音态与转写结果需要更密的轮询
+        // PTT 录音态与转写结果需要更密的轮询。语音关闭时放慢，避免空转唤醒 UI。
         cx.spawn(async move |this, cx| {
             loop {
+                let fast = this
+                    .update(cx, |this, _cx| {
+                        this.ptt_held
+                            || this
+                                .state
+                                .with(|s| s.prefs.voice.enabled || s.prefs.voice.caps_lock_ptt)
+                    })
+                    .unwrap_or(false);
+                let wait = if fast { 50 } else { 1_000 };
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(wait))
                     .await;
                 this.update(cx, |this, cx| {
                     this.on_ptt_poll(cx);
@@ -263,25 +316,30 @@ impl WorkbenchApp {
         let due_reminds: Vec<(String, String, bool)> = self.state.with_mut(|s| {
             s.repo.wake_snoozed_notifications(now);
             let mut due = Vec::new();
-            for task in s.repo.list_tasks() {
-                if task.is_done {
+            let due_ids: Vec<String> = s
+                .repo
+                .tasks()
+                .filter(|task| {
+                    !task.is_done
+                        && (task.remind_at.is_some_and(|at| at <= now)
+                            || task.deadline_remind_at.is_some_and(|at| at <= now))
+                })
+                .map(|task| task.id.clone())
+                .collect();
+            for id in due_ids {
+                let Some(task) = s.repo.get_task(&id).cloned() else {
                     continue;
-                }
+                };
                 let mut next = task.clone();
-                let mut changed = false;
                 if task.remind_at.is_some_and(|at| at <= now) {
                     due.push((task.id.clone(), task.title.clone(), false));
                     next.remind_at = None;
-                    changed = true;
                 }
                 if task.deadline_remind_at.is_some_and(|at| at <= now) {
                     due.push((task.id.clone(), task.title.clone(), true));
                     next.deadline_remind_at = None;
-                    changed = true;
                 }
-                if changed {
-                    s.repo.upsert_task(next);
-                }
+                s.repo.upsert_task(next);
             }
             s.last_tick = now;
             due
@@ -472,15 +530,19 @@ impl Render for WorkbenchApp {
             .with(|s| clamp_right_sidebar_width(s.prefs.right_sidebar_width));
         let today = self.state.today();
         let (today_count, inbox_count) = self.state.with(|s| {
-            let tasks = s.repo.list_tasks();
-            let today_count = tasks
-                .iter()
-                .filter(|t| t.parent_id.is_none() && is_today_member(t, &today))
-                .count();
-            let inbox_count = tasks
-                .iter()
-                .filter(|t| !t.is_done && t.project_id == INBOX_PROJECT_ID && t.parent_id.is_none())
-                .count();
+            let mut today_count = 0usize;
+            let mut inbox_count = 0usize;
+            for task in s.repo.tasks() {
+                if task.parent_id.is_some() {
+                    continue;
+                }
+                if is_today_member(task, &today) {
+                    today_count += 1;
+                }
+                if !task.is_done && task.project_id == INBOX_PROJECT_ID {
+                    inbox_count += 1;
+                }
+            }
             (today_count, inbox_count)
         });
         let project_items: Vec<(String, String, bool)> = self.state.with(|s| {
@@ -623,10 +685,14 @@ impl Render for WorkbenchApp {
             Vec::new()
         };
 
+        let dark = cx.theme().mode.is_dark();
         div()
             .id("workbench-root")
+            .relative()
             .size_full()
+            .overflow_hidden()
             .bg(cx.theme().background)
+            .child(field_wash(dark))
             .track_focus(&cx.focus_handle())
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(window, cx);
@@ -674,187 +740,249 @@ impl Render for WorkbenchApp {
                         collapsed,
                         cx,
                     ))
-                    .child(div().flex_1().min_h_0().child(if nav == AppNav::Settings {
-                        self.settings.clone().into_any_element()
-                    } else {
-                        let sidebar = Sidebar::new("wb-sidebar")
-                            .w_full()
-                            .collapsible(SidebarCollapsible::Icon)
-                            .collapsed(collapsed)
-                            .child(SidebarGroup::new("任务").child(task_menu))
-                            .child(
-                                SidebarGroup::new("项目")
-                                    .suffix({
-                                        let entity = entity.clone();
-                                        move |_, _| {
-                                            let entity = entity.clone();
-                                            Button::new("sidebar-add-project")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(IconName::Plus)
-                                                .tooltip("新建项目")
-                                                .on_click(move |_, window, app| {
-                                                    if let Some(e) = entity.upgrade() {
-                                                        e.update(app, |this, cx| {
+                    .child(
+                        div().h(px(1.)).w_full().flex().justify_center().child(
+                            div()
+                                .h_full()
+                                .w(px(180.))
+                                .bg(cx.theme().primary.opacity(0.45)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p_1()
+                            .child(if nav == AppNav::Settings {
+                                div()
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .rounded(cx.theme().radius_lg)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().secondary)
+                                    .child(self.settings.clone())
+                                    .into_any_element()
+                            } else {
+                                let sidebar = Sidebar::new("wb-sidebar")
+                                    .w_full()
+                                    .collapsible(SidebarCollapsible::Icon)
+                                    .collapsed(collapsed)
+                                    .child(SidebarGroup::new("任务").child(task_menu))
+                                    .child(
+                                        SidebarGroup::new("项目")
+                                            .suffix({
+                                                let entity = entity.clone();
+                                                move |_, _| {
+                                                    let entity = entity.clone();
+                                                    Button::new("sidebar-add-project")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .icon(IconName::Plus)
+                                                        .tooltip("新建项目")
+                                                        .on_click(move |_, window, app| {
+                                                            if let Some(e) = entity.upgrade() {
+                                                                e.update(app, |this, cx| {
                                                             this.tasks.update(cx, |tasks, cx| {
                                                                 tasks.open_project_dialog(
                                                                     window, cx,
                                                                 );
                                                             });
                                                         });
-                                                    }
-                                                })
-                                        }
-                                    })
-                                    .child(project_menu),
-                            )
-                            .child(SidebarGroup::new("工具").child(tools_menu))
-                            .footer({
-                                let account_footer = div()
-                                    .id("account-nav")
-                                    .w_full()
-                                    .h_7()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_2()
-                                    .rounded(cx.theme().radius)
-                                    .text_sm()
-                                    .cursor_pointer()
-                                    .hover(|this| {
-                                        this.bg(cx.theme().tokens.sidebar_accent)
-                                            .text_color(cx.theme().sidebar_accent_foreground)
-                                    })
-                                    .when(nav == AppNav::Settings, |this| {
-                                        this.bg(cx.theme().tokens.sidebar_accent)
-                                            .text_color(cx.theme().sidebar_accent_foreground)
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_nav(AppNav::Settings, cx);
-                                    }));
-                                if collapsed {
-                                    account_footer
-                                        .justify_center()
-                                        .child(Icon::new(IconName::CircleUser).size_4())
-                                } else {
-                                    account_footer
-                                        .justify_between()
-                                        .child(
-                                            h_flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .gap_2()
-                                                .items_center()
-                                                .child(Icon::new(IconName::CircleUser).size_4())
-                                                .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .child(account_name.clone()),
-                                                ),
-                                        )
-                                        .child(Icon::new(IconName::Settings).size_4())
-                                }
-                            });
-                        let hide_page_bar = matches!(nav, AppNav::Knowledge | AppNav::Agent);
-                        let page_header = if hide_page_bar {
-                            None
-                        } else if nav == AppNav::Timed {
-                            Some(self.timed.update(cx, |pane, cx| pane.chrome_header(cx)))
-                        } else {
-                            Some(self.tasks.update(cx, |pane, cx| pane.chrome_header(cx)))
-                        };
-                        let recording_bg = cx.theme().danger;
-                        let recording_fg = cx.theme().danger_foreground;
-                        let main = v_flex()
-                            .flex_1()
-                            .h_full()
-                            .min_w_0()
-                            .when_some(page_header, |col, header| {
-                                col.child(
-                                    h_flex()
-                                        .min_h(px(44.))
-                                        .px_3()
-                                        .py_1()
-                                        .items_center()
-                                        .gap_2()
-                                        .border_b_1()
-                                        .border_color(cx.theme().border)
-                                        .child(header)
-                                        .when(ptt_held, |row| {
-                                            row.child(recording_chip(recording_bg, recording_fg))
-                                        }),
-                                )
-                            })
-                            .when(hide_page_bar && ptt_held, |col| {
-                                col.child(
-                                    h_flex()
-                                        .px_3()
-                                        .py_1()
-                                        .justify_end()
-                                        .child(recording_chip(recording_bg, recording_fg)),
-                                )
-                            })
-                            .child(div().flex_1().min_h_0().child(main_view));
-
-                        let entity = entity.clone();
-                        let inspector = self.inspector.clone();
-                        let right_collapsed = self.right_collapsed;
-                        let show_right = nav == AppNav::Agent
-                            && self.state.with(|s| s.active_thread_id.is_some());
-                        let left_width = if collapsed { 48.0 } else { width };
-                        let left_range = if collapsed {
-                            px(48.)..px(48.)
-                        } else {
-                            px(SIDEBAR_WIDTH_MIN)..px(SIDEBAR_WIDTH_MAX)
-                        };
-                        div()
-                            .size_full()
-                            .child(
-                                h_resizable("wb-layout")
-                                    .with_state(&self.sidebar_panels)
-                                    .on_resize(move |state, _, app| {
-                                        let sizes = state.read(app).sizes().clone();
-                                        let left = sizes.first().copied().map(f32::from);
-                                        let right = sizes.get(2).copied().map(f32::from);
-                                        if let Some(e) = entity.upgrade() {
-                                            e.update(app, |this, cx| {
-                                                if let Some(w) = left {
-                                                    if !this.collapsed {
-                                                        this.set_sidebar_width(w, cx);
-                                                    }
+                                                            }
+                                                        })
                                                 }
-                                                if let Some(w) = right {
-                                                    if !this.right_collapsed {
-                                                        this.set_right_sidebar_width(w, cx);
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    })
-                                    .child(
-                                        resizable_panel()
-                                            .size(px(left_width))
-                                            .size_range(left_range)
-                                            .fixed()
-                                            .child(sidebar),
+                                            })
+                                            .child(project_menu),
                                     )
-                                    .child(resizable_panel().child(main))
-                                    .when(show_right && !right_collapsed, |row| {
-                                        let right_size = right_width;
-                                        let right_range = px(RIGHT_SIDEBAR_WIDTH_MIN)
-                                            ..px(RIGHT_SIDEBAR_WIDTH_MAX);
-                                        row.child(
-                                            resizable_panel()
-                                                .size(px(right_size))
-                                                .size_range(right_range)
-                                                .fixed()
-                                                .child(inspector),
-                                        )
-                                    }),
-                            )
-                            .into_any_element()
-                    })),
+                                    .child(SidebarGroup::new("工具").child(tools_menu))
+                                    .footer({
+                                        let account_footer = div()
+                                            .id("account-nav")
+                                            .w_full()
+                                            .h_7()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_2()
+                                            .rounded(cx.theme().radius)
+                                            .text_sm()
+                                            .cursor_pointer()
+                                            .hover(|this| {
+                                                this.bg(cx.theme().tokens.sidebar_accent)
+                                                    .text_color(
+                                                        cx.theme().sidebar_accent_foreground,
+                                                    )
+                                            })
+                                            .when(nav == AppNav::Settings, |this| {
+                                                this.bg(cx.theme().tokens.sidebar_accent)
+                                                    .text_color(
+                                                        cx.theme().sidebar_accent_foreground,
+                                                    )
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.set_nav(AppNav::Settings, cx);
+                                            }));
+                                        if collapsed {
+                                            account_footer
+                                                .justify_center()
+                                                .child(Icon::new(IconName::CircleUser).size_4())
+                                        } else {
+                                            account_footer
+                                                .justify_between()
+                                                .child(
+                                                    h_flex()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .child(
+                                                            Icon::new(IconName::CircleUser)
+                                                                .size_4(),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .child(account_name.clone()),
+                                                        ),
+                                                )
+                                                .child(Icon::new(IconName::Settings).size_4())
+                                        }
+                                    });
+                                let hide_page_bar =
+                                    matches!(nav, AppNav::Knowledge | AppNav::Agent);
+                                let page_header = if hide_page_bar {
+                                    None
+                                } else if nav == AppNav::Timed {
+                                    Some(self.timed.update(cx, |pane, cx| pane.chrome_header(cx)))
+                                } else {
+                                    Some(self.tasks.update(cx, |pane, cx| pane.chrome_header(cx)))
+                                };
+                                let recording_bg = cx.theme().danger;
+                                let recording_fg = cx.theme().danger_foreground;
+                                let panel_radius = cx.theme().radius_lg;
+                                let panel_border = cx.theme().border;
+                                let main =
+                                    v_flex()
+                                        .flex_1()
+                                        .h_full()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .rounded(panel_radius)
+                                        .border_1()
+                                        .border_color(panel_border)
+                                        .bg(cx.theme().secondary)
+                                        .when_some(page_header, |col, header| {
+                                            col.child(
+                                                h_flex()
+                                                    .min_h(px(44.))
+                                                    .px_3()
+                                                    .py_1()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .border_b_1()
+                                                    .border_color(cx.theme().border)
+                                                    .child(header)
+                                                    .when(ptt_held, |row| {
+                                                        row.child(recording_chip(
+                                                            recording_bg,
+                                                            recording_fg,
+                                                        ))
+                                                    }),
+                                            )
+                                        })
+                                        .when(hide_page_bar && ptt_held, |col| {
+                                            col.child(
+                                                h_flex().px_3().py_1().justify_end().child(
+                                                    recording_chip(recording_bg, recording_fg),
+                                                ),
+                                            )
+                                        })
+                                        .child(div().flex_1().min_h_0().child(main_view));
+
+                                let entity = entity.clone();
+                                let inspector = self.inspector.clone();
+                                let right_collapsed = self.right_collapsed;
+                                let show_right = nav == AppNav::Agent
+                                    && self.state.with(|s| s.active_thread_id.is_some());
+                                let left_width = if collapsed { 48.0 } else { width };
+                                let left_range = if collapsed {
+                                    px(48.)..px(48.)
+                                } else {
+                                    px(SIDEBAR_WIDTH_MIN)..px(SIDEBAR_WIDTH_MAX)
+                                };
+                                div()
+                                    .size_full()
+                                    .child(
+                                        h_resizable("wb-layout")
+                                            .with_state(&self.sidebar_panels)
+                                            .on_resize(move |state, _, app| {
+                                                let sizes = state.read(app).sizes().clone();
+                                                let left = sizes.first().copied().map(f32::from);
+                                                let right = sizes.get(2).copied().map(f32::from);
+                                                if let Some(e) = entity.upgrade() {
+                                                    e.update(app, |this, cx| {
+                                                        if let Some(w) = left {
+                                                            if !this.collapsed {
+                                                                this.set_sidebar_width(w, cx);
+                                                            }
+                                                        }
+                                                        if let Some(w) = right {
+                                                            if !this.right_collapsed {
+                                                                this.set_right_sidebar_width(w, cx);
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            })
+                                            .child(
+                                                resizable_panel()
+                                                    .size(px(left_width))
+                                                    .size_range(left_range)
+                                                    .fixed()
+                                                    .child(
+                                                        div().size_full().p_1().child(
+                                                            div()
+                                                                .size_full()
+                                                                .overflow_hidden()
+                                                                .rounded(panel_radius)
+                                                                .border_1()
+                                                                .border_color(panel_border)
+                                                                .child(sidebar),
+                                                        ),
+                                                    ),
+                                            )
+                                            .child(
+                                                resizable_panel()
+                                                    .child(div().size_full().p_1().child(main)),
+                                            )
+                                            .when(show_right && !right_collapsed, |row| {
+                                                let right_size = right_width;
+                                                let right_range = px(RIGHT_SIDEBAR_WIDTH_MIN)
+                                                    ..px(RIGHT_SIDEBAR_WIDTH_MAX);
+                                                row.child(
+                                                    resizable_panel()
+                                                        .size(px(right_size))
+                                                        .size_range(right_range)
+                                                        .fixed()
+                                                        .child(
+                                                            div().size_full().p_1().child(
+                                                                div()
+                                                                    .size_full()
+                                                                    .overflow_hidden()
+                                                                    .rounded(panel_radius)
+                                                                    .border_1()
+                                                                    .border_color(panel_border)
+                                                                    .child(inspector),
+                                                            ),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    .into_any_element()
+                            }),
+                    ),
             )
             .when(palette_open, |root| {
                 root.child(self.palette.clone().into_any_element())
@@ -881,9 +1009,15 @@ impl Render for WorkbenchApp {
                         .rounded(cx.theme().radius)
                         .border_1()
                         .border_color(cx.theme().border)
-                        .bg(cx.theme().background)
+                        .bg(cx.theme().popover)
+                        .text_color(cx.theme().popover_foreground)
                         .p_3()
-                        .shadow_md()
+                        .shadow_lg()
+                        .with_animation(
+                            "notifications-in",
+                            Animation::new(Duration::from_millis(160)),
+                            |panel, delta| panel.opacity(delta).mt(px(8.) * (1. - delta)),
+                        )
                         .child(
                             h_flex()
                                 .items_center()

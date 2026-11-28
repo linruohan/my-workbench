@@ -1054,24 +1054,25 @@ impl TasksPane {
         self.ensure_task_cache();
         let nav = self.state.with(|s| s.nav);
         let today = self.state.today();
-        let all = self.task_cache.clone();
-        self.state.with(|s| {
+        let state = self.state.clone();
+        let all = &self.task_cache;
+        state.with(|s| {
             let roots: Vec<Task> = match nav {
-                AppNav::Today => select_today_tasks(&all, &today, s.repo.today_order())
+                AppNav::Today => select_today_tasks(all, &today, s.repo.today_order())
                     .into_iter()
                     .cloned()
                     .collect(),
-                AppNav::Inbox => filter_tasks(&all, Some(INBOX_PROJECT_ID), Some(false), None)
-                    .into_iter()
-                    .filter(|t| t.parent_id.is_none())
-                    .cloned()
-                    .collect(),
-                AppNav::Done => filter_tasks(&all, None, Some(true), None)
+                AppNav::Inbox => filter_tasks(all, Some(INBOX_PROJECT_ID), Some(false), None)
                     .into_iter()
                     .filter(|t| t.parent_id.is_none())
                     .cloned()
                     .collect(),
-                AppNav::Planner => select_planner_tasks(&all)
+                AppNav::Done => filter_tasks(all, None, Some(true), None)
+                    .into_iter()
+                    .filter(|t| t.parent_id.is_none())
+                    .cloned()
+                    .collect(),
+                AppNav::Planner => select_planner_tasks(all)
                     .into_iter()
                     .filter(|t| t.parent_id.is_none())
                     .cloned()
@@ -1081,7 +1082,7 @@ impl TasksPane {
                         .active_project_id
                         .clone()
                         .unwrap_or_else(|| INBOX_PROJECT_ID.to_string());
-                    filter_tasks(&all, Some(&pid), Some(false), None)
+                    filter_tasks(all, Some(&pid), Some(false), None)
                         .into_iter()
                         .filter(|t| t.parent_id.is_none())
                         .cloned()
@@ -1134,13 +1135,13 @@ impl TasksPane {
             let title = if nav == AppNav::Projects {
                 s.active_project_id
                     .as_ref()
-                    .and_then(|id| s.repo.list_projects().into_iter().find(|p| &p.id == id))
-                    .map(|p| p.title)
+                    .and_then(|id| s.repo.get_project(id))
+                    .map(|p| p.title.clone())
                     .unwrap_or_else(|| nav.label().to_string())
             } else if nav == AppNav::Tags {
                 s.active_tag_id
                     .as_ref()
-                    .and_then(|id| s.repo.list_tags().into_iter().find(|t| &t.id == id))
+                    .and_then(|id| s.repo.get_tag(id))
                     .map(|t| format!("#{}", t.title))
                     .unwrap_or_else(|| "全部标签".into())
             } else {

@@ -11,7 +11,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Selectable as _, *};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use gpui_kit::{AnimationExt as _, *};
 use gpui_webview::WebView;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -28,9 +28,9 @@ use wb_agent::{
     resolve_approval, resolve_turn_reply_streaming, slash_suggestions,
 };
 use wb_domain::{
-    AgentEvent, AgentMessage, AgentRole, AgentThread, AgentWorkspace, WEB_AGENT_THREAD_TITLE,
-    agent_workspace_title_from_path, create_id, format_chat_day_label, format_local_clock,
-    format_local_day, normalize_agent_web_url, now_ms,
+    AgentApproval, AgentEvent, AgentMessage, AgentRole, AgentThread, AgentWorkspace,
+    WEB_AGENT_THREAD_TITLE, agent_workspace_title_from_path, create_id, format_chat_day_label,
+    format_local_clock, format_local_day, normalize_agent_web_url, now_ms,
 };
 use wb_domain::{BUILTIN_MODEL_REF, BUILTIN_PROVIDER_ID};
 use wb_host::{cleanup_tool_spill, global_terminals};
@@ -100,8 +100,6 @@ pub struct AgentPane {
     ask_input: Entity<InputState>,
     /// Filters the thread list by title.
     thread_query: Entity<InputState>,
-    /// Show only pinned threads in the list.
-    pinned_only: bool,
     webview: Option<Entity<WebView>>,
     /// Font family baked into the current webview's init script.
     webview_font: Option<String>,
@@ -169,11 +167,61 @@ pub struct AgentPane {
     chat_scroll: ScrollHandle,
     /// Keep the chat pinned to the newest message until the reader scrolls up.
     chat_follow: bool,
+    /// Last repo snapshot used to paint the sidebar and transcript.
+    chat_lists: Option<ChatLists>,
     ghost_suffix: Option<String>,
     _subs: Vec<Subscription>,
 }
 
+#[derive(Clone)]
+struct ChatLists {
+    revision: u64,
+    thread_id: Option<String>,
+    threads: Arc<Vec<AgentThread>>,
+    messages: Arc<Vec<AgentMessage>>,
+    workspaces: Arc<Vec<AgentWorkspace>>,
+    approvals: Arc<Vec<AgentApproval>>,
+}
+
 impl AgentPane {
+    fn load_chat_lists(&mut self) -> ChatLists {
+        let (revision, thread_id) = self
+            .state
+            .with(|s| (s.repo.data_revision(), s.active_thread_id.clone()));
+        if let Some(cached) = &self.chat_lists {
+            if cached.revision == revision && cached.thread_id == thread_id {
+                return cached.clone();
+            }
+        }
+        let lists = self.state.with(|s| {
+            let messages = thread_id
+                .as_deref()
+                .map(|id| s.repo.messages_for_thread(id))
+                .unwrap_or_default();
+            let approvals = thread_id
+                .as_deref()
+                .map(|id| pending_approvals_for_thread(&s.repo, id))
+                .unwrap_or_default();
+            let mut threads = s.repo.list_agent_threads();
+            threads.sort_by(|a, b| match (a.pinned_at, b.pinned_at) {
+                (Some(x), Some(y)) => y.cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => b.updated_at.cmp(&a.updated_at),
+            });
+            ChatLists {
+                revision,
+                thread_id: thread_id.clone(),
+                threads: Arc::new(threads),
+                messages: Arc::new(messages),
+                workspaces: Arc::new(s.repo.list_agent_workspaces()),
+                approvals: Arc::new(approvals),
+            }
+        });
+        self.chat_lists = Some(lists.clone());
+        lists
+    }
+
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -211,7 +259,6 @@ impl AgentPane {
             web_link_input: web_link_input.clone(),
             ask_input: ask_input.clone(),
             thread_query: thread_query.clone(),
-            pinned_only: false,
             webview: None,
             webview_font: None,
             loaded_web_url: None,
@@ -256,6 +303,7 @@ impl AgentPane {
             term_id: None,
             chat_scroll: ScrollHandle::new(),
             chat_follow: true,
+            chat_lists: None,
             ghost_suffix: None,
             host: None,
             _subs: Vec::new(),
@@ -598,16 +646,15 @@ impl AgentPane {
     fn ensure_thread(&mut self) -> String {
         self.state.with_mut(|s| {
             if let Some(id) = s.active_thread_id.clone() {
-                if s.repo.list_agent_threads().iter().any(|t| t.id == id) {
+                if s.repo.get_agent_thread(&id).is_some() {
                     return id;
                 }
             }
             let ws = s
                 .repo
-                .list_agent_workspaces()
-                .into_iter()
-                .next()
-                .expect("default workspace");
+                .earliest_agent_workspace()
+                .expect("default workspace")
+                .clone();
             let thread =
                 create_thread(&ws.id, "新会话", s.prefs.agent.default_model_ref.as_deref());
             let id = thread.id.clone();
@@ -706,10 +753,8 @@ impl AgentPane {
             let msgs = s.repo.messages_for_thread(&thread_id);
             let model = s
                 .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == thread_id)
-                .map(|t| t.model_ref)
+                .get_agent_thread(&thread_id)
+                .map(|t| t.model_ref.clone())
                 .unwrap_or_else(|| BUILTIN_MODEL_REF.to_string());
             (prompt_char_count(&msgs), model)
         });
@@ -724,12 +769,7 @@ impl AgentPane {
             }
         }
         let proxy = self.state.with(|s| s.prefs.http_proxy.clone());
-        let thread = self.state.with(|s| {
-            s.repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == thread_id)
-        });
+        let thread = self.state.with(|s| s.repo.get_agent_thread(&thread_id).cloned());
         let Some(thread) = thread else {
             return;
         };
@@ -895,12 +935,7 @@ impl AgentPane {
                 goal_followups += 1;
                 let pending_goal = match this.update(cx, |this, cx| {
                     let tid = this.ensure_thread();
-                    let thread = this.state.with(|s| {
-                        s.repo
-                            .list_agent_threads()
-                            .into_iter()
-                            .find(|t| t.id == tid)
-                    });
+                    let thread = this.state.with(|s| s.repo.get_agent_thread(&tid).cloned());
                     let thread = thread?;
                     let pending = this
                         .state
@@ -1281,10 +1316,8 @@ impl AgentPane {
     ) {
         let texts = self.state.with(|s| {
             s.repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == thread_id)
-                .map(|t| queued_user_texts(&t))
+                .get_agent_thread(&thread_id)
+                .map(queued_user_texts)
                 .unwrap_or_default()
         });
         let Some(text) = texts.get(index).cloned() else {
@@ -1383,16 +1416,10 @@ impl AgentPane {
             return;
         };
         let root = self.state.with(|s| {
-            let thread = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)?;
+            let thread = s.repo.get_agent_thread(&tid)?;
             s.repo
-                .list_agent_workspaces()
-                .into_iter()
-                .find(|w| w.id == thread.workspace_id)
-                .and_then(|w| w.root_path)
+                .get_agent_workspace(&thread.workspace_id)
+                .and_then(|w| w.root_path.clone())
         });
         let phase = self
             .state
@@ -1481,12 +1508,7 @@ impl AgentPane {
     fn set_thread_workspace(&mut self, workspace_id: String, cx: &mut Context<Self>) {
         let tid = self.ensure_thread();
         self.state.with_mut(|s| {
-            if let Some(mut t) = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-            {
+            if let Some(mut t) = s.repo.get_agent_thread(&tid).cloned() {
                 t.workspace_id = workspace_id;
                 t.updated_at = now_ms();
                 s.repo.upsert_agent_thread(t);
@@ -1505,12 +1527,7 @@ impl AgentPane {
     fn set_thread_model(&mut self, model_ref: String, cx: &mut Context<Self>) {
         let tid = self.ensure_thread();
         self.state.with_mut(|s| {
-            if let Some(mut t) = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-            {
+            if let Some(mut t) = s.repo.get_agent_thread(&tid).cloned() {
                 t.model_ref = model_ref;
                 t.updated_at = now_ms();
                 s.repo.upsert_agent_thread(t);
@@ -1528,12 +1545,7 @@ impl AgentPane {
     ) {
         let tid = self.ensure_thread();
         self.state.with_mut(|s| {
-            if let Some(mut t) = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-            {
+            if let Some(mut t) = s.repo.get_agent_thread(&tid).cloned() {
                 t.permission_mode = mode;
                 t.updated_at = now_ms();
                 s.repo.upsert_agent_thread(t);
@@ -1576,16 +1588,10 @@ impl AgentPane {
     fn decide_approval(&mut self, approval_id: String, approved: bool, cx: &mut Context<Self>) {
         let root = self.state.with(|s| {
             let tid = s.active_thread_id.clone()?;
-            let thread = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)?;
+            let thread = s.repo.get_agent_thread(&tid)?;
             s.repo
-                .list_agent_workspaces()
-                .into_iter()
-                .find(|w| w.id == thread.workspace_id)
-                .and_then(|w| w.root_path)
+                .get_agent_workspace(&thread.workspace_id)
+                .and_then(|w| w.root_path.clone())
         });
         let phase = self
             .state
@@ -1788,12 +1794,7 @@ impl AgentPane {
             return;
         };
         let (title, messages) = self.state.with(|s| {
-            let title = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-                .map(|t| t.title)
+            let title = s.repo.get_agent_thread(&tid).map(|t| t.title.clone())
                 .unwrap_or_else(|| "会话".into());
             (title, s.repo.messages_for_thread(&tid))
         });
@@ -2064,11 +2065,7 @@ impl AgentPane {
     fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.state.with(|s| {
             s.active_thread_id.as_deref().and_then(|id| {
-                s.repo
-                    .list_agent_threads()
-                    .into_iter()
-                    .find(|t| t.id == id)
-                    .map(|t| t.title)
+                s.repo.get_agent_thread(id).map(|t| t.title.clone())
             })
         });
         let Some(title) = title else {
@@ -2144,12 +2141,7 @@ impl AgentPane {
             return;
         };
         self.state.with_mut(|s| {
-            if let Some(mut t) = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)
-            {
+            if let Some(mut t) = s.repo.get_agent_thread(&tid).cloned() {
                 t.title = title.chars().take(48).collect();
                 t.updated_at = now_ms();
                 s.repo.upsert_agent_thread(t);
@@ -2216,7 +2208,7 @@ impl AgentPane {
 
     fn toggle_pin_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         self.state.with_mut(|s| {
-            if let Some(mut t) = s.repo.list_agent_threads().into_iter().find(|t| t.id == id) {
+            if let Some(mut t) = s.repo.get_agent_thread(id).cloned() {
                 t.pinned_at = if t.pinned_at.is_some() {
                     None
                 } else {
@@ -2232,7 +2224,7 @@ impl AgentPane {
 
     fn toggle_archive_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         self.state.with_mut(|s| {
-            if let Some(mut t) = s.repo.list_agent_threads().into_iter().find(|t| t.id == id) {
+            if let Some(mut t) = s.repo.get_agent_thread(id).cloned() {
                 t.archived_at = if t.archived_at.is_some() {
                     None
                 } else {
@@ -2381,10 +2373,8 @@ impl AgentPane {
             }
             let workspace_id = thread.workspace_id.clone();
             s.repo
-                .list_agent_workspaces()
-                .into_iter()
-                .find(|w| w.id == workspace_id)
-                .and_then(|w| w.root_path)
+                .get_agent_workspace(&workspace_id)
+                .and_then(|w| w.root_path.clone())
         })
     }
 
@@ -2488,16 +2478,10 @@ impl AgentPane {
     fn open_terminal(&mut self, cx: &mut Context<Self>) {
         let cwd = self.state.with(|s| {
             let tid = s.active_thread_id.clone()?;
-            let thread = s
-                .repo
-                .list_agent_threads()
-                .into_iter()
-                .find(|t| t.id == tid)?;
+            let thread = s.repo.get_agent_thread(&tid)?;
             s.repo
-                .list_agent_workspaces()
-                .into_iter()
-                .find(|w| w.id == thread.workspace_id)
-                .and_then(|w| w.root_path)
+                .get_agent_workspace(&thread.workspace_id)
+                .and_then(|w| w.root_path.clone())
         });
         let shell = self.state.terminal_program();
         match global_terminals().open(&shell, cwd.as_deref().map(std::path::Path::new)) {
@@ -2593,7 +2577,7 @@ impl AgentPane {
         }
         // Growing or shrinking the composer changes the chat viewport; stay pinned
         // to the newest message while the reader has not scrolled away.
-        if self.chat_follow {
+        if self.chat_follow && !self.busy {
             let handle = self.chat_scroll.clone();
             cx.on_next_frame(window, move |_this, _window, _cx| {
                 let max = handle.max_offset();
@@ -2603,72 +2587,41 @@ impl AgentPane {
         // Message-body search is handled by the store, so the query is all the
         // render needs here; no message list is cloned.
         let thread_q = self.thread_query.read(cx).value().trim().to_lowercase();
-        let (
-            threads,
-            messages,
-            workspaces,
-            approvals,
-            perm_label,
-            thread_perm,
-            model_label,
-            active_web_url,
-            queued,
-            model_ref,
-            cwd_label,
-        ) = self.state.with(|s| {
-            let tid = s.active_thread_id.clone();
-            let messages = tid
-                .as_deref()
-                .map(|id| s.repo.messages_for_thread(id))
-                .unwrap_or_default();
-            let approvals = tid
-                .as_deref()
-                .map(|id| pending_approvals_for_thread(&s.repo, id))
-                .unwrap_or_default();
-            let threads = s.repo.list_agent_threads();
-            let thread = tid
-                .as_deref()
-                .and_then(|id| threads.iter().find(|t| t.id == id));
-            let web_url = thread.as_ref().and_then(|t| t.web_url.clone());
-            let queued = thread.map(queued_user_texts).unwrap_or_default();
-            let perm = thread
-                .as_ref()
-                .map(|t| permission_mode_label(t.permission_mode))
-                .unwrap_or("询问");
-            let cwd_label = thread.as_ref().and_then(|t| t.cwd.as_ref()).map(|cwd| {
-                let name = std::path::Path::new(cwd)
-                    .file_name()
-                    .and_then(|part| part.to_str())
-                    .unwrap_or(cwd);
-                if cwd.contains(".wb-worktrees") {
-                    format!("worktree · {name}")
-                } else {
-                    name.to_string()
-                }
-            });
-            let thread_perm = thread
-                .as_ref()
-                .map(|t| t.permission_mode)
-                .unwrap_or_default();
-            let model_ref = thread
-                .as_ref()
-                .map(|t| t.model_ref.clone())
-                .unwrap_or_else(|| BUILTIN_MODEL_REF.to_string());
-            let model = model_label_of(&model_ref);
-            (
-                threads,
-                messages,
-                s.repo.list_agent_workspaces(),
-                approvals,
-                perm,
-                thread_perm,
-                model,
-                web_url,
-                queued,
-                model_ref,
-                cwd_label,
-            )
+        let lists = self.load_chat_lists();
+        let threads = lists.threads.clone();
+        let messages = lists.messages.clone();
+        let workspaces = lists.workspaces.clone();
+        let approvals = lists.approvals.clone();
+        let thread = lists
+            .thread_id
+            .as_deref()
+            .and_then(|id| threads.iter().find(|t| t.id == id));
+        let active_web_url = thread.as_ref().and_then(|t| t.web_url.clone());
+        let queued = thread.map(queued_user_texts).unwrap_or_default();
+        let perm_label = thread
+            .as_ref()
+            .map(|t| permission_mode_label(t.permission_mode))
+            .unwrap_or("询问");
+        let cwd_label = thread.as_ref().and_then(|t| t.cwd.as_ref()).map(|cwd| {
+            let name = std::path::Path::new(cwd)
+                .file_name()
+                .and_then(|part| part.to_str())
+                .unwrap_or(cwd);
+            if cwd.contains(".wb-worktrees") {
+                format!("worktree · {name}")
+            } else {
+                name.to_string()
+            }
         });
+        let thread_perm = thread
+            .as_ref()
+            .map(|t| t.permission_mode)
+            .unwrap_or_default();
+        let model_ref = thread
+            .as_ref()
+            .map(|t| t.model_ref.clone())
+            .unwrap_or_else(|| BUILTIN_MODEL_REF.to_string());
+        let model_label = model_label_of(&model_ref);
         self.sync_webview(active_web_url.as_deref(), window, cx);
         self.spawn_ask_timers(&approvals, cx);
         let webview_el = self.webview.clone();
@@ -2689,6 +2642,7 @@ impl AgentPane {
         let radius = cx.theme().radius;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
+        let primary = cx.theme().primary;
         let secondary = cx.theme().secondary;
         let success = cx.theme().success;
         let danger_theme = cx.theme().danger;
@@ -2837,7 +2791,7 @@ impl AgentPane {
         let has_session_bar = true;
 
         let approval_rows: Vec<_> = approvals
-            .into_iter()
+            .iter()
             .filter(|a| a.tool_name != "ask_user_question")
             .map(|a| {
                 let id_ok = a.id.clone();
@@ -2888,13 +2842,6 @@ impl AgentPane {
         let ctx_pct = ((ctx_used as f32 / ctx_cap as f32) * 100.0).min(999.0);
         let ws_filter = self.workspace_filter.clone();
         let show_archived = self.show_archived;
-        let mut threads = threads;
-        threads.sort_by(|a, b| match (a.pinned_at, b.pinned_at) {
-            (Some(x), Some(y)) => y.cmp(&x),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => b.updated_at.cmp(&a.updated_at),
-        });
         // Searching message bodies walks the whole store, so ask the store once
         // for the matching thread ids instead of cloning every message here.
         let body_hits = if thread_q.is_empty() {
@@ -2904,9 +2851,8 @@ impl AgentPane {
                 .with(|s| s.repo.agent_thread_ids_matching(&thread_q))
         };
         let filtered: Vec<_> = threads
-            .into_iter()
+            .iter()
             .filter(|t| show_archived || t.archived_at.is_none())
-            .filter(|t| !self.pinned_only || t.pinned_at.is_some())
             .filter(|t| {
                 ws_filter
                     .as_ref()
@@ -2918,10 +2864,11 @@ impl AgentPane {
                     || t.title.to_lowercase().contains(&thread_q)
                     || body_hits.contains(&t.id)
             })
+            .cloned()
             .collect();
         let (match_count, thread_rows) = render_workspace_groups(
             filtered,
-            workspaces.clone(),
+            (*workspaces).clone(),
             active.as_deref(),
             &self.collapsed_workspaces,
             &self.revealed_workspaces,
@@ -2936,8 +2883,8 @@ impl AgentPane {
         );
 
         let empty_chat = messages.is_empty();
-        let draft_text = self.stream_draft_text();
-        let draft_stage = self.stream_status_text();
+        let draft_text = self.painted_draft.clone();
+        let draft_stage = self.painted_status.clone();
         let mut last_day = String::new();
         let mut tool_group: Vec<AgentMessage> = Vec::new();
         let mut tool_group_day = String::new();
@@ -2946,6 +2893,7 @@ impl AgentPane {
             radius,
             muted,
             accent,
+            primary,
             secondary,
             success,
             danger: danger_theme,
@@ -3055,31 +3003,14 @@ impl AgentPane {
                             ),
                     )
                     .child(Input::new(&self.thread_query).small().cleanable(true))
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(
-                                Button::new("thread-pinned-only")
-                                    .xsmall()
-                                    .ghost()
-                                    .label("仅置顶")
-                                    .selected(self.pinned_only)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.pinned_only = !this.pinned_only;
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(!thread_q.is_empty(), |row| {
-                                row.child(
-                                    div()
-                                        .flex_1()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(format!("{match_count} 个匹配")),
-                                )
-                            }),
-                    )
+                    .when(!thread_q.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("{match_count} 个匹配")),
+                        )
+                    })
                     .when(!thread_q.is_empty() && match_count == 0, |col| {
                         col.child(
                             div()
@@ -3175,15 +3106,11 @@ impl AgentPane {
                                     )
                                 })
                                 .when(active.is_some(), |row| {
-                                    let (archived, pinned) = self.state.with(|s| {
-                                        s.active_thread_id
-                                            .as_deref()
-                                            .and_then(|id| {
-                                                s.repo.list_agent_threads().into_iter().find(|t| t.id == id)
-                                            })
-                                            .map(|t| (t.archived_at.is_some(), t.pinned_at.is_some()))
-                                            .unwrap_or((false, false))
-                                    });
+                                    let (archived, pinned) = active
+                                        .as_deref()
+                                        .and_then(|id| threads.iter().find(|t| t.id == id))
+                                        .map(|t| (t.archived_at.is_some(), t.pinned_at.is_some()))
+                                        .unwrap_or((false, false));
                                     let menu_entity = entity.clone();
                                     let pin_entity = entity.clone();
                                     let archive_entity = entity.clone();
@@ -3709,7 +3636,25 @@ impl AgentPane {
                                     h_flex()
                                         .gap_2()
                                         .items_center()
-                                        .child(div().size(px(6.)).rounded_full().bg(accent))
+                                        .child(
+                                            div()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .bg(accent)
+                                                .with_animation(
+                                                    "agent-live-dot",
+                                                    Animation::new(Duration::from_millis(900))
+                                                        .repeat(),
+                                                    |dot, delta| {
+                                                        let wave = if delta < 0.5 {
+                                                            delta * 2.
+                                                        } else {
+                                                            (1. - delta) * 2.
+                                                        };
+                                                        dot.opacity(0.35 + wave * 0.65)
+                                                    },
+                                                ),
+                                        )
                                         .child(
                                             div()
                                                 .text_xs()
@@ -3752,16 +3697,11 @@ impl AgentPane {
                                 || !draft_refs.is_empty()
                                 || draft.contains('\n');
                             let branch = self.workspace_branch();
-                            let active_ws = self.state.with(|s| {
-                                s.active_thread_id
-                                    .as_ref()
-                                    .and_then(|id| {
-                                        s.repo
-                                            .list_agent_threads()
-                                            .into_iter()
-                                            .find(|t| &t.id == id)
-                                    })
-                                    .map(|t| t.workspace_id)
+                            let active_ws = active.as_ref().and_then(|id| {
+                                threads
+                                    .iter()
+                                    .find(|t| &t.id == id)
+                                    .map(|t| t.workspace_id.clone())
                             });
                             let root_name = self
                                 .workspace_root()
@@ -3785,12 +3725,13 @@ impl AgentPane {
                                 .bg(secondary)
                                 .border_1()
                                 .border_color(if self.drag_hover {
-                                    accent
+                                    primary
                                 } else if is_focused {
-                                    foreground.opacity(0.28)
+                                    primary.opacity(0.85)
                                 } else {
                                     border
                                 })
+                                .when(is_focused, |card| card.shadow_md())
                                 .when(self.drag_hover, |col| {
                                     col.child(
                                         div()
@@ -4430,7 +4371,7 @@ impl AgentPane {
                                                             Anchor::TopLeft,
                                                             move |menu, _, _| {
                                                                 let mut menu = menu;
-                                                                for ws in &workspaces {
+                                                                for ws in workspaces.iter() {
                                                                     let entity = entity.clone();
                                                                     let pick = ws.id.clone();
                                                                     menu = menu.item(
@@ -4653,6 +4594,7 @@ struct ChatPalette {
     radius: Pixels,
     muted: Hsla,
     accent: Hsla,
+    primary: Hsla,
     secondary: Hsla,
     success: Hsla,
     danger: Hsla,
@@ -4709,6 +4651,7 @@ fn render_chat_message(
         radius,
         muted,
         accent,
+        primary,
         secondary,
         success: cx_success,
         danger,
@@ -4772,7 +4715,7 @@ fn render_chat_message(
         }
     });
     let name_color = if is_user {
-        accent
+        primary
     } else if is_tool {
         muted
     } else if is_assistant {
@@ -4982,13 +4925,23 @@ fn render_chat_message(
                         .px_3()
                         .py_2()
                         .rounded(radius)
-                        .when(is_user, |card| card.bg(accent.opacity(0.12)))
+                        .when(is_user, |card| {
+                            card.bg(primary.opacity(0.16))
+                                .border_1()
+                                .border_color(primary.opacity(0.4))
+                        })
                         .when(!is_user && !is_tool, |card| {
                             card.bg(secondary)
+                                .border_1()
+                                .border_color(muted.opacity(0.22))
                                 .border_l(px(3.))
-                                .border_color(name_color.opacity(0.7))
+                                .border_color(name_color.opacity(0.75))
                         })
-                        .when(is_tool, |card| card.bg(secondary.opacity(0.6)))
+                        .when(is_tool, |card| {
+                            card.bg(secondary.opacity(0.55))
+                                .border_1()
+                                .border_color(muted.opacity(0.18))
+                        })
                         .child(body),
                 ),
         )
@@ -5075,12 +5028,14 @@ fn render_workspace_groups(
         let root = ws.as_ref().and_then(|w| w.root_path.clone());
         let entity_head = entity.clone();
         let key_head = key.clone();
+        let hover_group = SharedString::from(format!("ws-row-{key}"));
         out.push(
             h_flex()
                 .w_full()
                 .items_center()
                 .gap_1()
                 .py_1()
+                .group(hover_group.clone())
                 .child(
                     h_flex()
                         .id(SharedString::from(format!("ws-fold-{key}")))
@@ -5119,82 +5074,96 @@ fn render_workspace_groups(
                             }
                         }),
                 )
-                .when(ws.is_some(), |row| {
+                .child({
                     let entity_menu = entity.clone();
                     let key_menu = key.clone();
                     let root_menu = root.clone();
-                    row.child(
-                        Button::new(SharedString::from(format!("ws-more-{key}")))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Ellipsis)
-                            .tooltip("更多")
-                            .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                                let rename_entity = entity_menu.clone();
-                                let reveal_entity = entity_menu.clone();
-                                let delete_entity = entity_menu.clone();
-                                let rename_id = key_menu.clone();
-                                let reveal_id = key_menu.clone();
-                                let delete_id = key_menu.clone();
-                                let root_menu = root_menu.clone();
-                                menu.item(PopupMenuItem::new("重命名").on_click(
-                                    move |_, window, app| {
-                                        if let Some(e) = rename_entity.upgrade() {
-                                            let rename_id = rename_id.clone();
-                                            e.update(app, |this, cx| {
-                                                this.open_rename_workspace_dialog(
-                                                    rename_id, window, cx,
-                                                );
-                                            });
-                                        }
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("在文件夹中显示").on_click(
-                                    move |_, _, app| {
-                                        if let Some(e) = reveal_entity.upgrade() {
-                                            let reveal_id = reveal_id.clone();
-                                            e.update(app, |this, cx| {
-                                                let _ = root_menu;
-                                                this.reveal_workspace(&reveal_id, cx);
-                                            });
-                                        }
-                                    },
-                                ))
-                                .separator()
-                                .item(
-                                    PopupMenuItem::new("删除工作区").on_click(move |_, _, app| {
-                                        if let Some(e) = delete_entity.upgrade() {
-                                            let delete_id = delete_id.clone();
-                                            e.update(app, |this, cx| {
-                                                this.delete_workspace(&delete_id, cx);
-                                            });
-                                        }
-                                    }),
-                                )
-                            }),
-                    )
-                })
-                .child({
                     let entity_add = entity.clone();
                     let key_add = key.clone();
                     let has_ws = ws.is_some();
-                    Button::new(SharedString::from(format!("ws-add-{key}")))
-                        .xsmall()
-                        .ghost()
-                        .icon(IconName::Plus)
-                        .tooltip("添加会话")
-                        .on_click(move |_, _, app| {
-                            if let Some(e) = entity_add.upgrade() {
-                                let key_add = key_add.clone();
-                                e.update(app, |this, cx| {
-                                    if has_ws {
-                                        this.new_thread_in(&key_add, cx);
-                                    } else {
-                                        this.new_thread(cx);
-                                    }
-                                });
-                            }
+                    let show_more = ws.is_some();
+                    h_flex()
+                        .invisible()
+                        .group_hover(hover_group, |style| style.visible())
+                        .items_center()
+                        .when(show_more, |row| {
+                            row.child(
+                                Button::new(SharedString::from(format!("ws-more-{key}")))
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::Ellipsis)
+                                    .tooltip("更多")
+                                    .dropdown_menu_with_anchor(
+                                        Anchor::BottomRight,
+                                        move |menu, _, _| {
+                                            let rename_entity = entity_menu.clone();
+                                            let reveal_entity = entity_menu.clone();
+                                            let delete_entity = entity_menu.clone();
+                                            let rename_id = key_menu.clone();
+                                            let reveal_id = key_menu.clone();
+                                            let delete_id = key_menu.clone();
+                                            let root_menu = root_menu.clone();
+                                            menu.item(PopupMenuItem::new("重命名").on_click(
+                                                move |_, window, app| {
+                                                    if let Some(e) = rename_entity.upgrade() {
+                                                        let rename_id = rename_id.clone();
+                                                        e.update(app, |this, cx| {
+                                                            this.open_rename_workspace_dialog(
+                                                                rename_id, window, cx,
+                                                            );
+                                                        });
+                                                    }
+                                                },
+                                            ))
+                                            .item(PopupMenuItem::new("在文件夹中显示").on_click(
+                                                move |_, _, app| {
+                                                    if let Some(e) = reveal_entity.upgrade() {
+                                                        let reveal_id = reveal_id.clone();
+                                                        e.update(app, |this, cx| {
+                                                            let _ = root_menu;
+                                                            this.reveal_workspace(&reveal_id, cx);
+                                                        });
+                                                    }
+                                                },
+                                            ))
+                                            .separator()
+                                            .item(
+                                                PopupMenuItem::new("删除工作区").on_click(
+                                                    move |_, _, app| {
+                                                        if let Some(e) = delete_entity.upgrade() {
+                                                            let delete_id = delete_id.clone();
+                                                            e.update(app, |this, cx| {
+                                                                this.delete_workspace(
+                                                                    &delete_id, cx,
+                                                                );
+                                                            });
+                                                        }
+                                                    },
+                                                ),
+                                            )
+                                        },
+                                    ),
+                            )
                         })
+                        .child(
+                            Button::new(SharedString::from(format!("ws-add-{key}")))
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Plus)
+                                .tooltip("添加会话")
+                                .on_click(move |_, _, app| {
+                                    if let Some(e) = entity_add.upgrade() {
+                                        let key_add = key_add.clone();
+                                        e.update(app, |this, cx| {
+                                            if has_ws {
+                                                this.new_thread_in(&key_add, cx);
+                                            } else {
+                                                this.new_thread(cx);
+                                            }
+                                        });
+                                    }
+                                }),
+                        )
                 })
                 .into_any_element(),
         );

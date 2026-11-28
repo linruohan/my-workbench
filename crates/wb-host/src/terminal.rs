@@ -423,24 +423,48 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-fn default_shell() -> &'static str {
+/// Git for Windows `bash.exe`. `System32\bash.exe` is the WSL launcher and
+/// exits or hangs inside ConPTY, so it is never used.
+fn git_bash_exe() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Some(root) = std::env::var_os(key) {
+            candidates.push(PathBuf::from(root).join("Git").join("bin").join("bash.exe"));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local)
+                .join("Programs")
+                .join("Git")
+                .join("bin")
+                .join("bash.exe"),
+        );
+    }
+    candidates.push(PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn default_shell() -> String {
     #[cfg(windows)]
     {
-        if which_bin("pwsh").is_some() {
-            "pwsh"
+        if git_bash_exe().is_some() {
+            "bash".into()
+        } else if which_bin("pwsh").is_some() {
+            "pwsh".into()
         } else {
-            "powershell"
+            "powershell".into()
         }
     }
     #[cfg(not(windows))]
     {
-        "bash"
+        "bash".into()
     }
 }
 
 fn resolve_terminal_shell(shell: &str) -> String {
     match shell.trim().to_ascii_lowercase().as_str() {
-        "" | "auto" => default_shell().to_string(),
+        "" | "auto" => default_shell(),
         "psh" | "powershell" | "powershell.exe" => "powershell".into(),
         "cmd" | "cmd.exe" => "cmd".into(),
         "pwsh" | "pwsh.exe" => "pwsh".into(),
@@ -453,7 +477,13 @@ fn resolve_terminal_shell(shell: &str) -> String {
 fn interactive_shell(shell: &str) -> CommandBuilder {
     let s = shell.to_ascii_lowercase();
     if s.contains("bash") || s == "sh" {
-        let mut cmd = CommandBuilder::new("bash");
+        // Full path to Git Bash. A bare `bash` on Windows often resolves to
+        // the WSL stub. `--login -i` is what keeps the MSYS session alive in ConPTY.
+        let bin = git_bash_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "bash".into());
+        let mut cmd = CommandBuilder::new(bin);
+        cmd.arg("--login");
         cmd.arg("-i");
         cmd
     } else if s == "cmd" || s == "cmd.exe" {
