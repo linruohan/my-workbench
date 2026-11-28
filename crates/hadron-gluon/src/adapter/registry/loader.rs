@@ -207,11 +207,7 @@ pub fn resolve_from_registry_data(
 /// Path to the cached ACP registry file: `~/.wb/acp_registry.json`.
 pub fn cache_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(".wb")
-            .join("acp_registry.json"),
-    )
+    Some(PathBuf::from(home).join(".wb").join("acp_registry.json"))
 }
 
 /// Offline fallback path: `~/.local/share/zed/external_agents/registry/registry.json`.

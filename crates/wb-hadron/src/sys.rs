@@ -1774,7 +1774,8 @@ mod tests {
     #[test]
     fn resolve_file_url_for_workspace_maps_linux_paths_and_strips_worktree_under_wsl_unc() {
         let wsl_ws = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\field.jsonl");
-        let url = "file:///home/user/project/.wb/trees/cli-agy/crates/hadron-chamber/src/pty.rs#L48-L49";
+        let url =
+            "file:///home/user/project/.wb/trees/cli-agy/crates/hadron-chamber/src/pty.rs#L48-L49";
         let (resolved, line) = super::resolve_file_url_for_workspace(url, Some(wsl_ws)).unwrap();
         assert_eq!(
             resolved,
@@ -1966,11 +1967,7 @@ mod tests {
         fs::create_dir_all(root.join(".wb/docs/plans")).unwrap();
         fs::write(root.join(".wb/docs/plans/master.md"), "# Master Plan").unwrap();
         fs::create_dir_all(root.join(".wb/trees/peer1")).unwrap();
-        fs::write(
-            root.join(".wb/trees/peer1/scratch.txt"),
-            "heavy tree file",
-        )
-        .unwrap();
+        fs::write(root.join(".wb/trees/peer1/scratch.txt"), "heavy tree file").unwrap();
         fs::create_dir_all(root.join("target/debug")).unwrap();
         fs::write(root.join("target/debug/app.bin"), "binary").unwrap();
 
@@ -2315,9 +2312,7 @@ mod tests {
         // Heavy directories are collapsed, not expanded into individual files
         assert!(files.contains(&("target/".to_string(), true)));
         assert!(!files.iter().any(|(p, _)| p == "target/debug/bin"));
-        assert!(!files
-            .iter()
-            .any(|(p, _)| p == ".wb/trees/worker/file.rs"));
+        assert!(!files.iter().any(|(p, _)| p == ".wb/trees/worker/file.rs"));
         assert!(!files
             .iter()
             .any(|(p, _)| p == "crates/gpui-component/src/lib.rs"));

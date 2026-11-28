@@ -111,9 +111,9 @@ mod input;
 #[cfg(test)]
 use input::split_leading_commands;
 
+mod migrate;
 mod reload;
 mod terminal;
-mod migrate;
 pub use migrate::{migrate_global_dir, migrate_repo_dir};
 pub mod update;
 pub use update::UpdateState;
@@ -953,11 +953,7 @@ pub fn ensure_daemon_for_field(field_path: &Path) -> Option<std::process::Child>
         Ok(child) => {
             hadron_lattice::term::info(
                 hadron_lattice::term::Source::Chamber,
-                &format!(
-                    "已为 {:?} 启动 wb-gluon（PID {}）",
-                    field_path,
-                    child.id()
-                ),
+                &format!("已为 {:?} 启动 wb-gluon（PID {}）", field_path, child.id()),
             );
             Some(child)
         }

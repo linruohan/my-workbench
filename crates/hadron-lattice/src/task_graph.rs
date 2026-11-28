@@ -68,13 +68,13 @@ impl TaskGraph {
                 let heading = trimmed
                     .trim_start_matches('#')
                     .trim()
-                    .trim_matches(|c| c == '*' || c == '_' || c == '`')
+                    .trim_matches(|c| matches!(c, '*' | '_' | '`'))
                     .trim();
                 let raw_prefix = heading
                     .split_once(':')
                     .map(|(p, _)| p.trim())
                     .unwrap_or(heading)
-                    .trim_matches(|c| c == '*' || c == '_' || c == '`')
+                    .trim_matches(|c| matches!(c, '*' | '_' | '`'))
                     .trim();
                 let lower = raw_prefix.to_lowercase().replace(' ', "-");
                 if lower.starts_with("task-") || lower == "task" {
@@ -191,20 +191,20 @@ impl TaskGraph {
         // Strip leading/trailing formatting like **
         let clean_title = title
             .trim()
-            .trim_matches(|c| c == '*' || c == '_' || c == '`')
+            .trim_matches(|c| matches!(c, '*' | '_' | '`'))
             .trim();
 
         // Extract identifier from title prefix if available (e.g. "Task 1.1: ...")
         if let Some(colon_pos) = clean_title.find(':') {
             let raw_prefix = clean_title[..colon_pos]
                 .trim()
-                .trim_matches(|c| c == '*' || c == '_' || c == '`')
+                .trim_matches(['*', '_', '`'])
                 .trim();
             if Self::is_task_id_prefix(raw_prefix) {
                 let candidate = raw_prefix.to_lowercase().replace(' ', "-");
                 let final_title = clean_title[colon_pos + 1..]
                     .trim()
-                    .trim_start_matches(|c| c == '*' || c == '_' || c == '`')
+                    .trim_start_matches(['*', '_', '`'])
                     .trim()
                     .to_string();
                 return (

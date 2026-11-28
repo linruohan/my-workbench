@@ -853,8 +853,7 @@ mod tests {
             Some(PathBuf::from("/home/user/dev/my-cloud"))
         );
 
-        let unc_wt =
-            Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\my-cloud\.wb\trees\cli-agy");
+        let unc_wt = Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\my-cloud\.wb\trees\cli-agy");
         let bwrap_args = build_bwrap_args(
             unc_wt,
             "/home/user/.local/bin/agy",

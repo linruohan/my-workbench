@@ -49,10 +49,7 @@ fn an_absolute_field_path_finds_its_workspace_root() {
     let workspace = tmp.path().canonicalize().unwrap();
     fs::create_dir_all(workspace.join(".wb")).unwrap();
 
-    let root = workspace_root_of(
-        &workspace.join(".wb/field.jsonl"),
-        Path::new("/nowhere"),
-    );
+    let root = workspace_root_of(&workspace.join(".wb/field.jsonl"), Path::new("/nowhere"));
 
     assert_eq!(root, workspace);
 }
@@ -3052,11 +3049,7 @@ async fn engine_injects_invariants() {
 
     // The REPO tier: this project's own rules. `always.md` loads every turn;
     // the rest load only when a turn asks for them by name.
-    let invariants_dir = fdir
-        .path()
-        .join(".wb")
-        .join("nucleus")
-        .join("invariants");
+    let invariants_dir = fdir.path().join(".wb").join("nucleus").join("invariants");
     fs::create_dir_all(&invariants_dir).unwrap();
     fs::write(invariants_dir.join("always.md"), "Be nice.").unwrap();
     fs::write(

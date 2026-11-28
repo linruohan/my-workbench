@@ -757,7 +757,13 @@ impl super::Chamber {
                             h_flex()
                                 .items_center()
                                 .gap_2()
-                                .child(div().text_sm().font_weight(gpui_kit::FontWeight::MEDIUM).text_color(theme::text()).child("Active Palette:"))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                        .text_color(theme::text())
+                                        .child("Active Palette:"),
+                                )
                                 .child(
                                     div()
                                         .px_2()
@@ -780,18 +786,37 @@ impl super::Chamber {
                                             .bg(theme::bg_surface_raised())
                                             .cursor_pointer()
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                let base_preset = this.prefs.theme_preset.unwrap_or_default();
-                                                let mut new_theme = config::ThemeDefinition::from_preset(base_preset);
-                                                new_theme.id = format!("custom-{}", chrono::Utc::now().timestamp());
+                                                let base_preset =
+                                                    this.prefs.theme_preset.unwrap_or_default();
+                                                let mut new_theme =
+                                                    config::ThemeDefinition::from_preset(
+                                                        base_preset,
+                                                    );
+                                                new_theme.id = format!(
+                                                    "custom-{}",
+                                                    chrono::Utc::now().timestamp()
+                                                );
                                                 let existing = theme::load_custom_themes();
-                                                new_theme.name = theme::next_available_theme_name(&format!("Custom {}", base_preset.label()), &existing);
+                                                new_theme.name = theme::next_available_theme_name(
+                                                    &format!("Custom {}", base_preset.label()),
+                                                    &existing,
+                                                );
                                                 let _ = theme::save_custom_theme(&new_theme);
                                                 this.prefs.custom_theme = Some(new_theme.clone());
                                                 this.prefs.theme_preset = None;
                                                 let _ = config::save(&this.prefs);
-                                                this.theme_name_input.update(cx, |s, cx| s.set_value(new_theme.name.clone(), window, cx));
-                                                this.theme_selected_token = Some(ThemeTokenKey::CanvasBase);
-                                                this.theme_color_hex_input.update(cx, |s, cx| s.set_value(new_theme.surfaces.canvas_base.clone(), window, cx));
+                                                this.theme_name_input.update(cx, |s, cx| {
+                                                    s.set_value(new_theme.name.clone(), window, cx)
+                                                });
+                                                this.theme_selected_token =
+                                                    Some(ThemeTokenKey::CanvasBase);
+                                                this.theme_color_hex_input.update(cx, |s, cx| {
+                                                    s.set_value(
+                                                        new_theme.surfaces.canvas_base.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
                                                 theme::set_active_custom_theme(Some(new_theme));
                                                 Self::apply_theme_and_typography(cx, &this.prefs);
                                                 this.show_toast(
@@ -810,18 +835,37 @@ impl super::Chamber {
                                             .bg(theme::bg_surface_raised())
                                             .cursor_pointer()
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                let base_theme = this.prefs.custom_theme.clone().unwrap_or_default();
+                                                let base_theme = this
+                                                    .prefs
+                                                    .custom_theme
+                                                    .clone()
+                                                    .unwrap_or_default();
                                                 let mut new_theme = base_theme;
-                                                new_theme.id = format!("custom-{}", chrono::Utc::now().timestamp());
+                                                new_theme.id = format!(
+                                                    "custom-{}",
+                                                    chrono::Utc::now().timestamp()
+                                                );
                                                 let existing = theme::load_custom_themes();
-                                                new_theme.name = theme::next_available_theme_name(&new_theme.name, &existing);
+                                                new_theme.name = theme::next_available_theme_name(
+                                                    &new_theme.name,
+                                                    &existing,
+                                                );
                                                 let _ = theme::save_custom_theme(&new_theme);
                                                 this.prefs.custom_theme = Some(new_theme.clone());
                                                 this.prefs.theme_preset = None;
                                                 let _ = config::save(&this.prefs);
-                                                this.theme_name_input.update(cx, |s, cx| s.set_value(new_theme.name.clone(), window, cx));
-                                                this.theme_selected_token = Some(ThemeTokenKey::CanvasBase);
-                                                this.theme_color_hex_input.update(cx, |s, cx| s.set_value(new_theme.surfaces.canvas_base.clone(), window, cx));
+                                                this.theme_name_input.update(cx, |s, cx| {
+                                                    s.set_value(new_theme.name.clone(), window, cx)
+                                                });
+                                                this.theme_selected_token =
+                                                    Some(ThemeTokenKey::CanvasBase);
+                                                this.theme_color_hex_input.update(cx, |s, cx| {
+                                                    s.set_value(
+                                                        new_theme.surfaces.canvas_base.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
                                                 theme::set_active_custom_theme(Some(new_theme));
                                                 Self::apply_theme_and_typography(cx, &this.prefs);
                                                 this.show_toast(
@@ -839,16 +883,29 @@ impl super::Chamber {
                                             .cursor_pointer()
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 if let Some(custom) = &mut this.prefs.custom_theme {
-                                                    let name_val = this.theme_name_input.read(cx).value().trim().to_string();
+                                                    let name_val = this
+                                                        .theme_name_input
+                                                        .read(cx)
+                                                        .value()
+                                                        .trim()
+                                                        .to_string();
                                                     if !name_val.is_empty() {
                                                         custom.name = name_val;
                                                     }
-                                                    let clean_id: String = custom.name
+                                                    let clean_id: String = custom
+                                                        .name
                                                         .to_lowercase()
                                                         .chars()
-                                                        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                                                        .map(|c| {
+                                                            if c.is_alphanumeric() {
+                                                                c
+                                                            } else {
+                                                                '-'
+                                                            }
+                                                        })
                                                         .collect();
-                                                    let clean_id = clean_id.trim_matches('-').to_string();
+                                                    let clean_id =
+                                                        clean_id.trim_matches('-').to_string();
                                                     if !clean_id.is_empty() {
                                                         custom.id = clean_id;
                                                     }
@@ -856,8 +913,13 @@ impl super::Chamber {
                                                 if let Some(custom) = &this.prefs.custom_theme {
                                                     let _ = theme::save_custom_theme(custom);
                                                     let _ = config::save(&this.prefs);
-                                                    theme::set_active_custom_theme(Some(custom.clone()));
-                                                    let toast_msg = format!("Saved theme '{}' to ~/.wb/themes/{}.json", custom.name, custom.id);
+                                                    theme::set_active_custom_theme(Some(
+                                                        custom.clone(),
+                                                    ));
+                                                    let toast_msg = format!(
+                                                        "Saved theme '{}' to ~/.wb/themes/{}.json",
+                                                        custom.name, custom.id
+                                                    );
                                                     this.show_toast(
                                                         toasts::ToastKind::Success,
                                                         toast_msg,
@@ -874,7 +936,8 @@ impl super::Chamber {
                                             .cursor_pointer()
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 this.prefs.custom_theme = None;
-                                                this.prefs.theme_preset = Some(config::ThemePreset::Obsidian);
+                                                this.prefs.theme_preset =
+                                                    Some(config::ThemePreset::Obsidian);
                                                 this.theme_selected_token = None;
                                                 let _ = config::save(&this.prefs);
                                                 theme::set_active_custom_theme(None);
@@ -902,7 +965,13 @@ impl super::Chamber {
                                 .w_full()
                                 .justify_between()
                                 .items_center()
-                                .child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(theme::text_muted()).child("PALETTE TOKENS & LIVE VALUES"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .text_color(theme::text_muted())
+                                        .child("PALETTE TOKENS & LIVE VALUES"),
+                                )
                                 .child(category_filter_bar),
                         )
                         .child(swatches_grid),

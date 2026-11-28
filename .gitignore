@@ -19,3 +19,4 @@ node_modules/
 .cursor/
 .hadron/
 .wb/
+dist/

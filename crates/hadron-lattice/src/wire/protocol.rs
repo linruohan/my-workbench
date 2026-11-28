@@ -296,8 +296,7 @@ pub fn write_rpc_metadata(
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(meta)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &target)?;
     Ok(())

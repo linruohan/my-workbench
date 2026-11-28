@@ -46,10 +46,7 @@ pub fn is_lesson_line(line: &str) -> bool {
 /// repo that configured a different one. A missing file is not over budget — it is
 /// the normal first-run case.
 pub fn index_over_budget(workspace_root: &Path, budget_bytes: usize) -> bool {
-    let path = workspace_root
-        .join(".wb")
-        .join("nucleus")
-        .join("index.md");
+    let path = workspace_root.join(".wb").join("nucleus").join("index.md");
     std::fs::metadata(&path)
         .map(|m| m.len() as usize > budget_bytes)
         .unwrap_or(false)

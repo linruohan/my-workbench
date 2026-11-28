@@ -119,8 +119,7 @@ mod tests {
 
     #[test]
     fn a_session_field_still_belongs_to_the_repo_with_its_own_runtime_dir() {
-        let field =
-            PathBuf::from("/home/user/project/.wb/sessions/20260101_120000/field.jsonl");
+        let field = PathBuf::from("/home/user/project/.wb/sessions/20260101_120000/field.jsonl");
         assert_eq!(repo_root_of(&field), Path::new("/home/user/project"));
         assert_eq!(
             hadron_dir_of(&field),

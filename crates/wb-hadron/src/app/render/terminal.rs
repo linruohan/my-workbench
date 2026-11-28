@@ -1999,12 +1999,11 @@ impl super::Chamber {
                             );
 
                         if schedule_reg.jobs.is_empty() {
-                            schedules_card = schedules_card.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child("No scheduled tasks configured (.wb/schedules/schedules.json)."),
-                            );
+                            schedules_card =
+                                schedules_card
+                                    .child(div().text_xs().text_color(theme::text_muted()).child(
+                                    "No scheduled tasks configured (.wb/schedules/schedules.json).",
+                                ));
                         } else {
                             let mut sched_rows = v_flex().gap_1p5().w_full();
                             for (idx, job) in schedule_reg.jobs.iter().enumerate() {

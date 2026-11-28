@@ -103,12 +103,7 @@ fn home_dir() -> Option<std::path::PathBuf> {
 /// Where a user's own always-on rules live, under their home directory. Their
 /// preferences, across every project they run Hadron in.
 fn global_invariants_dir() -> Option<std::path::PathBuf> {
-    Some(
-        home_dir()?
-            .join(".wb")
-            .join("nucleus")
-            .join("invariants"),
-    )
+    Some(home_dir()?.join(".wb").join("nucleus").join("invariants"))
 }
 
 /// Standing laws the human pinned with `/learn-std-model[-global]` — appended
@@ -120,10 +115,7 @@ fn global_laws_path() -> Option<std::path::PathBuf> {
 }
 
 fn repo_laws_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
-    workspace_root
-        .join(".wb")
-        .join("nucleus")
-        .join("laws.md")
+    workspace_root.join(".wb").join("nucleus").join("laws.md")
 }
 
 /// Read every `*.md` in a directory, sorted by name so the prompt is deterministic

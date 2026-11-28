@@ -38,10 +38,13 @@ pub struct GossipMessage {
     pub payload: GossipPayload,
 }
 
+/// 触摸历史：slug → (发生时间, 时间戳, 是否命中)。
+type TouchHistory = Arc<Mutex<HashMap<String, Vec<(String, DateTime<Utc>, bool)>>>>;
+
 #[derive(Debug, Clone)]
 pub struct GossipBus {
     bus_file: PathBuf,
-    touch_history: Arc<Mutex<HashMap<String, Vec<(String, DateTime<Utc>, bool)>>>>,
+    touch_history: TouchHistory,
 }
 
 impl GossipBus {

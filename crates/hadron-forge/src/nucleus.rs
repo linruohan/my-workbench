@@ -494,10 +494,7 @@ mod tests {
         assert_eq!(parsed_root, expected_unc_main);
 
         let root = derive_nucleus_root(&unc_tree).expect("WSL UNC linked worktree resolves");
-        assert_eq!(
-            root.path(),
-            expected_unc_main.join(".wb").join("nucleus")
-        );
+        assert_eq!(root.path(), expected_unc_main.join(".wb").join("nucleus"));
 
         assert_eq!(
             derive_shared_hadron_dir(&tree),

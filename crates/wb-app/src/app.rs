@@ -251,13 +251,13 @@ struct PickedWorkspace {
 /// `sessions/<id>`，说明用户点到了某个会话目录，顺便把它作为要打开的会话。
 fn resolve_picked_workspace(picked: std::path::PathBuf) -> PickedWorkspace {
     let components: Vec<_> = picked.components().collect();
-    let Some(hadron_index) = components
-        .iter()
-        .position(|component| {
-            // 同时接受新旧目录名：旧 `.hadron` 也能被识别并上溯到仓库根。
-            matches!(component.as_os_str().to_str(), Some(".wb") | Some(".hadron"))
-        })
-    else {
+    let Some(hadron_index) = components.iter().position(|component| {
+        // 同时接受新旧目录名：旧 `.hadron` 也能被识别并上溯到仓库根。
+        matches!(
+            component.as_os_str().to_str(),
+            Some(".wb") | Some(".hadron")
+        )
+    }) else {
         return PickedWorkspace {
             root: picked,
             session_id: None,
@@ -1055,7 +1055,9 @@ impl WorkbenchApp {
             }
         }
         // 句柄清空，Drop 兜底时不会重复停止。
-        self.open_sessions.iter_mut().for_each(|session| session._gluon = None);
+        self.open_sessions
+            .iter_mut()
+            .for_each(|session| session._gluon = None);
         self._gluon = None;
     }
 

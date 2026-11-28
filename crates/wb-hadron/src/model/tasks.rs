@@ -875,8 +875,7 @@ mod tests {
                 to: "researcher".into(),
                 from: "human".into(),
                 title: "Research something".into(),
-                body: "Please check `.wb/docs/research/2026-08-21-theme-engine-research.md`"
-                    .into(),
+                body: "Please check `.wb/docs/research/2026-08-21-theme-engine-research.md`".into(),
                 state: TaskState::Working,
                 asked_at: t0,
                 done_at: None,

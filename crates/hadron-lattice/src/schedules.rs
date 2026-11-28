@@ -463,11 +463,8 @@ pub fn cron_matches(cron: &str, dt: &DateTime<Utc>) -> anyhow::Result<bool> {
     // Chrono Sunday is 7 or 0 (Sun = 0, Mon = 1, ..., Sat = 6)
     let dow = dt.weekday().num_days_from_sunday();
     let dow_matches = parse_cron_field(fields[4], 0, 7)?.contains(&dow);
-    if !dow_matches {
-        return Ok(false);
-    }
 
-    Ok(true)
+    Ok(dow_matches)
 }
 
 fn parse_cron_field(field: &str, min: u32, max: u32) -> anyhow::Result<HashSet<u32>> {

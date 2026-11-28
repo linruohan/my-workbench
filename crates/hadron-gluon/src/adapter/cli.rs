@@ -2460,7 +2460,9 @@ mod tests {
         assert!(prompt.len() <= max);
         assert!(fitted.nucleus_index.is_empty());
         assert!(
-            prompt.contains("_Omitted to fit the prompt budget — open `/repo/.wb/nucleus/index.md` on demand._"),
+            prompt.contains(
+                "_Omitted to fit the prompt budget — open `/repo/.wb/nucleus/index.md` on demand._"
+            ),
             "must point at the index it omitted:\n{prompt}"
         );
         assert!(!prompt.contains("nothing has been recorded here yet"));
@@ -2544,8 +2546,7 @@ mod tests {
         q.excite(turn.clone()).await.unwrap();
 
         let spill = hadron_dir.join("prompts").join("cli-agy.md");
-        let full =
-            std::fs::read_to_string(&spill).expect("prompt spilled to .wb/prompts/<id>.md");
+        let full = std::fs::read_to_string(&spill).expect("prompt spilled to .wb/prompts/<id>.md");
         assert!(
             full.contains("EVENT-00"),
             "the spill carries the oldest event"

@@ -139,9 +139,6 @@ mod tests {
         assert!(report.total_samples > 0);
         assert!(!report.top_hotspots.is_empty());
         assert!(report.svg_path.is_some());
-        assert!(temp
-            .path()
-            .join(".wb/screenshots/git_profile.svg")
-            .exists());
+        assert!(temp.path().join(".wb/screenshots/git_profile.svg").exists());
     }
 }

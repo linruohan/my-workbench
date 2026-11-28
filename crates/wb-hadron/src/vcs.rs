@@ -1237,8 +1237,7 @@ pub fn init_repository(repo_root: &Path) -> anyhow::Result<String> {
             std::fs::write(&gitignore_path, updated)?;
         }
     } else {
-        let content =
-            "# Hadron worktrees and daemon runtime lock\n.wb/trees/\n.wb/gluon.lock\n";
+        let content = "# Hadron worktrees and daemon runtime lock\n.wb/trees/\n.wb/gluon.lock\n";
         std::fs::write(&gitignore_path, content)?;
     }
 
@@ -2645,8 +2644,7 @@ mod tests {
             "~/dev/project/"
         );
 
-        let wsl_field =
-            Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\project\.wb\field.jsonl");
+        let wsl_field = Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\project\.wb\field.jsonl");
         assert_eq!(format_working_dir(wsl_field), "~/dev/project/");
 
         let wsl_opt_repo = Path::new(r"\\wsl$\Ubuntu\opt\workspace\app");

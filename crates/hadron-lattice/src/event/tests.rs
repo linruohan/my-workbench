@@ -436,8 +436,7 @@ mod event_tests {
     /// exist in a fresh clone — the embedded test above is what runs there.
     #[test]
     fn the_live_field_still_parses() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.wb/field.jsonl");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.wb/field.jsonl");
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("skipped: no live field at {}", path.display());
             return;

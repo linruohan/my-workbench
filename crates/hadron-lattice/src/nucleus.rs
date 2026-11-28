@@ -162,11 +162,9 @@ impl DynamicNucleusInjector {
 
         for (score, note) in scored {
             let note_len = note.byte_len();
-            if used_bytes + note_len <= budget_bytes {
-                if score > 0 || selected.is_empty() {
-                    used_bytes += note_len;
-                    selected.push(note.clone());
-                }
+            if used_bytes + note_len <= budget_bytes && (score > 0 || selected.is_empty()) {
+                used_bytes += note_len;
+                selected.push(note.clone());
             }
         }
 

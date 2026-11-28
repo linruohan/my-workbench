@@ -119,15 +119,14 @@ impl IntentLockTable {
 
     /// Return all currently active, non-expired leases grouped by lease id.
     pub fn active_leases(&self) -> Vec<LockLease> {
-        let mut by_lease: HashMap<
-            Ulid,
-            (
-                QuarkId,
-                Vec<PathBuf>,
-                chrono::DateTime<chrono::Utc>,
-                chrono::DateTime<chrono::Utc>,
-            ),
-        > = HashMap::new();
+        /// 一条租约的聚合信息：(租用人, 路径列表, 获得时间, 过期时间)。
+        type LeaseAggregate = (
+            QuarkId,
+            Vec<PathBuf>,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        );
+        let mut by_lease: HashMap<Ulid, LeaseAggregate> = HashMap::new();
         let now_utc = chrono::Utc::now();
         for (path, (quark, lease_id, acquired, ttl)) in &self.locks {
             if acquired.elapsed() < *ttl {

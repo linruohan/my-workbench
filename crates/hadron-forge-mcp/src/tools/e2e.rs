@@ -168,9 +168,6 @@ mod tests {
 
         assert!(res.0.ok);
         assert!(res.0.blocks.unwrap().contains("Basic Page Check"));
-        assert!(temp
-            .path()
-            .join(".wb/screenshots/verify_page.png")
-            .exists());
+        assert!(temp.path().join(".wb/screenshots/verify_page.png").exists());
     }
 }

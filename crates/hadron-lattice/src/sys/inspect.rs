@@ -389,10 +389,9 @@ pub fn collect_process_tree(root_pids: &[u32], dir: &std::path::Path) -> Vec<Pro
         }
     }
     for p in &all_procs {
-        if p.cmdline.contains("trees/") || p.cmdline.contains("trees\\") {
-            if included.insert(p.pid) {
-                queue.push_back(p.pid);
-            }
+        if (p.cmdline.contains("trees/") || p.cmdline.contains("trees\\")) && included.insert(p.pid)
+        {
+            queue.push_back(p.pid);
         }
     }
 

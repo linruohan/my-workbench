@@ -115,17 +115,13 @@ impl ContextGovernor {
         let leading_spaces = line
             .len()
             .saturating_sub(line.trim_start_matches(' ').len());
-        if leading_spaces >= 2
+        leading_spaces >= 2
             && !l.starts_with("- ")
             && !l.starts_with("* ")
             && !l
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_digit() && l.contains(". "))
-        {
-            return true;
-        }
-        false
     }
 
     /// Returns true when `raw` is a standalone tool dump OR contains `<SYSTEM_MESSAGE>` wakeup

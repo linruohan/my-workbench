@@ -1822,8 +1822,7 @@ mod tests {
         std::fs::write(&single_newest, "# Latest Hotfix\n").unwrap();
         std::fs::write(suite_new.join("master.md"), "# Swarm Master\n").unwrap();
 
-        let items =
-            scan_plan_dropdown_items(root, ".wb/docs/plans/2026-08-20-single-file-plan.md");
+        let items = scan_plan_dropdown_items(root, ".wb/docs/plans/2026-08-20-single-file-plan.md");
         let plan_paths: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
@@ -1843,9 +1842,8 @@ mod tests {
         let messages = vec![crate::model::MessageRow {
             from: "Human".to_string(),
             to: None,
-            body:
-                "Old message mentioning .wb/docs/plans/2026-08-19-twenty-capabilities/master.md"
-                    .to_string(),
+            body: "Old message mentioning .wb/docs/plans/2026-08-19-twenty-capabilities/master.md"
+                .to_string(),
             kind_label: "message",
             usage: None,
             ts: old_msg_ts,
@@ -1881,7 +1879,8 @@ mod tests {
         std::fs::write(suite1.join("01-phase-1-reactive-dag.md"), "# Phase 1 DAG\n").unwrap();
         std::fs::write(suite2.join("master.md"), "# Twenty Caps Master\n").unwrap();
 
-        let active_rel = ".wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/01-phase-1-reactive-dag.md";
+        let active_rel =
+            ".wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/01-phase-1-reactive-dag.md";
         let items = scan_plan_dropdown_items(root, active_rel);
 
         // First item is Current header for suite 1

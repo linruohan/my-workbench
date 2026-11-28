@@ -488,10 +488,7 @@ mod tests {
         assert!(wide(&[".cargo/config.toml"]));
         assert!(wide(&[".github/workflows/ci.yml"]));
         assert!(wide(&["assets/icon.png"]), "non-member code/data");
-        assert!(
-            wide(&["docs/only.md", ".wb/x.json"]),
-            "nothing to slice"
-        );
+        assert!(wide(&["docs/only.md", ".wb/x.json"]), "nothing to slice");
         assert!(
             wide(&["crates/core/src/lib.rs", "crates/leaf/src/lib.rs"]),
             "closure is every member"

@@ -3037,8 +3037,7 @@ impl Chamber {
                 Ok(reg) if reg.jobs.is_empty() => {
                     self.post_chat_message(
                         Actor::Gluon,
-                        "No scheduled tasks defined in `.wb/schedules/schedules.json`."
-                            .to_string(),
+                        "No scheduled tasks defined in `.wb/schedules/schedules.json`.".to_string(),
                         cx,
                     );
                 }

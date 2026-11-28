@@ -127,17 +127,12 @@ pub struct Seat {
 }
 
 /// Sandbox confinement mode for command and process execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SandboxMode {
     Off,
+    #[default]
     WorktreeOnly,
     Strict,
-}
-
-impl Default for SandboxMode {
-    fn default() -> Self {
-        Self::WorktreeOnly
-    }
 }
 
 /// Per-seat model parameters (e.g. temperature, top_p, max_tokens).

@@ -36,13 +36,9 @@ pub fn parse_wsl_unc_path(path: &Path) -> Option<(String, PathBuf)> {
         normalized
     };
 
-    let rest = if let Some(stripped) = without_verbatim.strip_prefix(r"\\wsl.localhost\") {
-        stripped
-    } else if let Some(stripped) = without_verbatim.strip_prefix(r"\\wsl$\") {
-        stripped
-    } else {
-        return None;
-    };
+    let rest = without_verbatim
+        .strip_prefix(r"\\wsl.localhost\")
+        .or_else(|| without_verbatim.strip_prefix(r"\\wsl$\"))?;
 
     if rest.is_empty() {
         return None;
@@ -174,14 +170,16 @@ pub fn decode_wsl_output(bytes: &[u8]) -> Vec<String> {
     let decoded = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         // UTF-16LE BOM
         let u16_chars: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .chunks(2)
+            .filter(|chunk| chunk.len() == 2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
         String::from_utf16_lossy(&u16_chars)
     } else if bytes.iter().filter(|&&b| b == 0).count() > bytes.len() / 4 {
         // Likely UTF-16LE without BOM
         let u16_chars: Vec<u16> = bytes
-            .chunks_exact(2)
+            .chunks(2)
+            .filter(|chunk| chunk.len() == 2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
         String::from_utf16_lossy(&u16_chars)
@@ -302,7 +300,9 @@ pub fn resolve_wsl_program_path(distro: &str, program: &str) -> Option<String> {
         use std::process::Command;
         use std::sync::{Mutex, OnceLock};
 
-        static CACHE: OnceLock<Mutex<HashMap<(String, String), Option<String>>>> = OnceLock::new();
+        /// WSL 程序路径探测缓存：(发行版, 程序) → 解析结果。
+        type ProbeCache = Mutex<HashMap<(String, String), Option<String>>>;
+        static CACHE: OnceLock<ProbeCache> = OnceLock::new();
         let map = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         let key = (distro.to_string(), program.to_string());
         if let Some(cached) = map.lock().unwrap().get(&key) {

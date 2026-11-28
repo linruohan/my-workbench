@@ -63,6 +63,9 @@ jobs:
           $stage = Join-Path $env:GITHUB_WORKSPACE "my-workbench/dist/my-workbench"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/release/my-workbench.exe" $stage
+          # 守护进程与 MCP 启动壳必须和主程序同目录，否则聊天/右栏无法工作。
+          Copy-Item "target/release/wb-gluon.exe" $stage
+          Copy-Item "target/release/hadron-forge-mcp.exe" $stage
           Copy-Item -Recurse "themes" (Join-Path $stage "themes")
           $zip = Join-Path $env:GITHUB_WORKSPACE "my-workbench/dist/my-workbench-windows.zip"
           if (Test-Path $zip) { Remove-Item $zip }

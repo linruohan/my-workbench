@@ -821,10 +821,7 @@ pub fn team_body(roster: &[crate::model::RosterRow]) -> String {
 
 /// Format `/nucleus` output.
 pub fn nucleus_body(workspace_root: &std::path::Path, budget_bytes: usize) -> String {
-    let index_path = workspace_root
-        .join(".wb")
-        .join("nucleus")
-        .join("index.md");
+    let index_path = workspace_root.join(".wb").join("nucleus").join("index.md");
     let notes_dir = workspace_root.join(".wb").join("nucleus").join("notes");
 
     let (index_bytes, lessons_count) = if let Ok(content) = std::fs::read_to_string(&index_path) {
@@ -952,10 +949,7 @@ pub fn doctor_body(repo_root: &std::path::Path, roster: &[crate::model::RosterRo
 
 /// Compacts `.wb/nucleus/index.md` by removing orphan pointers pointing to non-existent notes.
 pub fn compact_nucleus_index(workspace_root: &std::path::Path, _target_arg: &str) -> String {
-    let index_path = workspace_root
-        .join(".wb")
-        .join("nucleus")
-        .join("index.md");
+    let index_path = workspace_root.join(".wb").join("nucleus").join("index.md");
     let notes_dir = workspace_root.join(".wb").join("nucleus").join("notes");
 
     let content = match std::fs::read_to_string(&index_path) {

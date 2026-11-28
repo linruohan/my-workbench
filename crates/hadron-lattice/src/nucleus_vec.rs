@@ -9,6 +9,13 @@ pub struct NucleusVectorIndex {
     entries: Vec<(String, Vec<f32>, String)>,
 }
 
+impl Default for NucleusVectorIndex {
+    /// 空索引，等价于 `NucleusVectorIndex::new()`。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NucleusVectorIndex {
     pub fn new() -> Self {
         Self {

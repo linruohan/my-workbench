@@ -895,9 +895,8 @@ mod tests {
 
     #[test]
     fn agy_candidate_homes_includes_wsl_unc_home_from_work_dir() {
-        let wsl_work_dir = std::path::Path::new(
-            r"\\wsl.localhost\Ubuntu\home\Jake\dev\hadron\.wb\trees\cli-agy",
-        );
+        let wsl_work_dir =
+            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\Jake\dev\hadron\.wb\trees\cli-agy");
         let homes = agy_candidate_homes(Some(wsl_work_dir));
         assert!(
             homes

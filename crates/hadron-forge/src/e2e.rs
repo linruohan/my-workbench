@@ -465,10 +465,7 @@ mod tests {
         assert_eq!(report.passed_steps, 7);
         assert_eq!(report.total_steps, 7);
         assert_eq!(report.screenshots.len(), 1);
-        assert!(temp
-            .path()
-            .join(".wb/screenshots/notes_smoke.png")
-            .exists());
+        assert!(temp.path().join(".wb/screenshots/notes_smoke.png").exists());
     }
 
     #[test]

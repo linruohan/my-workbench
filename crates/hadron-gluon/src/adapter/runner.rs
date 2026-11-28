@@ -1095,9 +1095,7 @@ mod tests {
             program: "agy".to_string(),
             args: vec!["--print".to_string(), "ok".to_string()],
             stdin: String::new(),
-            cwd: PathBuf::from(
-                r"\\wsl.localhost\Ubuntu-22.04\home\user\project\.wb\trees\cli-agy",
-            ),
+            cwd: PathBuf::from(r"\\wsl.localhost\Ubuntu-22.04\home\user\project\.wb\trees\cli-agy"),
             env: RedactedEnv::default(),
             stream: None,
             sandbox: hadron_gatekeeper::SandboxMode::WorktreeOnly,

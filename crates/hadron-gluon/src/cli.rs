@@ -314,10 +314,7 @@ pub async fn run() {
             Source::Gluon,
             "Team resolution: --team, else a team.json next to the field",
         );
-        term::error(
-            Source::Gluon,
-            "(e.g. .wb/team.json), else ~/.wb/team.json.",
-        );
+        term::error(Source::Gluon, "(e.g. .wb/team.json), else ~/.wb/team.json.");
         term::error(
             Source::Gluon,
             "With none, the daemon refuses to start — there are no stand-in quarks.",
