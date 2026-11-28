@@ -17,7 +17,7 @@ fn test_distiller_extracts_and_persists_post_mortem() {
     assert_eq!(lesson.slug, "missing-export-or-module-seam");
     assert!(path.exists());
 
-    let index_file = root.join(".hadron").join("nucleus").join("index.md");
+    let index_file = root.join(".wb").join("nucleus").join("index.md");
     assert!(index_file.exists());
     let index_content = fs::read_to_string(index_file).unwrap();
     assert!(index_content

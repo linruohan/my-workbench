@@ -22,7 +22,7 @@ async fn test_visual_smoke_layout_overflow_and_screenshot_jailing() {
     let shot_path = report.captured_screenshot.unwrap();
     assert!(
         shot_path.starts_with(screenshots_dir(root)),
-        "Screenshot must be jailed in .hadron/screenshots/"
+        "Screenshot must be jailed in .wb/screenshots/"
     );
     assert!(shot_path.exists());
 

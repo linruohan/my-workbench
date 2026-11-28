@@ -5,7 +5,7 @@ description: Execute project release procedure (updating CHANGELOG, bumping vers
 
 # Release Procedure
 
-Execute the repository release workflow strictly following instructions in `.hadron/nucleus/release.md`.
+Execute the repository release workflow strictly following instructions in `.wb/nucleus/release.md`.
 
 ## Procedure Steps:
 1. **Pre-flight Check:** Verify working tree is clean and up-to-date with `origin/main`.

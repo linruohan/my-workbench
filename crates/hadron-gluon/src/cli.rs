@@ -54,9 +54,9 @@ fn parse_args() -> Option<Args> {
 /// Resolve which `team.json` to load, in priority order:
 /// 1. an explicit `--team <path>`;
 /// 2. a `team.json` sitting **next to the field** — the per-project
-///    `.hadron/team.json` convention (field at `.hadron/field.jsonl` → team at
-///    `.hadron/team.json`), so opening a project's field just works;
-/// 3. the user-level default (`~/.hadron/team.json`).
+///    `.wb/team.json` convention (field at `.wb/field.jsonl` → team at
+///    `.wb/team.json`), so opening a project's field just works;
+/// 3. the user-level default (`~/.wb/team.json`).
 ///
 /// `None` → no team file found → the daemon refuses to start.
 fn resolve_team_path(explicit: Option<PathBuf>, field_path: &Path) -> Option<PathBuf> {
@@ -97,7 +97,7 @@ fn seat_quarks(
                 Source::Gluon,
                 &format!(
                     "{} was found but resolves to NO seats. Usually the catalogue \
-                     (~/.hadron/team.json) failed to parse, so every roster override is an \
+                     (~/.wb/team.json) failed to parse, so every roster override is an \
                      orphan (see the warnings above); a build older than the file that \
                      describes it does exactly that.",
                     p.display()
@@ -105,7 +105,7 @@ fn seat_quarks(
             ),
             None => term::error(
                 Source::Gluon,
-                "no team.json found. Add one next to the field (e.g. .hadron/team.json) \
+                "no team.json found. Add one next to the field (e.g. .wb/team.json) \
                  or pass --team to seat real quarks.",
             ),
         }
@@ -279,7 +279,7 @@ pub(crate) fn parse_mcp_field_path<I: IntoIterator<Item = String>>(args: I, cwd:
             positional = Some(PathBuf::from(arg));
         }
     }
-    positional.unwrap_or_else(|| cwd.join(".hadron").join("field.jsonl"))
+    positional.unwrap_or_else(|| cwd.join(".wb").join("field.jsonl"))
 }
 
 /// The `hadron-gluon` daemon entrypoint, in the library rather than in a `[[bin]]`,
@@ -316,7 +316,7 @@ pub async fn run() {
         );
         term::error(
             Source::Gluon,
-            "(e.g. .hadron/team.json), else ~/.hadron/team.json.",
+            "(e.g. .wb/team.json), else ~/.wb/team.json.",
         );
         term::error(
             Source::Gluon,
@@ -328,7 +328,7 @@ pub async fn run() {
     // 运行文件（gluon.lock / gluon.rpc / ledger）跟着 field 走：会话 field 用自己的
     // 会话目录，这样同一仓库的多个会话可以各起一个守护进程互不争锁。
     let field_dir = hadron_lattice::runtime_dir_of(&args.field_path);
-    // 仓库级共享状态（构建产物清理记录等）仍写共享的 `.hadron`。
+    // 仓库级共享状态（构建产物清理记录等）仍写共享的 `.wb`。
     let hadron_dir = hadron_lattice::hadron_dir_of(&args.field_path);
     let _ = std::fs::create_dir_all(&field_dir);
     let lock_path = field_dir.join("gluon.lock");
@@ -379,7 +379,7 @@ pub async fn run() {
     }
 
     // Seat the team: explicit --team, else a sibling team.json next to the field
-    // (the .hadron/ convention), else the config-dir default; refuse to start when none.
+    // (the .wb/ convention), else the config-dir default; refuse to start when none.
     let team_path = resolve_team_path(args.team_path.clone(), &args.field_path);
     match &team_path {
         Some(p) => term::info(Source::Gluon, &format!("team from {}", p.display())),
@@ -389,7 +389,7 @@ pub async fn run() {
         ),
     }
     // The global catalogue holds the quark *definitions* a repo's role/state overrides
-    // resolve against. Skip it when it IS the repo file (a bare ~/.hadron/team.json used
+    // resolve against. Skip it when it IS the repo file (a bare ~/.wb/team.json used
     // directly as the team) — there is nothing to resolve against itself.
     let global_path = team_config_path().filter(|g| Some(g.as_path()) != team_path.as_deref());
     if let Some(g) = &global_path {
@@ -432,8 +432,8 @@ pub async fn run() {
         hadron_lattice::sys::paths::canonicalize(hadron_lattice::repo_root_of(&args.field_path))
             .unwrap_or_else(|_| hadron_lattice::repo_root_of(&args.field_path).to_path_buf());
 
-    // Self-healing: move the legacy `.hadron/memory/` lessons ledger into
-    // `.hadron/nucleus/` before anything else reads either. Non-fatal — the
+    // Self-healing: move the legacy `.wb/memory/` lessons ledger into
+    // `.wb/nucleus/` before anything else reads either. Non-fatal — the
     // reader's own fallback (`read_nucleus_index_with_fallback`) covers a
     // failed or skipped migration.
     if let Err(e) = crate::engine::migrate_legacy_memory(&repo_root) {
@@ -602,15 +602,15 @@ pub async fn run() {
         .with_nucleus(crate::engine::build_nucleus_digest(&repo_root))
         // `Engine::new` defaults this to `None` (hermetic — see the field doc), so the
         // real daemon must opt in explicitly or custom global skills under
-        // `~/.hadron/skills` would silently never load in production.
+        // `~/.wb/skills` would silently never load in production.
         .with_global_skills_dir(hadron_lattice::user_hadron_dir().map(|d| d.join("skills")))
         // Same seam, same reason: without this the real daemon would never look in
-        // `~/.hadron/preons`, so `@preon-name` mentions could only ever resolve
+        // `~/.wb/preons`, so `@preon-name` mentions could only ever resolve
         // via the repo half.
         .with_global_preons_dir(hadron_lattice::user_hadron_dir().map(|d| d.join("preons")));
 
     // Security: We open the energy ledger database `ledger.db` under the parent directory
-    // of `field_path` (which resides inside the repo's `.hadron/` directory in typical usage).
+    // of `field_path` (which resides inside the repo's `.wb/` directory in typical usage).
     // The path is derived using standard library functions to prevent traversal or access
     // to untrusted locations.
     let ledger_path = field_dir.join("ledger.db");
@@ -1008,7 +1008,7 @@ mod tests {
     #[test]
     fn explicit_team_wins() {
         let dir = tempdir().unwrap();
-        let field = dir.path().join(".hadron").join("field.jsonl");
+        let field = dir.path().join(".wb").join("field.jsonl");
         let explicit = dir.path().join("custom-team.json");
         assert_eq!(
             resolve_team_path(Some(explicit.clone()), &field),
@@ -1018,9 +1018,9 @@ mod tests {
 
     #[test]
     fn discovers_team_json_next_to_the_field() {
-        // The .hadron/ convention: team.json sits beside the field.
+        // The .wb/ convention: team.json sits beside the field.
         let dir = tempdir().unwrap();
-        let hadron = dir.path().join(".hadron");
+        let hadron = dir.path().join(".wb");
         std::fs::create_dir_all(&hadron).unwrap();
         let field = hadron.join("field.jsonl");
         let sibling = hadron.join("team.json");
@@ -1092,7 +1092,7 @@ mod tests {
         // No team.json beside the field. (The config-dir default is env-dependent;
         // in a clean temp field dir with no sibling, discovery must not invent one.)
         let dir = tempdir().unwrap();
-        let field = dir.path().join(".hadron").join("field.jsonl");
+        let field = dir.path().join(".wb").join("field.jsonl");
         let resolved = resolve_team_path(None, &field);
         // Either None (no config file) or the real config path — never the sibling.
         if let Some(p) = resolved {
@@ -1188,7 +1188,7 @@ mod tests {
         ]));
         assert!(!is_statusline_invocation(Vec::<String>::new()));
         assert!(!is_statusline_invocation([
-            ".hadron/field.jsonl".to_string(),
+            ".wb/field.jsonl".to_string(),
             "--interval-ms".to_string(),
             "500".to_string(),
         ]));
@@ -1199,14 +1199,14 @@ mod tests {
         assert!(is_mcp_invocation(["--mcp".to_string()]));
         assert!(is_mcp_invocation([
             "--mcp".to_string(),
-            "/tmp/proj/.hadron/field.jsonl".to_string(),
+            "/tmp/proj/.wb/field.jsonl".to_string(),
         ]));
-        assert!(!is_mcp_invocation([".hadron/field.jsonl".to_string()]));
+        assert!(!is_mcp_invocation([".wb/field.jsonl".to_string()]));
 
         let cwd = Path::new("/workspace/demo");
         assert_eq!(
             parse_mcp_field_path(["--mcp".to_string()], cwd),
-            cwd.join(".hadron").join("field.jsonl")
+            cwd.join(".wb").join("field.jsonl")
         );
         assert_eq!(
             parse_mcp_field_path(

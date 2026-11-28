@@ -194,17 +194,17 @@ pub fn derive_repo_root(project: &Path) -> Result<PathBuf, ForgeError> {
     parse_git_common_repo_root(project, &String::from_utf8_lossy(&output.stdout))
 }
 
-/// Resolve the shared `<repo_root>/.hadron` directory from `project`.
+/// Resolve the shared `<repo_root>/.wb` directory from `project`.
 ///
-/// When `project` is inside `<repo_root>/.hadron/trees/<id>` or a linked git worktree,
-/// returns the main checkout's `<repo_root>/.hadron` instead of a nested worktree-local
-/// `.hadron` directory. Falls back to `project.join(".hadron")` for standalone directories.
+/// When `project` is inside `<repo_root>/.wb/trees/<id>` or a linked git worktree,
+/// returns the main checkout's `<repo_root>/.wb` instead of a nested worktree-local
+/// `.wb` directory. Falls back to `project.join(".wb")` for standalone directories.
 pub fn derive_shared_hadron_dir(project: &Path) -> PathBuf {
     if let Some((distro, linux_path)) = hadron_lattice::wsl::parse_wsl_unc_path(project) {
         for ancestor in linux_path.ancestors() {
             if ancestor.file_name().and_then(|n| n.to_str()) == Some("trees") {
                 if let Some(hadron_dir) = ancestor.parent() {
-                    if hadron_dir.file_name().and_then(|n| n.to_str()) == Some(".hadron") {
+                    if hadron_dir.file_name().and_then(|n| n.to_str()) == Some(".wb") {
                         return hadron_lattice::wsl::format_wsl_unc_path(&distro, hadron_dir);
                     }
                 }
@@ -214,7 +214,7 @@ pub fn derive_shared_hadron_dir(project: &Path) -> PathBuf {
         for ancestor in project.ancestors() {
             if ancestor.file_name().and_then(|n| n.to_str()) == Some("trees") {
                 if let Some(hadron_dir) = ancestor.parent() {
-                    if hadron_dir.file_name().and_then(|n| n.to_str()) == Some(".hadron") {
+                    if hadron_dir.file_name().and_then(|n| n.to_str()) == Some(".wb") {
                         return hadron_dir.to_path_buf();
                     }
                 }
@@ -222,16 +222,16 @@ pub fn derive_shared_hadron_dir(project: &Path) -> PathBuf {
         }
     }
     if let Ok(repo_root) = derive_repo_root(project) {
-        return repo_root.join(".hadron");
+        return repo_root.join(".wb");
     }
-    project.join(".hadron")
+    project.join(".wb")
 }
 
-/// Derive a project's `.hadron/nucleus` directory as a [`Root`].
+/// Derive a project's `.wb/nucleus` directory as a [`Root`].
 ///
 /// `project` is the directory forge-mcp was given as `argv[1]` — the cwd of the turn.
 /// The `--git-common-dir` walk is what makes a quark's LINKED worktree
-/// (`.hadron/trees/<id>`) resolve to the main checkout's single shared nucleus rather
+/// (`.wb/trees/<id>`) resolve to the main checkout's single shared nucleus rather
 /// than growing a private empty one.
 ///
 /// This used to resolve from `current_exe`, which answered about the repository the
@@ -239,7 +239,7 @@ pub fn derive_shared_hadron_dir(project: &Path) -> PathBuf {
 /// silently returns a different project's nucleus.
 pub fn derive_nucleus_root(project: &Path) -> Result<Root, ForgeError> {
     let repo_root = derive_repo_root(project)?;
-    let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+    let nucleus_dir = repo_root.join(".wb").join("nucleus");
     Ok(Root::new(nucleus_dir))
 }
 
@@ -379,13 +379,13 @@ mod tests {
         let root = derive_nucleus_root(&project).expect("a git checkout resolves");
         assert_eq!(
             root.path(),
-            project.join(".hadron").join("nucleus"),
+            project.join(".wb").join("nucleus"),
             "the nucleus must be the project's own, whatever repo the binary came from"
         );
     }
 
     /// The `--git-common-dir` walk is load-bearing, not incidental: a quark's turn runs
-    /// in a LINKED worktree (`.hadron/trees/<id>`), and this is what makes every quark
+    /// in a LINKED worktree (`.wb/trees/<id>`), and this is what makes every quark
     /// share one nucleus instead of silently growing a private empty one per worktree.
     #[test]
     fn a_linked_worktree_resolves_to_the_main_checkouts_nucleus() {
@@ -415,7 +415,7 @@ mod tests {
         let root = derive_nucleus_root(&tree).expect("a linked worktree resolves");
         assert_eq!(
             root.path(),
-            main.join(".hadron").join("nucleus"),
+            main.join(".wb").join("nucleus"),
             "a linked worktree must share the MAIN checkout's nucleus"
         );
     }
@@ -478,7 +478,7 @@ mod tests {
         std::fs::write(main.join("f"), "x").unwrap();
         git(&["add", "f"], &main);
         git(&["commit", "-qm", "one"], &main);
-        let tree = main.join(".hadron").join("trees").join("cli-agy");
+        let tree = main.join(".wb").join("trees").join("cli-agy");
         std::fs::create_dir_all(tree.parent().unwrap()).unwrap();
         git(&["worktree", "add", "-q", tree.to_str().unwrap()], &main);
 
@@ -496,13 +496,13 @@ mod tests {
         let root = derive_nucleus_root(&unc_tree).expect("WSL UNC linked worktree resolves");
         assert_eq!(
             root.path(),
-            expected_unc_main.join(".hadron").join("nucleus")
+            expected_unc_main.join(".wb").join("nucleus")
         );
 
         assert_eq!(
             derive_shared_hadron_dir(&tree),
-            main.join(".hadron"),
-            "worktree inside .hadron/trees/<id> resolves shared .hadron"
+            main.join(".wb"),
+            "worktree inside .wb/trees/<id> resolves shared .wb"
         );
     }
 }

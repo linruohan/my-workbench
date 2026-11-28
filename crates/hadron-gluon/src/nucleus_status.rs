@@ -40,14 +40,14 @@ pub fn is_lesson_line(line: &str) -> bool {
     line.starts_with("- **") || line.starts_with("- [")
 }
 
-/// Whether `.hadron/nucleus/index.md` under `workspace_root` currently exceeds
+/// Whether `.wb/nucleus/index.md` under `workspace_root` currently exceeds
 /// `budget_bytes` — the RESOLVED budget (see [`resolve_budget_bytes`]), not always
 /// [`BUDGET_BYTES`]: a caller that hardcoded the default here would drift from a
 /// repo that configured a different one. A missing file is not over budget — it is
 /// the normal first-run case.
 pub fn index_over_budget(workspace_root: &Path, budget_bytes: usize) -> bool {
     let path = workspace_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("index.md");
     std::fs::metadata(&path)
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn index_over_budget_is_false_for_a_small_file() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
         std::fs::write(nucleus.join("index.md"), "- **x** — short\n").unwrap();
         assert!(!index_over_budget(dir.path(), BUDGET_BYTES));
@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn index_over_budget_is_true_past_the_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
         let big = "- **x** — ".to_string() + &"a".repeat(BUDGET_BYTES + 1);
         std::fs::write(nucleus.join("index.md"), big).unwrap();
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn index_over_budget_respects_a_smaller_configured_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
         std::fs::write(nucleus.join("index.md"), "a".repeat(2000)).unwrap();
         assert!(!index_over_budget(dir.path(), BUDGET_BYTES));

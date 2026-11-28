@@ -21,13 +21,13 @@ impl NucleusHealthReport {
     }
 }
 
-/// Automated health linter auditing `.hadron/nucleus/` for integrity.
+/// Automated health linter auditing `.wb/nucleus/` for integrity.
 pub struct NucleusIntegrityLinter {
     byte_budget: usize,
 }
 
-/// Automatically shards .hadron/nucleus/index.md into domain-specific shards
-/// under .hadron/nucleus/shards/<slug>.md when the file exceeds `byte_threshold`.
+/// Automatically shards .wb/nucleus/index.md into domain-specific shards
+/// under .wb/nucleus/shards/<slug>.md when the file exceeds `byte_threshold`.
 pub fn auto_shard_index(nucleus_dir: &Path, byte_threshold: usize) -> std::io::Result<bool> {
     let index_file = nucleus_dir.join("index.md");
     if !index_file.exists() {
@@ -189,7 +189,7 @@ fn extract_note_slugs_from_markdown(content: &str) -> Vec<String> {
 }
 
 impl NucleusIntegrityLinter {
-    /// Standard Model Rule 9: 32 KB prompt budget for `.hadron/nucleus/index.md`.
+    /// Standard Model Rule 9: 32 KB prompt budget for `.wb/nucleus/index.md`.
     pub const DEFAULT_INDEX_BUDGET: usize = 32 * 1024;
 
     pub fn new(byte_budget: usize) -> Self {

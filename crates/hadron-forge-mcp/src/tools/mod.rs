@@ -92,7 +92,7 @@ impl ForgeMcpServer {
         // The nucleus follows the PROJECT, not this binary. A non-git project keeps the
         // plain fallback — that is the correct root there, not a degraded one.
         let nucleus = hadron_forge::nucleus::derive_nucleus_root(&root_pb)
-            .unwrap_or_else(|_| Root::new(root_pb.join(".hadron").join("nucleus")));
+            .unwrap_or_else(|_| Root::new(root_pb.join(".wb").join("nucleus")));
         Self::with_nucleus(root_pb, nucleus.path())
     }
 

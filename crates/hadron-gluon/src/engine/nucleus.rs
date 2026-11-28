@@ -10,15 +10,15 @@ use super::*;
 /// It was one file *per quark*, which meant a lesson agy paid for in blood was one
 /// opus would pay for again. Shared, so the swarm learns once.
 ///
-/// Lives under `.hadron/nucleus/` — the single knowledge root, alongside
-/// `invariants/` — not the old `.hadron/memory/`. See
+/// Lives under `.wb/nucleus/` — the single knowledge root, alongside
+/// `invariants/` — not the old `.wb/memory/`. See
 /// [`read_nucleus_index_with_fallback`] for what covers the window before a
 /// project's legacy `memory/` has been migrated.
 pub(super) fn nucleus_index_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
     nucleus_lessons_dir(workspace_root).join("index.md")
 }
 
-/// Where the long-form notes live: `.hadron/nucleus/notes/<slug>.md`. The index names
+/// Where the long-form notes live: `.wb/nucleus/notes/<slug>.md`. The index names
 /// them; the engine never loads them. That is the whole token argument — an index of
 /// one-liners stays cheap forever, and the detail is paid for only on the turn a quark
 /// actually opens it.
@@ -27,11 +27,11 @@ pub(super) fn nucleus_notes_dir(workspace_root: &std::path::Path) -> std::path::
 }
 
 fn nucleus_lessons_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
-    workspace_root.join(".hadron").join("nucleus")
+    workspace_root.join(".wb").join("nucleus")
 }
 
 fn legacy_memory_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
-    workspace_root.join(".hadron").join("memory")
+    workspace_root.join(".wb").join("memory")
 }
 
 /// The index is in **every** prompt of **every** turn, so its size is a tax paid
@@ -61,9 +61,9 @@ pub(super) fn read_nucleus_index(path: &std::path::Path) -> (String, bool) {
     (raw, false)
 }
 
-/// Read the lessons index from its home (`.hadron/nucleus/index.md`),
+/// Read the lessons index from its home (`.wb/nucleus/index.md`),
 /// falling back to the pre-migration legacy location
-/// (`.hadron/memory/index.md`) if nucleus is empty — so a quark is never
+/// (`.wb/memory/index.md`) if nucleus is empty — so a quark is never
 /// shown an empty index in the window before `Engine::migrate_legacy_memory`
 /// has run at daemon boot.
 pub(super) fn read_nucleus_index_with_fallback(workspace_root: &std::path::Path) -> (String, bool) {
@@ -105,7 +105,7 @@ fn home_dir() -> Option<std::path::PathBuf> {
 fn global_invariants_dir() -> Option<std::path::PathBuf> {
     Some(
         home_dir()?
-            .join(".hadron")
+            .join(".wb")
             .join("nucleus")
             .join("invariants"),
     )
@@ -116,12 +116,12 @@ fn global_invariants_dir() -> Option<std::path::PathBuf> {
 /// when `always.md` or requested by name. A law is meant to be unconditional, the
 /// same way the Standard Model itself is.
 fn global_laws_path() -> Option<std::path::PathBuf> {
-    Some(home_dir()?.join(".hadron").join("nucleus").join("laws.md"))
+    Some(home_dir()?.join(".wb").join("nucleus").join("laws.md"))
 }
 
 fn repo_laws_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
     workspace_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("laws.md")
 }
@@ -164,8 +164,8 @@ fn read_invariant_dir(dir: &std::path::Path) -> Vec<(String, String)> {
 /// Assemble the three tiers of working protocol handed to a quark.
 ///
 /// 1. **Hardcoded** — [`STANDARD_MODEL`], compiled in, always present, not optional.
-/// 2. **Global** — `~/.hadron/nucleus/invariants/`, the user's own standing rules.
-/// 3. **Repo** — `<workspace>/.hadron/nucleus/invariants/`, this project's rules.
+/// 2. **Global** — `~/.wb/nucleus/invariants/`, the user's own standing rules.
+/// 3. **Repo** — `<workspace>/.wb/nucleus/invariants/`, this project's rules.
 ///
 /// Ordered narrowest-last, and the prompt *says* which tier each block came from:
 /// a quark that cannot tell a shipped rule from a project rule cannot reason about
@@ -213,7 +213,7 @@ pub(super) fn build_invariants(
     // Tier 3 — this project. A cybersecurity repo and an indie game do not want the
     // same rules, so the repo tier is where the domain gets to speak.
     let repo_dir = workspace_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("invariants");
     let repo_rules = read_invariant_dir(&repo_dir);

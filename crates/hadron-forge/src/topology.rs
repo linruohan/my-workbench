@@ -447,7 +447,7 @@ mod tests {
         graph.add_dependency("hadron-chamber", "hadron-gluon");
 
         graph.add_quark("agy", "orchestrator", "excited");
-        graph.add_worktree(".hadron/trees/cli-agy", "quark/cli-agy/01M01");
+        graph.add_worktree(".wb/trees/cli-agy", "quark/cli-agy/01M01");
         graph.add_quark_worktree_link("agy", "quark/cli-agy/01M01");
 
         assert_eq!(graph.nodes.len(), 4);

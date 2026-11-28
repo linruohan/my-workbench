@@ -467,7 +467,7 @@ impl SessionsIndexCache {
 
 /// List archived sessions under `sessions_dir`, oldest first (directory names are
 /// timestamp-sortable, same order `load_archived_messages` folds them in). Uses
-/// `.hadron/cache/sessions_index.json` session metadata caching to avoid re-parsing
+/// `.wb/cache/sessions_index.json` session metadata caching to avoid re-parsing
 /// unchanged `.jsonl` files on disk.
 pub fn list_sessions(sessions_dir: &std::path::Path) -> Vec<SessionInfo> {
     let cache_path = sessions_dir
@@ -561,7 +561,7 @@ pub fn find_session<'a>(sessions: &'a [SessionInfo], target: &str) -> Option<&'a
 }
 
 /// Whether any roster quark is mid-turn right now. `/resume` swaps out
-/// `.hadron/field.jsonl` — the live bus a running daemon appends to — so it must
+/// `.wb/field.jsonl` — the live bus a running daemon appends to — so it must
 /// refuse while a quark could still be writing to it.
 pub fn any_quark_mid_turn(roster: &[RosterRow]) -> bool {
     roster

@@ -213,7 +213,7 @@ fn supports_model_params_capability_gating_in_settings() {
 #[test]
 fn skill_creation_and_deletion_in_repo_and_global_paths() {
     let dir = tempfile::tempdir().unwrap();
-    let team_path = dir.path().join(".hadron").join("team.json");
+    let team_path = dir.path().join(".wb").join("team.json");
     std::fs::create_dir_all(team_path.parent().unwrap()).unwrap();
     std::fs::write(&team_path, "{}").unwrap();
 

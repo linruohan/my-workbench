@@ -42,14 +42,14 @@ fn default_true() -> bool {
     true
 }
 
-/// A scheduled task definition stored in `.hadron/schedules/schedules.json`.
+/// A scheduled task definition stored in `.wb/schedules/schedules.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledJob {
     /// Unique identifier for this schedule (e.g. "weekly-sec").
     pub id: String,
     /// Human-readable display name.
     pub name: String,
-    /// Safe identifier of the task folder under `.hadron/schedules/tasks/<task_id>/`.
+    /// Safe identifier of the task folder under `.wb/schedules/tasks/<task_id>/`.
     pub task_id: String,
     /// 5-field cron expression (or @hourly, @daily, @weekly, @monthly).
     pub cron: String,
@@ -133,14 +133,14 @@ pub enum DueStatus {
     MissingTask { task_id: String, path: PathBuf },
 }
 
-/// Frozen schema version for `<repo_root>/.hadron/schedules/schedules.json`.
+/// Frozen schema version for `<repo_root>/.wb/schedules/schedules.json`.
 pub const SCHEDULES_SCHEMA_VERSION: u32 = 1;
 
 fn default_schedules_schema_version() -> u32 {
     SCHEDULES_SCHEMA_VERSION
 }
 
-/// Registry of scheduled jobs stored in `<repo_root>/.hadron/schedules/schedules.json`.
+/// Registry of scheduled jobs stored in `<repo_root>/.wb/schedules/schedules.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleRegistry {
     #[serde(default = "default_schedules_schema_version")]
@@ -198,7 +198,7 @@ impl ScheduleRegistry {
     }
 
     pub fn schedules_dir(repo_root: &Path) -> PathBuf {
-        repo_root.join(".hadron").join("schedules")
+        repo_root.join(".wb").join("schedules")
     }
 
     pub fn schedules_file(repo_root: &Path) -> PathBuf {
@@ -218,7 +218,7 @@ impl ScheduleRegistry {
         Ok(Self::task_dir(repo_root, task_id)?.join("TASK.md"))
     }
 
-    /// Load the markdown prompt for a given task_id from `.hadron/schedules/tasks/<task_id>/TASK.md`.
+    /// Load the markdown prompt for a given task_id from `.wb/schedules/tasks/<task_id>/TASK.md`.
     pub fn load_task_markdown(repo_root: &Path, task_id: &str) -> anyhow::Result<String> {
         let path = Self::task_markdown_path(repo_root, task_id)?;
         if !path.is_file() {
@@ -228,7 +228,7 @@ impl ScheduleRegistry {
             .map_err(|e| anyhow::anyhow!("could not read {}: {e}", path.display()))
     }
 
-    /// Write the markdown prompt for a given task_id to `.hadron/schedules/tasks/<task_id>/TASK.md`.
+    /// Write the markdown prompt for a given task_id to `.wb/schedules/tasks/<task_id>/TASK.md`.
     pub fn save_task_markdown(
         repo_root: &Path,
         task_id: &str,
@@ -256,7 +256,7 @@ impl ScheduleRegistry {
         Some(self.jobs.remove(pos))
     }
 
-    /// Load the schedule registry from `<repo_root>/.hadron/schedules/schedules.json`,
+    /// Load the schedule registry from `<repo_root>/.wb/schedules/schedules.json`,
     /// transparently migrating legacy `v0` files to [`SCHEDULES_SCHEMA_VERSION`] (`1`) on disk.
     pub fn load(repo_root: &Path) -> anyhow::Result<Self> {
         let file = Self::schedules_file(repo_root);
@@ -272,7 +272,7 @@ impl ScheduleRegistry {
         Ok(reg)
     }
 
-    /// Save the schedule registry to `<repo_root>/.hadron/schedules/schedules.json`.
+    /// Save the schedule registry to `<repo_root>/.wb/schedules/schedules.json`.
     pub fn save(&self, repo_root: &Path) -> anyhow::Result<()> {
         let dir = Self::schedules_dir(repo_root);
         std::fs::create_dir_all(&dir)?;
@@ -322,7 +322,7 @@ impl ScheduleRegistry {
                 return DueStatus::MissingTask {
                     task_id: job.task_id.clone(),
                     path: repo_root
-                        .join(".hadron/schedules/tasks")
+                        .join(".wb/schedules/tasks")
                         .join(&job.task_id)
                         .join("TASK.md"),
                 }

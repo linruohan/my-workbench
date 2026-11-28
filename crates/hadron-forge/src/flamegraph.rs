@@ -223,7 +223,7 @@ pub fn run_flamegraph(
     if action == FlamegraphAction::RenderSvg || output_svg_rel.is_some() {
         let svg_title = title.unwrap_or("CPU Flamegraph Profile");
         let svg = generate_flamegraph_svg(&stacks, total_samples, svg_title);
-        let target_rel = output_svg_rel.unwrap_or(".hadron/screenshots/flamegraph.svg");
+        let target_rel = output_svg_rel.unwrap_or(".wb/screenshots/flamegraph.svg");
         let abs_svg = resolve_jailed_path(root, target_rel)?;
         if let Some(parent) = abs_svg.parent() {
             fs::create_dir_all(parent).map_err(|e| ForgeError::Io(e.to_string()))?;

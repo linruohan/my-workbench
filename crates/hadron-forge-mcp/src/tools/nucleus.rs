@@ -1,7 +1,7 @@
 //! The **nucleus** family: search the swarm's shared lessons, synthesize invariants, and promote notes.
 //!
 //! Read-only queries and strict Standard Model writes rooted **outside** the worktree jail: the nucleus lives at
-//! `<repo>/.hadron/nucleus`, which no quark's `Root` can reach.
+//! `<repo>/.wb/nucleus`, which no quark's `Root` can reach.
 
 use super::{ForgeMcpServer, ToolResponse};
 use hadron_forge::nucleus::query_nucleus;
@@ -51,7 +51,7 @@ pub struct InvariantSynthesizeArgs {
     pub failure_text: String,
     /// Category: "compile_error", "borrow_checker", "test_failure", "runtime_panic", "merge_conflict", "security_violation"
     pub category: String,
-    /// Whether to automatically persist to .hadron/nucleus/invariants/
+    /// Whether to automatically persist to .wb/nucleus/invariants/
     #[serde(default)]
     pub auto_persist: bool,
 }
@@ -124,7 +124,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_nucleus_distill_lesson",
-        description = "Autonomously distill a post-mortem lesson or permanent invariant into .hadron/nucleus/notes/<slug>.md and register a 1-line pointer in index.md"
+        description = "Autonomously distill a post-mortem lesson or permanent invariant into .wb/nucleus/notes/<slug>.md and register a 1-line pointer in index.md"
     )]
     pub async fn nucleus_distill_lesson(
         &self,
@@ -214,7 +214,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_nucleus_semantic_search",
-        description = "Vectorized semantic ranking search over .hadron/nucleus/notes/ lessons and invariants"
+        description = "Vectorized semantic ranking search over .wb/nucleus/notes/ lessons and invariants"
     )]
     pub async fn nucleus_semantic_search(
         &self,
@@ -361,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn nucleus_promote_and_invariant_synthesize_tools_execute() {
         let worktree_dir = tempfile::tempdir().unwrap();
-        let nucleus_dir = worktree_dir.path().join(".hadron").join("nucleus");
+        let nucleus_dir = worktree_dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus_dir).unwrap();
         std::fs::write(nucleus_dir.join("index.md"), "# Index\n").unwrap();
 

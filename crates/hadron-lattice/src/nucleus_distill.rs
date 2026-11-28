@@ -48,7 +48,7 @@ pub fn distill_failure_recovery(error_tail: &str, fix_diff: &str) -> Option<Cand
 }
 
 pub fn write_distilled_lesson(repo_root: &Path, lesson: &CandidateLesson) -> Result<PathBuf> {
-    let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+    let nucleus_dir = repo_root.join(".wb").join("nucleus");
     let notes_dir = nucleus_dir.join("notes");
     fs::create_dir_all(&notes_dir)
         .with_context(|| format!("Failed to create notes directory at {:?}", notes_dir))?;
@@ -101,7 +101,7 @@ mod tests {
         let path = write_distilled_lesson(root, &lesson).expect("write lesson");
         assert!(path.exists());
 
-        let index_content = fs::read_to_string(root.join(".hadron/nucleus/index.md")).unwrap();
+        let index_content = fs::read_to_string(root.join(".wb/nucleus/index.md")).unwrap();
         assert!(index_content
             .contains("- [missing-export-or-module-seam](notes/missing-export-or-module-seam.md)"));
     }

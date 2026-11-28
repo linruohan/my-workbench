@@ -2,10 +2,10 @@
 //!
 //! Provides headless visual verification and element layout bounds checking,
 //! asserting that UI components fit within specified viewport dimensions without
-//! overflow violations and saving jailed artifacts to `.hadron/screenshots/`.
+//! overflow violations and saving jailed artifacts to `.wb/screenshots/`.
 //!
 //! **Invariants:**
-//! 1. Strictly Jailed Media: All generated screenshot captures are confined to `<root>/.hadron/screenshots/`.
+//! 1. Strictly Jailed Media: All generated screenshot captures are confined to `<root>/.wb/screenshots/`.
 //! 2. Safe Fallback: Renders/captures layout states headlessly even in software rasterization (LAVAPIPE).
 
 use std::fs;
@@ -18,7 +18,7 @@ use crate::screenshot::ScreenshotManager;
 
 /// Return the canonical screenshot directory for a workspace root.
 pub fn screenshots_dir(root: impl AsRef<Path>) -> PathBuf {
-    root.as_ref().join(".hadron").join("screenshots")
+    root.as_ref().join(".wb").join("screenshots")
 }
 
 /// Assertion configuration for a visual smoke test.

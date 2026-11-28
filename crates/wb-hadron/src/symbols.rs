@@ -1646,7 +1646,7 @@ fn match_folder(folder: &str) -> Option<(&'static str, &'static str)> {
             "symbols/folders/folder-graphql.svg",
             "symbols/folders/folder-graphql.svg",
         )),
-        ".hadron" => Some((
+        ".wb" => Some((
             "symbols/folders/folder-claude.svg",
             "symbols/folders/folder-claude.svg",
         )),

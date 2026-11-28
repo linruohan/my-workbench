@@ -122,7 +122,7 @@ impl super::Chamber {
                     .child("⚠ over budget")
                     .tooltip(|window, cx| {
                         Tooltip::new(
-                            ".hadron/nucleus/index.md exceeds 32 KiB and is truncated in prompts",
+                            ".wb/nucleus/index.md exceeds 32 KiB and is truncated in prompts",
                         )
                         .build(window, cx)
                     }),
@@ -719,7 +719,7 @@ mod tests {
             32 * 1024
         ));
 
-        let nucleus_dir = temp_dir.path().join(".hadron").join("nucleus");
+        let nucleus_dir = temp_dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus_dir).unwrap();
         std::fs::write(nucleus_dir.join("index.md"), vec![b'a'; 32 * 1024 + 1]).unwrap();
 

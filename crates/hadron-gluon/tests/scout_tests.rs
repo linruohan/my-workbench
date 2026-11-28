@@ -7,7 +7,7 @@ async fn test_ephemeral_scout_zero_footprint_execution() {
     let dir = tempdir().unwrap();
     let root = dir.path();
 
-    // Create a mock repo directory + ignored directories (.git, target, .hadron/trees)
+    // Create a mock repo directory + ignored directories (.git, target, .wb/trees)
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
         root.join("src").join("main.rs"),
@@ -41,8 +41,8 @@ async fn test_ephemeral_scout_zero_footprint_execution() {
         result.findings
     );
 
-    // Verify no worktrees or .hadron/trees directory created
-    assert!(!root.join(".hadron").join("trees").exists());
+    // Verify no worktrees or .wb/trees directory created
+    assert!(!root.join(".wb").join("trees").exists());
 }
 
 #[tokio::test]

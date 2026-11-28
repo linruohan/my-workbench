@@ -96,9 +96,9 @@ pub fn is_process_alive_named_in_dir(pid: u32, dir: &std::path::Path, expected_n
     false
 }
 
-/// Check if `pid` of `hadron-gluon` is currently alive in the context of `dir`.
+/// Check if `pid` of `wb-gluon` is currently alive in the context of `dir`.
 pub fn is_process_alive_in_dir(pid: u32, dir: &std::path::Path) -> bool {
-    is_process_alive_named_in_dir(pid, dir, "hadron-gluon")
+    is_process_alive_named_in_dir(pid, dir, "wb-gluon")
 }
 
 /// Match a process image path against `expected_name`, accounting for `.exe` and
@@ -449,11 +449,11 @@ mod tests {
     #[test]
     fn cmdline_matches_quark_id_requires_a_boundary_after_the_id() {
         assert!(cmdline_matches_quark_id(
-            "agy --cwd /home/j/repo/.hadron/trees/cli-agy/src",
+            "agy --cwd /home/j/repo/.wb/trees/cli-agy/src",
             "cli-agy"
         ));
         assert!(cmdline_matches_quark_id(
-            r"agy.exe C:\repo\.hadron\trees\cli-agy",
+            r"agy.exe C:\repo\.wb\trees\cli-agy",
             "cli-agy"
         ));
         assert!(cmdline_matches_quark_id(
@@ -472,13 +472,13 @@ mod tests {
         ));
 
         assert!(!cmdline_matches_quark_id(
-            "agy --cwd /home/j/repo/.hadron/trees/cli-agy-2/src",
+            "agy --cwd /home/j/repo/.wb/trees/cli-agy-2/src",
             "cli-agy"
         ));
         assert!(!cmdline_matches_quark_id("trees/cli-agy_worker", "cli-agy"));
         assert!(!cmdline_matches_quark_id("trees/cli-agy.bak", "cli-agy"));
         assert!(!cmdline_matches_quark_id(
-            r"C:\repo\.hadron\trees\cli-agy-2\x",
+            r"C:\repo\.wb\trees\cli-agy-2\x",
             "cli-agy"
         ));
         assert!(!cmdline_matches_quark_id(
@@ -546,7 +546,7 @@ mod tests {
             if let Ok(comm) = std::fs::read_to_string(&comm_path) {
                 let name = comm.trim();
                 assert!(is_process_alive_named_in_dir(current_pid, &local_dir, name));
-                let wsl_unc_dir = std::path::Path::new(r"\\wsl.localhost\Ubuntu\workspace\.hadron");
+                let wsl_unc_dir = std::path::Path::new(r"\\wsl.localhost\Ubuntu\workspace\.wb");
                 assert!(
                     is_process_alive_named_in_dir(current_pid, wsl_unc_dir, name),
                     "host-spawned daemon PID must be detected as alive even when workspace is a WSL UNC path"
@@ -565,7 +565,7 @@ mod tests {
     fn enrich_cmdline_with_worktree_and_env_extracts_from_cwd_and_env() {
         let cmd = "hadron-gluon --daemon";
         let cwd_path =
-            std::path::PathBuf::from("/home/user/.hadron/trees/acp-agy/crates/hadron-lattice");
+            std::path::PathBuf::from("/home/user/.wb/trees/acp-agy/crates/hadron-lattice");
         let enriched = enrich_cmdline_with_worktree_and_env(cmd, Some(&cwd_path), None);
         assert_eq!(enriched, "hadron-gluon --daemon [trees/acp-agy]");
 
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(already_enriched, "hadron-gluon --daemon [trees/acp-agy]");
 
         // Windows backslash cwd check
-        let win_cwd = std::path::PathBuf::from(r"C:\dev\.hadron\trees\acp-agy\crates");
+        let win_cwd = std::path::PathBuf::from(r"C:\dev\.wb\trees\acp-agy\crates");
         let enriched_win = enrich_cmdline_with_worktree_and_env("hadron.exe", Some(&win_cwd), None);
         assert_eq!(enriched_win, "hadron.exe [trees/acp-agy]");
 

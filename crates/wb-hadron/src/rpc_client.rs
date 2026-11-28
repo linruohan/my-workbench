@@ -1,6 +1,6 @@
 //! Synchronous, bounded-timeout JSON-RPC 2.0 loopback client for `hadron-chamber`.
 //!
-//! Connects to the local `hadron-gluon` daemon advertised in `.hadron/gluon.rpc`
+//! Connects to the local `hadron-gluon` daemon advertised in `.wb/gluon.rpc`
 //! (`127.0.0.1:<port>`) to deliver `<1ms` wake notifications on user message submission
 //! and optional incremental field polling without blocking the GPUI render thread.
 
@@ -31,8 +31,8 @@ fn resolve_rpc_dir(path: &Path) -> PathBuf {
         hadron_lattice::hadron_dir_of(path)
     } else if path.join("gluon.rpc").is_file() {
         path.to_path_buf()
-    } else if path.join(".hadron").is_dir() {
-        path.join(".hadron")
+    } else if path.join(".wb").is_dir() {
+        path.join(".wb")
     } else {
         path.to_path_buf()
     }

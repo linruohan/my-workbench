@@ -280,7 +280,7 @@ pub fn create_stub_note(nucleus_dir: &std::path::Path, slug: &str) -> std::io::R
 impl CachedNucleusGraph {
     pub fn build_and_save(repo_root: &std::path::Path) -> Self {
         let built = Self::build(repo_root);
-        if repo_root.join(".hadron").is_dir() {
+        if repo_root.join(".wb").is_dir() {
             let fp = super::visualizer::compute_nucleus_graph_fingerprint(repo_root);
             let mut disk_cache = super::visualizer::VisualizerGraphsDiskCache::load(repo_root);
             disk_cache.nucleus_fingerprint = Some(fp);
@@ -291,7 +291,7 @@ impl CachedNucleusGraph {
     }
 
     pub fn build(repo_root: &std::path::Path) -> Self {
-        let nucleus_dir = repo_root.join(".hadron/nucleus");
+        let nucleus_dir = repo_root.join(".wb/nucleus");
         let (nodes, dead_links) = hadron_forge::nucleus_graph::build_nucleus_graph(&nucleus_dir);
 
         let mut force_graph = ForceDirectedGraph::new();
@@ -1440,7 +1440,7 @@ impl super::Chamber {
                                 .text_color(theme::accent())
                                 .child("+ Index All Orphans")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    let nucleus_dir = repo_root_for_orphans.join(".hadron/nucleus");
+                                    let nucleus_dir = repo_root_for_orphans.join(".wb/nucleus");
                                     for slug in &orphans_to_index {
                                         let _ = index_orphan_note(&nucleus_dir, slug);
                                     }
@@ -1473,7 +1473,7 @@ impl super::Chamber {
                                 .child("Delete All Orphans")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let nucleus_dir =
-                                        repo_root_for_delete_orphans.join(".hadron/nucleus");
+                                        repo_root_for_delete_orphans.join(".wb/nucleus");
                                     for slug in &orphans_to_delete {
                                         let _ = delete_orphan_note(&nucleus_dir, slug);
                                     }
@@ -1512,7 +1512,7 @@ impl super::Chamber {
                             .text_color(theme::error())
                             .child("Unlink All Dead Links")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                let nucleus_dir = repo_root_for_dead.join(".hadron/nucleus");
+                                let nucleus_dir = repo_root_for_dead.join(".wb/nucleus");
                                 for (src, tgt) in &dead_links_for_bulk {
                                     let _ = remove_dead_link_from_note(&nucleus_dir, src, tgt);
                                 }
@@ -1766,7 +1766,7 @@ impl super::Chamber {
                                             .text_color(theme::accent())
                                             .child("+ Add to Index")
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                let nucleus_dir = repo_for_index.join(".hadron/nucleus");
+                                                let nucleus_dir = repo_for_index.join(".wb/nucleus");
                                                 let _ = index_orphan_note(&nucleus_dir, &slug_for_index);
                                                 *this.cached_nucleus_graph.borrow_mut() = Some(CachedNucleusGraph::build_and_save(&repo_for_index));
                                                 this.cached_nucleus_fingerprint = super::visualizer::compute_nucleus_graph_fingerprint(&repo_for_index);
@@ -1786,7 +1786,7 @@ impl super::Chamber {
                                             .text_color(theme::error())
                                             .child("Delete Orphan")
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                let nucleus_dir = repo_for_delete.join(".hadron/nucleus");
+                                                let nucleus_dir = repo_for_delete.join(".wb/nucleus");
                                                 let _ = delete_orphan_note(&nucleus_dir, &slug_for_delete);
                                                 this.visualizer_selected_note = None;
                                                 *this.cached_nucleus_graph.borrow_mut() = Some(CachedNucleusGraph::build_and_save(&repo_for_delete));
@@ -1853,7 +1853,7 @@ impl super::Chamber {
                                             .text_color(theme::error())
                                             .child("Unlink")
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                let nucleus_dir = repo_unlink.join(".hadron/nucleus");
+                                                let nucleus_dir = repo_unlink.join(".wb/nucleus");
                                                 let _ = remove_dead_link_from_note(&nucleus_dir, &src_for_unlink, &tgt_for_unlink);
                                                 *this.cached_nucleus_graph.borrow_mut() = Some(CachedNucleusGraph::build_and_save(&repo_unlink));
                                                 this.cached_nucleus_fingerprint = super::visualizer::compute_nucleus_graph_fingerprint(&repo_unlink);
@@ -1873,7 +1873,7 @@ impl super::Chamber {
                                             .text_color(theme::accent())
                                             .child("+ Create Stub")
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                let nucleus_dir = repo_stub.join(".hadron/nucleus");
+                                                let nucleus_dir = repo_stub.join(".wb/nucleus");
                                                 let _ = create_stub_note(&nucleus_dir, &tgt_for_stub);
                                                 *this.cached_nucleus_graph.borrow_mut() = Some(CachedNucleusGraph::build_and_save(&repo_stub));
                                                 this.cached_nucleus_fingerprint = super::visualizer::compute_nucleus_graph_fingerprint(&repo_stub);
@@ -1984,7 +1984,7 @@ mod tests {
     #[test]
     fn test_orphan_and_dead_link_remediation_helpers() {
         let tmp = tempfile::tempdir().unwrap();
-        let nucleus_dir = tmp.path().join(".hadron/nucleus");
+        let nucleus_dir = tmp.path().join(".wb/nucleus");
         let notes_dir = nucleus_dir.join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
         std::fs::write(nucleus_dir.join("index.md"), "# Index\n").unwrap();
@@ -2054,7 +2054,7 @@ mod tests {
     #[test]
     fn test_filter_nucleus_nodes_isolates_orphans_and_dead_links() {
         let tmp = tempfile::tempdir().unwrap();
-        let nucleus_dir = tmp.path().join(".hadron/nucleus");
+        let nucleus_dir = tmp.path().join(".wb/nucleus");
         let notes_dir = nucleus_dir.join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
         std::fs::write(
@@ -2118,7 +2118,7 @@ mod tests {
     #[test]
     fn test_compute_nucleus_sphere_layout_dual_shell_placement() {
         let tmp = tempfile::tempdir().unwrap();
-        let nucleus_dir = tmp.path().join(".hadron/nucleus");
+        let nucleus_dir = tmp.path().join(".wb/nucleus");
         let notes_dir = nucleus_dir.join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
         std::fs::write(

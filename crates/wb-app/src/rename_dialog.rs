@@ -1,8 +1,8 @@
 //! 会话重命名弹窗。
 //!
 //! 左栏会话行点「更多」后打开：一个输入框 + 取消/保存。保存时把新的
-//! `SessionName` 事件写进对应 field（活动会话写 `<repo>/.hadron/field.jsonl`，
-//! 归档会话写 `<repo>/.hadron/sessions/<id>/field.jsonl`）。
+//! `SessionName` 事件写进对应 field（活动会话写 `<repo>/.wb/field.jsonl`，
+//! 归档会话写 `<repo>/.wb/sessions/<id>/field.jsonl`）。
 
 use crate::app::WorkbenchApp;
 use crate::style;
@@ -49,12 +49,13 @@ impl RenameDialog {
             _subs: Vec::new(),
         };
         // 回车直接保存，省一次点击。
-        this._subs
-            .push(cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+        this._subs.push(
+            cx.subscribe_in(&input, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.submit(window, cx);
                 }
-            }));
+            }),
+        );
         this
     }
 
@@ -96,9 +97,12 @@ impl Render for RenameDialog {
             .items_center()
             .justify_center()
             .bg(cx.theme().overlay.opacity(0.62))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.cancel(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.cancel(cx);
+                }),
+            )
             .child(
                 v_flex()
                     .w(px(380.))
@@ -122,13 +126,11 @@ impl Render for RenameDialog {
                         h_flex()
                             .justify_end()
                             .gap_2()
-                            .child(
-                                Button::new("rename-session-cancel")
-                                    .label("取消")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel(cx);
-                                    })),
-                            )
+                            .child(Button::new("rename-session-cancel").label("取消").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.cancel(cx);
+                                }),
+                            ))
                             .child(
                                 Button::new("rename-session-save")
                                     .primary()

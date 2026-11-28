@@ -62,7 +62,7 @@ impl DreamDaemon {
         let mut notes_cleaned = 0;
         let mut stale_worktrees_found = 0;
 
-        let nucleus_root = repo_root.join(".hadron/nucleus");
+        let nucleus_root = repo_root.join(".wb/nucleus");
         let notes_dir = nucleus_root.join("notes");
         let index_path = nucleus_root.join("index.md");
 
@@ -93,7 +93,7 @@ impl DreamDaemon {
             }
         }
 
-        // 2. Parse `.hadron/nucleus/index.md` for `notes/<slug>.md` links
+        // 2. Parse `.wb/nucleus/index.md` for `notes/<slug>.md` links
         let mut index_slug_counts: BTreeMap<String, usize> = BTreeMap::new();
         if let Ok(index_md) = fs::read_to_string(&index_path) {
             for slug in parse_index_note_slugs(&index_md) {
@@ -143,7 +143,7 @@ impl DreamDaemon {
         };
 
         // 4. Inspect worktrees directory
-        let trees_dir = repo_root.join(".hadron/trees");
+        let trees_dir = repo_root.join(".wb/trees");
         if let Ok(entries) = fs::read_dir(&trees_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -184,7 +184,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
 
-        let nucleus = root.join(".hadron/nucleus");
+        let nucleus = root.join(".wb/nucleus");
         let notes = nucleus.join("notes");
         fs::create_dir_all(&notes).unwrap();
         fs::write(notes.join("good-note.md"), b"valid note content").unwrap();
@@ -195,7 +195,7 @@ mod tests {
         )
         .unwrap();
 
-        let trees = root.join(".hadron/trees");
+        let trees = root.join(".wb/trees");
         fs::create_dir_all(trees.join("corrupted-tree")).unwrap(); // no .git, marked stale
 
         let summary = DreamDaemon::run_cycle(root);
@@ -214,7 +214,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
 
-        let nucleus = root.join(".hadron/nucleus");
+        let nucleus = root.join(".wb/nucleus");
         let notes = nucleus.join("notes");
         fs::create_dir_all(&notes).unwrap();
         fs::write(notes.join("linked.md"), b"linked note").unwrap();
@@ -244,7 +244,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
 
-        let nucleus = root.join(".hadron/nucleus");
+        let nucleus = root.join(".wb/nucleus");
         let notes = nucleus.join("notes");
         fs::create_dir_all(&notes).unwrap();
         fs::write(notes.join("hot-note.md"), b"opened recently").unwrap();

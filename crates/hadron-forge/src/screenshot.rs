@@ -1,11 +1,11 @@
 //! Jailed desktop and window screenshot engine.
 //!
 //! Provides safe screen capture capabilities strictly confined to the project's
-//! `.hadron/screenshots/` directory, preventing unintended data leaks or PII capture
+//! `.wb/screenshots/` directory, preventing unintended data leaks or PII capture
 //! outside the untracked workspace directory.
 //!
 //! **Invariants:**
-//! 1. Strict Jail: All captures are saved exclusively inside `<repo_root>/.hadron/screenshots/`.
+//! 1. Strict Jail: All captures are saved exclusively inside `<repo_root>/.wb/screenshots/`.
 //! 2. Path Traversal Guard: Any subpath containing `..` or escaping the screenshots directory is rejected.
 //! 3. Clean Pruning: Supports targeted age-based or complete pruning of old captures.
 
@@ -46,7 +46,7 @@ pub struct ScreenshotMetadata {
 }
 
 /// Validate that a screenshot filename or subpath is strictly contained
-/// within `<root>/.hadron/screenshots/`.
+/// within `<root>/.wb/screenshots/`.
 pub fn validate_screenshot_path(root: &Root, name: &str) -> Result<PathBuf, ForgeError> {
     if name.is_empty() {
         return Err(ForgeError::Rejected(
@@ -68,7 +68,7 @@ pub fn validate_screenshot_path(root: &Root, name: &str) -> Result<PathBuf, Forg
         }
     }
 
-    let screenshots_dir = root.path().join(".hadron").join("screenshots");
+    let screenshots_dir = root.path().join(".wb").join("screenshots");
     let target = screenshots_dir.join(name);
 
     // Ensure extension is png or jpg
@@ -101,10 +101,10 @@ impl ScreenshotManager {
     }
 
     pub fn screenshots_dir(&self) -> PathBuf {
-        self.root.path().join(".hadron").join("screenshots")
+        self.root.path().join(".wb").join("screenshots")
     }
 
-    /// Capture a screenshot and save it to `.hadron/screenshots/`.
+    /// Capture a screenshot and save it to `.wb/screenshots/`.
     pub fn capture(
         &self,
         filename: Option<&str>,
@@ -156,7 +156,7 @@ impl ScreenshotManager {
         })
     }
 
-    /// List all screenshots currently stored in `.hadron/screenshots/`.
+    /// List all screenshots currently stored in `.wb/screenshots/`.
     pub fn list(&self) -> Result<Vec<ScreenshotMetadata>, ForgeError> {
         let dir = self.screenshots_dir();
         if !dir.exists() {
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(
             valid,
             temp.path()
-                .join(".hadron")
+                .join(".wb")
                 .join("screenshots")
                 .join("test-ui.png")
         );
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(
             valid_ext,
             temp.path()
-                .join(".hadron")
+                .join(".wb")
                 .join("screenshots")
                 .join("preview.png")
         );

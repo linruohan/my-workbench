@@ -1343,7 +1343,7 @@ impl super::Chamber {
                                         .text_xs()
                                         .text_color(theme::text_muted())
                                         .child(
-                                            "Repository initialized with base commit — Quarks operate in isolated `.hadron/trees/`.",
+                                            "Repository initialized with base commit — Quarks operate in isolated `.wb/trees/`.",
                                         ),
                                 ),
                         ),
@@ -3465,7 +3465,7 @@ mod milestone_3_tests {
         assert_eq!(comp_files.candidates[0].detail, "src/app/render/chat.rs");
 
         let gitignored_files = vec![(
-            ".hadron/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md".to_string(),
+            ".wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md".to_string(),
             true,
         )];
         let comp_plans = completion_candidates("@master", 7, &quarks, &gitignored_files, &sessions)
@@ -3473,11 +3473,11 @@ mod milestone_3_tests {
         assert_eq!(comp_plans.candidates[0].label, "📄 @master.md");
         assert_eq!(
             comp_plans.candidates[0].detail,
-            ".hadron/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md"
+            ".wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md"
         );
         assert_eq!(
             comp_plans.candidates[0].new_text,
-            "@.hadron/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md "
+            "@.wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md "
         );
     }
 

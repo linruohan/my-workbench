@@ -34,7 +34,7 @@ fn test_rebase_streamer_clean_fast_forward_and_conflict() {
     run_cmd(root, &["commit", "-m", "add shared.txt"]);
 
     // Create worktree 1 (non-conflicting branch)
-    let wt1_dir = root.join(".hadron").join("trees").join("wt1");
+    let wt1_dir = root.join(".wb").join("trees").join("wt1");
     fs::create_dir_all(&wt1_dir).unwrap();
     run_cmd(
         root,
@@ -52,7 +52,7 @@ fn test_rebase_streamer_clean_fast_forward_and_conflict() {
     run_cmd(&wt1_dir, &["commit", "-m", "wt1 commit"]);
 
     // Create worktree 2 (conflicting branch on shared.txt)
-    let wt2_dir = root.join(".hadron").join("trees").join("wt2");
+    let wt2_dir = root.join(".wb").join("trees").join("wt2");
     fs::create_dir_all(&wt2_dir).unwrap();
     run_cmd(
         root,

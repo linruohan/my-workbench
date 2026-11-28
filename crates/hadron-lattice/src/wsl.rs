@@ -112,8 +112,8 @@ pub fn resolve_wsl_home_unc_path(distro: &str) -> PathBuf {
 }
 
 /// Given a workspace or field path on Windows WSL UNC (`\\wsl.localhost\<distro>\home\<user>\...`),
-/// infer the in-distro user's `~/.hadron` directory UNC path
-/// (`\\wsl.localhost\<distro>\home\<user>\.hadron`).
+/// infer the in-distro user's `~/.wb` directory UNC path
+/// (`\\wsl.localhost\<distro>\home\<user>\.wb`).
 fn wsl_user_subpath_for_field(field_path: &Path, sub: &str) -> Option<PathBuf> {
     let (distro, linux_path) = parse_wsl_unc_path(field_path)?;
     let path_str = linux_path.to_string_lossy();
@@ -123,16 +123,16 @@ fn wsl_user_subpath_for_field(field_path: &Path, sub: &str) -> Option<PathBuf> {
         "home" => {
             let user = parts.next()?;
             if sub.is_empty() {
-                format!("/home/{user}/.hadron")
+                format!("/home/{user}/.wb")
             } else {
-                format!("/home/{user}/.hadron/{sub}")
+                format!("/home/{user}/.wb/{sub}")
             }
         }
         "root" => {
             if sub.is_empty() {
-                "/root/.hadron".to_string()
+                "/root/.wb".to_string()
             } else {
-                format!("/root/.hadron/{sub}")
+                format!("/root/.wb/{sub}")
             }
         }
         _ => return None,
@@ -141,29 +141,29 @@ fn wsl_user_subpath_for_field(field_path: &Path, sub: &str) -> Option<PathBuf> {
 }
 
 /// Given a workspace or field path on Windows WSL UNC (`\\wsl.localhost\<distro>\home\<user>\...`),
-/// infer the in-distro user's `~/.hadron` directory UNC path
-/// (`\\wsl.localhost\<distro>\home\<user>\.hadron`).
+/// infer the in-distro user's `~/.wb` directory UNC path
+/// (`\\wsl.localhost\<distro>\home\<user>\.wb`).
 pub fn wsl_user_hadron_dir_for_field(field_path: &Path) -> Option<PathBuf> {
     wsl_user_subpath_for_field(field_path, "")
 }
 
 /// Given a workspace or field path on Windows WSL UNC (`\\wsl.localhost\<distro>\home\<user>\...`),
-/// infer the in-distro user's `~/.hadron/team.json` UNC path
-/// (`\\wsl.localhost\<distro>\home\<user>\.hadron\team.json`).
+/// infer the in-distro user's `~/.wb/team.json` UNC path
+/// (`\\wsl.localhost\<distro>\home\<user>\.wb\team.json`).
 pub fn wsl_catalogue_path_for_field(field_path: &Path) -> Option<PathBuf> {
     wsl_user_subpath_for_field(field_path, "team.json")
 }
 
 /// Given a workspace or field path on Windows WSL UNC (`\\wsl.localhost\<distro>\home\<user>\...`),
-/// infer the in-distro user's `~/.hadron/themes` directory UNC path
-/// (`\\wsl.localhost\<distro>\home\<user>\.hadron\themes`).
+/// infer the in-distro user's `~/.wb/themes` directory UNC path
+/// (`\\wsl.localhost\<distro>\home\<user>\.wb\themes`).
 pub fn wsl_themes_dir_for_field(field_path: &Path) -> Option<PathBuf> {
     wsl_user_subpath_for_field(field_path, "themes")
 }
 
 /// Given a workspace or field path on Windows WSL UNC (`\\wsl.localhost\<distro>\home\<user>\...`),
-/// infer the in-distro user's `~/.hadron/skills` directory UNC path
-/// (`\\wsl.localhost\<distro>\home\<user>\.hadron\skills`).
+/// infer the in-distro user's `~/.wb/skills` directory UNC path
+/// (`\\wsl.localhost\<distro>\home\<user>\.wb\skills`).
 pub fn wsl_skills_dir_for_field(field_path: &Path) -> Option<PathBuf> {
     wsl_user_subpath_for_field(field_path, "skills")
 }
@@ -282,7 +282,7 @@ pub fn wsl_unc_entry_exists(distro: &str, linux_path: &Path) -> bool {
 /// `$HOME/.volta/bin`, `/snap/bin`), or return `None` if `program` is not installed inside `distro`.
 ///
 /// Resolve the full path of `program` inside `distro` using the user's login `PATH`
-/// (including `$HOME/.nvm/versions/node/*/bin`, `$HOME/.hadron/bin`, `$HOME/.local/bin`,
+/// (including `$HOME/.nvm/versions/node/*/bin`, `$HOME/.wb/bin`, `$HOME/.local/bin`,
 /// `$HOME/.cargo/bin`, `$HOME/.gemini/antigravity-cli/bin`, `$HOME/.grok/bin`,
 /// `$HOME/.bun/bin`, `$HOME/.deno/bin`, `$HOME/.volta/bin`, `/snap/bin`), or return `None`
 /// if `program` is not installed inside `distro`.
@@ -337,7 +337,7 @@ pub fn resolve_wsl_program_path(distro: &str, program: &str) -> Option<String> {
                     }
                 }
                 for rel_dir in [
-                    ".hadron/bin",
+                    ".wb/bin",
                     ".local/bin",
                     ".cargo/bin",
                     ".gemini/antigravity-cli/bin",
@@ -381,7 +381,7 @@ pub fn resolve_wsl_program_path(distro: &str, program: &str) -> Option<String> {
                 "--exec",
                 "sh",
                 "-c",
-                "NVM_BIN=$(ls -d \"$HOME\"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1); export PATH=\"${NVM_BIN:+$NVM_BIN:}$HOME/.hadron/bin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.gemini/antigravity-cli/bin:$HOME/.grok/bin:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/.volta/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin\"; command -v \"$1\"",
+                "NVM_BIN=$(ls -d \"$HOME\"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1); export PATH=\"${NVM_BIN:+$NVM_BIN:}$HOME/.wb/bin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.gemini/antigravity-cli/bin:$HOME/.grok/bin:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/.volta/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin\"; command -v \"$1\"",
                 "sh",
                 program,
             ])
@@ -503,7 +503,7 @@ pub fn windows_drive_to_wsl_mnt(path: &Path) -> Option<PathBuf> {
 /// Check whether `program` exists inside `distro` (checking standard system and user bin directories)
 /// or on the Windows host, and return `true` if `program` should be executed via `wsl.exe` inside `distro`,
 /// or `false` if it is only installed on the Windows host (e.g. `agy.exe` on Windows when opening a WSL repo,
-/// or a Windows-host venv interpreter like `C:\Users\...\.hadron\bridges\agy\venv\Scripts\python.exe`).
+/// or a Windows-host venv interpreter like `C:\Users\...\.wb\bridges\agy\venv\Scripts\python.exe`).
 ///
 /// Results are cached per `(distro, program)` for the lifetime of the process.
 pub fn should_run_in_wsl(distro: &str, program: &str) -> bool {
@@ -589,7 +589,7 @@ pub fn wsl_user_path_env(linux_cwd: &Path) -> Option<String> {
         }
     }
     dirs.extend([
-        format!("{home}/.hadron/bin"),
+        format!("{home}/.wb/bin"),
         format!("{home}/.local/bin"),
         format!("{home}/.cargo/bin"),
         format!("{home}/.gemini/antigravity-cli/bin"),
@@ -695,7 +695,7 @@ pub fn git_command(cwd: &Path) -> std::process::Command {
     wsl_aware_command(cwd, "git")
 }
 
-/// Build the `wsl.exe` command and argument vector to launch a Linux-native `hadron-gluon`
+/// Build the `wsl.exe` command and argument vector to launch a Linux-native `wb-gluon`
 /// daemon inside `distro` on `linux_field_path`.
 pub fn build_wsl_gluon_command(
     distro: &str,
@@ -714,12 +714,12 @@ pub fn build_wsl_gluon_command(
     )
 }
 
-/// Probe whether a Linux-native `hadron-gluon` binary is installed inside `distro` and
+/// Probe whether a Linux-native `wb-gluon` binary is installed inside `distro` and
 /// opted into via `HADRON_WSL_GLUON=1` (`true`).
 ///
-/// By default on Windows, `hadron.exe` runs its own shipped sibling `hadron-gluon.exe`
+/// By default on Windows, the host app runs its own shipped sibling `wb-gluon.exe`
 /// so it uses the Windows Credential Manager keyring, Windows host CLIs, and the exact
-/// same release version as `hadron.exe` rather than an unauthenticated or stale Linux
+/// same release version as the app rather than an unauthenticated or stale Linux
 /// binary inside WSL.
 pub fn probe_wsl_gluon_binary(distro: &str) -> Option<String> {
     if !matches!(
@@ -731,7 +731,7 @@ pub fn probe_wsl_gluon_binary(distro: &str) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        resolve_wsl_program_path(distro, "hadron-gluon")
+        resolve_wsl_program_path(distro, "wb-gluon")
             .filter(|p| p.starts_with('/') && !p.starts_with("/mnt/"))
     }
     #[cfg(not(windows))]
@@ -833,38 +833,38 @@ mod tests {
         assert_eq!(
             wsl_catalogue_path_for_field(field),
             Some(PathBuf::from(
-                r"\\wsl.localhost\Ubuntu\home\user\.hadron\team.json"
+                r"\\wsl.localhost\Ubuntu\home\user\.wb\team.json"
             ))
         );
         assert_eq!(
             wsl_themes_dir_for_field(field),
             Some(PathBuf::from(
-                r"\\wsl.localhost\Ubuntu\home\user\.hadron\themes"
+                r"\\wsl.localhost\Ubuntu\home\user\.wb\themes"
             ))
         );
         assert_eq!(
             wsl_skills_dir_for_field(field),
             Some(PathBuf::from(
-                r"\\wsl.localhost\Ubuntu\home\user\.hadron\skills"
+                r"\\wsl.localhost\Ubuntu\home\user\.wb\skills"
             ))
         );
         let verbatim_field = Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project");
         assert_eq!(
             wsl_catalogue_path_for_field(verbatim_field),
             Some(PathBuf::from(
-                r"\\wsl.localhost\Ubuntu\home\user\.hadron\team.json"
+                r"\\wsl.localhost\Ubuntu\home\user\.wb\team.json"
             ))
         );
         assert_eq!(
             wsl_themes_dir_for_field(verbatim_field),
             Some(PathBuf::from(
-                r"\\wsl.localhost\Ubuntu\home\user\.hadron\themes"
+                r"\\wsl.localhost\Ubuntu\home\user\.wb\themes"
             ))
         );
         assert_eq!(
             wsl_skills_dir_for_field(verbatim_field),
             Some(PathBuf::from(
-                r"\\wsl.localhost\Ubuntu\home\user\.hadron\skills"
+                r"\\wsl.localhost\Ubuntu\home\user\.wb\skills"
             ))
         );
         assert_eq!(
@@ -1007,7 +1007,7 @@ mod tests {
         assert!(path_env.contains("/home/user/.gemini/antigravity-cli/bin"));
 
         assert!(is_windows_host_path(
-            r"C:\Users\Komputer\.hadron/bridges/agy/venv/Scripts/python.exe"
+            r"C:\Users\Komputer\.wb/bridges/agy/venv/Scripts/python.exe"
         ));
         assert!(is_windows_host_path(r"\\server\share\tool.exe"));
         assert!(is_windows_host_path("powershell.exe"));
@@ -1015,11 +1015,11 @@ mod tests {
         assert!(!is_windows_host_path("npx"));
         assert!(!is_windows_host_path("agy"));
         assert!(!is_windows_host_path(
-            "/home/user/.hadron/bridges/agy/venv/bin/python"
+            "/home/user/.wb/bridges/agy/venv/bin/python"
         ));
         assert!(!should_run_in_wsl(
             "Ubuntu-24.04",
-            r"C:\Users\Komputer\.hadron/bridges/agy/venv/Scripts/python.exe"
+            r"C:\Users\Komputer\.wb/bridges/agy/venv/Scripts/python.exe"
         ));
         assert!(should_run_in_wsl("Ubuntu", "agy"));
         assert!(should_run_in_wsl("Ubuntu", "claude"));
@@ -1029,8 +1029,8 @@ mod tests {
     fn test_build_wsl_gluon_command_and_parse_which() {
         let (prog, args) = build_wsl_gluon_command(
             "Ubuntu-24.04",
-            Path::new("/home/jake/dev/hadron/.hadron/field.jsonl"),
-            "/home/jake/.local/bin/hadron-gluon",
+            Path::new("/home/jake/dev/hadron/.wb/field.jsonl"),
+            "/home/jake/.local/bin/wb-gluon",
         );
         assert_eq!(prog, "wsl.exe");
         assert_eq!(
@@ -1039,8 +1039,8 @@ mod tests {
                 "-d",
                 "Ubuntu-24.04",
                 "--",
-                "/home/jake/.local/bin/hadron-gluon",
-                "/home/jake/dev/hadron/.hadron/field.jsonl",
+                "/home/jake/.local/bin/wb-gluon",
+                "/home/jake/dev/hadron/.wb/field.jsonl",
             ]
         );
 

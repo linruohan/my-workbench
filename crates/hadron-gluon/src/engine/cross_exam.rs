@@ -26,7 +26,7 @@
 ///
 /// Kept `&'static str` so the default `CrossExaminationLane` needs no
 /// allocation; tests exercise the same set.
-const DEFAULT_EXEMPT_PREFIXES: &[&str] = &["docs/", "doc/", ".hadron/"];
+const DEFAULT_EXEMPT_PREFIXES: &[&str] = &["docs/", "doc/", ".wb/"];
 
 /// File extensions that mark a file as documentation, configuration, or
 /// metadata — not a candidate for adversarial review. The list is deliberately
@@ -240,8 +240,8 @@ mod tests {
 
     #[test]
     fn should_cross_examine_under_hadron_dir_is_exempt() {
-        // .hadron/ is metadata, not code — plans, notes, preons.
-        let files = [".hadron/nucleus/notes/example.md", ".hadron/team.json"];
+        // .wb/ is metadata, not code — plans, notes, preons.
+        let files = [".wb/nucleus/notes/example.md", ".wb/team.json"];
         assert!(!should_cross_examine("@ollama", &files));
     }
 

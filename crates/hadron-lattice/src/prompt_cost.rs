@@ -144,10 +144,10 @@ mod tests {
 
     #[test]
     fn the_prompt_cost_dir_sits_beside_the_field() {
-        let field = Path::new("/home/user/project/.hadron/field.jsonl");
+        let field = Path::new("/home/user/project/.wb/field.jsonl");
         assert_eq!(
             prompt_cost_dir(field),
-            PathBuf::from("/home/user/project/.hadron/prompt-cost")
+            PathBuf::from("/home/user/project/.wb/prompt-cost")
         );
     }
 

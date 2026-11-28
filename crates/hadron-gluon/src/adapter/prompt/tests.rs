@@ -35,7 +35,7 @@ fn projection(task: &str) -> Projection {
         nucleus_notes_dir: std::path::PathBuf::new(),
         git_diff: String::new(),
         isolated: true,
-        cwd: std::path::PathBuf::from("/repo/.hadron/trees/agy"),
+        cwd: std::path::PathBuf::from("/repo/.wb/trees/agy"),
         mode: hadron_lattice::Mode::default(),
         active_skill: None,
         named_specifically: true,
@@ -49,7 +49,7 @@ fn projection(task: &str) -> Projection {
 fn prompt_names_the_working_directory() {
     let p = build(&projection("Build login"), &QuarkId::new("agy"));
     assert!(p.contains("# Where you are"));
-    assert!(p.contains("/repo/.hadron/trees/agy"));
+    assert!(p.contains("/repo/.wb/trees/agy"));
     assert!(
         p.contains("do NOT"),
         "and told not to touch the parent checkout"
@@ -539,19 +539,19 @@ fn the_orchestrator_must_verify_a_workers_claim_before_relaying_it() {
 #[test]
 fn a_quark_is_shown_the_nucleus_index_and_told_where_to_write_it() {
     let mut proj = projection("x");
-    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
-    proj.nucleus_notes_dir = std::path::PathBuf::from("/repo/.hadron/nucleus/notes");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
+    proj.nucleus_notes_dir = std::path::PathBuf::from("/repo/.wb/nucleus/notes");
 
     // Empty index still emits the section — otherwise the quark never learns it HAS one.
     let empty = build(&proj, &QuarkId::new("agy"));
     assert!(empty.contains("# What the swarm has learned (nucleus index)"));
     assert!(empty.contains("nothing has been recorded here yet"));
     assert!(
-        empty.contains("/repo/.hadron/nucleus/index.md"),
+        empty.contains("/repo/.wb/nucleus/index.md"),
         "it must know the path"
     );
     assert!(
-        empty.contains("/repo/.hadron/nucleus/notes"),
+        empty.contains("/repo/.wb/nucleus/notes"),
         "and where notes live"
     );
     assert!(
@@ -576,12 +576,12 @@ fn a_quark_is_shown_the_nucleus_index_and_told_where_to_write_it() {
 #[test]
 fn an_index_omitted_for_budget_is_not_reported_as_empty() {
     let mut proj = projection("x");
-    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
     proj.nucleus_index_truncated = true;
 
     let out = build(&proj, &QuarkId::new("agy"));
     assert!(out.contains(
-        "_Omitted to fit the prompt budget — open `/repo/.hadron/nucleus/index.md` on demand._"
+        "_Omitted to fit the prompt budget — open `/repo/.wb/nucleus/index.md` on demand._"
     ));
     assert!(!out.contains("nothing has been recorded here yet"));
 }
@@ -787,12 +787,12 @@ fn nucleus_recall_prompt_rendering() {
 #[test]
 fn nucleus_recall_cache_stability() {
     let mut proj1 = projection("Task A: build login");
-    proj1.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj1.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
     proj1.nucleus_index =
         "- [compiled-is-not-running](notes/compiled-is-not-running.md) — Pinned lesson".to_string();
 
     let mut proj2 = projection("Task B: fix database migration");
-    proj2.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj2.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
     proj2.nucleus_index =
         "- [compiled-is-not-running](notes/compiled-is-not-running.md) — Pinned lesson".to_string();
 
@@ -816,7 +816,7 @@ fn prompt_cache_prefix_strictly_identical_across_dynamic_turn_variations() {
     use hadron_lattice::{Actor, Kind};
 
     let mut base_proj = projection("Base task");
-    base_proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    base_proj.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
     base_proj.nucleus_index =
         "## How we get things wrong\n\n- [pinned](notes/pinned.md) — Pinned".to_string();
 
@@ -959,7 +959,7 @@ fn prompt_build_respects_nucleus_index_budget_bytes() {
 #[test]
 fn active_skill_is_rendered_after_nucleus_index_and_before_task() {
     let mut proj = projection("Do auth task");
-    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
     proj.nucleus_index = "- [lesson](notes/lesson.md) — Lesson line".to_string();
     proj.active_skill =
         Some("# Skill for this turn: test-driven-development\nWrite test first.".to_string());
@@ -1235,7 +1235,7 @@ fn without_static_prefix_strips_cached_reference_sections_and_preserves_task() {
     proj.has_forge_tools = true;
     proj.nucleus_digest = "Feature map".to_string();
     proj.nucleus_index = "- [lesson](notes/lesson.md) — hook".to_string();
-    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.hadron/nucleus/index.md");
+    proj.nucleus_index_path = std::path::PathBuf::from("/repo/.wb/nucleus/index.md");
 
     let stripped = without_static_prefix(proj);
     assert!(stripped.invariants.is_empty());

@@ -117,8 +117,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "team-brainstorm", detail: "Kick off brainstorming with the whole team", arity: Arity::Body, arg: ArgSource::None, listed: true },
     Command { name: "debate", detail: "Debate an architectural question or trade-off without code changes (e.g. /debate @Quark SQLite vs sled)", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "team-debate", detail: "Kick off multi-quark dialectic debate on architectural trade-offs", arity: Arity::Body, arg: ArgSource::None, listed: true },
-    Command { name: "settle", detail: "Settle an ongoing debate, recording an ADR in .hadron/docs/adr/ (e.g. /settle Adopt SQLite for metadata)", arity: Arity::Body, arg: ArgSource::None, listed: true },
-    Command { name: "adr", detail: "Settle an ongoing debate, recording an ADR in .hadron/docs/adr/", arity: Arity::Body, arg: ArgSource::None, listed: false },
+    Command { name: "settle", detail: "Settle an ongoing debate, recording an ADR in .wb/docs/adr/ (e.g. /settle Adopt SQLite for metadata)", arity: Arity::Body, arg: ArgSource::None, listed: true },
+    Command { name: "adr", detail: "Settle an ongoing debate, recording an ADR in .wb/docs/adr/", arity: Arity::Body, arg: ArgSource::None, listed: false },
     Command { name: "writing-plans", detail: "Turn a settled design into an implementation plan", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "executing-plans", detail: "Work through an existing plan, task by task", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "reviewing-work", detail: "Review code changes, plans, or commit diffs", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
@@ -133,8 +133,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "using-superpowers", detail: "Discover and activate available superpowers/skills", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "verification-before-completion", detail: "Run verification commands before claiming work is complete", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "writing-skills", detail: "Create, edit, or verify custom skill procedures", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
-    Command { name: "release", detail: "Execute project release procedure in .hadron/nucleus/release.md", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
-    Command { name: "absorb", detail: "Absorb foreign assistant skills, memories, lessons, rules, and plans into .hadron/", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
+    Command { name: "release", detail: "Execute project release procedure in .wb/nucleus/release.md", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
+    Command { name: "absorb", detail: "Absorb foreign assistant skills, memories, lessons, rules, and plans into .wb/", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "security-review", detail: "Audit authentication, permissions, secrets, and injection vectors", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "security", detail: "Audit security boundaries, secrets, and injection vectors", arity: Arity::Body, arg: ArgSource::Quark, listed: false },
     Command { name: "architecture-audit", detail: "Audit component decoupling, SSOT integrity, and type-system invariants", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
@@ -208,7 +208,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "team-review", detail: "Multi-quark peer review board across security, architecture, and simplicity", arity: Arity::Body, arg: ArgSource::Quark, listed: true },
     Command { name: "bakeoff", detail: "Spawn speculative tournament bake-off across competing solutions", arity: Arity::Body, arg: ArgSource::None, listed: true },
     Command { name: "grill-me", detail: "Interactive requirement alignment interview before plan synthesis", arity: Arity::Body, arg: ArgSource::None, listed: true },
-    Command { name: "research", detail: "Research a topic or architecture and save findings to .hadron/docs/research/", arity: Arity::Body, arg: ArgSource::None, listed: true },
+    Command { name: "research", detail: "Research a topic or architecture and save findings to .wb/docs/research/", arity: Arity::Body, arg: ArgSource::None, listed: true },
     Command { name: "home", detail: "Open Quark personal home & telemetry dashboard (e.g. /home @Quark)", arity: Arity::Line, arg: ArgSource::Quark, listed: true },
     Command { name: "canvas", detail: "Open interactive GPUI canvas preview", arity: Arity::None, arg: ArgSource::None, listed: true },
     Command { name: "intercom", detail: "Toggle audio intercom voice bridge (e.g. /intercom or /intercom @Quark)", arity: Arity::Line, arg: ArgSource::Quark, listed: true },
@@ -265,7 +265,7 @@ impl MemoryType {
 }
 
 /// How long an index hook may be. The index is force-loaded into every prompt of
-/// every turn, and `.hadron/nucleus/index.md` reached 46 KB against the engine's
+/// every turn, and `.wb/nucleus/index.md` reached 46 KB against the engine's
 /// 32 KB `NUCLEUS_INDEX_BUDGET` — past which the prompt sends a per-section COUNT
 /// and no lesson text at all. An unbounded hook is that failure with extra steps,
 /// so the bound lives in the writer.
@@ -365,7 +365,7 @@ pub fn command_with_skills(name: &str, custom_skills: &[String]) -> Option<&'sta
 }
 
 /// Look a command up by the name typed after the slash, including custom skills
-/// resolved from `<repo_root>/.hadron/skills/*.md` and `~/.hadron/skills/*.md`.
+/// resolved from `<repo_root>/.wb/skills/*.md` and `~/.wb/skills/*.md`.
 pub fn command_in(name: &str, repo_root: Option<&std::path::Path>) -> Option<&'static Command> {
     if let Some(cmd) = COMMANDS.iter().find(|c| c.name == name) {
         return Some(cmd);
@@ -387,10 +387,10 @@ pub fn command_in(name: &str, repo_root: Option<&std::path::Path>) -> Option<&'s
 fn custom_skill_dirs(repo_root: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Some(root) = repo_root {
-        dirs.push(root.join(".hadron").join("skills"));
+        dirs.push(root.join(".wb").join("skills"));
     }
     if let Ok(cwd) = std::env::current_dir() {
-        let cwd_skills = cwd.join(".hadron").join("skills");
+        let cwd_skills = cwd.join(".wb").join("skills");
         if !dirs.contains(&cwd_skills) {
             dirs.push(cwd_skills);
         }
@@ -460,7 +460,7 @@ pub fn help_body() -> String {
 }
 
 /// The markdown `/help` prints, including any custom skills discovered in `repo_root`
-/// or `~/.hadron/skills/`.
+/// or `~/.wb/skills/`.
 pub fn help_body_with_skills(repo_root: Option<&std::path::Path>) -> String {
     let mut out = String::from("**Chat commands**\n\n");
     for c in COMMANDS.iter().filter(|c| c.listed) {
@@ -822,10 +822,10 @@ pub fn team_body(roster: &[crate::model::RosterRow]) -> String {
 /// Format `/nucleus` output.
 pub fn nucleus_body(workspace_root: &std::path::Path, budget_bytes: usize) -> String {
     let index_path = workspace_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("index.md");
-    let notes_dir = workspace_root.join(".hadron").join("nucleus").join("notes");
+    let notes_dir = workspace_root.join(".wb").join("nucleus").join("notes");
 
     let (index_bytes, lessons_count) = if let Ok(content) = std::fs::read_to_string(&index_path) {
         let bytes = content.len();
@@ -898,7 +898,7 @@ pub fn doctor_body(repo_root: &std::path::Path, roster: &[crate::model::RosterRo
     let mut out = String::from("**Hadron Diagnostics System Report**\n\n");
 
     // 1. Daemon lock check
-    let lock_path = repo_root.join(".hadron").join("gluon.lock");
+    let lock_path = repo_root.join(".wb").join("gluon.lock");
     let daemon_status = match std::fs::read_to_string(&lock_path)
         .ok()
         .and_then(|c| c.trim().parse::<u32>().ok())
@@ -912,7 +912,7 @@ pub fn doctor_body(repo_root: &std::path::Path, roster: &[crate::model::RosterRo
     out.push_str(&format!("- **Daemon**: {}\n", daemon_status));
 
     // 2. Nucleus index budget check
-    let index_path = repo_root.join(".hadron").join("nucleus").join("index.md");
+    let index_path = repo_root.join(".wb").join("nucleus").join("index.md");
     let index_bytes = std::fs::metadata(&index_path).map(|m| m.len()).unwrap_or(0);
     let team = hadron_lattice::load_team_for_repo(repo_root);
     let budget_bytes = hadron_gluon::nucleus_status::resolve_budget_bytes(&team);
@@ -950,13 +950,13 @@ pub fn doctor_body(repo_root: &std::path::Path, roster: &[crate::model::RosterRo
     out
 }
 
-/// Compacts `.hadron/nucleus/index.md` by removing orphan pointers pointing to non-existent notes.
+/// Compacts `.wb/nucleus/index.md` by removing orphan pointers pointing to non-existent notes.
 pub fn compact_nucleus_index(workspace_root: &std::path::Path, _target_arg: &str) -> String {
     let index_path = workspace_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("index.md");
-    let notes_dir = workspace_root.join(".hadron").join("nucleus").join("notes");
+    let notes_dir = workspace_root.join(".wb").join("nucleus").join("notes");
 
     let content = match std::fs::read_to_string(&index_path) {
         Ok(c) => c,
@@ -1174,7 +1174,7 @@ pub fn theme_body(arg: &str, current: crate::config::ThemePreset) -> String {
 
         let custom_themes = crate::theme::load_custom_themes();
         if !custom_themes.is_empty() {
-            out.push_str("\n**Custom Themes (`~/.hadron/themes/`):**\n");
+            out.push_str("\n**Custom Themes (`~/.wb/themes/`):**\n");
             for t in &custom_themes {
                 let is_active = active_custom
                     .as_ref()
@@ -1250,7 +1250,7 @@ fn contains_path_escape(s: &str) -> bool {
 /// Turn a `/add-skill <name>` argument into a safe `<name>.md` filename —
 /// never a path. `load_skills` keys a skill by its front-matter `name:`, not
 /// its filename, so this only needs to be a filesystem-safe label; it must
-/// never let the human's typed name escape `.hadron/skills/` (e.g. `../..`).
+/// never let the human's typed name escape `.wb/skills/` (e.g. `../..`).
 pub fn add_skill_filename(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty() || name == "." || contains_path_escape(name) {
@@ -1287,8 +1287,8 @@ pub fn add_skill_written_body(
 }
 
 /// Validate whether a session argument for `/export` is safe — rejects any
-/// input that could escape `.hadron/exports/` (the write path) or
-/// `.hadron/sessions/` (the read path). An empty argument is safe: it means
+/// input that could escape `.wb/exports/` (the write path) or
+/// `.wb/sessions/` (the read path). An empty argument is safe: it means
 /// "the current session", not a path component.
 pub fn is_safe_session_arg(arg: &str) -> bool {
     let s = arg.trim();
@@ -2801,7 +2801,7 @@ mod tests {
         let files = vec![
             ("target/debug/hadron".to_string(), true),
             ("node_modules/".to_string(), true),
-            (".hadron/assets/screenshot.png".to_string(), true),
+            (".wb/assets/screenshot.png".to_string(), true),
         ];
         let c = completion_candidates("@target", 7, &[], &files, &[]).expect("has rows");
         assert_eq!(c.candidates.len(), 1);
@@ -2816,13 +2816,13 @@ mod tests {
         assert_eq!(c_dir.candidates[0].detail, "node_modules/");
         assert!(c_dir.candidates[0].is_ignored);
 
-        // Leading "./" query normalization (`@./hadron/assets` matches `.hadron/assets/screenshot.png`)
+        // Leading "./" query normalization (`@./hadron/assets` matches `.wb/assets/screenshot.png`)
         let c_dot_slash =
             completion_candidates("@./hadron/assets", 16, &[], &files, &[]).expect("has rows");
         assert_eq!(c_dot_slash.candidates.len(), 1);
         assert_eq!(
             c_dot_slash.candidates[0].detail,
-            ".hadron/assets/screenshot.png"
+            ".wb/assets/screenshot.png"
         );
         assert!(c_dot_slash.candidates[0].is_ignored);
     }
@@ -3430,7 +3430,7 @@ mod tests {
         assert!(!would_exceed_index_budget(989, line, 1000));
     }
 
-    /// The whole failure this format exists to prevent: `.hadron/nucleus/index.md`
+    /// The whole failure this format exists to prevent: `.wb/nucleus/index.md`
     /// grew to 46 KB against a 32 KB budget, so every quark got a per-section COUNT
     /// instead of any lesson at all. A hook that can grow without bound is that bug
     /// with extra steps, so the cap lives in the writer, not in a reviewer's memory.
@@ -3519,11 +3519,11 @@ mod tests {
         let body = whoami_body(
             &[],
             std::path::Path::new("/workspace"),
-            std::path::Path::new("/workspace/.hadron/field.jsonl"),
+            std::path::Path::new("/workspace/.wb/field.jsonl"),
         );
         assert!(body.contains("Workspace Root"));
         assert!(body.contains("/workspace"));
-        assert!(body.contains("/workspace/.hadron/field.jsonl"));
+        assert!(body.contains("/workspace/.wb/field.jsonl"));
     }
 
     #[test]
@@ -3598,7 +3598,7 @@ mod tests {
     #[test]
     fn nucleus_body_uses_resolved_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus_dir = dir.path().join(".hadron").join("nucleus");
+        let nucleus_dir = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus_dir).unwrap();
         std::fs::write(
             nucleus_dir.join("index.md"),
@@ -3618,12 +3618,12 @@ mod tests {
     #[test]
     fn nucleus_body_counts_only_what_the_engine_calls_a_lesson() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus_dir = dir.path().join(".hadron").join("nucleus");
+        let nucleus_dir = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus_dir).unwrap();
         std::fs::write(
             nucleus_dir.join("index.md"),
             "# Memory index\n\n\
-             - The index lives at `.hadron/nucleus/index.md` — prose, not a lesson.\n\
+             - The index lives at `.wb/nucleus/index.md` — prose, not a lesson.\n\
              - Notes live in `notes/` — also prose.\n\n\
              ## A section\n\n\
              - [one](notes/one.md) — hook\n\
@@ -3650,7 +3650,7 @@ mod tests {
     #[test]
     fn doctor_body_respects_configured_nucleus_budget_in_team_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let hadron = tmp.path().join(".hadron");
+        let hadron = tmp.path().join(".wb");
         let nucleus = hadron.join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
         std::fs::write(
@@ -3981,7 +3981,7 @@ mod tests {
     #[test]
     fn test_compact_nucleus_index_removes_invalid_pointers() {
         let dir = std::env::temp_dir().join("test_compact_nucleus");
-        let n_dir = dir.join(".hadron").join("nucleus");
+        let n_dir = dir.join(".wb").join("nucleus");
         let _ = std::fs::create_dir_all(n_dir.join("notes"));
         let index_path = n_dir.join("index.md");
         let _ = std::fs::write(
@@ -4164,7 +4164,7 @@ mod tests {
     #[test]
     fn custom_skill_discovery_and_completion_via_repo_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let skills_dir = tmp.path().join(".hadron").join("skills");
+        let skills_dir = tmp.path().join(".wb").join("skills");
         std::fs::create_dir_all(&skills_dir).expect("create skills dir");
         std::fs::write(
             skills_dir.join("joke.md"),

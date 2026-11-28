@@ -834,7 +834,7 @@ impl super::Chamber {
                                             })),
                                     )
                                     .child(
-                                        text_button("btn-save-theme", "Save to ~/.hadron/themes")
+                                        text_button("btn-save-theme", "Save to ~/.wb/themes")
                                             .bg(theme::bg_surface_raised())
                                             .cursor_pointer()
                                             .on_click(cx.listener(|this, _, _window, cx| {
@@ -857,7 +857,7 @@ impl super::Chamber {
                                                     let _ = theme::save_custom_theme(custom);
                                                     let _ = config::save(&this.prefs);
                                                     theme::set_active_custom_theme(Some(custom.clone()));
-                                                    let toast_msg = format!("Saved theme '{}' to ~/.hadron/themes/{}.json", custom.name, custom.id);
+                                                    let toast_msg = format!("Saved theme '{}' to ~/.wb/themes/{}.json", custom.name, custom.id);
                                                     this.show_toast(
                                                         toasts::ToastKind::Success,
                                                         toast_msg,
@@ -1139,7 +1139,7 @@ impl super::Chamber {
                 .child(settings_field(
                     "Nucleus index budget",
                     Some(
-                        "How big .hadron/nucleus/index.md may grow before a quark is shown \
+                        "How big .wb/nucleus/index.md may grow before a quark is shown \
                          counts instead of the index.",
                     ),
                     self.nucleus_budget_select(window, cx),
@@ -1571,7 +1571,7 @@ impl super::Chamber {
                 .child(settings_field(
                     "Daemon IPC & WSL Bridge",
                     Some(
-                        "Live JSON-RPC 2.0 loopback channel (.hadron/gluon.rpc) for <1ms daemon wakeups and WSL2 native daemon bridge status.",
+                        "Live JSON-RPC 2.0 loopback channel (.wb/gluon.rpc) for <1ms daemon wakeups and WSL2 native daemon bridge status.",
                     ),
                     div()
                         .text_xs()
@@ -1596,7 +1596,7 @@ impl super::Chamber {
                 ))
                 .child(settings_field(
                     "Close Gluon on Exit",
-                    Some("Terminate the hadron-gluon daemon when the Chamber window closes."),
+                    Some("Terminate the wb-gluon daemon when the Chamber window closes."),
                     Switch::new("close-gluon-on-exit")
                         .checked(self.prefs.close_gluon_on_exit)
                         .on_click(cx.listener(|this, checked, _window, cx| {

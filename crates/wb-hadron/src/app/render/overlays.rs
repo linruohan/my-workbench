@@ -24,10 +24,10 @@ const RELEASES: &[Release] = &[
         date: Some("2026-11-25"),
         added: &[
             "Affected-Crate Smart Gate & Live Merge-Gate Streaming (hadron-forge, hadron-lattice, hadron-gluon, hadron-chamber): Added zero-subprocess transitive workspace crate closure (resolve_affected_workspace_crates) in detect_affected_runner, streamed merge-gate test lines over RpcPushEvent::GateOutput with unified parse_cargo_test_line, and added the Mission > Gate live Test Explorer UI with filter pills, per-test Dispatch Fix, and Retry Gate",
-            "Headless Swarm MCP Bridge (hadron-gluon): Added hadron-gluon --mcp stdio MCP bridge exposing hadron_swarm_status, hadron_swarm_roster, hadron_swarm_dispatch, hadron_field_poll, and hadron_daemon_wake over bounded loopback .hadron/gluon.rpc",
+            "Headless Swarm MCP Bridge (hadron-gluon): Added hadron-gluon --mcp stdio MCP bridge exposing hadron_swarm_status, hadron_swarm_roster, hadron_swarm_dispatch, hadron_field_poll, and hadron_daemon_wake over bounded loopback .wb/gluon.rpc",
             "Rule 1 Liveness & Evidence-Claim Gate Advisories (hadron-gatekeeper, hadron-gluon): Added audit_diff_liveness and audit_evidence_claims wired as non-blocking merge-gate advisories",
             "GitHub Issue & PR Review Dispatch Intake (hadron-chamber): Added off-thread gh issue/PR review detail fetchers and [Dispatch] / [Dispatch Fix] buttons in Git > Remote & Issues",
-            "Nucleus Lesson Usage Ledger & Upgraded DreamDaemon (hadron-lattice, hadron-forge-mcp, hadron-gluon, hadron-chamber): Added schema-v1 .hadron/nucleus/usage.json ledger wired into forge-mcp query_nucleus/read_file, upgraded DreamDaemon to audit orphans, dead links, duplicate slugs, and cold notes on an hourly idle hook, and enriched /dream reporting",
+            "Nucleus Lesson Usage Ledger & Upgraded DreamDaemon (hadron-lattice, hadron-forge-mcp, hadron-gluon, hadron-chamber): Added schema-v1 .wb/nucleus/usage.json ledger wired into forge-mcp query_nucleus/read_file, upgraded DreamDaemon to audit orphans, dead links, duplicate slugs, and cold notes on an hourly idle hook, and enriched /dream reporting",
         ],
         changed: &[
             "Dead-Code Pruning (hadron-gatekeeper, hadron-lattice): Pruned zero-caller record_mutation_run and HeadlessReplayer/BisectResult (replay.rs)",
@@ -40,14 +40,14 @@ const RELEASES: &[Release] = &[
         added: &[],
         changed: &[],
         fixed: &[
-            "Loopback Enforcement & Bounded JSON-RPC Frame Deserialization (hadron-lattice, hadron-gluon, hadron-chamber): Enforced LoopbackRpcAddr and 4 KiB metadata / 16 MiB frame caps across .hadron/gluon.rpc, added #[serde(deny_unknown_fields)] and JSON-RPC 2.0 response-ID correlation in JsonRpcCodec::decode_response, and bounded socket reads via Read::take in rpc_client and RpcServer (remediating CodeQL #2)",
+            "Loopback Enforcement & Bounded JSON-RPC Frame Deserialization (hadron-lattice, hadron-gluon, hadron-chamber): Enforced LoopbackRpcAddr and 4 KiB metadata / 16 MiB frame caps across .wb/gluon.rpc, added #[serde(deny_unknown_fields)] and JSON-RPC 2.0 response-ID correlation in JsonRpcCodec::decode_response, and bounded socket reads via Read::take in rpc_client and RpcServer (remediating CodeQL #2)",
         ],
     },
     Release {
         version: "0.33.53",
         date: Some("2026-11-13"),
         added: &[
-            "Cross-Crate SSOT Helpers, Real /scout Search & 24h ACP Registry Refresh (hadron-lattice, hadron-gluon): Added split_model_effort_suffix, is_1m_context_model, Seat::accepts_effort, and delimiter-bounded cmdline_matches_quark_id in hadron-lattice and routed Chamber/Gluon callers onto them; wired real read-only workspace keyword search in /scout (skipping symlinks/binaries/.hadron/.git/target and >512 KiB files) and 24h background ACP registry refresh (fetch_and_cache_registry)",
+            "Cross-Crate SSOT Helpers, Real /scout Search & 24h ACP Registry Refresh (hadron-lattice, hadron-gluon): Added split_model_effort_suffix, is_1m_context_model, Seat::accepts_effort, and delimiter-bounded cmdline_matches_quark_id in hadron-lattice and routed Chamber/Gluon callers onto them; wired real read-only workspace keyword search in /scout (skipping symlinks/binaries/.wb/.git/target and >512 KiB files) and 24h background ACP registry refresh (fetch_and_cache_registry)",
         ],
         changed: &[
             "Borderless Chat-Inspector Split, Off-Thread UI Polling, Native agy acp Config & Dead-Code Pruning (hadron-chamber, hadron-gluon, hadron-forge): Replaced h_resizable with a borderless floating-island flex split + invisible drag splitter, moved 3-way diff, plan DAG, nucleus graph, bridge checks, and seq-guarded ACP probes off the UI thread, updated native agy acp dynamic config_options refresh + Gemini 4 Hydrogen/Orchestrator fallbacks + WSL UNC translation, and pruned dap, replay.rs, unused Gluon/Chamber modules, and all baseline warnings",
@@ -74,7 +74,7 @@ const RELEASES: &[Release] = &[
             "Loopback daemon/subscribe Push RPC, Bake-Off Persistence, Build-Cache Binding & Minimized Gate Diagnostics (hadron-lattice, hadron-gluon, hadron-chamber): Added daemon/subscribe + RpcPushEvent push notifications waking FieldPoll within 100ms, BakeOffManager::save_active tournament persistence, BuildCacheMesh::record_worktree_binding, and TestFailureMinimizer + SynthesizedInvariant gate diagnostics",
         ],
         changed: &[
-            "Decoupled 256 KiB Pipe Prompt Budget, Ranked Nucleus Shedding, Argv Spillover & Native agy acp Preset (hadron-gluon, hadron-lattice): Added SAFE_PIPE_PROMPT_BYTES (256 KiB) for ACP/stdin CLIs, spilled oversized argv prompts to .hadron/prompts/<id>.md, re-ranked nucleus_index to 2 KiB before shedding, switched Antigravity ACP preset to native agy acp, and added --effort on CliSpec::agy()",
+            "Decoupled 256 KiB Pipe Prompt Budget, Ranked Nucleus Shedding, Argv Spillover & Native agy acp Preset (hadron-gluon, hadron-lattice): Added SAFE_PIPE_PROMPT_BYTES (256 KiB) for ACP/stdin CLIs, spilled oversized argv prompts to .wb/prompts/<id>.md, re-ranked nucleus_index to 2 KiB before shedding, switched Antigravity ACP preset to native agy acp, and added --effort on CliSpec::agy()",
         ],
         fixed: &[
             "agy --statusline Telemetry & Quota Persistence, 1M Claude 5.5 Context Gauge, and Native Windows Maximize/Restore (hadron-gluon, hadron-chamber): Wired --statusline shim and per-turn session --settings + HADRON_STATUSLINE_OUT capture/quota persistence for agy seats (stripping email/plan_tier PII), restored 1M context window sizing for agy and Claude 5.5 / Opus 4.6+ models, and routed Windows titlebar buttons through WindowControlArea::{Min, Max, Close} for native maximize/restore",
@@ -105,7 +105,7 @@ const RELEASES: &[Release] = &[
             "Live Worktree Diffs & Refresh (hadron-chamber): vcs::branch_diff includes uncommitted and untracked worktree changes, the selected worktree diff is polled in the background WorkspaceScan::gather, and Git > Worktrees gains a Refresh button",
         ],
         changed: &[
-            "Shared Orchestrator Badge & Configured Nucleus Budget (hadron-chamber, hadron-forge, hadron-lattice, hadron-gluon): widgets::orchestrator_badge is shared by the Roster and Processes overlay, and the configured nucleus_index_budget_kb from .hadron/team.json is resolved in the nucleus linters, doctor_body, and quark prompts/skills",
+            "Shared Orchestrator Badge & Configured Nucleus Budget (hadron-chamber, hadron-forge, hadron-lattice, hadron-gluon): widgets::orchestrator_badge is shared by the Roster and Processes overlay, and the configured nucleus_index_budget_kb from .wb/team.json is resolved in the nucleus linters, doctor_body, and quark prompts/skills",
         ],
         fixed: &[
             "/command & @mention Coloring on Upstream gpui-component (hadron-chamber): Resolved @human, @quark, and @alias mentions now render as bold hadron://mention/ links and bare /commands as bold amber inline code (code spans and paths like src/app.rs or /home/user untouched), markdown_style's inline_code highlight is theme::file_link() on bg_elevated, and handle_chat_link_click ignores hadron:// URLs",
@@ -211,7 +211,7 @@ const RELEASES: &[Release] = &[
         date: Some("2026-11-03"),
         added: &[
             "Live Mission Plan Refresh, Interactive DAG Dispatch & Remote Branches View: Polled workspace plan content and branch fingerprint while RightRailTab::Mission is open with manual and tab-switch refresh, added interactive DAG wave/task dispatch and prompt anatomy HUD, and added remote branch listing with All/Local/Remote filter pills and a Fetch button in Git > Branches",
-            "Shared Inter-Quark Clipboard, /clip Command & LoopWatchdog: Added hadron_lattice::clipboard (.hadron/clipboard.json) with hadron_forge_clip_put/get/list MCP tools and the /clip slash command (list, put, get, clear), plus hadron_gluon::watchdog::LoopWatchdog in LocalQuark and CliQuark streaming loops",
+            "Shared Inter-Quark Clipboard, /clip Command & LoopWatchdog: Added hadron_lattice::clipboard (.wb/clipboard.json) with hadron_forge_clip_put/get/list MCP tools and the /clip slash command (list, put, get, clear), plus hadron_gluon::watchdog::LoopWatchdog in LocalQuark and CliQuark streaming loops",
             "Session Index Caching, Async /clear Decoupling & Direct Conversational Routing: Cached archived session indices in FieldModel, decoupled /clear UI reset from background worktree cleanup, and suppressed @orchestrator tags on direct casual human turns via Projection::from_human_directly",
         ],
         changed: &[
@@ -232,7 +232,7 @@ const RELEASES: &[Release] = &[
             "Legacy Roles Removal: Stripped deprecated roles, exclusive, role_body, and preferred_role fields and routing helpers across hadron-lattice, hadron-gluon, and hadron-chamber",
         ],
         fixed: &[
-            "Nucleus Orphan/Dead-Link Alignment, Live Disk Auto-Refresh & Blocked-Branch Routing: Unified orphan and dead-link detection across Git > Remote & Issues and Visualiser > Nucleus Graph with automatic refresh on .hadron/nucleus/ disk edits, and fixed CancelSlot WIP loops, park_blocked PermissionGrant recovery, and blocked-branch follow-up excitation",
+            "Nucleus Orphan/Dead-Link Alignment, Live Disk Auto-Refresh & Blocked-Branch Routing: Unified orphan and dead-link detection across Git > Remote & Issues and Visualiser > Nucleus Graph with automatic refresh on .wb/nucleus/ disk edits, and fixed CancelSlot WIP loops, park_blocked PermissionGrant recovery, and blocked-branch follow-up excitation",
         ],
     },
     Release {
@@ -261,7 +261,7 @@ const RELEASES: &[Release] = &[
         version: "0.33.34",
         date: Some("2026-11-01"),
         added: &[
-            "Persistent Disk Caching & Startup Revalidation for Dependencies and Nucleus Graph: Added VisualizerGraphsDiskCache (.hadron/cache/visualizer_graphs.json) with FNV-1a metadata fingerprinting, wired Chamber::warm_visualizer_graphs at startup and on workspace/nucleus scans to hydrate cached graphs immediately and rebuild only stale graphs in the background, persisted Nucleus Graph remediation updates, and added a Checking changes badge during background revalidation",
+            "Persistent Disk Caching & Startup Revalidation for Dependencies and Nucleus Graph: Added VisualizerGraphsDiskCache (.wb/cache/visualizer_graphs.json) with FNV-1a metadata fingerprinting, wired Chamber::warm_visualizer_graphs at startup and on workspace/nucleus scans to hydrate cached graphs immediately and rebuild only stale graphs in the background, persisted Nucleus Graph remediation updates, and added a Checking changes badge during background revalidation",
         ],
         changed: &[
             "Stats Tab Cleanup: Removed the redundant Milestone Timeline stepper card from Chamber::stats_view",
@@ -326,7 +326,7 @@ const RELEASES: &[Release] = &[
         version: "0.33.28",
         date: Some("2026-10-31"),
         added: &[
-            "Daemon-First JSON-RPC IPC Server & <1ms Chamber Wakeups: Added RpcServer::bind_and_serve on 127.0.0.1:0 with .hadron/gluon.rpc discovery, daemon/wake, field/poll, engine/status, and swarm/turn/dispatch handlers, wired rpc_client::notify_daemon_wake on message/command submit, and added live Daemon IPC & WSL Bridge status in Settings > Environment",
+            "Daemon-First JSON-RPC IPC Server & <1ms Chamber Wakeups: Added RpcServer::bind_and_serve on 127.0.0.1:0 with .wb/gluon.rpc discovery, daemon/wake, field/poll, engine/status, and swarm/turn/dispatch handlers, wired rpc_client::notify_daemon_wake on message/command submit, and added live Daemon IPC & WSL Bridge status in Settings > Environment",
             "WSL-Native hadron-gluon Daemon Bridge & Cross-Boundary Spawning: Added probe_wsl_gluon_binary, build_wsl_gluon_command, spawn_gluon_for_field, and terminate_gluon_in_dir so WSL UNC workspaces run an in-distro Linux hadron-gluon daemon on native ext4/inotify when installed with automatic host fallback",
             "Unified Adapter Stream Telemetry Sink & ACP Vendor Preference: Added AdapterStreamEvent and TurnTelemetrySink across ACP, CLI, and Local adapters plus vendor_prefers_acp in the adapter registry",
         ],
@@ -349,7 +349,7 @@ const RELEASES: &[Release] = &[
         added: &[],
         changed: &[],
         fixed: &[
-            "WSL UNC Tool & ACP Bridge Resolution and cli-agy Authentication Fix: Added fast-path WSL UNC binary discovery in resolve_wsl_program_path, stopped caching transient None/false lookups in should_run_in_wsl and is_wsl_bwrap_available, routed bare POSIX tools (agy, claude, codex, git) and in-distro .hadron/bridges/ targets through wsl.exe so Windows host agy.exe never triggers an OAuth browser timeout on WSL repos, and ran probe_cli_models in std::env::temp_dir()",
+            "WSL UNC Tool & ACP Bridge Resolution and cli-agy Authentication Fix: Added fast-path WSL UNC binary discovery in resolve_wsl_program_path, stopped caching transient None/false lookups in should_run_in_wsl and is_wsl_bwrap_available, routed bare POSIX tools (agy, claude, codex, git) and in-distro .wb/bridges/ targets through wsl.exe so Windows host agy.exe never triggers an OAuth browser timeout on WSL repos, and ran probe_cli_models in std::env::temp_dir()",
             "Plan List Date-Prefix Sort Alignment: Updated newest_plan_from_list_with_mtime to sort plan files by leading YYYY-MM-DD- date prefix before falling back to modification time",
             "Release CI macOS Runner Migration: Migrated x86_64-apple-darwin and aarch64-apple-darwin release build jobs from retired macos-14 runner images to macos-15",
         ],
@@ -394,7 +394,7 @@ const RELEASES: &[Release] = &[
         added: &[],
         changed: &[],
         fixed: &[
-            "WSL UNC Path Resolution, Shared .hadron Worktree Routing & ACP WSLENV Forwarding: Resolved WSL UNC paths across worktree cleanup, forge/MCP shared .hadron buses, plans, ledgers, liveness, themes, and skills, and forwarded WSLENV to ACP sessions",
+            "WSL UNC Path Resolution, Shared .wb Worktree Routing & ACP WSLENV Forwarding: Resolved WSL UNC paths across worktree cleanup, forge/MCP shared .wb buses, plans, ledgers, liveness, themes, and skills, and forwarded WSLENV to ACP sessions",
             "Portable Test Fixtures & RedTeamAuditor Hygiene: Replaced hardcoded developer paths across workspace tests with portable fixtures, propagated remove_file errors in delete_custom_theme, and used Path::parent in mermaid tests",
         ],
     },
@@ -403,7 +403,7 @@ const RELEASES: &[Release] = &[
         date: Some("2026-10-29"),
         added: &[
             "Multi-Turn Token Efficiency, Resident Delta Prompts & Cache Telemetry: Moved static response rules into build_cache_stable_prefix, stripped cached static prefix on resumed CLI turns, split LocalQuark prompt into system/user messages with cache_read/cache_write spend accounting, wired SlidingContextPruner and prompt_cost::save across CLI/HTTP adapters, and extracted cache_read_input_tokens in parse_agy_statusline",
-            "Frozen v1 On-Disk Schemas & Automatic v0-to-v1 Migration: Froze schema v1 for field.jsonl, team.json, schedules.json, and ~/.hadron/themes/*.json with seamless v0 migration and forward-version guards",
+            "Frozen v1 On-Disk Schemas & Automatic v0-to-v1 Migration: Froze schema v1 for field.jsonl, team.json, schedules.json, and ~/.wb/themes/*.json with seamless v0 migration and forward-version guards",
         ],
         changed: &[
             "Refined README.md Tagline & 6-Pillar Key Superpowers: Updated header tagline and streamlined Key Superpowers into 6 problem-first pillars including Token-Efficient Swarm Economics",
@@ -467,7 +467,7 @@ const RELEASES: &[Release] = &[
         date: Some("2026-10-27"),
         added: &[
             "Parallel Swarm Self-Delegation (@self), Mid-Turn Live Dispatch & Concurrent Worktree Provisioning: Added @self and parallel @orchestrator self-delegation, immediate mid-turn worker dispatch on tool start, and concurrent spawn_blocking worktree provisioning",
-            "Recurring & One-Shot Schedules Engine, /schedule Commands & Watchdog/Git Settings: Added .hadron/schedules.toml persistence, 30s schedule ticker, /schedule commands, overdue schedule banners, and Watchdog/Git settings controls",
+            "Recurring & One-Shot Schedules Engine, /schedule Commands & Watchdog/Git Settings: Added .wb/schedules.toml persistence, 30s schedule ticker, /schedule commands, overdue schedule banners, and Watchdog/Git settings controls",
             "Composer Markdown Preview, Mid-Sentence Word Suggestions & Wave DAG Scroll Isolation: Added live composer Markdown preview, mid-sentence word completions, and isolated scroll handling in the Mission Plan Wave DAG",
         ],
         changed: &[],
@@ -499,7 +499,7 @@ const RELEASES: &[Release] = &[
         changed: &[],
         fixed: &[
             "Mission Plan Wave DAG Scroll & Cache Stability: Cached parsed Plan DAGs, landed commits, and checkbox progress in CachedPlanDag with persistent ScrollHandles, cross-axis max_h bounds on #dag-waves-row, and (commit <sha>) checkbox parsing",
-            "Repo-Root Custom Skill Discovery & @target Punctuation Stripping: Threaded repo_root into custom skill discovery (.hadron/skills/*.md) and stripped trailing punctuation (,.;:!?) from @target mentions in /steer and chat routing",
+            "Repo-Root Custom Skill Discovery & @target Punctuation Stripping: Threaded repo_root into custom skill discovery (.wb/skills/*.md) and stripped trailing punctuation (,.;:!?) from @target mentions in /steer and chat routing",
             "ACP/CLI Per-Turn Spend Delta Accounting & 75% ACP Context Rotation: Fixed cumulative vs per-turn token accounting in agy_acp.py and CumulativeSpendTracker, rotated ACP sessions at 75% context fill, and populated CLI Usage.model/context/step telemetry",
         ],
     },
@@ -556,7 +556,7 @@ const RELEASES: &[Release] = &[
         ],
         changed: &[],
         fixed: &[
-            "Shared .hadron Sandbox Binds, CLI Turn Reaping & Render-Thread I/O Elimination: Bound <repo_root>/.hadron/{nucleus,docs,skills,preons,live} in bwrap/Seatbelt with error-checked worktree reconciliation, reaped active CLI subprocesses on /clear and Chamber exit (ChildProcessGuard + SIGTERM), and moved event/plan/nucleus disk reads off the GPUI render thread",
+            "Shared .wb Sandbox Binds, CLI Turn Reaping & Render-Thread I/O Elimination: Bound <repo_root>/.wb/{nucleus,docs,skills,preons,live} in bwrap/Seatbelt with error-checked worktree reconciliation, reaped active CLI subprocesses on /clear and Chamber exit (ChildProcessGuard + SIGTERM), and moved event/plan/nucleus disk reads off the GPUI render thread",
             "CI Matrix-Gated Release Publication: Split .github/workflows/release.yml into build-release and publish-release (needs: build-release) so GitHub Releases only publish after all 4 target binaries compile cleanly",
         ],
     },
@@ -575,8 +575,8 @@ const RELEASES: &[Release] = &[
         added: &[],
         changed: &[],
         fixed: &[
-            "WSL Sandboxed Execution via Linux Bubblewrap: Routed WSL UNC worktree sandboxing through in-distro Linux bwrap (with /run, /mnt/wsl, user toolchains, and parent .git/.hadron/target mounts) instead of Windows powershell.exe, and excluded /mnt/* Windows interop paths from WSL binary resolution",
-            "WSL Merge Gate & Blast Radius Filtering: Forwarded translated CARGO_TARGET_DIR/CARGO_HOME into WSL merge gate via WSLENV, targeted --bin hadron for hadron package test runs, and exempted .hadron/, docs/, .md, and .txt edits from triggering Rust test rebuilds",
+            "WSL Sandboxed Execution via Linux Bubblewrap: Routed WSL UNC worktree sandboxing through in-distro Linux bwrap (with /run, /mnt/wsl, user toolchains, and parent .git/.wb/target mounts) instead of Windows powershell.exe, and excluded /mnt/* Windows interop paths from WSL binary resolution",
+            "WSL Merge Gate & Blast Radius Filtering: Forwarded translated CARGO_TARGET_DIR/CARGO_HOME into WSL merge gate via WSLENV, targeted --bin hadron for hadron package test runs, and exempted .wb/, docs/, .md, and .txt edits from triggering Rust test rebuilds",
             "Agy Live Stream Tool Labels & Prompt Budget Retention: Bypassed text-delta throttling on status-only transitions, prioritized file/command arguments in agy_step_label without overwriting active tools on DONE agent_response steps, and preserved recent field messages ahead of reference sections in fit_prompt_to_budget",
             "WSL UNC Working Directory Display: Normalized WSL UNC and Windows repository root paths to ~/ and forward slashes in format_working_dir and guarded git remote tracking lookup when no remote exists",
         ],
@@ -596,7 +596,7 @@ const RELEASES: &[Release] = &[
         added: &[],
         changed: &[],
         fixed: &[
-            "Unadopted Catalogue Quark Adoption & Live Repo Team Re-Resolution: Clicking 'Enable' or 'Make Orchestrator' on an unadopted catalogue quark now adopts and enables it into .hadron/team.json (auto-promoting the first seat to Orchestrator), hides ORCH badges on unadopted rows, and live-resolves newly created repo team.json files in the daemon without restarting",
+            "Unadopted Catalogue Quark Adoption & Live Repo Team Re-Resolution: Clicking 'Enable' or 'Make Orchestrator' on an unadopted catalogue quark now adopts and enables it into .wb/team.json (auto-promoting the first seat to Orchestrator), hides ORCH badges on unadopted rows, and live-resolves newly created repo team.json files in the daemon without restarting",
             "Superseded /steer Loop Fix & Windows 24 KiB Prompt Budget: Answering a newer addressed /steer request now marks older superseded requests to the same quark as answered to prevent infinite re-dispatch loops, and fit_prompt_to_budget sheds reference sections before '# Your task' under the Windows 24 KiB argv limit",
         ],
     },
@@ -606,7 +606,7 @@ const RELEASES: &[Release] = &[
         added: &[],
         changed: &[],
         fixed: &[
-            "Global & WSL Catalogue Guard: Added repo_team_for_field and is_global_team_config_path stopping walk-ups at .git root so migrate_repo_to_catalogue never mistakes or wipes a user's global or WSL home ~/.hadron/team.json",
+            "Global & WSL Catalogue Guard: Added repo_team_for_field and is_global_team_config_path stopping walk-ups at .git root so migrate_repo_to_catalogue never mistakes or wipes a user's global or WSL home ~/.wb/team.json",
             "WSL User PATH & Host Binary Fallback: Added resolve_wsl_program_path and should_run_in_wsl to resolve ~/.local/bin, ~/.cargo/bin, and ~/.gemini/antigravity-cli/bin inside WSL, fall back to Windows host binaries when needed, and route hadron-forge exec on WSL UNC paths through wsl.exe --exec",
             "Cross-OS ACP Bridge & Streaming Diagnostics: Normalized foreign-OS agy_acp.py paths to portable {hadron}/bridges/agy/... tokens, mapped venv/Scripts/python.exe <-> venv/bin/python across hosts, and surfaced stripped stderr details on streaming CLI errors",
         ],
@@ -632,8 +632,8 @@ const RELEASES: &[Release] = &[
         ],
         changed: &[],
         fixed: &[
-            "Windows-WSL 9P Freeze & SQLite Lock Fix: Routed WSL UNC SQLite ledgers to host-local ~/.hadron/ledgers/, skipped 9P .cargo-lock LockFileEx calls, and preserved \\\\ prefixes when stripping \\\\?\\UNC\\",
-            "Native WSL Git & Catalogue Merging: Routed git/gh calls on WSL UNC paths through wsl.exe to eliminate 9P stat freezes, replaced per-file exists() checks with git ls-files --deleted, and merged WSL ~/.hadron/team.json catalogues",
+            "Windows-WSL 9P Freeze & SQLite Lock Fix: Routed WSL UNC SQLite ledgers to host-local ~/.wb/ledgers/, skipped 9P .cargo-lock LockFileEx calls, and preserved \\\\ prefixes when stripping \\\\?\\UNC\\",
+            "Native WSL Git & Catalogue Merging: Routed git/gh calls on WSL UNC paths through wsl.exe to eliminate 9P stat freezes, replaced per-file exists() checks with git ls-files --deleted, and merged WSL ~/.wb/team.json catalogues",
         ],
     },
     Release {
@@ -695,7 +695,7 @@ const RELEASES: &[Release] = &[
         version: "0.31.0",
         date: Some("2026-10-11"),
         added: &[
-            "Architectural Dialectic: Slash commands for /debate, /team-debate, and /settle to conduct read-only trade-off analysis and persist ADRs to .hadron/docs/adr/",
+            "Architectural Dialectic: Slash commands for /debate, /team-debate, and /settle to conduct read-only trade-off analysis and persist ADRs to .wb/docs/adr/",
             "Read-Only Debate Tool Gating: Enforced read-only tool gating via is_tool_allowed during debate turns to prevent premature code churn and spec writing",
             "Skills Suite Expansion: Added debate, migration-deprecation, benchmarking, and doc-drift-audit workflow procedures",
             "Standard Model Invariants: Codified Rule 1 live caller verification in verification-before-completion and Hadron chaos failure modes in chaos-testing",
@@ -725,7 +725,7 @@ const RELEASES: &[Release] = &[
             "Cross-Platform Process Sandboxing: Native OS containment across Linux/WSL (Bubblewrap), macOS (Apple Seatbelt), and Windows (PowerShell & Job Objects) with worktree write jailing and credential scrubbing",
             "Chamber Sandbox Controls: Interactive [SANDBOX: ON / STRICT / OFF] chat input badge with click/F7 toggle, and Settings -> Environment toggle switch and confinement mode selector",
             "Prompt Cache Alignment: Immutable cache-stable system prompt prefix for 80%+ KV prompt cache hit rates across Claude, Gemini, and OpenAI models",
-            "Frontier LLM Ergonomics: Automated test output transcript folding to .hadron/scratch/, multi-modal base64 screenshot piping, batched parallel tool dispatch, and speculative tournament bake-offs",
+            "Frontier LLM Ergonomics: Automated test output transcript folding to .wb/scratch/, multi-modal base64 screenshot piping, batched parallel tool dispatch, and speculative tournament bake-offs",
         ],
         changed: &[],
         fixed: &[],
@@ -816,7 +816,7 @@ const RELEASES: &[Release] = &[
         ],
         changed: &[],
         fixed: &[
-            "Nucleus Index Budget Override: Respect custom user budget (e.g. 64 KiB) configured in .hadron/team.json across RepoMonitor and NucleusIntegrityLinter instead of hardcoded 32 KiB default",
+            "Nucleus Index Budget Override: Respect custom user budget (e.g. 64 KiB) configured in .wb/team.json across RepoMonitor and NucleusIntegrityLinter instead of hardcoded 32 KiB default",
             "Nucleus Linter False Positives: Ignore template placeholders (<slug>) and recognize invariant cross-references in invariants/always.md during link and orphan validation",
         ],
     },
@@ -959,7 +959,7 @@ const RELEASES: &[Release] = &[
         date: Some("2026-08-22"),
         added: &[
             "Full-color emoji font fallback via patched Zed gpui_wgpu engine (Noto Color Emoji preservation across all fonts)",
-            "Theme Editor Overhaul: Theme naming, custom save/export to ~/.hadron/themes, and 33 design/syntax color tokens",
+            "Theme Editor Overhaul: Theme naming, custom save/export to ~/.wb/themes, and 33 design/syntax color tokens",
             "Multi-terminal grid responsive viewport fitting, per-card scrollback navigation, and ANSI color snapshot rendering",
             "File Tree preview bottom clearance padding and strict flex container sizing",
         ],
@@ -973,7 +973,7 @@ const RELEASES: &[Release] = &[
         version: "0.16.0",
         date: Some("2026-08-22"),
         added: &[
-            "/research slash command and structured architectural investigation document lifecycle (.hadron/docs/research/)",
+            "/research slash command and structured architectural investigation document lifecycle (.wb/docs/research/)",
             "Custom Theme Engine with dynamic runtime palette swapping and live syntax preview in Appearance Settings",
             "Native markdown badge pills with interactive link navigation (shields.io, badgen)",
             "Responsive markdown image rendering with zero-copy dimension probing and WSL-aware external viewer",
@@ -1178,7 +1178,7 @@ const RELEASES: &[Release] = &[
             "Git Inspector keyboard navigation and bundled Noto Color Emoji font for Linux/WSL",
         ],
         changed: &[
-            "Aligned skill paths, progress ledgers, and priority hierarchy with .hadron and Standard Model standards",
+            "Aligned skill paths, progress ledgers, and priority hierarchy with .wb and Standard Model standards",
         ],
         fixed: &[],
     },
@@ -1234,7 +1234,7 @@ const RELEASES: &[Release] = &[
             "Hub-and-Spoke swarm routing with Orchestrator-exclusive dispatch and worker escalation",
             "Git Workspace Initializer (`/git-init`) with one-click UI banner in empty workspaces",
             "Autonomous mission and iterative execution slash commands (`/goal` and `/loop`)",
-            "Automatic Plan tab directory scanning across `.hadron/docs/plans/` and worktrees",
+            "Automatic Plan tab directory scanning across `.wb/docs/plans/` and worktrees",
         ],
         changed: &[
             "Posture-aware workflow skills tailored for uninterrupted autonomy in Bypass mode",
@@ -1296,7 +1296,7 @@ const RELEASES: &[Release] = &[
         changed: &[],
         fixed: &[
             "Nucleus Feature Map prompt evaluation and explicit filesystem checking",
-            "VCS spec and plan cleanup (untracked internal `.hadron/docs` files from git index)",
+            "VCS spec and plan cleanup (untracked internal `.wb/docs` files from git index)",
         ],
     },
     Release {
@@ -1339,7 +1339,7 @@ const RELEASES: &[Release] = &[
         changed: &[],
         fixed: &[
             "Antigravity SDK empty prompt validation and trajectory recovery on turn error",
-            "Standardized worktree invariant paths to `.hadron/trees/` and `.hadron/worktrees/`",
+            "Standardized worktree invariant paths to `.wb/trees/` and `.wb/worktrees/`",
         ],
     },
     Release {

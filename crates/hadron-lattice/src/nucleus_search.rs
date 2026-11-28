@@ -25,7 +25,7 @@ pub fn query_nucleus_semantic(
     query: &str,
     limit: usize,
 ) -> Result<Vec<NucleusSearchResult>> {
-    let notes_dir = repo_root.join(".hadron").join("nucleus").join("notes");
+    let notes_dir = repo_root.join(".wb").join("nucleus").join("notes");
     if !notes_dir.exists() {
         return Ok(Vec::new());
     }
@@ -145,7 +145,7 @@ mod tests {
     fn test_nucleus_search_ranking() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        let notes = root.join(".hadron").join("nucleus").join("notes");
+        let notes = root.join(".wb").join("nucleus").join("notes");
         fs::create_dir_all(&notes).unwrap();
 
         fs::write(

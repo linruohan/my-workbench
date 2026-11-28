@@ -28,7 +28,7 @@ impl super::Engine {
     /// not re-select the quark onto the abandoned turn.
     ///
     /// Paired with [`Self::abort_in_flight`] at both places a turn gets cut
-    /// short outside the normal `join_next` path (Task 9 of `.hadron/docs/
+    /// short outside the normal `join_next` path (Task 9 of `.wb/docs/
     /// plans/2026-07-31-responsive-orchestrator.md`) — a human's force-restart
     /// ([`Self::service_reboots`], below) and a graceful cancel that never
     /// resolved in time (`CANCEL_DEADLINE`, `engine/run.rs`). The deadline

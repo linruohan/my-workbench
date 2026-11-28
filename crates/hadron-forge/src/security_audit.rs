@@ -108,7 +108,7 @@ pub fn run_security_audit(
         ".git/".to_string(),
         "dist/".to_string(),
         "build/".to_string(),
-        ".hadron/".to_string(),
+        ".wb/".to_string(),
         ".lock".to_string(),
     ];
 

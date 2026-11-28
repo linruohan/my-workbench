@@ -134,7 +134,7 @@ impl SlidingContextPruner {
     pub fn govern_projection_tool_dumps(projection: &mut Projection) -> bool {
         let base_root = hadron_gatekeeper::infer_repo_root_from_worktree(&projection.cwd)
             .unwrap_or_else(|| projection.cwd.clone());
-        let scratch_dir = base_root.join(".hadron").join("scratch");
+        let scratch_dir = base_root.join(".wb").join("scratch");
         let _ = std::fs::create_dir_all(&scratch_dir);
         let gov_cfg = hadron_lattice::GovernorConfig::default();
         let mut changed = false;
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn test_prune_projection_resolves_shared_scratch_dir_from_worktree_cwd() {
         let repo = tempfile::tempdir().unwrap();
-        let wt_cwd = repo.path().join(".hadron").join("trees").join("cli-agy");
+        let wt_cwd = repo.path().join(".wb").join("trees").join("cli-agy");
         std::fs::create_dir_all(&wt_cwd).unwrap();
 
         let mut lines = vec!["running 35 tests".to_string()];
@@ -333,12 +333,12 @@ mod tests {
             SlidingContextPruner::prune_projection(&mut proj, &SlidingPrunerConfig::default());
         assert!(changed);
         assert!(
-            !wt_cwd.join(".hadron").exists(),
-            "prune_projection must not create nested <worktree>/.hadron/scratch"
+            !wt_cwd.join(".wb").exists(),
+            "prune_projection must not create nested <worktree>/.wb/scratch"
         );
         assert!(
-            repo.path().join(".hadron").join("scratch").is_dir(),
-            "prune_projection must write folded logs into shared <repo_root>/.hadron/scratch"
+            repo.path().join(".wb").join("scratch").is_dir(),
+            "prune_projection must write folded logs into shared <repo_root>/.wb/scratch"
         );
     }
 }

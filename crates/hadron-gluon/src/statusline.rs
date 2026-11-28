@@ -48,7 +48,7 @@ pub const OUT_ENV: &str = "HADRON_STATUSLINE_OUT";
 /// own statusline keeps rendering. Absent → hadron prints its own compact line.
 pub const CHAIN_ENV: &str = "HADRON_STATUSLINE_CHAIN";
 
-/// Where per-cwd captures live: `~/.hadron/statusline/`. Hadron-owned; nothing here
+/// Where per-cwd captures live: `~/.wb/statusline/`. Hadron-owned; nothing here
 /// is ever read by agy or the human's script.
 pub fn capture_dir() -> Option<PathBuf> {
     hadron_lattice::user_hadron_dir().map(|d| d.join("statusline"))
@@ -255,8 +255,8 @@ mod tests {
     /// Two quarks in two worktrees must not overwrite each other's captures.
     #[test]
     fn cwd_key_is_filesystem_safe_and_distinct_per_tree() {
-        let a = cwd_key(Path::new("/home/user/project/.hadron/trees/agy"));
-        let b = cwd_key(Path::new("/home/user/project/.hadron/trees/opus"));
+        let a = cwd_key(Path::new("/home/user/project/.wb/trees/agy"));
+        let b = cwd_key(Path::new("/home/user/project/.wb/trees/opus"));
         assert_ne!(a, b, "different worktrees, different capture files");
         assert!(!a.contains('/'), "a key is a filename, not a path: {a}");
         assert!(!a.contains('.'), "no dot-segments to escape the dir: {a}");

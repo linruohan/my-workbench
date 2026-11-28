@@ -1,8 +1,8 @@
 //! Preons — a named voice or specialist persona a quark seat can attach.
 //!
 //! A preon is authored as a `.md` file with front-matter (`name:`, optional
-//! `description:`) plus a body, loaded from `~/.hadron/preons` and
-//! `<repo>/.hadron/preons` — the same shape, and the same loader pattern, as
+//! `description:`) plus a body, loaded from `~/.wb/preons` and
+//! `<repo>/.wb/preons` — the same shape, and the same loader pattern, as
 //! [`crate::skills::load_skills`].
 
 use std::fs;
@@ -65,7 +65,7 @@ fn upsert(preons: &mut Vec<Preon>, preon: Preon) {
 
 /// Read every `*.md` file directly under `dir` (non-recursive) as a candidate
 /// preon. A missing or unreadable directory yields no preons, silently — the
-/// caller passes `None` for "not configured" and an absent `~/.hadron/preons` on a
+/// caller passes `None` for "not configured" and an absent `~/.wb/preons` on a
 /// machine that has never used preons is the same case, not an error.
 fn load_dir(dir: &Path) -> Vec<Preon> {
     let Ok(entries) = fs::read_dir(dir) else {

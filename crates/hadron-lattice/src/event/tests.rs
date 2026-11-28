@@ -291,7 +291,7 @@ mod event_tests {
         assert!(line.contains(r#""gemini-weekly""#));
     }
 
-    /// **PRIVACY, at the boundary that matters.** The field (`.hadron/field.jsonl`) is
+    /// **PRIVACY, at the boundary that matters.** The field (`.wb/field.jsonl`) is
     /// a durable, human-readable log the chamber renders. The agy statusline payload
     /// that feeds an energy report also carries the human's email address and plan
     /// tier. Neither may EVER reach a serialized event — this is the test that fails
@@ -360,8 +360,8 @@ mod event_tests {
     /// one of them, or the token split silently eats his history.
     ///
     /// These four lines are copied **verbatim** out of the live
-    /// `.hadron/field.jsonl`, not hand-written to match the parser. (They have to be
-    /// embedded: `.hadron/` is gitignored, so a test that only read the real file
+    /// `.wb/field.jsonl`, not hand-written to match the parser. (They have to be
+    /// embedded: `.wb/` is gitignored, so a test that only read the real file
     /// would silently pass by never running anywhere else — see
     /// [`the_live_field_still_parses`], which does read it, when it is there.)
     #[test]
@@ -432,12 +432,12 @@ mod event_tests {
 
     /// Parse the **actual** live log, every line of it, if it is present. This is the
     /// one that would catch a shape we never thought to embed above. It is skipped
-    /// (not failed) when `.hadron/` is absent, because it is gitignored and will not
+    /// (not failed) when `.wb/` is absent, because it is gitignored and will not
     /// exist in a fresh clone — the embedded test above is what runs there.
     #[test]
     fn the_live_field_still_parses() {
         let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.hadron/field.jsonl");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.wb/field.jsonl");
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("skipped: no live field at {}", path.display());
             return;

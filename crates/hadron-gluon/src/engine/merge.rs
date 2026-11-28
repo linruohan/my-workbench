@@ -1145,7 +1145,7 @@ impl super::Engine {
                     // (or No-Human-Mode), an unaddressed `to: None` message is ignored by
                     // the swarm and the lesson is lost. Route the nudge to `@orchestrator`
                     // so it evaluates and distills any non-obvious lesson into
-                    // `.hadron/nucleus/`; otherwise emit the passive human `/learn` hint.
+                    // `.wb/nucleus/`; otherwise emit the passive human `/learn` hint.
                     let auto_orch = self.orchestrator_id().filter(|orch_id| {
                         self.is_enabled(orch_id)
                             && (self.no_human
@@ -1165,8 +1165,8 @@ impl super::Engine {
                             format!(
                                 "@{} {DEBUGGING_PASS_NUDGE_MARKER} If `{}`'s debugging pass \
                                  taught a non-obvious lesson the swarm should not pay for twice, \
-                                 distill it directly into `.hadron/nucleus/notes/<slug>.md` and \
-                                 `.hadron/nucleus/index.md` (or use `/learn <lesson>`) and end \
+                                 distill it directly into `.wb/nucleus/notes/<slug>.md` and \
+                                 `.wb/nucleus/index.md` (or use `/learn <lesson>`) and end \
                                  your turn with no `@mention`; if nothing non-obvious was \
                                  learned, reply briefly with no `@mention`.",
                                 crate::router::ORCHESTRATOR_ALIAS,

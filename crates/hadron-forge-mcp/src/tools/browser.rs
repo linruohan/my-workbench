@@ -62,7 +62,7 @@ pub struct BrowserSnapshotArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BrowserScreenshotArgs {
-    /// Relative output path under `.hadron/artifacts/` for the screenshot PNG.
+    /// Relative output path under `.wb/artifacts/` for the screenshot PNG.
     #[serde(default)]
     pub output_path: Option<String>,
 }
@@ -176,13 +176,13 @@ impl ForgeMcpServer {
         let rel_file = args
             .output_path
             .unwrap_or_else(|| "screenshot.png".to_string());
-        let screenshot_dir = self.root.path().join(".hadron").join("screenshots");
+        let screenshot_dir = self.root.path().join(".wb").join("screenshots");
         let _ = fs::create_dir_all(&screenshot_dir);
         let file_path = screenshot_dir.join(&rel_file);
 
         if !hadron_forge::browser_bridge::is_jailed_screenshot_path(self.root.path(), &file_path) {
             return Json(ToolResponse::error(format!(
-                "Screenshot path escapes jailed directory (.hadron/screenshots): {}",
+                "Screenshot path escapes jailed directory (.wb/screenshots): {}",
                 file_path.display()
             )));
         }
@@ -198,7 +198,7 @@ impl ForgeMcpServer {
         let _ = fs::write(&file_path, &png_bytes);
 
         Json(ToolResponse::success(Some(format!(
-            "Screenshot captured to `.hadron/screenshots/{}` (1280x800)",
+            "Screenshot captured to `.wb/screenshots/{}` (1280x800)",
             rel_file
         ))))
     }
@@ -337,7 +337,7 @@ mod tests {
             }))
             .await;
         assert!(shot_res.0.ok);
-        assert!(dir.path().join(".hadron/screenshots/view.png").exists());
+        assert!(dir.path().join(".wb/screenshots/view.png").exists());
 
         let escape_res = server
             .browser_screenshot(Parameters(BrowserScreenshotArgs {

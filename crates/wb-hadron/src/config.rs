@@ -1,5 +1,5 @@
 //! Persistent chamber layout preferences — rail collapse state and panel widths.
-//! Stored at `~/.hadron/chamber.json` (cross-platform), loaded on start and saved
+//! Stored at `~/.wb/chamber.json` (cross-platform), loaded on start and saved
 //! whenever the layout changes, so the user's workspace is preserved across
 //! sessions. Pure (no GPUI) so it is unit-tested.
 
@@ -48,7 +48,7 @@ pub struct ChamberPrefs {
     pub roster_collapsed: bool,
     #[serde(default = "default_false")]
     pub inspector_collapsed: bool,
-    /// Kill the auto-spawned `hadron-gluon` daemon when the chamber window closes.
+    /// Kill the auto-spawned `wb-gluon` daemon when the chamber window closes.
     /// Default `true` — the chamber spawns the daemon for you, so closing the window
     /// is the natural end of the swarm; a daemon left running after its only viewer
     /// is gone keeps burning tokens with nobody reading them. Turn it off in Settings
@@ -616,7 +616,7 @@ impl AccentChoice {
     }
 }
 
-/// Frozen schema version for `~/.hadron/themes/*.json` custom theme files.
+/// Frozen schema version for `~/.wb/themes/*.json` custom theme files.
 pub const THEME_SCHEMA_VERSION: u32 = 1;
 
 fn default_theme_schema_version() -> u32 {
@@ -625,7 +625,7 @@ fn default_theme_schema_version() -> u32 {
 
 /// Comprehensive, serializable theme definition for custom colors and surfaces.
 ///
-/// On-disk schema (`~/.hadron/themes/*.json`) is frozen at [`THEME_SCHEMA_VERSION`] (`1`).
+/// On-disk schema (`~/.wb/themes/*.json`) is frozen at [`THEME_SCHEMA_VERSION`] (`1`).
 /// Legacy unversioned (`v0`) files omit `schema_version` (or set `0`) and are transparently
 /// migrated to `v1` on load via [`ThemeDefinition::from_versioned_json`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -905,7 +905,7 @@ impl Default for ThemeDefinition {
 }
 
 impl ThemeDefinition {
-    /// Parse a custom theme JSON payload (`~/.hadron/themes/*.json`) with explicit
+    /// Parse a custom theme JSON payload (`~/.wb/themes/*.json`) with explicit
     /// schema versioning and v0-to-v1 migration guarantees:
     /// - Missing `"schema_version"` or `"schema_version": 0` (legacy `v0`) is upgraded to
     ///   [`THEME_SCHEMA_VERSION`] (`1`) and returns `Ok((theme, true))` (`migrated = true`).
@@ -1559,7 +1559,7 @@ impl ChamberPrefs {
     }
 }
 
-/// Resolve the on-disk preferences path: `~/.hadron/chamber.json` (cross-platform).
+/// Resolve the on-disk preferences path: `~/.wb/chamber.json` (cross-platform).
 /// `None` if the home directory can't be resolved.
 pub fn config_path() -> Option<PathBuf> {
     Some(hadron_lattice::user_hadron_dir()?.join("chamber.json"))

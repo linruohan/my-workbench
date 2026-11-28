@@ -46,7 +46,7 @@ pub(super) fn gather_overdue_schedule_jobs(
     repo_root: &std::path::Path,
 ) -> Vec<(String, String, String, String)> {
     if !repo_root
-        .join(".hadron")
+        .join(".wb")
         .join("schedules")
         .join("schedules.json")
         .is_file()
@@ -159,7 +159,7 @@ impl WorkspaceScan {
             .as_ref()
             .map(|(_, body)| collect_plan_landed_commits(repo_root, body))
             .unwrap_or_default();
-        let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+        let nucleus_dir = repo_root.join(".wb").join("nucleus");
         let nucleus_docs = (
             std::fs::read_to_string(nucleus_dir.join("features.md")).ok(),
             std::fs::read_to_string(nucleus_dir.join("invariants").join("always.md")).ok(),
@@ -1034,7 +1034,7 @@ impl super::Chamber {
 
 /// Resolve the active implementation plan for a workspace:
 /// 1. Newest-first scan of messages for an explicit plan file reference (`plan_ref`) or mention that exists on disk.
-/// 2. If no plan is explicitly referenced in messages, scan `.hadron/docs/plans/`, `docs/plans/`, and worktrees for the newest plan on disk.
+/// 2. If no plan is explicitly referenced in messages, scan `.wb/docs/plans/`, `docs/plans/`, and worktrees for the newest plan on disk.
 #[cfg(test)]
 pub(crate) fn resolve_active_plan(
     repo: &Path,
@@ -1162,7 +1162,7 @@ fn find_plan_mention_in_text_with_plans(
     None
 }
 
-/// Scan all plan `.md` files across `.hadron/docs/plans/`, `docs/plans/`, and worktrees.
+/// Scan all plan `.md` files across `.wb/docs/plans/`, `docs/plans/`, and worktrees.
 pub(crate) fn scan_all_plan_paths(repo: &Path) -> Vec<(std::time::SystemTime, String)> {
     let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
 
@@ -1210,7 +1210,7 @@ pub(crate) fn scan_all_plan_paths(repo: &Path) -> Vec<(std::time::SystemTime, St
     };
 
     let check_dirs = [
-        repo.join(".hadron").join("docs").join("plans"),
+        repo.join(".wb").join("docs").join("plans"),
         repo.join("docs").join("plans"),
     ];
 
@@ -1218,13 +1218,13 @@ pub(crate) fn scan_all_plan_paths(repo: &Path) -> Vec<(std::time::SystemTime, St
         collect_plan_dir(dir);
     }
 
-    let trees_dir = repo.join(".hadron").join("trees");
+    let trees_dir = repo.join(".wb").join("trees");
     if let Ok(tree_entries) = std::fs::read_dir(&trees_dir) {
         for tree_entry in tree_entries.flatten() {
             if tree_entry.path().is_dir() {
                 let tree_path = tree_entry.path();
                 let tree_plan_dirs = [
-                    tree_path.join(".hadron").join("docs").join("plans"),
+                    tree_path.join(".wb").join("docs").join("plans"),
                     tree_path.join("docs").join("plans"),
                 ];
                 for dir in &tree_plan_dirs {
@@ -1294,7 +1294,7 @@ fn newest_plan_from_list(all_plans: &[(std::time::SystemTime, String)]) -> Optio
     newest_plan_from_list_with_mtime(all_plans).map(|(_, rel)| rel)
 }
 
-/// Scan `.hadron/docs/plans/`, `docs/plans/`, and worktree trees for the most recently modified `.md` plan.
+/// Scan `.wb/docs/plans/`, `docs/plans/`, and worktree trees for the most recently modified `.md` plan.
 #[cfg(test)]
 pub(crate) fn scan_newest_plan(repo: &Path) -> Option<String> {
     let candidates = scan_all_plan_paths(repo);
@@ -1364,14 +1364,14 @@ pub(crate) enum PlanDropdownItem {
     Plan {
         /// Display label inside the dropdown menu (e.g. `Master Plan`, `Phase 1: Reactive Orchestration And DAG`)
         label: String,
-        /// Relative path from repo root (e.g. `.hadron/docs/plans/.../master.md`)
+        /// Relative path from repo root (e.g. `.wb/docs/plans/.../master.md`)
         rel_path: String,
         /// Whether this plan is currently viewed/active
         is_active: bool,
     },
 }
 
-/// Discover and organize plans across `.hadron/docs/plans/`, `docs/plans/`, and worktrees into
+/// Discover and organize plans across `.wb/docs/plans/`, `docs/plans/`, and worktrees into
 /// chronological newest-first order across both multi-plan folder suites and single-file plans.
 #[cfg(test)]
 pub(crate) fn scan_plan_dropdown_items(
@@ -1650,7 +1650,7 @@ mod tests {
     fn test_scan_newest_plan_finds_latest_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let hadron_plans = root.join(".hadron").join("docs").join("plans");
+        let hadron_plans = root.join(".wb").join("docs").join("plans");
         std::fs::create_dir_all(&hadron_plans).unwrap();
 
         let plan1 = hadron_plans.join("2026-08-01-old-plan.md");
@@ -1671,7 +1671,7 @@ mod tests {
         let messages = vec![crate::model::MessageRow {
             from: "Human".to_string(),
             to: None,
-            body: "Execute `2026-08-01-old-plan.md` in .hadron/docs/plans/2026-08-01-old-plan.md"
+            body: "Execute `2026-08-01-old-plan.md` in .wb/docs/plans/2026-08-01-old-plan.md"
                 .to_string(),
             kind_label: "message",
             usage: None,
@@ -1690,7 +1690,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let subfolder = root
-            .join(".hadron")
+            .join(".wb")
             .join("docs")
             .join("plans")
             .join("2026-08-19-test-plan");
@@ -1705,7 +1705,7 @@ mod tests {
         let p2 = subfolder.join("02-phase-2-build.md");
         std::fs::write(&p2, "# Phase 2\n- [ ] Step 1\n").unwrap();
 
-        let active_rel = ".hadron/docs/plans/2026-08-19-test-plan/master.md";
+        let active_rel = ".wb/docs/plans/2026-08-19-test-plan/master.md";
         let items = scan_plan_dropdown_items(root, active_rel);
 
         let plan_items: Vec<_> = items
@@ -1725,7 +1725,7 @@ mod tests {
             plan_items[0],
             (
                 "Master Plan",
-                ".hadron/docs/plans/2026-08-19-test-plan/master.md",
+                ".wb/docs/plans/2026-08-19-test-plan/master.md",
                 true
             )
         );
@@ -1733,7 +1733,7 @@ mod tests {
             plan_items[1],
             (
                 "Phase 1: setup",
-                ".hadron/docs/plans/2026-08-19-test-plan/01-phase-1-setup.md",
+                ".wb/docs/plans/2026-08-19-test-plan/01-phase-1-setup.md",
                 false
             )
         );
@@ -1741,7 +1741,7 @@ mod tests {
             plan_items[2],
             (
                 "Phase 2: build",
-                ".hadron/docs/plans/2026-08-19-test-plan/02-phase-2-build.md",
+                ".wb/docs/plans/2026-08-19-test-plan/02-phase-2-build.md",
                 false
             )
         );
@@ -1752,12 +1752,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let suite1 = root
-            .join(".hadron")
+            .join(".wb")
             .join("docs")
             .join("plans")
             .join("2026-08-19-twenty-capabilities");
         let suite2 = root
-            .join(".hadron")
+            .join(".wb")
             .join("docs")
             .join("plans")
             .join("2026-08-21-swarm-orchestration");
@@ -1769,7 +1769,7 @@ mod tests {
         std::fs::write(suite2.join("master.md"), "# Swarm Master\n").unwrap();
         std::fs::write(suite2.join("01-phase-1-reactive-dag.md"), "# Phase 1 DAG\n").unwrap();
 
-        let active_rel = ".hadron/docs/plans/2026-08-19-twenty-capabilities/master.md";
+        let active_rel = ".wb/docs/plans/2026-08-19-twenty-capabilities/master.md";
         let items = scan_plan_dropdown_items(root, active_rel);
 
         let plan_items: Vec<_> = items
@@ -1809,7 +1809,7 @@ mod tests {
     fn test_chronological_interleaving_single_and_suite_plans_and_autoselect() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let plans_dir = root.join(".hadron").join("docs").join("plans");
+        let plans_dir = root.join(".wb").join("docs").join("plans");
         let suite_old = plans_dir.join("2026-08-19-twenty-capabilities");
         let suite_new = plans_dir.join("2026-08-21-swarm-orchestration");
         std::fs::create_dir_all(&suite_old).unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
         std::fs::write(suite_new.join("master.md"), "# Swarm Master\n").unwrap();
 
         let items =
-            scan_plan_dropdown_items(root, ".hadron/docs/plans/2026-08-20-single-file-plan.md");
+            scan_plan_dropdown_items(root, ".wb/docs/plans/2026-08-20-single-file-plan.md");
         let plan_paths: Vec<_> = items
             .iter()
             .filter_map(|item| match item {
@@ -1844,7 +1844,7 @@ mod tests {
             from: "Human".to_string(),
             to: None,
             body:
-                "Old message mentioning .hadron/docs/plans/2026-08-19-twenty-capabilities/master.md"
+                "Old message mentioning .wb/docs/plans/2026-08-19-twenty-capabilities/master.md"
                     .to_string(),
             kind_label: "message",
             usage: None,
@@ -1865,12 +1865,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let suite1 = root
-            .join(".hadron")
+            .join(".wb")
             .join("docs")
             .join("plans")
             .join("2026-08-21-swarm-orchestration-and-teamwork");
         let suite2 = root
-            .join(".hadron")
+            .join(".wb")
             .join("docs")
             .join("plans")
             .join("2026-08-19-twenty-capabilities");
@@ -1881,7 +1881,7 @@ mod tests {
         std::fs::write(suite1.join("01-phase-1-reactive-dag.md"), "# Phase 1 DAG\n").unwrap();
         std::fs::write(suite2.join("master.md"), "# Twenty Caps Master\n").unwrap();
 
-        let active_rel = ".hadron/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/01-phase-1-reactive-dag.md";
+        let active_rel = ".wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/01-phase-1-reactive-dag.md";
         let items = scan_plan_dropdown_items(root, active_rel);
 
         // First item is Current header for suite 1
@@ -1937,7 +1937,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let suite = root
-            .join(".hadron")
+            .join(".wb")
             .join("docs")
             .join("plans")
             .join("2026-08-21-swarm-orchestration-and-teamwork");
@@ -1968,7 +1968,7 @@ mod tests {
         let messages_mention = vec![crate::model::MessageRow {
             from: "Human".to_string(),
             to: None,
-            body: "@.hadron/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md"
+            body: "@.wb/docs/plans/2026-08-21-swarm-orchestration-and-teamwork/master.md"
                 .to_string(),
             kind_label: "message",
             usage: None,
@@ -1987,7 +1987,7 @@ mod tests {
         let messages_typo = vec![crate::model::MessageRow {
             from: "Human".to_string(),
             to: None,
-            body: "@.hadron/docs/plans/2026008-21-swarm-orchestration-and-teamwork/master.md"
+            body: "@.wb/docs/plans/2026008-21-swarm-orchestration-and-teamwork/master.md"
                 .to_string(),
             kind_label: "message",
             usage: None,
@@ -2009,7 +2009,7 @@ mod tests {
         let root = temp.path();
 
         let wt_plan_dir = root
-            .join(".hadron")
+            .join(".wb")
             .join("trees")
             .join("quark-1")
             .join("docs")

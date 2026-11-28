@@ -154,13 +154,13 @@ pub fn synthesize_invariant(
     }
 }
 
-/// Persists a synthesized invariant to `.hadron/nucleus/invariants/<category>/<slug>.md`.
+/// Persists a synthesized invariant to `.wb/nucleus/invariants/<category>/<slug>.md`.
 pub fn write_synthesized_invariant(
     repo_root: &Path,
     invariant: &SynthesizedInvariant,
 ) -> io::Result<PathBuf> {
     let invariants_dir = repo_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("invariants")
         .join(invariant.category.directory_name());

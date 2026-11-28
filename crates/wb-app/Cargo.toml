@@ -12,8 +12,8 @@ path = "src/main.rs"
 
 # 与工作台同目录发布的守护进程与 MCP 启动壳：聊天/右栏依赖它们。
 [[bin]]
-name = "hadron-gluon"
-path = "src/bin/hadron-gluon.rs"
+name = "wb-gluon"
+path = "src/bin/wb-gluon.rs"
 
 [[bin]]
 name = "hadron-forge-mcp"

@@ -46,7 +46,7 @@ fn lock_file_path(root: &std::path::Path) -> std::path::PathBuf {
 impl ForgeMcpServer {
     #[tool(
         name = "hadron_forge_peer_inspect",
-        description = "Inspect sibling quark worktrees across .hadron/trees/* (branch, latest commit, dirty files, commits ahead)"
+        description = "Inspect sibling quark worktrees across .wb/trees/* (branch, latest commit, dirty files, commits ahead)"
     )]
     pub async fn peer_inspect(
         &self,
@@ -77,7 +77,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_peers_detect_conflicts",
-        description = "Proactively scan sibling quark worktrees in .hadron/trees/* for overlapping file edits and merge collision risks"
+        description = "Proactively scan sibling quark worktrees in .wb/trees/* for overlapping file edits and merge collision risks"
     )]
     pub async fn peers_detect_conflicts(
         &self,
@@ -244,7 +244,7 @@ mod tests {
         run(&["add", "file.txt"], &main);
         run(&["commit", "-q", "-m", "initial commit"], &main);
 
-        let trees = main.join(".hadron").join("trees");
+        let trees = main.join(".wb").join("trees");
         std::fs::create_dir_all(&trees).unwrap();
 
         let peer_a = trees.join("peer-alpha");

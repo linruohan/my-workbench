@@ -56,13 +56,21 @@ fn session_tab(
     let hairline = style::hairline(cx);
     let accent = style::accent(cx);
     let hover_bg = style::hover(cx);
-    let bg = if active { style::raised(cx) } else { style::panel(cx) };
+    let bg = if active {
+        style::raised(cx)
+    } else {
+        style::panel(cx)
+    };
     let fg = if active {
         cx.theme().foreground
     } else {
         cx.theme().muted_foreground
     };
-    let border = if active { accent.opacity(0.45) } else { hairline };
+    let border = if active {
+        accent.opacity(0.45)
+    } else {
+        hairline
+    };
 
     h_flex()
         .id(SharedString::from(format!("session-tab-{index}")))

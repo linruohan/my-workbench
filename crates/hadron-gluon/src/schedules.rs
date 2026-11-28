@@ -7,7 +7,7 @@ use std::path::Path;
 pub const SCHEDULE_CHECK_INTERVAL_SECS: u64 = 30;
 pub const GRACE_WINDOW_SECS: i64 = 3600; // 1 hour
 
-/// Evaluates scheduled jobs in `<repo_root>/.hadron/schedules/schedules.json`.
+/// Evaluates scheduled jobs in `<repo_root>/.wb/schedules/schedules.json`.
 /// Called periodically (every ~30s) from the gluon daemon loop at the safe point.
 pub async fn check_schedules(repo_root: &Path, engine: &Engine) -> anyhow::Result<()> {
     let mut registry = match ScheduleRegistry::load(repo_root) {
@@ -100,7 +100,7 @@ pub async fn check_schedules(repo_root: &Path, engine: &Engine) -> anyhow::Resul
                     }
                 };
 
-                let task_dir_rel = format!(".hadron/schedules/tasks/{}/", job.task_id);
+                let task_dir_rel = format!(".wb/schedules/tasks/{}/", job.task_id);
                 let target = if job.target.trim().is_empty() {
                     "@orchestrator".to_string()
                 } else if job.target.starts_with('@') {
@@ -111,7 +111,7 @@ pub async fn check_schedules(repo_root: &Path, engine: &Engine) -> anyhow::Resul
 
                 // Format per spec:
                 // [Scheduled Task: <id> (`<task_id>`)]
-                // Schedule: `<cron>` | Task Dir: `.hadron/schedules/tasks/<task_id>/`
+                // Schedule: `<cron>` | Task Dir: `.wb/schedules/tasks/<task_id>/`
                 // @orchestrator <TASK.md body>
                 let body = format!(
                     "[Scheduled Task: {} (`{}`)]\nSchedule: `{}` | Task Dir: `{}`\n{} {}",

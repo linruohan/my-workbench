@@ -43,7 +43,7 @@ impl ShadowGate {
         ];
         paths.iter().all(|p| {
             let p_norm = p.replace('\\', "/");
-            if p_norm.starts_with(".hadron/") || p_norm.starts_with("docs/") {
+            if p_norm.starts_with(".wb/") || p_norm.starts_with("docs/") {
                 return true;
             }
             if let Some(ext) = std::path::Path::new(&p_norm)
@@ -167,7 +167,7 @@ mod tests {
             "README.md".to_string(),
             "docs/architecture.md".to_string(),
             "assets/logo.svg".to_string(),
-            ".hadron/nucleus/notes/lesson.md".to_string(),
+            ".wb/nucleus/notes/lesson.md".to_string(),
         ]));
         assert!(!ShadowGate::is_docs_or_asset_only_paths(&[
             "README.md".to_string(),

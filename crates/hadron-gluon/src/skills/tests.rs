@@ -427,20 +427,20 @@ fn plan_ref_finds_a_path_through_human_punctuation() {
         Some("docs/plans/2026-07-14-foo.md".to_string())
     );
     assert_eq!(
-        plan_ref("see [Plan](.hadron/docs/plans/2026-08-14-plan.md) for details"),
-        Some(".hadron/docs/plans/2026-08-14-plan.md".to_string())
+        plan_ref("see [Plan](.wb/docs/plans/2026-08-14-plan.md) for details"),
+        Some(".wb/docs/plans/2026-08-14-plan.md".to_string())
     );
     assert_eq!(
         plan_ref("check <docs/plans/2026-08-14-plan.md>"),
         Some("docs/plans/2026-08-14-plan.md".to_string())
     );
     assert_eq!(
-        plan_ref("see [Master Plan](file:///home/user/project/.hadron/docs/plans/2026-08-21-swarm/master.md)"),
-        Some("/home/user/project/.hadron/docs/plans/2026-08-21-swarm/master.md".to_string())
+        plan_ref("see [Master Plan](file:///home/user/project/.wb/docs/plans/2026-08-21-swarm/master.md)"),
+        Some("/home/user/project/.wb/docs/plans/2026-08-21-swarm/master.md".to_string())
     );
     assert_eq!(
-        plan_ref("referencing @.hadron/docs/plans/2026-08-21-swarm/master.md in chat"),
-        Some(".hadron/docs/plans/2026-08-21-swarm/master.md".to_string())
+        plan_ref("referencing @.wb/docs/plans/2026-08-21-swarm/master.md in chat"),
+        Some(".wb/docs/plans/2026-08-21-swarm/master.md".to_string())
     );
     assert_eq!(plan_ref("no plan here"), None);
     // A directory is not a plan, and a non-markdown file is not one either.
@@ -452,8 +452,8 @@ fn plan_ref_finds_a_path_through_human_punctuation() {
 fn test_subfolder_plan_ref() {
     // Nested subfolder markdown plan files
     assert_eq!(
-        plan_ref("execute .hadron/docs/plans/2026-08-19-twenty-capabilities/master.md"),
-        Some(".hadron/docs/plans/2026-08-19-twenty-capabilities/master.md".to_string())
+        plan_ref("execute .wb/docs/plans/2026-08-19-twenty-capabilities/master.md"),
+        Some(".wb/docs/plans/2026-08-19-twenty-capabilities/master.md".to_string())
     );
     assert_eq!(
         plan_ref("take docs/plans/2026-08-19-twenty-capabilities/01-phase-1-nucleus-quick-dx.md"),
@@ -467,8 +467,8 @@ fn test_subfolder_plan_ref() {
     );
     // Subfolder directory references defaulting to master.md
     assert_eq!(
-        plan_ref("execute `.hadron/docs/plans/2026-08-19-twenty-capabilities/`"),
-        Some(".hadron/docs/plans/2026-08-19-twenty-capabilities/master.md".to_string())
+        plan_ref("execute `.wb/docs/plans/2026-08-19-twenty-capabilities/`"),
+        Some(".wb/docs/plans/2026-08-19-twenty-capabilities/master.md".to_string())
     );
     assert_eq!(
         plan_ref("follow `docs/plans/subfolder-feature`"),

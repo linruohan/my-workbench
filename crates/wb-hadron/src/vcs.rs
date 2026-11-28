@@ -118,7 +118,7 @@ pub fn worktree_diff(repo_root: &Path, wt_path: &str, base: &str) -> Option<Vec<
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                if rel == ".hadron" || rel.starts_with(".hadron/") || rel.starts_with(".hadron\\") {
+                if rel == ".wb" || rel.starts_with(".wb/") || rel.starts_with(".wb\\") {
                     continue;
                 }
                 if diffs.iter().any(|d| d.path == rel) {
@@ -582,7 +582,7 @@ pub fn fetch_remotes(repo_root: &Path) -> Result<String, String> {
 }
 
 /// One `git worktree list --porcelain` entry — a checkout of this repo living
-/// somewhere on disk, e.g. a quark's isolated `.hadron/trees/<id>`.
+/// somewhere on disk, e.g. a quark's isolated `.wb/trees/<id>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeInfo {
     pub path: String,
@@ -1214,16 +1214,16 @@ pub fn init_repository(repo_root: &Path) -> anyhow::Result<String> {
         }
     }
 
-    // Ensure .gitignore exists with .hadron/trees/ and .hadron/gluon.lock
+    // Ensure .gitignore exists with .wb/trees/ and .wb/gluon.lock
     let gitignore_path = repo_root.join(".gitignore");
     if gitignore_path.exists() {
         let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
         let mut to_append = Vec::new();
-        if !existing.contains(".hadron/trees") {
-            to_append.push(".hadron/trees/");
+        if !existing.contains(".wb/trees") {
+            to_append.push(".wb/trees/");
         }
-        if !existing.contains(".hadron/gluon.lock") {
-            to_append.push(".hadron/gluon.lock");
+        if !existing.contains(".wb/gluon.lock") {
+            to_append.push(".wb/gluon.lock");
         }
         if !to_append.is_empty() {
             let mut updated = existing;
@@ -1238,7 +1238,7 @@ pub fn init_repository(repo_root: &Path) -> anyhow::Result<String> {
         }
     } else {
         let content =
-            "# Hadron worktrees and daemon runtime lock\n.hadron/trees/\n.hadron/gluon.lock\n";
+            "# Hadron worktrees and daemon runtime lock\n.wb/trees/\n.wb/gluon.lock\n";
         std::fs::write(&gitignore_path, content)?;
     }
 
@@ -2613,7 +2613,7 @@ mod tests {
 
     #[test]
     fn the_repo_root_is_the_parent_of_the_hadron_dir() {
-        let field = PathBuf::from("/home/user/project/.hadron/field.jsonl");
+        let field = PathBuf::from("/home/user/project/.wb/field.jsonl");
         assert_eq!(repo_root_of(&field), Path::new("/home/user/project"));
     }
 
@@ -2625,7 +2625,7 @@ mod tests {
 
     #[test]
     fn format_working_dir_formats_with_tilde_and_trailing_slash() {
-        let field = PathBuf::from(".hadron/field.jsonl");
+        let field = PathBuf::from(".wb/field.jsonl");
         let formatted = format_working_dir(&field);
         assert!(formatted.ends_with('/'));
         assert!(!formatted.contains('\\'), "no mixed slashes: {formatted}");
@@ -2646,7 +2646,7 @@ mod tests {
         );
 
         let wsl_field =
-            Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\project\.hadron\field.jsonl");
+            Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\project\.wb\field.jsonl");
         assert_eq!(format_working_dir(wsl_field), "~/dev/project/");
 
         let wsl_opt_repo = Path::new(r"\\wsl$\Ubuntu\opt\workspace\app");
@@ -2823,11 +2823,11 @@ worktree /home/user/project
 HEAD f33de6e1234567890
 branch refs/heads/main
 
-worktree /home/user/project/.hadron/trees/acp-claude-2
+worktree /home/user/project/.wb/trees/acp-claude-2
 HEAD abcdef0123456789
 branch refs/heads/quark/acp-claude-2/01K
 
-worktree /home/user/project/.hadron/trees/detached-scratch
+worktree /home/user/project/.wb/trees/detached-scratch
 HEAD 0011223344556677
 detached
 ";
@@ -2844,7 +2844,7 @@ detached
         assert_eq!(
             worktrees[1],
             WorktreeInfo {
-                path: "/home/user/project/.hadron/trees/acp-claude-2".into(),
+                path: "/home/user/project/.wb/trees/acp-claude-2".into(),
                 head: "abcdef01".into(),
                 branch: Some("quark/acp-claude-2/01K".into()),
             }
@@ -2852,7 +2852,7 @@ detached
         assert_eq!(
             worktrees[2],
             WorktreeInfo {
-                path: "/home/user/project/.hadron/trees/detached-scratch".into(),
+                path: "/home/user/project/.wb/trees/detached-scratch".into(),
                 head: "00112233".into(),
                 branch: None,
             }
@@ -2900,7 +2900,7 @@ detached
                 .success());
 
             let branch = "quark/testq/01ABC".to_string();
-            let wt = root.join(".hadron").join("trees").join("testq");
+            let wt = root.join(".wb").join("trees").join("testq");
             assert!(git_id(
                 &root,
                 &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]
@@ -2992,7 +2992,7 @@ detached
                 .success());
 
             let branch = "quark/testq/01MERGED".to_string();
-            let wt = root.join(".hadron").join("trees").join("testq");
+            let wt = root.join(".wb").join("trees").join("testq");
             assert!(git_id(
                 &root,
                 &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]
@@ -3393,10 +3393,10 @@ index a1b2c3d..e4f5g6h 100644
         assert!(is_git_repo(root));
         assert!(has_commits(root));
 
-        // .gitignore created and contains .hadron/trees/
+        // .gitignore created and contains .wb/trees/
         let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains(".hadron/trees/"));
-        assert!(gitignore.contains(".hadron/gluon.lock"));
+        assert!(gitignore.contains(".wb/trees/"));
+        assert!(gitignore.contains(".wb/gluon.lock"));
 
         // Idempotent re-initialization
         let res2 = init_repository(root).unwrap();
@@ -3700,7 +3700,7 @@ index a1b2c3d..e4f5g6h 100644
         run_git(repo, &["add", "tracked.txt"]);
         run_git(repo, &["commit", "-m", "init"]);
 
-        let wt_dir = repo.join(".hadron").join("trees").join("worker");
+        let wt_dir = repo.join(".wb").join("trees").join("worker");
         std::fs::create_dir_all(wt_dir.parent().unwrap()).unwrap();
         let branch = "quark/worker/01TEST";
         run_git(

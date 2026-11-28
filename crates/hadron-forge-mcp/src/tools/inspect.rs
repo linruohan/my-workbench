@@ -155,14 +155,14 @@ mod tests {
     #[tokio::test]
     async fn reading_a_nucleus_note_records_usage_but_other_notes_dirs_do_not() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(nucleus.join("notes")).unwrap();
         std::fs::create_dir_all(dir.path().join("docs/notes")).unwrap();
         std::fs::write(nucleus.join("notes/real.md"), "fact\n").unwrap();
         std::fs::write(dir.path().join("docs/notes/decoy.md"), "not a lesson\n").unwrap();
         let server = ForgeMcpServer::with_nucleus(dir.path(), nucleus.as_path());
 
-        for path in [".hadron/nucleus/notes/real.md", "docs/notes/decoy.md"] {
+        for path in [".wb/nucleus/notes/real.md", "docs/notes/decoy.md"] {
             let res = server
                 .read_file(Parameters(ReadFileArgs {
                     path: path.into(),

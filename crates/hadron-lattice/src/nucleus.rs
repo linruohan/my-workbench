@@ -1,12 +1,12 @@
 //! Dynamic nucleus prompt injector.
 //!
-//! Loads `.hadron/nucleus/notes/*.md` and ranks them by overlap with the
+//! Loads `.wb/nucleus/notes/*.md` and ranks them by overlap with the
 //! target file paths and the current query, returning the top notes that fit
 //! within a byte budget. The chamber, engine, or adapter then injects those
 //! notes into the prompt that goes to a quark.
 //!
 //! See `Dynamic Smart Nucleus Prompt Injector` in
-//! `.hadron/docs/plans/2026-08-13-hadron-next-gen-capabilities.md`.
+//! `.wb/docs/plans/2026-08-13-hadron-next-gen-capabilities.md`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -83,7 +83,7 @@ impl DynamicNucleusInjector {
         }
     }
 
-    /// Load all `.md` notes from a directory (such as `.hadron/nucleus/notes` or `.hadron/nucleus`).
+    /// Load all `.md` notes from a directory (such as `.wb/nucleus/notes` or `.wb/nucleus`).
     pub fn load_from_dir(dir: impl AsRef<Path>) -> io::Result<Self> {
         let dir_path = dir.as_ref();
         let notes_dir = if dir_path.join("notes").is_dir() {

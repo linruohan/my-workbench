@@ -1,5 +1,5 @@
 //! Pure logic for the `nucleus_graph` tool family.
-//! Note topology, wiki-link graph analysis, orphaned note detection, and Mermaid visualization for `.hadron/nucleus/`.
+//! Note topology, wiki-link graph analysis, orphaned note detection, and Mermaid visualization for `.wb/nucleus/`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

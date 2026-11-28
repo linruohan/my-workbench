@@ -47,7 +47,7 @@ pub struct SpecCompileArgs {
 impl ForgeMcpServer {
     #[tool(
         name = "hadron_forge_spec_compile",
-        description = "Compile high-level feature intent into formal Design Spec (.hadron/docs/specs/) and executable DAG Implementation Plan (.hadron/docs/plans/)."
+        description = "Compile high-level feature intent into formal Design Spec (.wb/docs/specs/) and executable DAG Implementation Plan (.wb/docs/plans/)."
     )]
     pub async fn spec_compile(
         &self,
@@ -112,11 +112,11 @@ mod tests {
 
         assert!(temp
             .path()
-            .join(".hadron/docs/specs/2026-08-15-websocket-server-core-design.md")
+            .join(".wb/docs/specs/2026-08-15-websocket-server-core-design.md")
             .exists());
         assert!(temp
             .path()
-            .join(".hadron/docs/plans/2026-08-15-websocket-server-core.md")
+            .join(".wb/docs/plans/2026-08-15-websocket-server-core.md")
             .exists());
     }
 }

@@ -521,7 +521,7 @@ fn acp_stdio_descriptor_translates_wsl_env_and_injects_wslenv() {
     .resolved()
     .expect("bare program needs no repo root");
     let work_dir =
-        std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\trees\acp-agy");
+        std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\trees\acp-agy");
     let env = vec![
         (
             "CARGO_TARGET_DIR".to_string(),
@@ -1252,7 +1252,7 @@ fn the_python_adapters_tool_call_update_deserializes() {
 
 /// **Option C, verified against the exact wire shape.** `claude-agent-acp`'s
 /// `rate_limit_event` arm sends this precise `_meta` object (see
-/// `.hadron/docs/plans/2026-07-24-claude-plan-limits-in-stats.md`) — assert on that
+/// `.wb/docs/plans/2026-07-24-claude-plan-limits-in-stats.md`) — assert on that
 /// JSON, not on our own structs (the `acp-agy-wire-contract-mismatch` lesson).
 #[test]
 fn a_claude_rate_limit_meta_deserializes_and_maps_to_a_quota_bucket() {
@@ -1807,13 +1807,13 @@ async fn test_batched_tool_call_evaluation_runs_concurrently() {
 #[test]
 fn windows_host_bridge_path_on_wsl_unc_workspace_is_never_wrapped_in_wsl_exe() {
     let target = AcpTarget {
-        program: r"C:\Users\Komputer\.hadron\bridges\agy\venv\Scripts\python.exe".to_string(),
-        args: vec![r"C:\Users\Komputer\.hadron\bridges\agy\agy_acp.py".to_string()],
+        program: r"C:\Users\Komputer\.wb\bridges\agy\venv\Scripts\python.exe".to_string(),
+        args: vec![r"C:\Users\Komputer\.wb\bridges\agy\agy_acp.py".to_string()],
         env: Vec::new(),
     };
     let resolved = target.resolved().expect("windows host path resolves");
     let wsl_work_dir = std::path::Path::new(
-        r"\\wsl.localhost\Ubuntu-24.04\home\Jake\dev\hadron\.hadron\trees\acp-agy",
+        r"\\wsl.localhost\Ubuntu-24.04\home\Jake\dev\hadron\.wb\trees\acp-agy",
     );
     let desc_json = super::session::acp_stdio_descriptor_sandboxed(
         &resolved,
@@ -1830,7 +1830,7 @@ fn windows_host_bridge_path_on_wsl_unc_workspace_is_never_wrapped_in_wsl_exe() {
     assert!(
         parsed["command"]
             .as_str()
-            .is_some_and(|c| c.starts_with(r"C:\Users\Komputer\.hadron\bridges\agy")),
+            .is_some_and(|c| c.starts_with(r"C:\Users\Komputer\.wb\bridges\agy")),
         "command must remain anchored to the Windows host bridge path, got: {:?}",
         parsed["command"]
     );
@@ -1838,16 +1838,16 @@ fn windows_host_bridge_path_on_wsl_unc_workspace_is_never_wrapped_in_wsl_exe() {
     assert_eq!(
         super::session::rewrite_windows_bridge_path_to_linux(
             "/home/Jake",
-            r"C:\Users\Komputer\.hadron\bridges\agy\venv\Scripts\python.exe"
+            r"C:\Users\Komputer\.wb\bridges\agy\venv\Scripts\python.exe"
         ),
-        Some("/home/Jake/.hadron/bridges/agy/venv/bin/python".to_string())
+        Some("/home/Jake/.wb/bridges/agy/venv/bin/python".to_string())
     );
     assert_eq!(
         super::session::rewrite_windows_bridge_path_to_linux(
             "/home/Jake",
-            r"C:\Users\Komputer\.hadron\bridges\agy\agy_acp.py"
+            r"C:\Users\Komputer\.wb\bridges\agy\agy_acp.py"
         ),
-        Some("/home/Jake/.hadron/bridges/agy/agy_acp.py".to_string())
+        Some("/home/Jake/.wb/bridges/agy/agy_acp.py".to_string())
     );
 }
 
@@ -1984,7 +1984,7 @@ fn resolve_session_cwd_and_forge_translates_wsl_unc_for_in_distro_acp_agents() {
         r#"{"type":"stdio","name":"wsl.exe","command":"wsl.exe","args":["-d","Ubuntu"],"env":[]}"#;
     assert!(descriptor_runs_via_wsl(wsl_desc));
 
-    let unc_cwd = Path::new(r"\\wsl.localhost\Ubuntu\home\jake\repo\.hadron\trees\acp-agy");
+    let unc_cwd = Path::new(r"\\wsl.localhost\Ubuntu\home\jake\repo\.wb\trees\acp-agy");
     let win_forge =
         Path::new(r"C:\Users\Komputer\AppData\Local\Programs\Hadron\hadron-forge-mcp.exe");
 
@@ -1993,7 +1993,7 @@ fn resolve_session_cwd_and_forge_translates_wsl_unc_for_in_distro_acp_agents() {
         resolve_session_cwd_and_forge_with_wsl_bin(unc_cwd, &[], win_forge, true, None);
     assert_eq!(
         session_cwd,
-        std::path::PathBuf::from("/home/jake/repo/.hadron/trees/acp-agy")
+        std::path::PathBuf::from("/home/jake/repo/.wb/trees/acp-agy")
     );
     assert_eq!(
         forge_exe,
@@ -2014,7 +2014,7 @@ fn resolve_session_cwd_and_forge_translates_wsl_unc_for_in_distro_acp_agents() {
         );
     assert_eq!(
         session_cwd_linux,
-        std::path::PathBuf::from("/home/jake/repo/.hadron/trees/acp-agy")
+        std::path::PathBuf::from("/home/jake/repo/.wb/trees/acp-agy")
     );
     assert_eq!(
         forge_exe_linux,
@@ -2022,7 +2022,7 @@ fn resolve_session_cwd_and_forge_translates_wsl_unc_for_in_distro_acp_agents() {
     );
     assert_eq!(
         forge_args_linux,
-        vec!["/home/jake/repo/.hadron/trees/acp-agy".to_string()]
+        vec!["/home/jake/repo/.wb/trees/acp-agy".to_string()]
     );
 }
 

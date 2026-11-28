@@ -1,7 +1,7 @@
 //! The **clipboard** family: shared inter-quark artifact clipboard (`hadron_lattice::clipboard`).
 //!
 //! Allows quarks across isolated git worktrees to store, retrieve, and list named text/code/JSON
-//! clips in `.hadron/clipboard/clips.json` without cluttering the field transcript.
+//! clips in `.wb/clipboard/clips.json` without cluttering the field transcript.
 
 use super::{ForgeMcpServer, ToolResponse};
 use hadron_lattice::clipboard::{get_clip, list_clips, put_clip};
@@ -34,7 +34,7 @@ pub struct ClipListArgs {}
 impl ForgeMcpServer {
     #[tool(
         name = "hadron_forge_clip_put",
-        description = "Store or update a named clip in the shared inter-quark artifact clipboard (.hadron/clipboard/clips.json)"
+        description = "Store or update a named clip in the shared inter-quark artifact clipboard (.wb/clipboard/clips.json)"
     )]
     pub async fn clip_put(&self, Parameters(args): Parameters<ClipPutArgs>) -> Json<ToolResponse> {
         let root = self.root.path().to_path_buf();
@@ -60,7 +60,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_clip_get",
-        description = "Retrieve a named clip from the shared inter-quark artifact clipboard (.hadron/clipboard/clips.json)"
+        description = "Retrieve a named clip from the shared inter-quark artifact clipboard (.wb/clipboard/clips.json)"
     )]
     pub async fn clip_get(&self, Parameters(args): Parameters<ClipGetArgs>) -> Json<ToolResponse> {
         let root = self.root.path().to_path_buf();

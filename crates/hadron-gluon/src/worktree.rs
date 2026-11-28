@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <repo>/                    ← the human's tree. No quark ever writes here.
-//!   .hadron/                 ← gitignored, so the trees never dirty `git status`
+//!   .wb/                 ← gitignored, so the trees never dirty `git status`
 //!     trees/
 //!       opus/                ← git worktree, HEAD = quark/opus/<assignment-ulid>
 //!       agy/                 ← git worktree, HEAD = quark/agy/<assignment-ulid>
@@ -59,12 +59,12 @@ pub struct Reclaimed {
     pub dirty: bool,
 }
 
-/// `.hadron/trees` — inside the repo, but gitignored, so a worktree checked out
-/// `.hadron/trees` — inside the repo, but gitignored, so a worktree checked out
-/// here contains no `.hadron/` of its own (the dir is in no commit) and cannot
+/// `.wb/trees` — inside the repo, but gitignored, so a worktree checked out
+/// `.wb/trees` — inside the repo, but gitignored, so a worktree checked out
+/// here contains no `.wb/` of its own (the dir is in no commit) and cannot
 /// recurse.
 pub fn trees_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".hadron").join("trees")
+    repo_root.join(".wb").join("trees")
 }
 
 /// The branch a quark's assignment branches *from*, and the branch it may never
@@ -230,13 +230,13 @@ fn assert_not_default_branch_with_base(path: &Path, default: &str) -> anyhow::Re
 
 /// Serializes `git worktree add` across concurrent threads in the same process so
 /// parallel worktree provisioning on 50+ quarks never contends on `.git/config.lock`
-/// or `.git/worktrees/` admin directory creation. Once `.hadron/trees/<quark>/`
+/// or `.git/worktrees/` admin directory creation. Once `.wb/trees/<quark>/`
 /// exists, per-worktree operations (`is_dirty`, `checkout`, `snapshot::create`,
 /// `branch_diff`) touch only `.git/worktrees/<quark>/index` and the quark's own
 /// `refs/heads/quark/<quark>/<ulid>` ref and run concurrently.
 static WORKTREE_ADD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Ensure `.hadron/trees/<quark>/` exists as a worktree, checked out on
+/// Ensure `.wb/trees/<quark>/` exists as a worktree, checked out on
 /// `quark/<id>/<assignment>` branched from the default branch.
 ///
 /// **Idempotent for the same assignment**: called twice it is a no-op returning the
@@ -418,7 +418,7 @@ pub fn ensure_with_base_and_carry(
     })
 }
 
-/// Every `.hadron/trees/*` worktree git currently knows about.
+/// Every `.wb/trees/*` worktree git currently knows about.
 pub fn list(repo_root: &Path) -> anyhow::Result<Vec<Worktree>> {
     let out = git(repo_root, &["worktree", "list", "--porcelain"])?;
     let trees = trees_dir(repo_root);
@@ -538,7 +538,7 @@ pub fn shared_build_env_for_quark(cwd: &Path, quark_id: &str) -> Vec<(String, St
             .find(|(k, _)| k == "CARGO_TARGET_DIR")
             .map(|(_, v)| PathBuf::from(v))
             .unwrap_or_else(|| root.join("target"));
-        if root.join(".hadron").is_dir() && !quark_id.trim().is_empty() {
+        if root.join(".wb").is_dir() && !quark_id.trim().is_empty() {
             let cache_mesh = build_cache::BuildCacheMesh::for_repo(root);
             let mesh_wt_dir = if cache_mesh.read_worktree_binding(quark_id).is_some() {
                 Ok(cache_mesh.worktrees_root().join(quark_id))
@@ -708,7 +708,7 @@ pub fn reap_build_artifacts_maybe_dry(
     Ok(Some(reap))
 }
 
-/// Remove any orphaned `.hadron/trees/*/target` directories whose `.cargo-lock`
+/// Remove any orphaned `.wb/trees/*/target` directories whose `.cargo-lock`
 /// is not actively held by a running build.
 ///
 /// Every quark worktree shares `<repo_root>/target` via `CARGO_TARGET_DIR`
@@ -888,7 +888,7 @@ for profile in ("target/debug", "target/release"):
                 files_removed += 1
                 bytes_removed += sz
 
-trees_dir = ".hadron/trees"
+trees_dir = ".wb/trees"
 if os.path.isdir(trees_dir):
     with os.scandir(trees_dir) as it:
         for entry in it:
@@ -1058,7 +1058,7 @@ fn hold_target_lock(lock_path: &Path) -> anyhow::Result<Option<std::fs::File>> {
     Ok(None)
 }
 
-/// Where [`record_artifact_sweep`] appends, relative to the `.hadron/` dir.
+/// Where [`record_artifact_sweep`] appends, relative to the `.wb/` dir.
 pub const ARTIFACT_SWEEP_LOG: &str = "artifact-sweeps.log";
 
 /// Append one line describing what a sweep reclaimed to
@@ -1292,9 +1292,9 @@ pub fn reset_worktrees_on_clear(repo_root: &Path) -> anyhow::Result<Vec<String>>
 }
 
 /// Where a reap parks anything it had to move out of a tree before removing it.
-/// Gitignored like the rest of `.hadron/`, so it never dirties the human's status.
+/// Gitignored like the rest of `.wb/`, so it never dirties the human's status.
 pub fn reaped_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".hadron").join("reaped")
+    repo_root.join(".wb").join("reaped")
 }
 
 /// Ignored files `git worktree remove` would silently destroy, moved out to
@@ -1523,12 +1523,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// If a quark running inside `<repo_root>/.hadron/trees/<id>` wrote to a worktree-local
-/// `.hadron/{nucleus,docs,skills,preons,screenshots,scratch}` path instead of `<repo_root>/.hadron/`,
-/// rescue those shared artifacts up into `<repo_root>/.hadron/` and remove the nested
-/// `<worktree>/.hadron/` directory so it is neither stranded nor committed to git.
+/// If a quark running inside `<repo_root>/.wb/trees/<id>` wrote to a worktree-local
+/// `.wb/{nucleus,docs,skills,preons,screenshots,scratch}` path instead of `<repo_root>/.wb/`,
+/// rescue those shared artifacts up into `<repo_root>/.wb/` and remove the nested
+/// `<worktree>/.wb/` directory so it is neither stranded nor committed to git.
 pub fn reconcile_worktree_dot_hadron(wt_path: &Path) -> anyhow::Result<()> {
-    let nested_hadron = wt_path.join(".hadron");
+    let nested_hadron = wt_path.join(".wb");
     let meta = match std::fs::symlink_metadata(&nested_hadron) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1543,12 +1543,12 @@ pub fn reconcile_worktree_dot_hadron(wt_path: &Path) -> anyhow::Result<()> {
         .parent()
         .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("trees"))
         .and_then(|p| p.parent())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some(".hadron"))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some(".wb"))
         .and_then(|p| p.parent())
     else {
         return Ok(());
     };
-    let shared_hadron = repo_root.join(".hadron");
+    let shared_hadron = repo_root.join(".wb");
     for sub in [
         "nucleus",
         "docs",
@@ -1806,7 +1806,7 @@ pub(crate) mod tests {
             wt.path.join("target"),
         );
         assert!(
-            !target.1.contains(".hadron/trees"),
+            !target.1.contains(".wb/trees"),
             "a target under the worktree is exactly the 37 GB duplicate this prevents",
         );
         assert_eq!(
@@ -1872,11 +1872,11 @@ pub(crate) mod tests {
         assert!(default_env.iter().all(|(k, _)| k != "CARGO_BUILD_JOBS"));
         assert!(default_env.iter().all(|(k, _)| k != "RUST_TEST_THREADS"));
 
-        // Configure explicit thread cap and disable low priority in .hadron/team.json.
+        // Configure explicit thread cap and disable low priority in .wb/team.json.
         let mut team = hadron_lattice::Team::default();
         team.test_low_priority = Some(false);
         team.test_max_threads = Some(4);
-        hadron_lattice::save_team(&repo.path().join(".hadron/team.json"), &team).unwrap();
+        hadron_lattice::save_team(&repo.path().join(".wb/team.json"), &team).unwrap();
 
         for env in [
             shared_build_env(&wt.path),
@@ -2047,7 +2047,7 @@ pub(crate) mod tests {
     /// `git worktree remove` deletes them without a word. Proven in a scratch repo: an
     /// ignored `secret.log` in a tree whose porcelain status is empty is gone after a
     /// clean `worktree remove`, exit 0. Sparing on ignored files instead would make the
-    /// reap a permanent no-op — every live tree here holds some (`.hadron/*.lock`,
+    /// reap a permanent no-op — every live tree here holds some (`.wb/*.lock`,
     /// `.remember/`, and plan docs a quark wrote into its own tree by mistake).
     #[test]
     fn reap_preserves_ignored_files_before_removing_the_tree() {
@@ -2161,7 +2161,7 @@ pub(crate) mod tests {
         let repo = git_repo();
         let wt = ensure(repo.path(), &q("opus"), "01AAA").unwrap();
         assert!(wt.path.is_dir(), "the worktree exists on disk");
-        assert_eq!(wt.path, repo.path().join(".hadron/trees/opus"));
+        assert_eq!(wt.path, repo.path().join(".wb/trees/opus"));
         assert_eq!(wt.branch, "quark/opus/01AAA");
         assert_eq!(
             current_branch(&wt.path).as_deref(),
@@ -2171,20 +2171,20 @@ pub(crate) mod tests {
         assert_eq!(current_branch(repo.path()).as_deref(), Some("main"));
     }
 
-    /// A worktree checked out inside the (gitignored) `.hadron/` does NOT contain a
-    /// `.hadron/` of its own — the dir is in no commit — so there is no recursion.
+    /// A worktree checked out inside the (gitignored) `.wb/` does NOT contain a
+    /// `.wb/` of its own — the dir is in no commit — so there is no recursion.
     /// Flagged as risk-to-verify in the plan; verified here.
     #[test]
     fn a_worktree_under_dot_hadron_does_not_recurse() {
         let repo = git_repo();
-        std::fs::create_dir_all(repo.path().join(".hadron")).unwrap();
-        std::fs::write(repo.path().join(".hadron/field.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(repo.path().join(".wb")).unwrap();
+        std::fs::write(repo.path().join(".wb/field.jsonl"), "{}\n").unwrap();
         let wt = ensure(repo.path(), &q("opus"), "01AAA").unwrap();
         assert!(
-            !wt.path.join(".hadron").exists(),
-            "no nested .hadron in the checkout"
+            !wt.path.join(".wb").exists(),
+            "no nested .wb in the checkout"
         );
-        // …and the quark's tree is clean: the parent's .hadron is not visible in it.
+        // …and the quark's tree is clean: the parent's .wb is not visible in it.
         assert!(!is_dirty(&wt.path).unwrap());
     }
 
@@ -2826,8 +2826,8 @@ pub(crate) mod tests {
     #[test]
     fn orphaned_worktree_target_dirs_are_reaped_unless_locked() {
         let repo = tempfile::tempdir().unwrap();
-        let wt_unlocked = repo.path().join(".hadron/trees/cli-agy/target/debug/deps");
-        let wt_locked = repo.path().join(".hadron/trees/acp-agy/target/debug/deps");
+        let wt_unlocked = repo.path().join(".wb/trees/cli-agy/target/debug/deps");
+        let wt_locked = repo.path().join(".wb/trees/acp-agy/target/debug/deps");
         write_aged(
             &wt_unlocked.join("dup.rlib"),
             b"0123456789abcdef",
@@ -2841,7 +2841,7 @@ pub(crate) mod tests {
 
         let lock_path = repo
             .path()
-            .join(".hadron/trees/acp-agy/target/debug/.cargo-lock");
+            .join(".wb/trees/acp-agy/target/debug/.cargo-lock");
         let held = File::options()
             .create(true)
             .write(true)
@@ -2859,7 +2859,7 @@ pub(crate) mod tests {
                 bytes_removed: 16
             }
         );
-        assert!(repo.path().join(".hadron/trees/cli-agy/target").exists());
+        assert!(repo.path().join(".wb/trees/cli-agy/target").exists());
 
         let reap = reap_build_artifacts(repo.path(), ARTIFACT_REAP_MIN_AGE)
             .unwrap()
@@ -2872,11 +2872,11 @@ pub(crate) mod tests {
             }
         );
         assert!(
-            !repo.path().join(".hadron/trees/cli-agy/target").exists(),
+            !repo.path().join(".wb/trees/cli-agy/target").exists(),
             "unlocked orphaned worktree target dir must be removed wholesale"
         );
         assert!(
-            repo.path().join(".hadron/trees/acp-agy/target").exists(),
+            repo.path().join(".wb/trees/acp-agy/target").exists(),
             "locked worktree target dir must be spared while a build holds .cargo-lock"
         );
 
@@ -2891,7 +2891,7 @@ pub(crate) mod tests {
                 bytes_removed: 5
             }
         );
-        assert!(!repo.path().join(".hadron/trees/acp-agy/target").exists());
+        assert!(!repo.path().join(".wb/trees/acp-agy/target").exists());
     }
 
     #[test]
@@ -2912,7 +2912,7 @@ pub(crate) mod tests {
         write_aged(
             &repo
                 .path()
-                .join(".hadron/trees/cli-agy/target/debug/deps/orphan.rlib"),
+                .join(".wb/trees/cli-agy/target/debug/deps/orphan.rlib"),
             b"12345",
             Duration::from_secs(60),
         );
@@ -2940,7 +2940,7 @@ pub(crate) mod tests {
             }
         );
         assert!(debug.join("deps").join("stale.rlib").exists());
-        assert!(repo.path().join(".hadron/trees/cli-agy/target").exists());
+        assert!(repo.path().join(".wb/trees/cli-agy/target").exists());
 
         let real = reap_build_artifacts(&unc_root, Duration::from_secs(7 * 86400))
             .unwrap()
@@ -2948,17 +2948,17 @@ pub(crate) mod tests {
         assert_eq!(real, dry);
         assert!(!debug.join("deps").join("stale.rlib").exists());
         assert!(debug.join("deps").join("fresh.rlib").exists());
-        assert!(!repo.path().join(".hadron/trees/cli-agy/target").exists());
+        assert!(!repo.path().join(".wb/trees/cli-agy/target").exists());
     }
 
     #[test]
     fn commit_turn_reconciles_worktree_dot_hadron_into_shared_repo_root() {
         let repo = git_repo();
         let wt = ensure(repo.path(), &q("cli-agy"), "01ABSORB").unwrap();
-        let wt_skill_dir = wt.path.join(".hadron/skills/my-skill");
-        let wt_preons_dir = wt.path.join(".hadron/preons");
-        let wt_screenshots_dir = wt.path.join(".hadron/screenshots");
-        let wt_scratch_dir = wt.path.join(".hadron/scratch");
+        let wt_skill_dir = wt.path.join(".wb/skills/my-skill");
+        let wt_preons_dir = wt.path.join(".wb/preons");
+        let wt_screenshots_dir = wt.path.join(".wb/screenshots");
+        let wt_scratch_dir = wt.path.join(".wb/scratch");
         std::fs::create_dir_all(&wt_skill_dir).unwrap();
         std::fs::create_dir_all(&wt_preons_dir).unwrap();
         std::fs::create_dir_all(&wt_screenshots_dir).unwrap();
@@ -2974,24 +2974,24 @@ pub(crate) mod tests {
 
         assert_eq!(commit_turn(&wt, "cli-agy: absorb").unwrap(), None);
         assert!(
-            !wt.path.join(".hadron").exists(),
-            "nested .hadron in worktree must be cleaned up after reconciliation"
+            !wt.path.join(".wb").exists(),
+            "nested .wb in worktree must be cleaned up after reconciliation"
         );
         assert!(
-            repo.path().join(".hadron/skills/my-skill/SKILL.md").is_file(),
-            "skills written to worktree .hadron must be rescued into shared repo_root/.hadron/skills"
+            repo.path().join(".wb/skills/my-skill/SKILL.md").is_file(),
+            "skills written to worktree .wb must be rescued into shared repo_root/.wb/skills"
         );
         assert!(
-            repo.path().join(".hadron/preons/auditor.md").is_file(),
-            "preons written to worktree .hadron must be rescued into shared repo_root/.hadron/preons"
+            repo.path().join(".wb/preons/auditor.md").is_file(),
+            "preons written to worktree .wb must be rescued into shared repo_root/.wb/preons"
         );
         assert!(
-            repo.path().join(".hadron/screenshots/shot.png").is_file(),
-            "screenshots written to worktree .hadron must be rescued into shared repo_root/.hadron/screenshots"
+            repo.path().join(".wb/screenshots/shot.png").is_file(),
+            "screenshots written to worktree .wb must be rescued into shared repo_root/.wb/screenshots"
         );
         assert!(
-            repo.path().join(".hadron/scratch/test_output_1.log").is_file(),
-            "scratch logs written to worktree .hadron must be rescued into shared repo_root/.hadron/scratch"
+            repo.path().join(".wb/scratch/test_output_1.log").is_file(),
+            "scratch logs written to worktree .wb must be rescued into shared repo_root/.wb/scratch"
         );
         assert!(!is_dirty(&wt.path).unwrap());
     }

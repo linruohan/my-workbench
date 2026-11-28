@@ -216,7 +216,7 @@ impl BreadcrumbSummary {
                         BreadcrumbKind::Invariant,
                         label,
                         Some("Plan Invariant".to_string()),
-                        Some(".hadron/nucleus/invariants/always.md".to_string()),
+                        Some(".wb/nucleus/invariants/always.md".to_string()),
                     );
                     found_constraints += 1;
                     if found_constraints >= 2 {
@@ -235,7 +235,7 @@ impl BreadcrumbSummary {
                             BreadcrumbKind::Invariant,
                             rest,
                             Some("Nucleus Invariant".to_string()),
-                            Some(".hadron/nucleus/invariants/always.md".to_string()),
+                            Some(".wb/nucleus/invariants/always.md".to_string()),
                         );
                         break;
                     }
@@ -267,7 +267,7 @@ impl BreadcrumbSummary {
                             .contains(&search_term.to_lowercase())
                         {
                             let target = if entrypoint.is_empty() {
-                                ".hadron/nucleus/features.md".to_string()
+                                ".wb/nucleus/features.md".to_string()
                             } else {
                                 entrypoint.to_string()
                             };
@@ -302,7 +302,7 @@ impl BreadcrumbSummary {
                                 BreadcrumbKind::Lesson,
                                 slug,
                                 Some("Nucleus Lesson".to_string()),
-                                Some(format!(".hadron/nucleus/notes/{slug}.md")),
+                                Some(format!(".wb/nucleus/notes/{slug}.md")),
                             );
                             break;
                         }
@@ -350,7 +350,7 @@ impl BreadcrumbSummary {
                         let status = cols[2];
                         let entrypoint = cols[3].trim_matches('`').trim();
                         let target = if entrypoint.is_empty() {
-                            ".hadron/nucleus/features.md".to_string()
+                            ".wb/nucleus/features.md".to_string()
                         } else {
                             entrypoint.to_string()
                         };
@@ -384,7 +384,7 @@ impl BreadcrumbSummary {
                         BreadcrumbKind::Invariant,
                         rest,
                         Some("Nucleus Invariant".to_string()),
-                        Some(".hadron/nucleus/invariants/always.md".to_string()),
+                        Some(".wb/nucleus/invariants/always.md".to_string()),
                     );
                     if summary
                         .items
@@ -412,7 +412,7 @@ impl BreadcrumbSummary {
                             BreadcrumbKind::Lesson,
                             slug,
                             Some("Nucleus Lesson".to_string()),
-                            Some(format!(".hadron/nucleus/notes/{slug}.md")),
+                            Some(format!(".wb/nucleus/notes/{slug}.md")),
                         );
                         if summary
                             .items
@@ -443,7 +443,7 @@ mod tests {
             BreadcrumbKind::Plan,
             "01-phase-1-nucleus-quick-dx.md",
             None,
-            Some(".hadron/docs/plans/01-phase-1-nucleus-quick-dx.md".to_string()),
+            Some(".wb/docs/plans/01-phase-1-nucleus-quick-dx.md".to_string()),
         );
         summary.add_item(
             BreadcrumbKind::Feature,
@@ -455,13 +455,13 @@ mod tests {
             BreadcrumbKind::Invariant,
             "Vulkan / Lavapipe Software Fallback",
             None,
-            Some(".hadron/nucleus/invariants/always.md".to_string()),
+            Some(".wb/nucleus/invariants/always.md".to_string()),
         );
         summary.add_item(
             BreadcrumbKind::Lesson,
             "compiled-is-not-running",
             None,
-            Some(".hadron/nucleus/notes/compiled-is-not-running.md".to_string()),
+            Some(".wb/nucleus/notes/compiled-is-not-running.md".to_string()),
         );
 
         assert_eq!(summary.len(), 4);
@@ -500,14 +500,14 @@ mod tests {
             Some(features),
             Some(invariants),
             Some(index),
-            Some(".hadron/docs/plans/2026-08-19-twenty-capabilities/master.md"),
+            Some(".wb/docs/plans/2026-08-19-twenty-capabilities/master.md"),
         );
 
         assert_eq!(summary.items[0].kind, BreadcrumbKind::Plan);
         assert_eq!(summary.items[0].label, "master.md");
         assert_eq!(
             summary.items[0].target_path.as_deref(),
-            Some(".hadron/docs/plans/2026-08-19-twenty-capabilities/master.md")
+            Some(".wb/docs/plans/2026-08-19-twenty-capabilities/master.md")
         );
 
         let feature_items: Vec<_> = summary
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!(lesson_items[0].label, "compiled-is-not-running");
         assert_eq!(
             lesson_items[0].target_path.as_deref(),
-            Some(".hadron/nucleus/notes/compiled-is-not-running.md")
+            Some(".wb/nucleus/notes/compiled-is-not-running.md")
         );
     }
 
@@ -571,7 +571,7 @@ mod tests {
 "#;
 
         let summary = BreadcrumbSummary::from_plan(
-            ".hadron/docs/plans/2026-08-19-twenty-capabilities/01-phase-1-nucleus-quick-dx.md",
+            ".wb/docs/plans/2026-08-19-twenty-capabilities/01-phase-1-nucleus-quick-dx.md",
             plan_text,
             Some(features),
             None,

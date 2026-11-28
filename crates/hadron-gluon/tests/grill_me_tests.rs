@@ -7,7 +7,7 @@ fn test_grill_me_interview_and_spec_synthesis() {
 
     interview.ask_question("Should we use SQLite FTS5 or an in-memory TF-IDF index?");
     interview.answer_question(
-        "Use an in-memory TF-IDF index over .hadron/nucleus/notes/ for zero external dependencies.",
+        "Use an in-memory TF-IDF index over .wb/nucleus/notes/ for zero external dependencies.",
     );
 
     interview.ask_question("What is the max candidate limit for search results?");

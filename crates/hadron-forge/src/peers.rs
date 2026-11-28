@@ -1,7 +1,7 @@
 //! Cross-worktree peer inspector.
 //!
 //! Provides read-only visibility into sibling quark worktrees located in
-//! `.hadron/trees/<peer-id>`. Allows querying peer branch names, latest commit
+//! `.wb/trees/<peer-id>`. Allows querying peer branch names, latest commit
 //! metadata, dirty file status, and commits ahead of base.
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub struct WorktreeConflict {
     pub description: String,
 }
 
-/// Comprehensive cross-worktree collision report across .hadron/trees/*.
+/// Comprehensive cross-worktree collision report across .wb/trees/*.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerConflictReport {
     pub total_peers_inspected: usize,
@@ -49,10 +49,10 @@ pub struct PeerConflictReport {
     pub summary: String,
 }
 
-/// Derive the `.hadron/trees` directory from any worktree or project path.
+/// Derive the `.wb/trees` directory from any worktree or project path.
 pub fn derive_trees_dir(project: &Path) -> Result<PathBuf, ForgeError> {
     let repo_root = crate::nucleus::derive_repo_root(project)?;
-    Ok(repo_root.join(".hadron").join("trees"))
+    Ok(repo_root.join(".wb").join("trees"))
 }
 
 fn host_accessible_dir(path: &Path) -> PathBuf {
@@ -92,7 +92,7 @@ pub fn inspect_peer_worktree(
     inspect_single_peer_dir(clean_id, &peer_dir)
 }
 
-/// List and inspect all sibling peer worktrees under `.hadron/trees/`.
+/// List and inspect all sibling peer worktrees under `.wb/trees/`.
 pub fn list_peer_worktrees(project_root: &Root) -> Result<Vec<PeerWorktreeInfo>, ForgeError> {
     let trees_dir = match derive_trees_dir(project_root.path()) {
         Ok(dir) => host_accessible_dir(&dir),
@@ -303,7 +303,7 @@ mod tests {
         run(&["add", "file.txt"], &main);
         run(&["commit", "-q", "-m", "initial commit"], &main);
 
-        let trees = main.join(".hadron").join("trees");
+        let trees = main.join(".wb").join("trees");
         std::fs::create_dir_all(&trees).unwrap();
 
         let peer_a = trees.join("peer-alpha");
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn detects_overlapping_modified_files_across_peer_worktrees() {
         let (_tmp, main, peer_a) = fixture_multitree_repo();
-        let peer_b = main.join(".hadron").join("trees").join("peer-beta");
+        let peer_b = main.join(".wb").join("trees").join("peer-beta");
 
         // Both peer-alpha and peer-beta edit shared.rs
         std::fs::write(
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn wsl_unc_project_root_lists_and_inspects_peer_worktrees() {
         let (_tmp, main, peer_a) = fixture_multitree_repo();
-        let peer_b = main.join(".hadron").join("trees").join("peer-beta");
+        let peer_b = main.join(".wb").join("trees").join("peer-beta");
         std::fs::write(
             peer_a.join("shared.rs"),
             "pub fn shared_fn() -> i32 { 1 }\n",

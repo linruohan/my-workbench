@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn split_leading_commands_in_discovers_repo_custom_skill_and_chains_line_commands() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let skills_dir = tmp.path().join(".hadron").join("skills");
+        let skills_dir = tmp.path().join(".wb").join("skills");
         std::fs::create_dir_all(&skills_dir).expect("create skills dir");
         std::fs::write(
             skills_dir.join("joke.md"),

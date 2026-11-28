@@ -55,7 +55,7 @@ fn format_nucleus_graph(report: NucleusGraphReport) -> String {
 impl ForgeMcpServer {
     #[tool(
         name = "hadron_forge_nucleus_graph",
-        description = "Analyze knowledge connectivity, detect broken/orphaned links, and generate Mermaid graphs for .hadron/nucleus/"
+        description = "Analyze knowledge connectivity, detect broken/orphaned links, and generate Mermaid graphs for .wb/nucleus/"
     )]
     pub async fn nucleus_graph(
         &self,

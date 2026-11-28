@@ -412,7 +412,7 @@ fn missing_or_malformed_file_is_an_empty_team() {
 #[test]
 fn team_for_field_prefers_the_sibling_then_global() {
     let dir = tempdir().unwrap();
-    let hadron = dir.path().join(".hadron");
+    let hadron = dir.path().join(".wb");
     std::fs::create_dir_all(&hadron).unwrap();
     let field = hadron.join("field.jsonl");
     // No sibling team.json yet → repo_team_for_field is None, and team_for_field falls back
@@ -429,53 +429,53 @@ fn team_for_field_prefers_the_sibling_then_global() {
 #[test]
 fn is_global_team_config_path_detects_native_and_wsl_home_catalogues() {
     assert!(is_global_team_config_path(std::path::Path::new(
-        "/home/user/.hadron/team.json"
+        "/home/user/.wb/team.json"
     )));
     assert!(is_global_team_config_path(std::path::Path::new(
-        "/root/.hadron/team.json"
+        "/root/.wb/team.json"
     )));
     assert!(is_global_team_config_path(std::path::Path::new(
-        r"\\wsl.localhost\Ubuntu\home\user\.hadron\team.json"
+        r"\\wsl.localhost\Ubuntu\home\user\.wb\team.json"
     )));
     assert!(is_global_team_config_path(std::path::Path::new(
-        r"\\wsl$\Ubuntu\home\user\.hadron\team.json"
+        r"\\wsl$\Ubuntu\home\user\.wb\team.json"
     )));
     assert!(is_global_team_config_path(std::path::Path::new(
-        r"\\?\UNC\wsl.localhost\Ubuntu\home\user\.hadron\team.json"
+        r"\\?\UNC\wsl.localhost\Ubuntu\home\user\.wb\team.json"
     )));
     assert!(!is_global_team_config_path(std::path::Path::new(
-        "/home/user/project/.hadron/team.json"
+        "/home/user/project/.wb/team.json"
     )));
     assert!(!is_global_team_config_path(std::path::Path::new(
-        r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\team.json"
+        r"\\wsl.localhost\Ubuntu\home\user\project\.wb\team.json"
     )));
 }
 
 #[test]
 fn repo_team_for_field_stops_at_git_root_and_skips_parent_dirs() {
     let dir = tempdir().unwrap();
-    // Simulate a parent directory with a `.hadron/team.json` (like `/home/user/.hadron/team.json`)
-    let parent_hadron = dir.path().join(".hadron");
+    // Simulate a parent directory with a `.wb/team.json` (like `/home/user/.wb/team.json`)
+    let parent_hadron = dir.path().join(".wb");
     std::fs::create_dir_all(&parent_hadron).unwrap();
     std::fs::write(parent_hadron.join("team.json"), "{}").unwrap();
 
-    // And a nested git repo `dir/dev/myrepo` that has `.git` and `.hadron/field.jsonl`
-    // but NO `myrepo/.hadron/team.json`.
+    // And a nested git repo `dir/dev/myrepo` that has `.git` and `.wb/field.jsonl`
+    // but NO `myrepo/.wb/team.json`.
     let repo_dir = dir.path().join("dev").join("myrepo");
     std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
-    std::fs::create_dir_all(repo_dir.join(".hadron")).unwrap();
-    let field = repo_dir.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(repo_dir.join(".wb")).unwrap();
+    let field = repo_dir.join(".wb").join("field.jsonl");
 
-    // Walk-up must stop at `myrepo/.git` and NOT climb into `dir/.hadron/team.json`.
+    // Walk-up must stop at `myrepo/.git` and NOT climb into `dir/.wb/team.json`.
     assert_eq!(repo_team_for_field(&field), None);
 }
 
 #[test]
 fn global_paths_live_under_user_hadron_dir() {
-    // Whatever the home resolves to in this env, ~/.hadron is the root and
+    // Whatever the home resolves to in this env, ~/.wb is the root and
     // the global team.json sits directly inside it.
     if let Some(dir) = user_hadron_dir() {
-        assert!(dir.ends_with(".hadron"), "user dir is <home>/.hadron");
+        assert!(dir.ends_with(".wb"), "user dir is <home>/.wb");
         assert_eq!(team_config_path(), Some(dir.join("team.json")));
     }
 }
@@ -1632,7 +1632,7 @@ fn external_roots_serde_round_trip_and_default_to_none() {
     let mut s = seat("a", "claude", "opus", Flavor::Worker);
     s.external_roots = vec![
         ExternalRootSpec {
-            path: "/home/x/.hadron/sessions".into(),
+            path: "/home/x/.wb/sessions".into(),
             writable: false,
         },
         ExternalRootSpec {

@@ -37,7 +37,7 @@ pub use transport::{
 
 pub(crate) use seat::is_false;
 
-/// Frozen schema version for `.hadron/team.json` and `~/.hadron/team.json`.
+/// Frozen schema version for `.wb/team.json` and `~/.wb/team.json`.
 pub const TEAM_SCHEMA_VERSION: u32 = 2;
 
 fn default_team_schema_version() -> u32 {
@@ -79,7 +79,7 @@ pub struct Team {
     #[serde(default)]
     pub max_exchanges: Option<usize>,
     /// Repo policy for [`crate::Projection::nucleus_index_budget_bytes`] — how big
-    /// `.hadron/nucleus/index.md` may grow before it is over budget, in KiB. `Option`
+    /// `.wb/nucleus/index.md` may grow before it is over budget, in KiB. `Option`
     /// and tolerant of a hand-edited team.json the same way `max_exchanges` is;
     /// absent (or `0`) falls back to the shipped default
     /// (`nucleus_status::BUDGET_BYTES`, 32 KiB). Not a strict enum: the Settings UI

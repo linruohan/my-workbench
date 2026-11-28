@@ -23,5 +23,5 @@ Perform rigorous, evidence-based triage and root-cause analysis on production in
 - Trace the chain of causality: Symptom -> Trigger -> Intermediate State -> Root Flaw.
 
 ### 3. Post-Mortem & Memory Distillation (Rule 9)
-- Distill non-obvious failure modes into a compact nucleus note under `.hadron/nucleus/notes/<slug>.md`.
-- Add a pointer line to `.hadron/nucleus/index.md` so the swarm never repeats the mistake.
+- Distill non-obvious failure modes into a compact nucleus note under `.wb/nucleus/notes/<slug>.md`.
+- Add a pointer line to `.wb/nucleus/index.md` so the swarm never repeats the mistake.

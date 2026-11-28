@@ -280,7 +280,7 @@ fn plan_heading_for<'h>(
     plan_headings: &'h [String],
 ) -> Option<&'h str> {
     // Compare by file name: a dispatch may name the plan absolutely
-    // (`/home/user/project/.hadron/docs/plans/….md`) while the active path is
+    // (`/home/user/project/.wb/docs/plans/….md`) while the active path is
     // repo-relative, and both are the same file.
     let named = hadron_gluon::skills::plan_ref(body)?;
     if file_name_of(&named) != file_name_of(plan_path) {
@@ -415,7 +415,7 @@ mod tests {
         ]
     }
 
-    const PLAN: &str = ".hadron/docs/plans/2026-08-01-chamber-hover-tasks-console.md";
+    const PLAN: &str = ".wb/docs/plans/2026-08-01-chamber-hover-tasks-console.md";
 
     #[test]
     fn a_dispatch_naming_a_plan_task_is_titled_by_that_tasks_heading() {
@@ -423,7 +423,7 @@ mod tests {
         let evs = vec![msg(
             Actor::Quark(QuarkId::new("acp-claude")),
             Some("cli-agy"),
-            "@cli-agy Execute **Task 8** of `.hadron/docs/plans/2026-08-01-chamber-hover-tasks-console.md` \
+            "@cli-agy Execute **Task 8** of `.wb/docs/plans/2026-08-01-chamber-hover-tasks-console.md` \
              — new, appended to the end of the plan, and it is the last one.",
         )];
         let mut tasks = swarm_tasks(&evs);
@@ -436,7 +436,7 @@ mod tests {
         let evs = vec![msg(
             Actor::Quark(QuarkId::new("acp-claude")),
             Some("cli-agy"),
-            "@cli-agy Execute **Task 8** of `.hadron/docs/plans/2026-08-01-chamber-hover-tasks-console.md` \
+            "@cli-agy Execute **Task 8** of `.wb/docs/plans/2026-08-01-chamber-hover-tasks-console.md` \
              — new, appended to the end of the plan",
         )];
         let mut tasks = swarm_tasks(&evs);
@@ -456,7 +456,7 @@ mod tests {
             Actor::Human,
             Some("acp-claude"),
             "I did not tick the boxes in \
-             `.hadron/docs/plans/2026-08-01-chamber-hover-tasks-console.md` — they are stale",
+             `.wb/docs/plans/2026-08-01-chamber-hover-tasks-console.md` — they are stale",
         )];
         let mut tasks = swarm_tasks(&evs);
         let before = tasks[0].title.clone();
@@ -875,7 +875,7 @@ mod tests {
                 to: "researcher".into(),
                 from: "human".into(),
                 title: "Research something".into(),
-                body: "Please check `.hadron/docs/research/2026-08-21-theme-engine-research.md`"
+                body: "Please check `.wb/docs/research/2026-08-21-theme-engine-research.md`"
                     .into(),
                 state: TaskState::Working,
                 asked_at: t0,
@@ -894,7 +894,7 @@ mod tests {
 
         retitle_from_research(
             &mut tasks,
-            ".hadron/docs/research/2026-08-21-theme-engine-research.md",
+            ".wb/docs/research/2026-08-21-theme-engine-research.md",
             "Dynamic Theme Architecture Investigation",
         );
 

@@ -4,7 +4,7 @@ use serde_json::Value;
 /// Maximum permitted byte length for a single newline-delimited JSON-RPC 2.0 frame (`16 MiB`).
 pub const MAX_RPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
-/// Maximum permitted byte length for `.hadron/gluon.rpc` endpoint metadata (`4 KiB`).
+/// Maximum permitted byte length for `.wb/gluon.rpc` endpoint metadata (`4 KiB`).
 pub const MAX_RPC_METADATA_BYTES: u64 = 4096;
 
 /// Validated loopback-only TCP socket address (`127.0.0.0/8` or `::1`, non-zero port)

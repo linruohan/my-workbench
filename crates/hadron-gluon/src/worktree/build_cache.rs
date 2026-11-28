@@ -36,7 +36,7 @@ impl CompilerAccelerator {
 
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let sccache_dir = PathBuf::from(home)
-            .join(".hadron")
+            .join(".wb")
             .join("cache")
             .join("sccache");
 
@@ -90,9 +90,9 @@ impl BuildCacheMesh {
         Self { base_dir }
     }
 
-    /// Root a `BuildCacheMesh` under `<repo_root>/.hadron/cache/build_mesh`.
+    /// Root a `BuildCacheMesh` under `<repo_root>/.wb/cache/build_mesh`.
     pub fn for_repo(repo_root: &std::path::Path) -> Self {
-        Self::new(repo_root.join(".hadron").join("cache").join("build_mesh"))
+        Self::new(repo_root.join(".wb").join("cache").join("build_mesh"))
     }
 
     pub fn base_dir(&self) -> &std::path::Path {
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn test_record_and_read_worktree_binding() {
         let tmp = tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join(".hadron")).unwrap();
+        fs::create_dir_all(tmp.path().join(".wb")).unwrap();
         let mesh = BuildCacheMesh::for_repo(tmp.path());
         let shared_target = tmp.path().join("target");
         let wt_cache = mesh

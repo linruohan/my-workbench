@@ -48,13 +48,13 @@ pub(super) fn acp_stdio_descriptor(target: &ResolvedAcpTarget, env: &[(String, S
 
 pub(super) fn rewrite_windows_bridge_path_to_linux(linux_home: &str, val: &str) -> Option<String> {
     let norm = val.replace('\\', "/");
-    let marker = "/.hadron/bridges/";
+    let marker = "/.wb/bridges/";
     let idx = norm.find(marker)?;
     let suffix = &norm[idx + marker.len()..];
     let linux_suffix = suffix
         .replace("/venv/Scripts/python.exe", "/venv/bin/python")
         .replace("/venv/Scripts/python3.exe", "/venv/bin/python3");
-    Some(format!("{linux_home}/.hadron/bridges/{linux_suffix}"))
+    Some(format!("{linux_home}/.wb/bridges/{linux_suffix}"))
 }
 
 pub(super) fn acp_stdio_descriptor_sandboxed(
@@ -65,7 +65,7 @@ pub(super) fn acp_stdio_descriptor_sandboxed(
 ) -> String {
     let (raw_prog, raw_args) = (target.program(), target.args());
     let wsl_parsed = hadron_lattice::wsl::parse_wsl_unc_path(work_dir);
-    // Keep explicit Windows host bridge paths (e.g. `C:\Users\...\.hadron\bridges\agy\venv\Scripts\python.exe`)
+    // Keep explicit Windows host bridge paths (e.g. `C:\Users\...\.wb\bridges\agy\venv\Scripts\python.exe`)
     // on the Windows host when `python.exe` exists there, so Windows Hadron uses the Windows
     // host environment and Windows Credential Manager keyring. Only rewrite to the in-distro
     // Linux bridge if the host bridge executable does not exist on the local filesystem.
@@ -243,7 +243,7 @@ pub(super) fn resolve_session_cwd_and_forge_with_wsl_bin(
 /// Code's own `rate_limit_event`. `utilization` is the provider's **own** figure —
 /// exactly the number Option A (recomputing locally from `ledger.db`) could never
 /// match, since server-side limits move with load
-/// (`.hadron/docs/plans/2026-07-24-claude-plan-limits-in-stats.md`). Absent or
+/// (`.wb/docs/plans/2026-07-24-claude-plan-limits-in-stats.md`). Absent or
 /// malformed `_meta` returns `None` — absent is not zero (see `Usage::quota`'s
 /// honesty rule: empty means the provider reported nothing, not that it is full).
 ///
@@ -475,7 +475,7 @@ fn base64_encode(data: &[u8]) -> String {
 pub(super) fn extract_screenshot_images(turn: &Projection) -> Vec<String> {
     let mut images = Vec::new();
     let re = match regex::Regex::new(
-        r#"(\.hadron/screenshots/[^\s\)\]'"\`]+|screenshots/[^\s\)\]'"\`]+)"#,
+        r#"(\.wb/screenshots/[^\s\)\]'"\`]+|screenshots/[^\s\)\]'"\`]+)"#,
     ) {
         Ok(r) => r,
         Err(_) => return images,
@@ -1417,7 +1417,7 @@ impl super::AcpQuark {
 
         // `message.is_none()` alone cannot tell "cut off mid-work" apart from
         // "genuinely finished with nothing to say" (`StopReason::EndTurn` with
-        // empty text lands here too) — Task 9 of `.hadron/docs/plans/2026-07-31-
+        // empty text lands here too) — Task 9 of `.wb/docs/plans/2026-07-31-
         // responsive-orchestrator.md`: `finish_turn` used to infer completion from
         // an absent message, so a graceful cancel read as a hand-back to the
         // human and could reach the merge gate. `cancelled` carries the fact
@@ -1444,7 +1444,7 @@ impl super::AcpQuark {
 /// it unconditionally, silently losing substantial partial replies. No annotation is
 /// added: `TurnOutcome::cancelled` already carries "this was interrupted" as its own
 /// fact (see the comment on `cancelled` below), so the message stays exactly what was
-/// said. See `.hadron/nucleus/notes/a-graceful-cancel-discarded-partial-text.md`.
+/// said. See `.wb/nucleus/notes/a-graceful-cancel-discarded-partial-text.md`.
 pub(super) fn message_for_stop(text: &str, stop: &StopReason) -> Option<String> {
     let cleaned = crate::adapter::telemetry::deduplicate_turn_message(text);
     let trimmed = cleaned.trim();

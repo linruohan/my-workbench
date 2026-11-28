@@ -517,9 +517,9 @@ impl super::Engine {
                 crate::router::task_names_card_specifically(&task_desc, card, &preons)
             });
 
-        // Resolved against the daemon's cwd: a *relative* field path (`.hadron/field.jsonl`,
+        // Resolved against the daemon's cwd: a *relative* field path (`.wb/field.jsonl`,
         // exactly how the daemon is launched) used to bottom out on the empty ancestor —
-        // `"".join(".hadron")` exists, so the search "succeeded" with a root of "". That
+        // `"".join(".wb")` exists, so the search "succeeded" with a root of "". That
         // empty root became the CLI's `cwd`, and `current_dir("")` is ENOENT, which the
         // spawn error then blamed on the program: `failed to spawn claude`.
         let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -543,7 +543,7 @@ impl super::Engine {
         // SessionStart hook that does not exist over ACP.
         //
         // The corpus is built-ins merged with whatever custom `.md` skills a human has
-        // dropped in `~/.hadron/skills` (global) and `<workspace>/.hadron/skills`
+        // dropped in `~/.wb/skills` (global) and `<workspace>/.wb/skills`
         // (repo) — `load_skills` degrades to exactly `builtins()` when neither
         // directory exists, so a machine with no custom skills installed sees
         // byte-for-byte the same corpus as before this wiring landed.
@@ -557,10 +557,10 @@ impl super::Engine {
         // `with_global_skills_dir`), NOT resolved inline via `user_hadron_dir()` here.
         // Resolving it inline would make every engine test read the real `$HOME`,
         // whatever custom skills happen to be sitting in the machine's actual
-        // `~/.hadron/skills` — `Engine::new` defaults this to `None` for exactly that
+        // `~/.wb/skills` — `Engine::new` defaults this to `None` for exactly that
         // reason. The repo directory stays derived from `workspace_root`, which every
         // test already controls via its own tempdir field.
-        let repo_skills_dir = workspace_root.join(".hadron").join("skills");
+        let repo_skills_dir = workspace_root.join(".wb").join("skills");
         let skill_corpus =
             skills::load_skills(self.global_skills_dir.as_deref(), Some(&repo_skills_dir));
         let card_deny_skills = self

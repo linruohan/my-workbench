@@ -66,14 +66,14 @@ fn test_no_tracked_files_in_hadron_directory() {
         if top.status.success() {
             let root = String::from_utf8_lossy(&top.stdout).trim().to_string();
             let output = std::process::Command::new("git")
-                .args(&["-C", &root, "ls-files", ".hadron"])
+                .args(&["-C", &root, "ls-files", ".wb"])
                 .output();
             if let Ok(out) = output {
                 if out.status.success() {
                     let tracked = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     assert!(
                         tracked.is_empty(),
-                        "Found tracked files under .hadron/ in git index (must remain untracked):\n{tracked}"
+                        "Found tracked files under .wb/ in git index (must remain untracked):\n{tracked}"
                     );
                 }
             }

@@ -4,7 +4,7 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn test_nucleus_central_store_note_and_index_lifecycle() {
     let dir = tempdir().expect("tempdir");
-    let nucleus_dir = dir.path().join(".hadron/nucleus");
+    let nucleus_dir = dir.path().join(".wb/nucleus");
     std::fs::create_dir_all(nucleus_dir.join("notes")).expect("create notes dir");
 
     let store = NucleusStore::new(&nucleus_dir);

@@ -106,7 +106,7 @@ pub fn record_note_open(
     Ok(snapshot)
 }
 
-/// `notes/<slug>.md` (optionally under `.hadron/nucleus/`, any leading dirs, either
+/// `notes/<slug>.md` (optionally under `.wb/nucleus/`, any leading dirs, either
 /// separator) → `<slug>`. Anything else, including nested note dirs, is `None`.
 pub fn extract_note_slug_from_path(path: &str) -> Option<String> {
     let normalized = path.trim().replace('\\', "/");
@@ -198,9 +198,9 @@ mod tests {
             "notes/compiled-is-not-running.md",
             "compiled-is-not-running",
         );
-        ok(".hadron/nucleus/notes/bug-x.md", "bug-x");
-        ok("/home/j/dev/hadron/.hadron/nucleus/notes/a_b.md", "a_b");
-        ok(r"C:\repo\.hadron\nucleus\notes\win.md", "win");
+        ok(".wb/nucleus/notes/bug-x.md", "bug-x");
+        ok("/home/j/dev/hadron/.wb/nucleus/notes/a_b.md", "a_b");
+        ok(r"C:\repo\.wb\nucleus\notes\win.md", "win");
         for bad in [
             "index.md",
             "notes/x.txt",

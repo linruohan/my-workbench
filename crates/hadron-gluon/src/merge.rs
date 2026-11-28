@@ -759,7 +759,7 @@ pub fn discard_local_lockfile_drift(repo_root: &Path) {
         let lines: Vec<&str> = status
             .lines()
             .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.ends_with(".hadron") && !l.contains(".hadron/"))
+            .filter(|l| !l.is_empty() && !l.ends_with(".wb") && !l.contains(".wb/"))
             .collect();
         if lines.len() == 1 {
             let path_part = lines[0].split_whitespace().last().unwrap_or("");

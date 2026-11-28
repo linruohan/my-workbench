@@ -1,9 +1,9 @@
 //! The vendored `agy` ACP bridge: a Python script embedded in the binary via
 //! `include_str!` so it ships with `cargo install` regardless of whether the
-//! source repository is present at runtime, materialized to `~/.hadron/bridges/agy`
+//! source repository is present at runtime, materialized to `~/.wb/bridges/agy`
 //! plus a dedicated venv holding `google-antigravity`.
 //!
-//! See `.hadron/nucleus/notes/anchoring-a-boot-command-does-not-ship-it.md`: the
+//! See `.wb/nucleus/notes/anchoring-a-boot-command-does-not-ship-it.md`: the
 //! script used to live only in the repository and the venv only in git-ignored
 //! `scripts/venv`, so neither reached an installed build. This module is what makes
 //! [`USER_HOME_TOKEN`](super::registry::USER_HOME_TOKEN)-anchored boot commands
@@ -67,7 +67,7 @@ pub fn compute_script_hash() -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// `~/.hadron/bridges/agy` — where the script and its venv live.
+/// `~/.wb/bridges/agy` — where the script and its venv live.
 pub fn bridge_dir() -> anyhow::Result<PathBuf> {
     hadron_lattice::user_hadron_dir()
         .map(|home| home.join("bridges").join("agy"))
@@ -79,7 +79,7 @@ pub fn bridge_dir() -> anyhow::Result<PathBuf> {
         })
 }
 
-/// Path to `~/.hadron/bridges/agy/manifest.json`.
+/// Path to `~/.wb/bridges/agy/manifest.json`.
 pub fn manifest_path() -> anyhow::Result<PathBuf> {
     Ok(bridge_dir()?.join("manifest.json"))
 }
@@ -91,7 +91,7 @@ pub fn read_manifest() -> Option<BridgeManifest> {
     serde_json::from_str(&content).ok()
 }
 
-/// Persist the bridge manifest to `~/.hadron/bridges/agy/manifest.json`.
+/// Persist the bridge manifest to `~/.wb/bridges/agy/manifest.json`.
 pub fn write_manifest(manifest: &BridgeManifest) -> anyhow::Result<()> {
     let path = manifest_path()?;
     let content = serde_json::to_string_pretty(manifest).context("serializing bridge manifest")?;
@@ -206,7 +206,7 @@ pub fn upgrade_venv() -> anyhow::Result<BridgeManifest> {
 /// Create the venv and install required packages into it. Blocking and
 /// potentially slow — callers MUST run this off the seating/dispatch path and off
 /// the UI thread (see task 1c in
-/// `.hadron/docs/plans/2026-07-28-shippable-bridge-and-self-update.md`).
+/// `.wb/docs/plans/2026-07-28-shippable-bridge-and-self-update.md`).
 /// A no-op returning the existing interpreter if already provisioned.
 pub fn provision_venv() -> anyhow::Result<PathBuf> {
     let python = venv_python()?;

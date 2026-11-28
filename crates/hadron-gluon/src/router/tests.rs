@@ -281,7 +281,7 @@ fn a_reboot_is_not_a_pending_turn() {
     assert_eq!(next_pending(&answered_then_rebooted), None);
 }
 
-/// **The masked-orchestrator bug, replayed from `.hadron/field.jsonl`.**
+/// **The masked-orchestrator bug, replayed from `.wb/field.jsonl`.**
 ///
 /// A worker reports up (`Message → orch`), and the merge gate then appends its own
 /// audit `PermissionReq` + `PermissionGrant{→worker}` before landing the branch. The

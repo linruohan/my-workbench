@@ -1,5 +1,5 @@
 //! Pure and async logic for the `vcr` (HTTP/RPC record-replay) tool family.
-//! Transparent cassette recording and deterministic offline replay proxy jailed under `.hadron/cassettes/`.
+//! Transparent cassette recording and deterministic offline replay proxy jailed under `.wb/cassettes/`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -159,7 +159,7 @@ fn parse_authority<'a>(authority: &'a str, url: &str) -> Result<(&'a str, u16), 
     }
 }
 
-/// A cassette name becomes a file name under `.hadron/cassettes/`, so it may not carry
+/// A cassette name becomes a file name under `.wb/cassettes/`, so it may not carry
 /// path separators or `..` — that would write outside the cassettes directory.
 fn validate_cassette_name(name: &str) -> Result<(), ForgeError> {
     let ok = !name.is_empty()
@@ -178,7 +178,7 @@ fn validate_cassette_name(name: &str) -> Result<(), ForgeError> {
 
 pub fn load_cassette(root: &Root, name: &str) -> Result<VcrCassette, ForgeError> {
     validate_cassette_name(name)?;
-    let cassettes_dir = resolve_jailed_path(root, ".hadron/cassettes")?;
+    let cassettes_dir = resolve_jailed_path(root, ".wb/cassettes")?;
     let path = cassettes_dir.join(format!("{}.json", name));
     if !path.exists() {
         return Err(ForgeError::Rejected(format!(
@@ -194,7 +194,7 @@ pub fn load_cassette(root: &Root, name: &str) -> Result<VcrCassette, ForgeError>
 
 pub fn save_cassette(root: &Root, cassette: &VcrCassette) -> Result<(), ForgeError> {
     validate_cassette_name(&cassette.name)?;
-    let cassettes_dir = resolve_jailed_path(root, ".hadron/cassettes")?;
+    let cassettes_dir = resolve_jailed_path(root, ".wb/cassettes")?;
     fs::create_dir_all(&cassettes_dir)
         .map_err(|e| ForgeError::Io(format!("Failed creating cassettes directory: {e}")))?;
     let path = cassettes_dir.join(format!("{}.json", cassette.name));
@@ -206,7 +206,7 @@ pub fn save_cassette(root: &Root, cassette: &VcrCassette) -> Result<(), ForgeErr
 }
 
 pub fn list_cassettes(root: &Root) -> Result<Vec<VcrCassetteSummary>, ForgeError> {
-    let cassettes_dir = resolve_jailed_path(root, ".hadron/cassettes")?;
+    let cassettes_dir = resolve_jailed_path(root, ".wb/cassettes")?;
     if !cassettes_dir.exists() {
         return Ok(Vec::new());
     }

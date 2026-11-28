@@ -95,7 +95,7 @@ pub(super) const ACP_AGENTS: &[AcpAgentSpec] = &[
         // The ONLY preset that names a path rather than a program on `PATH`, because
         // the bridge is a script rather than a published CLI. Written `{hadron}`-
         // anchored, NOT `{repo}`-anchored: the script and its venv are materialized
-        // under `~/.hadron/bridges/agy` (`adapter::bridge`) precisely so this preset
+        // under `~/.wb/bridges/agy` (`adapter::bridge`) precisely so this preset
         // works on an installed (`cargo install`) build with no source checkout — see
         // `notes/anchoring-a-boot-command-does-not-ship-it.md`. A bare relative path
         // would resolve by `execve` against the SPAWNING PROCESS's cwd — see

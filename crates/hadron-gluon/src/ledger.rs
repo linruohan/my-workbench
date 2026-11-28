@@ -13,7 +13,7 @@ pub struct Ledger {
     conn: Mutex<Connection>,
 }
 
-/// Compute a deterministic host-local SQLite path under `~/.hadron/ledgers/` for
+/// Compute a deterministic host-local SQLite path under `~/.wb/ledgers/` for
 /// workspaces on filesystems that do not support Win32 `LockFileEx` (such as Windows
 /// 9P `\\wsl.localhost\...` mounts, where SQLite fails with `Error code 5: database is locked`).
 pub fn host_local_ledger_path(original_path: &Path) -> Option<PathBuf> {
@@ -43,7 +43,7 @@ impl Ledger {
     ///
     /// On WSL UNC paths (`\\wsl.localhost\...` or `\\?\UNC\wsl.localhost\...`), the Windows 9P
     /// redirector rejects SQLite's `LockFileEx` byte-range locks with `SQLITE_BUSY` (`Error code 5`).
-    /// Those paths are transparently routed to host-local storage under `~/.hadron/ledgers/`,
+    /// Those paths are transparently routed to host-local storage under `~/.wb/ledgers/`,
     /// with an in-memory fallback if file locking still fails.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if hadron_lattice::wsl::is_wsl_unc_path(path) {
@@ -137,9 +137,9 @@ mod tests {
 
     #[test]
     fn wsl_unc_ledger_path_routes_to_host_local_and_opens_cleanly() {
-        let wsl_path = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\ledger.db");
+        let wsl_path = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\ledger.db");
         let verbatim_wsl_path =
-            Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project\.hadron\ledger.db");
+            Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project\.wb\ledger.db");
         assert_eq!(
             host_local_ledger_path(wsl_path),
             host_local_ledger_path(verbatim_wsl_path)

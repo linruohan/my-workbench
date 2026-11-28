@@ -26,7 +26,7 @@ fn is_heavy_ignored_dir(rel_path: &str) -> bool {
 }
 
 /// Ignored entries, with wholly-ignored heavy directories collapsed to a single entry.
-/// Non-heavy gitignored directories (e.g. `.hadron/docs/plans/`, `.hadron/nucleus/`, `assets/screenshots/`)
+/// Non-heavy gitignored directories (e.g. `.wb/docs/plans/`, `.wb/nucleus/`, `assets/screenshots/`)
 /// are automatically expanded without 9P stat storms by running a single `git ls-files` pass
 /// filtered by `!is_heavy_ignored_dir(line)` (synthesizing intermediate directory entries with trailing `/`).
 pub fn list_workspace_files(
@@ -141,16 +141,16 @@ pub fn list_workspace_files(
             cmd.arg(root);
         }
         cmd.args([
-            ":(exclude).hadron/trees",
-            ":(exclude).hadron/reaped",
-            ":(exclude).hadron/sessions",
-            ":(exclude).hadron/update",
-            ":(exclude).hadron/live",
-            ":(exclude).hadron/prompt-cost",
-            ":(exclude).hadron/quota",
-            ":(exclude).hadron/steer",
-            ":(exclude).hadron/archive",
-            ":(exclude).hadron/ledgers",
+            ":(exclude).wb/trees",
+            ":(exclude).wb/reaped",
+            ":(exclude).wb/sessions",
+            ":(exclude).wb/update",
+            ":(exclude).wb/live",
+            ":(exclude).wb/prompt-cost",
+            ":(exclude).wb/quota",
+            ":(exclude).wb/steer",
+            ":(exclude).wb/archive",
+            ":(exclude).wb/ledgers",
         ]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {
@@ -732,11 +732,11 @@ pub fn file_url_target(url: &str) -> Option<(std::path::PathBuf, Option<u32>)> {
     Some((std::path::PathBuf::from(normalized), line))
 }
 
-/// Strip an embedded `/.hadron/trees/<quark>/` worktree segment from a path string
+/// Strip an embedded `/.wb/trees/<quark>/` worktree segment from a path string
 /// so links generated inside an isolated quark worktree resolve to the main repository checkout.
 pub fn strip_quark_worktree_segment(path: &Path) -> std::path::PathBuf {
     let s = path.to_string_lossy();
-    for marker in ["/.hadron/trees/", r"\.hadron\trees\"] {
+    for marker in ["/.wb/trees/", r"\.wb\trees\"] {
         if let Some(idx) = s.find(marker) {
             let prefix = &s[..idx];
             let after_marker = &s[idx + marker.len()..];
@@ -752,7 +752,7 @@ pub fn strip_quark_worktree_segment(path: &Path) -> std::path::PathBuf {
 
 /// Resolve a `file://` URL against the active `workspace` root (if any), translating
 /// between Linux in-distro paths (`/home/...`) and Windows WSL UNC paths
-/// (`\\wsl.localhost\<distro>\home\...`) and stripping `.hadron/trees/<quark>/` segments.
+/// (`\\wsl.localhost\<distro>\home\...`) and stripping `.wb/trees/<quark>/` segments.
 pub fn resolve_file_url_for_workspace(
     url: &str,
     workspace: Option<&Path>,
@@ -1240,7 +1240,7 @@ pub fn set_windows_console_visible(visible: bool) {
 #[cfg(not(windows))]
 pub fn set_windows_console_visible(_visible: bool) {}
 
-/// Spawn a child `hadron` or `hadron-gluon` process, suppressing a new Windows
+/// Spawn a child `hadron` or `wb-gluon` process, suppressing a new Windows
 /// console window (`CREATE_NO_WINDOW`) when `show_console` is false.
 pub fn spawn_with_console_pref<I, S>(
     exe: &Path,
@@ -1251,8 +1251,31 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    spawn_with_log_output(exe, args, show_console, None)
+}
+
+/// `spawn_with_console_pref` 的可选日志重定向版本。
+///
+/// `log_file` 有值时同时接管子进程的 stdout 与 stderr（追加写），
+/// 这样 release 没有控制台时守护进程的日志也能落到文件里。
+fn spawn_with_log_output<I, S>(
+    exe: &Path,
+    args: I,
+    show_console: bool,
+    log_file: Option<std::fs::File>,
+) -> std::io::Result<std::process::Child>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let mut cmd = Command::new(exe);
     cmd.args(args);
+    if let Some(file) = log_file {
+        // stderr 与 stdout 各持一个句柄，追加写同一个文件。
+        let stderr = file.try_clone()?;
+        cmd.stdout(std::process::Stdio::from(file));
+        cmd.stderr(std::process::Stdio::from(stderr));
+    }
     #[cfg(windows)]
     if !show_console {
         use std::os::windows::process::CommandExt;
@@ -1263,12 +1286,13 @@ where
     cmd.spawn()
 }
 
-/// Resolve the `hadron-gluon` binary next to our own executable, falling back to
+/// Resolve the `wb-gluon` binary next to our own executable, falling back to
 /// the bare name (resolved via `PATH`) only if the sibling is absent. Resolving
-/// against `current_exe()` first means a `hadron-gluon` planted earlier on `PATH`
+/// against `current_exe()` first means a `wb-gluon` planted earlier on `PATH`
 /// cannot be run in place of the one we shipped.
 pub fn resolve_gluon_binary() -> std::path::PathBuf {
-    let name = format!("hadron-gluon{}", std::env::consts::EXE_SUFFIX);
+    // 守护进程改名为 wb-gluon，与工作台（workbench）前缀保持一致。
+    let name = format!("wb-gluon{}", std::env::consts::EXE_SUFFIX);
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(parent) = current_exe.parent() {
             let candidate = parent.join(&name);
@@ -1290,10 +1314,10 @@ pub fn read_lock_pid(lock_path: &Path) -> Option<u32> {
         .and_then(|content| content.trim().parse::<u32>().ok())
 }
 
-/// Resolve the program and argument vector to spawn `hadron-gluon` for `field_path`.
+/// Resolve the program and argument vector to spawn `wb-gluon` for `field_path`.
 ///
 /// When running on Windows against a WSL UNC path (`\\wsl.localhost\<distro>\...`) where
-/// a Linux-native `hadron-gluon` is installed inside `distro`, routes through
+/// a Linux-native `wb-gluon` is installed inside `distro`, routes through
 /// `wsl.exe -d <distro> -- <linux_gluon_bin> <linux_field_path>` so git worktree gates and
 /// quark subprocesses run natively on Linux ext4; otherwise uses the local host
 /// [`resolve_gluon_binary`].
@@ -1318,17 +1342,68 @@ pub fn resolve_gluon_spawn_target(field_path: &Path) -> (std::path::PathBuf, Vec
     )
 }
 
-/// Spawn `hadron-gluon` for `field_path`, routing through WSL2 when running on Windows
-/// against a WSL UNC workspace that has a Linux-native `hadron-gluon` installed.
+/// Spawn `wb-gluon` for `field_path`, routing through WSL2 when running on Windows
+/// against a WSL UNC workspace that has a Linux-native `wb-gluon` installed.
 pub fn spawn_gluon_for_field(
     field_path: &Path,
     show_console: bool,
 ) -> std::io::Result<std::process::Child> {
     let (prog, args) = resolve_gluon_spawn_target(field_path);
-    spawn_with_console_pref(&prog, args, show_console)
+    // 守护进程的 stdout/stderr 就是它的日志：重定向到 logs 下按会话区分的文件，
+    // release 没有控制台时也能留痕（启动叙事、警告、panic 一并捕获）。
+    let log_file = open_gluon_log(field_path);
+    spawn_with_log_output(&prog, args, show_console, log_file)
 }
 
-/// Return the live `hadron-gluon` daemon PID for `field_path` if the field's runtime
+/// 打开守护进程日志文件：`<WB_LOG_DIR>/wb-gluon-<仓库>-<会话>.log`。
+///
+/// `WB_LOG_DIR` 由工作台启动时注入（数据目录下的 `logs`）；没有该变量
+/// 或打不开文件时返回 `None`，退回不重定向的旧行为。
+fn open_gluon_log(field_path: &Path) -> Option<std::fs::File> {
+    let dir = std::env::var_os("WB_LOG_DIR").map(std::path::PathBuf::from)?;
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(gluon_log_file_name(field_path)))
+        .ok()
+}
+
+/// 生成守护进程日志文件名：`wb-gluon-<仓库>-<会话>.log`。
+///
+/// 会话取 `<repo>/.wb/sessions/<id>` 的 id；工作区默认会话记为 `active`。
+fn gluon_log_file_name(field_path: &Path) -> String {
+    let repo_name = hadron_lattice::repo_root_of(field_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+    let session = field_path
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| name != ".wb" && name != ".hadron")
+        .unwrap_or_else(|| "active".to_string());
+    format!(
+        "wb-gluon-{}-{}.log",
+        sanitize_file_stem(&repo_name),
+        sanitize_file_stem(&session)
+    )
+}
+
+/// 文件名只保留字母数字与 `-_.`，其余替换成 `_`，避免路径分隔符等非法字符。
+fn sanitize_file_stem(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Return the live `wb-gluon` daemon PID for `field_path` if the field's runtime
 /// directory contains a `gluon.lock` holding a PID that is currently alive.
 pub fn probe_gluon_pid(field_path: &Path) -> Option<u32> {
     let field_dir = hadron_lattice::runtime_dir_of(field_path);
@@ -1337,7 +1412,7 @@ pub fn probe_gluon_pid(field_path: &Path) -> Option<u32> {
     hadron_lattice::sys::inspect::is_process_alive_in_dir(pid, &field_dir).then_some(pid)
 }
 
-/// Stop the running `hadron-gluon` daemon for `field_path`, if any.
+/// Stop the running `wb-gluon` daemon for `field_path`, if any.
 /// Returns `Ok(true)` if a running daemon was found and terminated, or `Ok(false)` if none was running.
 pub fn stop_gluon_daemon(field_path: &Path) -> std::io::Result<bool> {
     let field_dir = hadron_lattice::runtime_dir_of(field_path);
@@ -1351,9 +1426,9 @@ pub fn stop_gluon_daemon(field_path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// Start or restart the `hadron-gluon` daemon for `field_path`: if a live
-/// `hadron-gluon` currently holds `<field_dir>/gluon.lock`, terminates it and waits
-/// briefly for exit before spawning a fresh `hadron-gluon` instance.
+/// Start or restart the `wb-gluon` daemon for `field_path`: if a live
+/// `wb-gluon` currently holds `<field_dir>/gluon.lock`, terminates it and waits
+/// briefly for exit before spawning a fresh `wb-gluon` instance.
 pub fn restart_gluon_daemon(field_path: &Path, show_console: bool) -> std::io::Result<u32> {
     let _ = stop_gluon_daemon(field_path)?;
     let child = spawn_gluon_for_field(field_path, show_console)?;
@@ -1698,8 +1773,8 @@ mod tests {
 
     #[test]
     fn resolve_file_url_for_workspace_maps_linux_paths_and_strips_worktree_under_wsl_unc() {
-        let wsl_ws = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\field.jsonl");
-        let url = "file:///home/user/project/.hadron/trees/cli-agy/crates/hadron-chamber/src/pty.rs#L48-L49";
+        let wsl_ws = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\field.jsonl");
+        let url = "file:///home/user/project/.wb/trees/cli-agy/crates/hadron-chamber/src/pty.rs#L48-L49";
         let (resolved, line) = super::resolve_file_url_for_workspace(url, Some(wsl_ws)).unwrap();
         assert_eq!(
             resolved,
@@ -1887,12 +1962,12 @@ mod tests {
             .output()
             .unwrap();
 
-        fs::write(root.join(".gitignore"), ".hadron/\ntarget/\n").unwrap();
-        fs::create_dir_all(root.join(".hadron/docs/plans")).unwrap();
-        fs::write(root.join(".hadron/docs/plans/master.md"), "# Master Plan").unwrap();
-        fs::create_dir_all(root.join(".hadron/trees/peer1")).unwrap();
+        fs::write(root.join(".gitignore"), ".wb/\ntarget/\n").unwrap();
+        fs::create_dir_all(root.join(".wb/docs/plans")).unwrap();
+        fs::write(root.join(".wb/docs/plans/master.md"), "# Master Plan").unwrap();
+        fs::create_dir_all(root.join(".wb/trees/peer1")).unwrap();
         fs::write(
-            root.join(".hadron/trees/peer1/scratch.txt"),
+            root.join(".wb/trees/peer1/scratch.txt"),
             "heavy tree file",
         )
         .unwrap();
@@ -1900,12 +1975,12 @@ mod tests {
         fs::write(root.join("target/debug/app.bin"), "binary").unwrap();
 
         let files = list_workspace_files(root, &std::collections::HashSet::new());
-        // .hadron/docs/plans/master.md is indexed automatically
+        // .wb/docs/plans/master.md is indexed automatically
         assert!(
-            files.contains(&(".hadron/docs/plans/master.md".to_string(), true)),
+            files.contains(&(".wb/docs/plans/master.md".to_string(), true)),
             "internal plans in gitignored non-heavy dirs must be discoverable: {files:?}"
         );
-        // Heavy dirs (target/ and .hadron/trees/) remain collapsed
+        // Heavy dirs (target/ and .wb/trees/) remain collapsed
         assert!(
             files.contains(&("target/".to_string(), true)),
             "target/ must remain collapsed: {files:?}"
@@ -1915,11 +1990,11 @@ mod tests {
             "target inner files must not be traversed: {files:?}"
         );
         assert!(
-            files.contains(&(".hadron/trees/".to_string(), true)),
-            ".hadron/trees/ must remain collapsed: {files:?}"
+            files.contains(&(".wb/trees/".to_string(), true)),
+            ".wb/trees/ must remain collapsed: {files:?}"
         );
         assert!(
-            !files.contains(&(".hadron/trees/peer1/scratch.txt".to_string(), true)),
+            !files.contains(&(".wb/trees/peer1/scratch.txt".to_string(), true)),
             "heavy subtrees must not be traversed: {files:?}"
         );
     }
@@ -2179,15 +2254,15 @@ mod tests {
 
     #[test]
     fn resolve_gluon_spawn_target_falls_back_to_local_binary_for_local_path() {
-        let local_field = Path::new("/tmp/hadron-test/.hadron/field.jsonl");
+        let local_field = Path::new("/tmp/hadron-test/.wb/field.jsonl");
         let (prog, args) = resolve_gluon_spawn_target(local_field);
         assert_eq!(prog, resolve_gluon_binary());
         assert_eq!(args, vec![local_field.to_string_lossy().into_owned()]);
 
         // And for a WSL UNC path on Windows when HADRON_WSL_GLUON is not set,
-        // resolve_gluon_spawn_target must use the local Windows hadron-gluon.exe
+        // resolve_gluon_spawn_target must use the local Windows wb-gluon.exe
         // so Windows Credential Manager and Windows host CLIs work out of the box.
-        let wsl_field = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\field.jsonl");
+        let wsl_field = Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\field.jsonl");
         let (wsl_prog, wsl_args) = resolve_gluon_spawn_target(wsl_field);
         assert_eq!(wsl_prog, resolve_gluon_binary());
         assert_eq!(wsl_args, vec![wsl_field.to_string_lossy().into_owned()]);
@@ -2206,18 +2281,18 @@ mod tests {
 
         std::fs::write(
             root.join(".gitignore"),
-            ".hadron/\nassets/screenshots/\ntarget/\ncrates/gpui-component/\n",
+            ".wb/\nassets/screenshots/\ntarget/\ncrates/gpui-component/\n",
         )
         .unwrap();
 
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
 
-        std::fs::create_dir_all(root.join(".hadron/assets")).unwrap();
-        std::fs::write(root.join(".hadron/assets/shot.png"), "png").unwrap();
+        std::fs::create_dir_all(root.join(".wb/assets")).unwrap();
+        std::fs::write(root.join(".wb/assets/shot.png"), "png").unwrap();
 
-        std::fs::create_dir_all(root.join(".hadron/trees/worker")).unwrap();
-        std::fs::write(root.join(".hadron/trees/worker/file.rs"), "heavy").unwrap();
+        std::fs::create_dir_all(root.join(".wb/trees/worker")).unwrap();
+        std::fs::write(root.join(".wb/trees/worker/file.rs"), "heavy").unwrap();
 
         std::fs::create_dir_all(root.join("assets/screenshots")).unwrap();
         std::fs::write(root.join("assets/screenshots/ui.png"), "png").unwrap();
@@ -2232,9 +2307,9 @@ mod tests {
         let files = list_workspace_files(root, &expanded);
 
         assert!(files.contains(&("src/main.rs".to_string(), false)));
-        assert!(files.contains(&(".hadron/".to_string(), true)));
-        assert!(files.contains(&(".hadron/assets/".to_string(), true)));
-        assert!(files.contains(&(".hadron/assets/shot.png".to_string(), true)));
+        assert!(files.contains(&(".wb/".to_string(), true)));
+        assert!(files.contains(&(".wb/assets/".to_string(), true)));
+        assert!(files.contains(&(".wb/assets/shot.png".to_string(), true)));
         assert!(files.contains(&("assets/screenshots/ui.png".to_string(), true)));
 
         // Heavy directories are collapsed, not expanded into individual files
@@ -2242,7 +2317,7 @@ mod tests {
         assert!(!files.iter().any(|(p, _)| p == "target/debug/bin"));
         assert!(!files
             .iter()
-            .any(|(p, _)| p == ".hadron/trees/worker/file.rs"));
+            .any(|(p, _)| p == ".wb/trees/worker/file.rs"));
         assert!(!files
             .iter()
             .any(|(p, _)| p == "crates/gpui-component/src/lib.rs"));

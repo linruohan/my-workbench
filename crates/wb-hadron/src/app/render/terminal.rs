@@ -1190,7 +1190,7 @@ impl super::Chamber {
                         let repo = crate::vcs::repo_root_of(&self.path).to_path_buf();
 
                         // The active plan is the plan tracked by Chamber reload, or resolved from
-                        // recent field messages and `.hadron/docs/plans/` directory scan.
+                        // recent field messages and `.wb/docs/plans/` directory scan.
                         let active_plan_path = self.last_plan_path.clone().or_else(|| {
                             crate::app::reload::resolve_active_plan_with_plans(
                                 &repo,
@@ -1224,7 +1224,7 @@ impl super::Chamber {
                                 list = list
                                     .child(self.breadcrumb_bar_for_plan(&rel_path, &content, cx));
 
-                                // Sibling and suite plans across .hadron/docs/plans/
+                                // Sibling and suite plans across .wb/docs/plans/
                                 let dropdown_items = crate::app::reload::build_plan_dropdown_items(
                                     &self.cached_plan_paths,
                                     &rel_path,
@@ -2003,7 +2003,7 @@ impl super::Chamber {
                                 div()
                                     .text_xs()
                                     .text_color(theme::text_muted())
-                                    .child("No scheduled tasks configured (.hadron/schedules/schedules.json)."),
+                                    .child("No scheduled tasks configured (.wb/schedules/schedules.json)."),
                             );
                         } else {
                             let mut sched_rows = v_flex().gap_1p5().w_full();

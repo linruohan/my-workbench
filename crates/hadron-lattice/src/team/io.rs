@@ -15,33 +15,40 @@ pub fn home_dir() -> Option<PathBuf> {
     None
 }
 
-/// The user-level Hadron directory: `~/.hadron` (i.e. `<home>/.hadron`), the same
-/// dot-folder convention as a project's `.hadron/`. Cross-platform. `None` if the
+/// The user-level Hadron directory: `~/.wb` (i.e. `<home>/.wb`), the same
+/// dot-folder convention as a project's `.wb/`. Cross-platform. `None` if the
 /// home directory can't be resolved. All global Hadron state (chamber prefs, the
 /// default team) lives here.
 pub fn user_hadron_dir() -> Option<PathBuf> {
-    Some(home_dir()?.join(".hadron"))
+    Some(home_dir()?.join(".wb"))
 }
 
-/// The canonical global `team.json` location: `~/.hadron/team.json`. Both the
+/// The canonical global `team.json` location: `~/.wb/team.json`. Both the
 /// daemon (to seat quarks when no project team is found) and the chamber (to
 /// annotate the roster) resolve the same file here.
 pub fn team_config_path() -> Option<PathBuf> {
     Some(user_hadron_dir()?.join("team.json"))
 }
 
-/// Returns `true` if `path` points to a user-level global `~/.hadron/team.json`
+/// Returns `true` if `path` points to a user-level global `~/.wb/team.json`
 /// (either the local host's `team_config_path()` or a Linux/WSL user home
-/// `/home/<user>/.hadron/team.json` / `/root/.hadron/team.json`, including Windows
-/// WSL UNC paths like `\\wsl.localhost\<distro>\home\<user>\.hadron\team.json`).
+/// `/home/<user>/.wb/team.json` / `/root/.wb/team.json`, including Windows
+/// WSL UNC paths like `\\wsl.localhost\<distro>\home\<user>\.wb\team.json`).
 ///
-/// This prevents directory walk-ups from mistaking a user's home `~/.hadron/team.json`
-/// for a repository's `.hadron/team.json` when opening a repository inside `~` that
+/// This prevents directory walk-ups from mistaking a user's home `~/.wb/team.json`
+/// for a repository's `.wb/team.json` when opening a repository inside `~` that
 /// has no repo-level `team.json` yet.
 pub fn is_global_team_config_path(path: &Path) -> bool {
     if let Some(global) = team_config_path() {
         if path == global {
             return true;
+        }
+        // Windows 8.3 短路径（如 `C:\Users\ADMINI~1`）与长路径写法不同，
+        // 统一规范化后再比较一次，避免把 home 下的全局 team 误判成仓库级。
+        if let (Ok(a), Ok(b)) = (path.canonicalize(), global.canonicalize()) {
+            if a == b {
+                return true;
+            }
         }
     }
     if let Some(wsl_cat) = crate::wsl::wsl_catalogue_path_for_field(path) {
@@ -51,12 +58,12 @@ pub fn is_global_team_config_path(path: &Path) -> bool {
     }
     let normalized = path.to_string_lossy().replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
-    // Match `/home/<user>/.hadron/team.json` or `//wsl.localhost/<distro>/home/<user>/.hadron/team.json`
-    if parts.len() == 4 && parts[0] == "home" && parts[2] == ".hadron" && parts[3] == "team.json" {
+    // Match `/home/<user>/.wb/team.json` or `//wsl.localhost/<distro>/home/<user>/.wb/team.json`
+    if parts.len() == 4 && parts[0] == "home" && parts[2] == ".wb" && parts[3] == "team.json" {
         return true;
     }
-    // Match `/root/.hadron/team.json`
-    if parts.len() == 3 && parts[0] == "root" && parts[1] == ".hadron" && parts[2] == "team.json" {
+    // Match `/root/.wb/team.json`
+    if parts.len() == 3 && parts[0] == "root" && parts[1] == ".wb" && parts[2] == "team.json" {
         return true;
     }
     if let Some((_distro, linux_path)) = crate::wsl::parse_wsl_unc_path(path) {
@@ -64,11 +71,11 @@ pub fn is_global_team_config_path(path: &Path) -> bool {
         let lparts: Vec<&str> = lp.split('/').filter(|p| !p.is_empty()).collect();
         if (lparts.len() == 4
             && lparts[0] == "home"
-            && lparts[2] == ".hadron"
+            && lparts[2] == ".wb"
             && lparts[3] == "team.json")
             || (lparts.len() == 3
                 && lparts[0] == "root"
-                && lparts[1] == ".hadron"
+                && lparts[1] == ".wb"
                 && lparts[2] == "team.json")
         {
             return true;
@@ -77,11 +84,11 @@ pub fn is_global_team_config_path(path: &Path) -> bool {
     false
 }
 
-/// Resolve the **repository-scoped** `.hadron/team.json` for a given `field_path`,
-/// returning `None` if the repository has no `.hadron/team.json` of its own.
+/// Resolve the **repository-scoped** `.wb/team.json` for a given `field_path`,
+/// returning `None` if the repository has no `.wb/team.json` of its own.
 ///
-/// Never returns the user-level global `~/.hadron/team.json` (nor a WSL home
-/// `/home/<user>/.hadron/team.json`), and stops walking up once it hits a `.git`
+/// Never returns the user-level global `~/.wb/team.json` (nor a WSL home
+/// `/home/<user>/.wb/team.json`), and stops walking up once it hits a `.git`
 /// boundary.
 pub fn repo_team_for_field(field_path: &Path) -> Option<PathBuf> {
     if let Some(sibling) = field_path.parent().map(|d| d.join("team.json")) {
@@ -91,7 +98,7 @@ pub fn repo_team_for_field(field_path: &Path) -> Option<PathBuf> {
     }
     let mut current = field_path.parent();
     while let Some(dir) = current {
-        let repo_config = dir.join(".hadron").join("team.json");
+        let repo_config = dir.join(".wb").join("team.json");
         if repo_config.exists() && !is_global_team_config_path(&repo_config) {
             return Some(repo_config);
         }
@@ -104,8 +111,8 @@ pub fn repo_team_for_field(field_path: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve which `team.json` describes the team working a given field: the
-/// project-level `team.json` sitting next to the field (the `.hadron/` convention)
-/// if present, else the global `~/.hadron/team.json`. Both the daemon (to seat)
+/// project-level `team.json` sitting next to the field (the `.wb/` convention)
+/// if present, else the global `~/.wb/team.json`. Both the daemon (to seat)
 /// and the chamber (to annotate the roster) must resolve the SAME team, so they
 /// share this — otherwise the chamber shows legibility for a team the daemon
 /// never seated.
@@ -113,10 +120,10 @@ pub fn team_for_field(field_path: &Path) -> Option<PathBuf> {
     repo_team_for_field(field_path).or_else(team_config_path)
 }
 
-/// Resolve the `team.json` path for a given repository root. Checks `<repo_root>/.hadron/team.json`,
-/// then falls back to `team_config_path()` (`~/.hadron/team.json`).
+/// Resolve the `team.json` path for a given repository root. Checks `<repo_root>/.wb/team.json`,
+/// then falls back to `team_config_path()` (`~/.wb/team.json`).
 pub fn team_for_repo(repo_root: &Path) -> Option<PathBuf> {
-    let repo_team = repo_root.join(".hadron").join("team.json");
+    let repo_team = repo_root.join(".wb").join("team.json");
     if repo_team.exists() {
         return Some(repo_team);
     }
@@ -158,7 +165,7 @@ pub fn load_team(path: &Path) -> Team {
 }
 
 /// When operating on a WSL UNC workspace from Windows (`\\wsl.localhost\<distro>\home\<user>\...`),
-/// merge any seat definitions from the WSL user's `~/.hadron/team.json` into `catalogue`
+/// merge any seat definitions from the WSL user's `~/.wb/team.json` into `catalogue`
 /// (preserving existing host catalogue seats on ID collision) so repo roster overrides
 /// referencing WSL-configured seats do not get dropped as orphans.
 pub fn merge_wsl_catalogue(catalogue: &mut Team, workspace_or_field_path: &Path) {

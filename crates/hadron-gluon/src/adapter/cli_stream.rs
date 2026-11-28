@@ -418,8 +418,8 @@ fn agy_candidate_homes(work_dir: Option<&std::path::Path>) -> Vec<std::path::Pat
         if let Some(wsl_hadron) = hadron_lattice::wsl::wsl_user_hadron_dir_for_field(w) {
             let s = wsl_hadron.to_string_lossy();
             let trimmed = s
-                .strip_suffix(r"\.hadron")
-                .or_else(|| s.strip_suffix("/.hadron"))
+                .strip_suffix(r"\.wb")
+                .or_else(|| s.strip_suffix("/.wb"))
                 .unwrap_or(&s);
             if !trimmed.is_empty() {
                 homes.push(std::path::PathBuf::from(trimmed));
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     fn agy_candidate_homes_includes_wsl_unc_home_from_work_dir() {
         let wsl_work_dir = std::path::Path::new(
-            r"\\wsl.localhost\Ubuntu\home\Jake\dev\hadron\.hadron\trees\cli-agy",
+            r"\\wsl.localhost\Ubuntu\home\Jake\dev\hadron\.wb\trees\cli-agy",
         );
         let homes = agy_candidate_homes(Some(wsl_work_dir));
         assert!(

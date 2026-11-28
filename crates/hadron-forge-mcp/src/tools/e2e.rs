@@ -170,7 +170,7 @@ mod tests {
         assert!(res.0.blocks.unwrap().contains("Basic Page Check"));
         assert!(temp
             .path()
-            .join(".hadron/screenshots/verify_page.png")
+            .join(".wb/screenshots/verify_page.png")
             .exists());
     }
 }

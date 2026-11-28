@@ -72,10 +72,10 @@ mod tests {
 
     #[test]
     fn the_quota_dir_sits_beside_the_field() {
-        let field = Path::new("/home/user/project/.hadron/field.jsonl");
+        let field = Path::new("/home/user/project/.wb/field.jsonl");
         assert_eq!(
             quota_dir(field),
-            PathBuf::from("/home/user/project/.hadron/quota")
+            PathBuf::from("/home/user/project/.wb/quota")
         );
     }
 

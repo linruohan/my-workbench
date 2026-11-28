@@ -39,7 +39,7 @@ pub fn kill_process_group(pid: u32) {
     }
 }
 
-/// Gracefully terminate a `hadron-gluon` process identified by `pid` in `field_dir`,
+/// Gracefully terminate a `wb-gluon` process identified by `pid` in `field_dir`,
 /// escalating to process-group force kill if it does not exit within 1.5s.
 ///
 /// Supports both host-spawned `hadron-gluon` processes and WSL-native Linux `hadron-gluon`
@@ -59,7 +59,7 @@ pub fn terminate_gluon_in_dir(pid: u32, field_dir: &std::path::Path) {
     }
     #[cfg(windows)]
     {
-        if !crate::sys::inspect::is_process_alive(pid, "hadron-gluon")
+        if !crate::sys::inspect::is_process_alive(pid, "wb-gluon")
             && crate::wsl::is_wsl_unc_path(field_dir)
         {
             let _ = crate::wsl::wsl_aware_command(field_dir, "kill")

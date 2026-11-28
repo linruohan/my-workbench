@@ -14,7 +14,7 @@ pub struct SharedScratchBus {
 
 impl SharedScratchBus {
     pub fn new(repo_root: &Path) -> Self {
-        let scratch_dir = repo_root.join(".hadron").join("scratch");
+        let scratch_dir = repo_root.join(".wb").join("scratch");
         Self { scratch_dir }
     }
 
@@ -30,12 +30,12 @@ impl SharedScratchBus {
 
     /// Projects the shared scratch directory into a specific worktree.
     ///
-    /// Creates `<worktree_path>/.hadron/scratch` as a symlink pointing to
-    /// `<repo_root>/.hadron/scratch`. If symlink creation is not permitted,
+    /// Creates `<worktree_path>/.wb/scratch` as a symlink pointing to
+    /// `<repo_root>/.wb/scratch`. If symlink creation is not permitted,
     /// ensures the directory exists as a fallback.
     pub fn project_into_worktree(&self, worktree_path: &Path) -> io::Result<PathBuf> {
         self.ensure_dir()?;
-        let target_hadron = worktree_path.join(".hadron");
+        let target_hadron = worktree_path.join(".wb");
         fs::create_dir_all(&target_hadron)?;
         let target_scratch = target_hadron.join("scratch");
 

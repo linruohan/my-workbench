@@ -25,7 +25,7 @@ pub struct SynthesizedPreon {
 pub struct PreonEvolutionEngine;
 
 impl PreonEvolutionEngine {
-    /// Analyze note contents from `.hadron/nucleus/notes/` and extract failure patterns.
+    /// Analyze note contents from `.wb/nucleus/notes/` and extract failure patterns.
     pub fn extract_patterns(notes: &[(String, String)]) -> Vec<FailurePattern> {
         let mut keyword_clusters: HashMap<String, Vec<(String, String)>> = HashMap::new();
 

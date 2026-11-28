@@ -142,7 +142,7 @@ pub fn plan_ref(task: &str) -> Option<String> {
     })
 }
 
-/// Finds a research document reference (`.hadron/docs/research/…` or `docs/research/…`) in a task string.
+/// Finds a research document reference (`.wb/docs/research/…` or `docs/research/…`) in a task string.
 pub fn research_ref(task: &str) -> Option<String> {
     task.split(|c: char| {
         c.is_whitespace()

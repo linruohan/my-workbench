@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub fn is_jailed_screenshot_path(repo_root: &Path, candidate: &Path) -> bool {
-    let allowed_dir = repo_root.join(".hadron/screenshots");
+    let allowed_dir = repo_root.join(".wb/screenshots");
     let canon_allowed = match std::fs::canonicalize(&allowed_dir) {
         Ok(p) => p,
         Err(_) => allowed_dir.clone(),
@@ -54,7 +54,7 @@ mod tests {
     #[test]
     fn test_screenshot_jail_enforcement() {
         let repo_root = PathBuf::from("/home/user/project");
-        let valid_path = repo_root.join(".hadron/screenshots/view.png");
+        let valid_path = repo_root.join(".wb/screenshots/view.png");
         let invalid_path = PathBuf::from("/tmp/view.png");
 
         assert!(is_jailed_screenshot_path(&repo_root, &valid_path));

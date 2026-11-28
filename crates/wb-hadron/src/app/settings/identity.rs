@@ -108,15 +108,15 @@ impl super::Chamber {
                 }
             };
 
-            // 1. Repo skills (.hadron/skills and fallback .hadron/preons)
+            // 1. Repo skills (.wb/skills and fallback .wb/preons)
             let hadron_dir = match self.path.parent() {
                 Some(p) => p.to_path_buf(),
-                None => std::path::PathBuf::from(".hadron"),
+                None => std::path::PathBuf::from(".wb"),
             };
             scan_dir(&hadron_dir.join("skills"), false);
             scan_dir(&hadron_dir.join("preons"), false);
 
-            // 2. Global skills (~/.hadron/skills and fallback ~/.hadron/preons)
+            // 2. Global skills (~/.wb/skills and fallback ~/.wb/preons)
             if let Some(user_dir) = hadron_lattice::user_hadron_dir() {
                 scan_dir(&user_dir.join("skills"), true);
                 scan_dir(&user_dir.join("preons"), true);
@@ -159,7 +159,7 @@ impl super::Chamber {
         } else {
             match self.path.parent() {
                 Some(p) => p.join("skills"),
-                None => std::path::PathBuf::from(".hadron/skills"),
+                None => std::path::PathBuf::from(".wb/skills"),
             }
         };
 

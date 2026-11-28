@@ -10,8 +10,8 @@ use hadron_lattice::{Mode, QuarkState};
 use std::fs;
 use tokio::task::AbortHandle;
 
-/// The daemon is launched as `hadron-gluon .hadron/field.jsonl` — a *relative*
-/// path. That path's ancestors end in the empty path, and `"".join(".hadron")`
+/// The daemon is launched as `hadron-gluon .wb/field.jsonl` — a *relative*
+/// path. That path's ancestors end in the empty path, and `"".join(".wb")`
 /// resolves against the process cwd, so the old ancestor search "found" a
 /// workspace root of `""`. That empty root rode the projection down to
 /// `Command::current_dir("")`, which the kernel answers with ENOENT — surfacing
@@ -23,9 +23,9 @@ use tokio::task::AbortHandle;
 fn a_relative_field_path_resolves_to_a_real_workspace_root() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().canonicalize().unwrap();
-    fs::create_dir_all(workspace.join(".hadron")).unwrap();
+    fs::create_dir_all(workspace.join(".wb")).unwrap();
 
-    let root = workspace_root_of(Path::new(".hadron/field.jsonl"), &workspace);
+    let root = workspace_root_of(Path::new(".wb/field.jsonl"), &workspace);
 
     assert_eq!(
         root, workspace,
@@ -41,16 +41,16 @@ fn a_relative_field_path_resolves_to_a_real_workspace_root() {
     );
 }
 
-/// An absolute field path keeps working, and still finds the `.hadron` owner
+/// An absolute field path keeps working, and still finds the `.wb` owner
 /// rather than just the file's parent.
 #[test]
 fn an_absolute_field_path_finds_its_workspace_root() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().canonicalize().unwrap();
-    fs::create_dir_all(workspace.join(".hadron")).unwrap();
+    fs::create_dir_all(workspace.join(".wb")).unwrap();
 
     let root = workspace_root_of(
-        &workspace.join(".hadron/field.jsonl"),
+        &workspace.join(".wb/field.jsonl"),
         Path::new("/nowhere"),
     );
 
@@ -1861,7 +1861,7 @@ async fn projection_carries_nucleus_digest() {
 #[tokio::test]
 async fn nucleus_digest_renders_from_a_real_features_file() {
     // Pins the REAL composition the daemon bin uses — `build_nucleus_digest`
-    // feeding `with_nucleus` — against a real `.hadron/nucleus/features.md`
+    // feeding `with_nucleus` — against a real `.wb/nucleus/features.md`
     // on disk. Discharges `nucleus-load-digest-is-unwired`: proves the
     // digest a quark actually sees comes from a file, not a hand-written
     // literal.
@@ -1869,7 +1869,7 @@ async fn nucleus_digest_renders_from_a_real_features_file() {
     let path = fdir.path().join("field.jsonl");
     seed_human_message(&path, "orch", "go");
 
-    let nucleus_dir = fdir.path().join(".hadron").join("nucleus");
+    let nucleus_dir = fdir.path().join(".wb").join("nucleus");
     std::fs::create_dir_all(&nucleus_dir).unwrap();
     std::fs::write(nucleus_dir.join("features.md"), "## Login\nstatus: done\n").unwrap();
 
@@ -2439,7 +2439,7 @@ async fn a_per_seat_limit_gates_even_with_no_swarm_wide_default() {
 /// Rules that stop a quark confabulating are worthless if a fresh clone, a
 /// `.gitignore`, or a deleted directory can silently remove them — the swarm
 /// would just quietly get worse, with nothing to notice. Point the engine at a
-/// workspace with NO `.hadron` at all: the invariants must still arrive.
+/// workspace with NO `.wb` at all: the invariants must still arrive.
 #[test]
 fn the_standard_model_survives_a_workspace_with_no_files_at_all() {
     let empty = tempdir().unwrap();
@@ -2520,11 +2520,11 @@ fn an_index_within_budget_is_untouched() {
 async fn the_shared_nucleus_index_actually_reaches_a_quarks_projection() {
     use std::fs;
     let ws = tempdir().unwrap();
-    let nucleus_dir = ws.path().join(".hadron").join("nucleus");
+    let nucleus_dir = ws.path().join(".wb").join("nucleus");
     fs::create_dir_all(&nucleus_dir).unwrap();
     fs::write(nucleus_dir.join("index.md"), "The forge crate is unwired.").unwrap();
 
-    let path = ws.path().join(".hadron").join("field.jsonl");
+    let path = ws.path().join(".wb").join("field.jsonl");
     append_event(
         &path,
         &Event::new(
@@ -2621,27 +2621,27 @@ fn an_oversized_nucleus_index_is_cut_and_says_so() {
 }
 
 /// Nucleus is the single knowledge root now — lessons live there, not in the
-/// old `.hadron/memory/`.
+/// old `.wb/memory/`.
 #[test]
 fn nucleus_index_paths_live_under_nucleus_dir() {
     let root = std::path::Path::new("/repo");
     assert_eq!(
         nucleus_index_path(root),
-        std::path::PathBuf::from("/repo/.hadron/nucleus/index.md")
+        std::path::PathBuf::from("/repo/.wb/nucleus/index.md")
     );
     assert_eq!(
         nucleus_notes_dir(root),
-        std::path::PathBuf::from("/repo/.hadron/nucleus/notes")
+        std::path::PathBuf::from("/repo/.wb/nucleus/notes")
     );
 }
 
-/// Until a project's legacy `.hadron/memory/` has been migrated (daemon
+/// Until a project's legacy `.wb/memory/` has been migrated (daemon
 /// boot, `Engine::migrate_legacy_memory`), a quark must still see its real
 /// lessons — never an empty index just because the move hasn't happened yet.
 #[test]
 fn fallback_reads_legacy_memory_when_nucleus_is_empty() {
     let dir = tempdir().unwrap();
-    let legacy = dir.path().join(".hadron").join("memory");
+    let legacy = dir.path().join(".wb").join("memory");
     std::fs::create_dir_all(&legacy).unwrap();
     std::fs::write(
         legacy.join("index.md"),
@@ -2659,14 +2659,14 @@ fn fallback_reads_legacy_memory_when_nucleus_is_empty() {
 #[test]
 fn fallback_prefers_nucleus_once_it_has_content() {
     let dir = tempdir().unwrap();
-    let nucleus = dir.path().join(".hadron").join("nucleus");
+    let nucleus = dir.path().join(".wb").join("nucleus");
     std::fs::create_dir_all(&nucleus).unwrap();
     std::fs::write(
         nucleus.join("index.md"),
         "- **new-lesson** — after the move\n",
     )
     .unwrap();
-    let legacy = dir.path().join(".hadron").join("memory");
+    let legacy = dir.path().join(".wb").join("memory");
     std::fs::create_dir_all(&legacy).unwrap();
     std::fs::write(
         legacy.join("index.md"),
@@ -2685,7 +2685,7 @@ fn fallback_prefers_nucleus_once_it_has_content() {
 fn repo_rules_are_labelled_as_the_projects_own() {
     use std::fs;
     let ws = tempdir().unwrap();
-    let dir = ws.path().join(".hadron").join("nucleus").join("invariants");
+    let dir = ws.path().join(".wb").join("nucleus").join("invariants");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("always.md"), "Threat-model every endpoint.").unwrap();
 
@@ -2705,7 +2705,7 @@ fn repo_rules_are_labelled_as_the_projects_own() {
 fn repo_laws_are_appended_right_after_the_standard_model() {
     use std::fs;
     let ws = tempdir().unwrap();
-    let nucleus = ws.path().join(".hadron").join("nucleus");
+    let nucleus = ws.path().join(".wb").join("nucleus");
     fs::create_dir_all(&nucleus).unwrap();
     fs::write(nucleus.join("laws.md"), "- Never merge on a red gate.\n").unwrap();
 
@@ -2744,7 +2744,7 @@ async fn a_quark_handed_its_own_plan_is_told_to_hand_verification_to_a_peer() {
     let fdir = tempdir().unwrap();
 
     // Anchor the workspace root, so `docs/plans/...` in the task resolves.
-    fs::create_dir_all(fdir.path().join(".hadron")).unwrap();
+    fs::create_dir_all(fdir.path().join(".wb")).unwrap();
     let plans = fdir.path().join("docs").join("plans");
     fs::create_dir_all(&plans).unwrap();
     fs::write(
@@ -2845,13 +2845,13 @@ async fn a_quark_handed_its_own_plan_is_told_to_hand_verification_to_a_peer() {
 ///
 /// `Engine::new` (used below) defaults `global_skills_dir` to `None`, so this
 /// negative assertion cannot be defeated by whatever custom skills happen to sit
-/// under the real `~/.hadron/skills` on the machine running the test — the engine
+/// under the real `~/.wb/skills` on the machine running the test — the engine
 /// simply never looks there unless `with_global_skills_dir` says to.
 #[tokio::test]
 async fn an_ordinary_task_gets_no_skill_and_no_extra_prompt() {
     use std::fs;
     let fdir = tempdir().unwrap();
-    fs::create_dir_all(fdir.path().join(".hadron")).unwrap();
+    fs::create_dir_all(fdir.path().join(".wb")).unwrap();
     let path = fdir.path().join("field.jsonl");
     append_event(
         &path,
@@ -2899,21 +2899,21 @@ async fn an_ordinary_task_gets_no_skill_and_no_extra_prompt() {
     engine.run_until_quiesce().await.unwrap();
 }
 
-/// A repo `.hadron/skills/*.md` file must actually reach a quark's turn — not
+/// A repo `.wb/skills/*.md` file must actually reach a quark's turn — not
 /// just parse (`skills.rs` Task 1 proved that in isolation). This is the
 /// end-to-end proof: a custom skill dropped in the workspace's own
-/// `.hadron/skills/` is loaded by the ENGINE and its body shows up in the
+/// `.wb/skills/` is loaded by the ENGINE and its body shows up in the
 /// projection, same as a built-in's would.
 ///
 /// `Engine::new` leaves `global_skills_dir` at its `None` default, so this test
-/// never touches the real `~/.hadron/skills` either — only the repo (tempdir)
+/// never touches the real `~/.wb/skills` either — only the repo (tempdir)
 /// skill is in play. See `engine_uses_injected_global_skills_dir` for the global
 /// half, via `with_global_skills_dir`.
 #[tokio::test]
 async fn engine_loads_repo_skills() {
     use std::fs;
     let fdir = tempdir().unwrap();
-    let skills_dir = fdir.path().join(".hadron").join("skills");
+    let skills_dir = fdir.path().join(".wb").join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("custom.md"),
@@ -2975,7 +2975,7 @@ async fn engine_loads_repo_skills() {
 
 /// The global half of skill loading, proven the same way the repo half was
 /// above: a skill placed under an INJECTED directory (never the real
-/// `~/.hadron/skills` — see `with_global_skills_dir`) must reach the projection.
+/// `~/.wb/skills` — see `with_global_skills_dir`) must reach the projection.
 /// Positive assertion only, tempdir-controlled throughout — this is the seam the
 /// daemon bin wires with the real path; here it's wired with a fake one, which is
 /// exactly the point of making it injectable.
@@ -3054,7 +3054,7 @@ async fn engine_injects_invariants() {
     // the rest load only when a turn asks for them by name.
     let invariants_dir = fdir
         .path()
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("invariants");
     fs::create_dir_all(&invariants_dir).unwrap();
@@ -4087,8 +4087,8 @@ impl crate::quark::Quark for WriterQuark {
 async fn two_concurrent_quarks_produce_disjoint_attribution() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     append_event(
         &field,
         &Event::new(
@@ -4194,8 +4194,8 @@ async fn two_concurrent_quarks_produce_disjoint_attribution() {
 async fn concurrent_commits_are_attributed_to_the_turn_that_made_them() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     append_event(
         &field,
         &Event::new(
@@ -4335,8 +4335,8 @@ impl crate::merge::MergeRunner for FailingLandRunner {
 async fn a_failing_merge_land_blocks_the_quark_instead_of_looping() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     // Bypass ⇒ the merge is delegated (auto-approved), so the gate takes the SAME
     // audit-grant-then-land path the live loop hit.
     seed_mode(&field, Some("w"), Mode::Bypass);
@@ -4484,8 +4484,8 @@ impl crate::merge::MergeRunner for RedTestRunner {
 async fn a_quark_fixable_merge_refusal_is_handed_back_on_the_same_branch() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -4564,8 +4564,8 @@ async fn a_quark_fixable_merge_refusal_is_handed_back_on_the_same_branch() {
 async fn a_handback_from_the_superseded_branch_gate_continues_the_old_assignment() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     // `w` hands off to a PEER, not the orchestrator: a peer hand-off is a mid-chain
     // step, so the assignment does not complete, the gate never fires, and `w`'s branch
@@ -4698,8 +4698,8 @@ impl crate::merge::MergeRunner for ConflictingSyncRunner {
 async fn a_rebase_conflict_sends_the_quark_back_to_resolve_it() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -4766,8 +4766,8 @@ async fn a_rebase_conflict_sends_the_quark_back_to_resolve_it() {
 async fn a_branch_that_will_not_heal_escalates_instead_of_looping() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -4918,8 +4918,8 @@ impl crate::merge::MergeRunner for GreenLandingRunner {
 async fn a_worker_reporting_to_the_orchestrator_lands_its_branch() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     // Bypass ⇒ the merge is delegated (auto-approved) without a human grant.
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
@@ -5007,8 +5007,8 @@ impl crate::merge::MergeRunner for SlowGreenLandingRunner {
 async fn a_running_gate_publishes_a_fresh_gating_activity() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5078,8 +5078,8 @@ async fn a_running_gate_publishes_a_fresh_gating_activity() {
 async fn a_running_gate_publishes_stage_progression() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5176,8 +5176,8 @@ impl crate::merge::MergeRunner for SlowRedTestRunner {
 async fn a_finished_gate_leaves_no_live_file() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5229,8 +5229,8 @@ async fn a_finished_gate_leaves_no_live_file() {
 async fn a_blocked_gate_also_leaves_no_live_file() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5303,8 +5303,8 @@ impl crate::merge::MergeRunner for OrderRecordingRunner {
 async fn the_gate_syncs_the_branch_before_it_runs_the_tests() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5378,8 +5378,8 @@ impl crate::merge::MergeRunner for EmptyingSyncRunner {
 async fn a_branch_emptied_by_the_sync_is_reported_as_nothing_to_merge() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5462,8 +5462,8 @@ async fn a_successful_land_sweeps_other_already_merged_quark_branches() {
         "the stale branch must exist before the fix kicks in, to prove it gets swept"
     );
 
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -5518,8 +5518,8 @@ async fn a_successful_land_sweeps_other_already_merged_quark_branches() {
 async fn without_worktree_isolation_the_engine_attributes_no_commit() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     append_event(
         &field,
         &Event::new(
@@ -5588,8 +5588,8 @@ impl Quark for OrchestratorDelegatingWriter {
 async fn orchestrator_delegating_turn_does_not_land_immediately() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
 
     seed_mode(&field, Some("orch"), Mode::Bypass);
     append_event(
@@ -5636,8 +5636,8 @@ async fn orchestrator_delegating_turn_does_not_land_immediately() {
 async fn superseded_assignment_branch_is_gated_and_lands_on_new_assignment() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
 
     seed_mode(&field, Some("orch"), Mode::Bypass);
     append_event(
@@ -7525,8 +7525,8 @@ async fn a_busy_quark_with_no_cancel_slot_is_not_interrupted() {
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let path = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let path = root.join(".wb").join("field.jsonl");
     seed_mode(&path, Some("seat"), Mode::Bypass);
     let hold = Duration::from_millis(300);
     let excite_count = Arc::new(AtomicUsize::new(0));
@@ -7726,7 +7726,7 @@ async fn a_busy_quark_with_a_cancel_slot_is_interrupted_by_a_new_message() {
     );
 }
 
-/// **Task 3 of `.hadron/docs/plans/2026-08-02-fonts-tools-orchestrator.md`.** A
+/// **Task 3 of `.wb/docs/plans/2026-08-02-fonts-tools-orchestrator.md`.** A
 /// message arriving mid-turn interrupts the in-flight turn (the responsive-
 /// orchestrator behaviour above), but the interrupted task must not simply be
 /// dropped: the re-dispatched turn's projection has to carry BOTH the original
@@ -7961,8 +7961,8 @@ async fn an_interrupted_turn_commits_its_dirty_worktree_before_the_cancel_is_req
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     append_event(
         &field,
         &Event::new(
@@ -8102,8 +8102,8 @@ async fn a_cancelled_turn_never_reaches_the_merge_gate() {
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("seat"), Mode::Bypass);
     append_event(
         &field,
@@ -8254,7 +8254,7 @@ async fn a_deadline_abandoned_turn_is_grounded_not_left_stale() {
             if body.contains("resumed on:") && body.contains("@seat second, urgent task"))),
         "the quark was never re-excited onto the interrupting message at all: {events:?}"
     );
-    // Task 3 of `.hadron/docs/plans/2026-08-02-fonts-tools-orchestrator.md`: the
+    // Task 3 of `.wb/docs/plans/2026-08-02-fonts-tools-orchestrator.md`: the
     // CANCEL_DEADLINE fallback abandons the turn destructively, but the task it
     // abandoned is still owed — it must ride along into the re-dispatch too, not
     // just the message that forced the abandonment.
@@ -8389,8 +8389,8 @@ async fn a_slow_merge_gate_does_not_block_sibling_quark_dispatch() {
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     seed_mode(&field, Some("b"), Mode::Bypass);
     append_event(
@@ -8544,8 +8544,8 @@ async fn an_orchestrator_dispatched_worker_reply_without_mention_wakes_the_orche
 async fn a_landed_turn_detaches_its_worktree_and_prunes_its_branch_immediately() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -8641,8 +8641,8 @@ fn should_rotate_session_triggers_at_70_percent_or_150k_tokens() {
 async fn pre_clear_or_errored_superseded_worktree_branch_is_archived_and_detached_not_gated() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
 
     // Simulate a leftover pre-/clear worktree branch with an unmerged WIP commit
     let old_ulid = ulid::Ulid::new();
@@ -8773,7 +8773,7 @@ async fn park_blocked_deduplicates_already_blocked_seat() {
 async fn provision_one_publishes_and_maintains_live_activity() {
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    let field = root.join(".hadron").join("field.jsonl");
+    let field = root.join(".wb").join("field.jsonl");
     let target = QuarkId::new("test-quark");
     let live_dir = hadron_lattice::live::live_dir(&field);
     std::fs::create_dir_all(&live_dir).unwrap();
@@ -8847,8 +8847,8 @@ async fn worktree_turn_hitting_silence_deadline_checkpoints_resets_session_and_a
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     let qid = QuarkId::new("cli-agy");
     seed_mode(&field, Some("cli-agy"), Mode::Bypass);
     seed_human_message(&field, "cli-agy", "complete overnight work");
@@ -8913,8 +8913,8 @@ async fn human_message_to_quark_blocked_by_target_checkout_excites_with_new_task
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("w"), Mode::Bypass);
     append_event(
         &field,
@@ -9074,8 +9074,8 @@ async fn interrupted_turn_carries_wip_onto_resumed_branch_without_running_supers
 
     let repo = git_init_repo();
     let root = repo.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".hadron")).unwrap();
-    let field = root.join(".hadron").join("field.jsonl");
+    std::fs::create_dir_all(root.join(".wb")).unwrap();
+    let field = root.join(".wb").join("field.jsonl");
     seed_mode(&field, Some("orch"), Mode::Bypass);
     append_event(
         &field,

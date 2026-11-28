@@ -3,7 +3,7 @@
 //! Enforces Standard Model Rule 9 invariants:
 //! - Strictly pointer lines in `index.md` (`- [<slug>](notes/<slug>.md) — <hook>`)
 //! - Strict YAML frontmatter with `name`, `description`, `metadata.type`
-//! - Fact body stored in `.hadron/nucleus/notes/<slug>.md`
+//! - Fact body stored in `.wb/nucleus/notes/<slug>.md`
 
 use std::fs;
 use std::io;
@@ -17,10 +17,10 @@ pub struct PromotionRequest {
     pub note_type: Option<String>,
 }
 
-/// Promotes a message, lesson, or gate failure to a new nucleus note in `.hadron/nucleus/notes/<slug>.md`
-/// and appends the routing pointer to `.hadron/nucleus/index.md`.
+/// Promotes a message, lesson, or gate failure to a new nucleus note in `.wb/nucleus/notes/<slug>.md`
+/// and appends the routing pointer to `.wb/nucleus/index.md`.
 pub fn promote_to_note(repo_root: &Path, req: &PromotionRequest) -> io::Result<PathBuf> {
-    let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+    let nucleus_dir = repo_root.join(".wb").join("nucleus");
     let notes_dir = nucleus_dir.join("notes");
     fs::create_dir_all(&notes_dir)?;
 
@@ -84,10 +84,10 @@ pub struct BugPostmortem {
     pub regression_test: Option<String>,
 }
 
-/// Promotes a structured bug postmortem to `.hadron/nucleus/notes/bug-<slug>.md`
-/// and appends the standard routing pointer to `.hadron/nucleus/index.md`.
+/// Promotes a structured bug postmortem to `.wb/nucleus/notes/bug-<slug>.md`
+/// and appends the standard routing pointer to `.wb/nucleus/index.md`.
 pub fn promote_bug_postmortem(repo_root: &Path, postmortem: &BugPostmortem) -> io::Result<PathBuf> {
-    let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+    let nucleus_dir = repo_root.join(".wb").join("nucleus");
     let notes_dir = nucleus_dir.join("notes");
     fs::create_dir_all(&notes_dir)?;
 
@@ -205,7 +205,7 @@ mod tests {
         assert!(note_content.contains("type: project"));
         assert!(note_content.contains("**Why:** Target dirs share rlibs."));
 
-        let index_path = temp.path().join(".hadron").join("nucleus").join("index.md");
+        let index_path = temp.path().join(".wb").join("nucleus").join("index.md");
         assert!(index_path.exists());
         let index_content = fs::read_to_string(&index_path).unwrap();
         assert!(index_content.contains(
@@ -246,7 +246,7 @@ mod tests {
         );
         assert!(note_content.contains("crates/hadron-chamber/src/app/render/chat.rs"));
 
-        let index_path = temp.path().join(".hadron").join("nucleus").join("index.md");
+        let index_path = temp.path().join(".wb").join("nucleus").join("index.md");
         assert!(index_path.exists());
         let index_content = fs::read_to_string(&index_path).unwrap();
         assert!(index_content.contains("- [bug-chat-copy-action](notes/bug-chat-copy-action.md) — Chat text copy failed in context menu -> Always register Copy at window root"));

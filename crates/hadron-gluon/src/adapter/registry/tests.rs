@@ -981,7 +981,7 @@ fn resolved_is_a_no_op_without_the_token() {
     assert!(t.resolved().unwrap().env().is_empty());
 }
 
-/// **The live bug.** `~/.hadron/team.json` carried the `acp-agy` seat's own `command`
+/// **The live bug.** `~/.wb/team.json` carried the `acp-agy` seat's own `command`
 /// with both parts written relative to the checkout — no `{repo}` token, because nothing
 /// in the Settings UI or in hand-editing teaches anyone about one. `for_seat` returns a
 /// stored command verbatim, so the token-only check passed it straight to `spawn`, which
@@ -1170,13 +1170,13 @@ fn a_preset_that_cannot_resolve_here_is_listed_but_not_seatable() {
 #[test]
 fn is_repo_relative_treats_windows_absolute_paths_as_not_relative() {
     assert!(!is_repo_relative(
-        "C:\\Users\\user\\.hadron\\bridges\\agy\\venv\\Scripts\\python.exe"
+        "C:\\Users\\user\\.wb\\bridges\\agy\\venv\\Scripts\\python.exe"
     ));
     assert!(!is_repo_relative(
-        "C:/Users/user/.hadron/bridges/agy/venv/Scripts/python.exe"
+        "C:/Users/user/.wb/bridges/agy/venv/Scripts/python.exe"
     ));
     assert!(!is_repo_relative(
-        "/home/user/.hadron/bridges/agy/venv/bin/python"
+        "/home/user/.wb/bridges/agy/venv/bin/python"
     ));
     assert!(is_repo_relative("crates/hadron-gluon/src/lib.rs"));
     assert!(is_repo_relative("crates\\hadron-gluon\\src\\lib.rs"));

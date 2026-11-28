@@ -161,7 +161,7 @@ fn manual_install_hint(tag: &str) -> String {
     install_argv(tag, None).join(" ")
 }
 
-/// Where an update leaves its build tree and its log: `~/.hadron/update/`.
+/// Where an update leaves its build tree and its log: `~/.wb/update/`.
 ///
 /// Both halves exist because a *failed* click used to leave nothing behind but rubbish.
 /// `cargo install` builds in a fresh temp directory under `TMPDIR` and abandons it where
@@ -819,7 +819,7 @@ mod tests {
     /// Cargo's own temp target directory is created under `TMPDIR` and **abandoned where
     /// it died**: four failed clicks on 2026-07-30 left `/tmp/cargo-install*` dirs holding
     /// 6.3 GB of a 12 GB tmpfs, and every retry started the 2,110-crate build from zero.
-    /// A stable directory under `~/.hadron` is both the leak fix and the retry fix.
+    /// A stable directory under `~/.wb` is both the leak fix and the retry fix.
     #[test]
     fn the_install_builds_where_a_retry_can_resume_from() {
         let Some(build) = update_build_dir() else {

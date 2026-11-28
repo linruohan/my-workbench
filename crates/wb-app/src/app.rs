@@ -82,7 +82,7 @@ fn load_workspace_sessions(sessions_dir: &std::path::Path) -> Vec<WorkspaceSessi
 /// 左栏「工作区」里的一个工作区：一个目录即 hadron 的一个 workspace。
 #[derive(Clone)]
 struct WorkspaceEntry {
-    /// 仓库根目录（`.hadron/` 就落在它下面）。
+    /// 仓库根目录（`.wb/` 就落在它下面）。
     root: std::path::PathBuf,
     /// 左栏显示的名字，默认取目录名。
     label: String,
@@ -97,6 +97,8 @@ struct WorkspaceEntry {
 impl WorkspaceEntry {
     /// 由目录路径构造条目，并顺带读出会话名与归档会话列表。
     fn new(root: std::path::PathBuf) -> Self {
+        // 兼容旧版本：旧工作区的 `.hadron/` 先改名为 `.wb/`，再读取会话数据。
+        wb_hadron::app::migrate_repo_dir(&root);
         let label = root
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
@@ -113,14 +115,14 @@ impl WorkspaceEntry {
         entry
     }
 
-    /// 活动会话的 field 文件路径：`<repo>/.hadron/field.jsonl`。
+    /// 活动会话的 field 文件路径：`<repo>/.wb/field.jsonl`。
     fn field_path(&self) -> std::path::PathBuf {
-        self.root.join(".hadron").join("field.jsonl")
+        self.root.join(".wb").join("field.jsonl")
     }
 
-    /// 归档会话目录：`<repo>/.hadron/sessions/`。
+    /// 归档会话目录：`<repo>/.wb/sessions/`。
     fn sessions_dir(&self) -> std::path::PathBuf {
-        self.root.join(".hadron").join("sessions")
+        self.root.join(".wb").join("sessions")
     }
 
     /// 重新读取该工作区的会话名与归档会话。
@@ -140,8 +142,8 @@ impl WorkspaceEntry {
 
 /// 一个已打开的会话：独立 field + 独立守护进程的 chamber。
 ///
-/// 并行多会话的关键就在这里：每个会话对应 `<repo>/.hadron/sessions/<id>/`
-/// （或工作区默认的 `<repo>/.hadron/`），彼此不共享 field，因此可以各聊各的。
+/// 并行多会话的关键就在这里：每个会话对应 `<repo>/.wb/sessions/<id>/`
+/// （或工作区默认的 `<repo>/.wb/`），彼此不共享 field，因此可以各聊各的。
 struct OpenSession {
     /// 所属工作区在 `workspaces` 里的下标。
     workspace: usize,
@@ -149,6 +151,8 @@ struct OpenSession {
     session_id: String,
     /// 标签栏与左栏显示的名字。
     label: String,
+    /// 该会话的 field 路径；退出或关闭标签时据此停止对应守护进程。
+    field_path: std::path::PathBuf,
     /// 该会话自己的聊天区实例。
     chamber: Entity<wb_hadron::app::Chamber>,
     /// 本进程为该会话拉起的守护进程句柄（已有守护进程时为 None）。
@@ -235,7 +239,7 @@ fn save_workspace_state(workspaces: &[WorkspaceEntry], active: usize) {
 
 /// 目录选择器归一化后的结果。
 struct PickedWorkspace {
-    /// 仓库根目录（`.hadron/` 的父目录）。
+    /// 仓库根目录（`.wb/` 的父目录）。
     root: std::path::PathBuf,
     /// 若用户直接选到了某个会话目录，这里是要恢复的会话 id。
     session_id: Option<String>,
@@ -243,13 +247,16 @@ struct PickedWorkspace {
 
 /// 把用户选中的目录归一成「仓库根 +（可选）会话 id」。
 ///
-/// 规则：路径里出现 `.hadron` 组件就取其前面部分作为仓库根；如果后面紧跟
+/// 规则：路径里出现 `.wb` 组件就取其前面部分作为仓库根；如果后面紧跟
 /// `sessions/<id>`，说明用户点到了某个会话目录，顺便把它作为要打开的会话。
 fn resolve_picked_workspace(picked: std::path::PathBuf) -> PickedWorkspace {
     let components: Vec<_> = picked.components().collect();
     let Some(hadron_index) = components
         .iter()
-        .position(|component| component.as_os_str() == ".hadron")
+        .position(|component| {
+            // 同时接受新旧目录名：旧 `.hadron` 也能被识别并上溯到仓库根。
+            matches!(component.as_os_str().to_str(), Some(".wb") | Some(".hadron"))
+        })
     else {
         return PickedWorkspace {
             root: picked,
@@ -289,7 +296,7 @@ fn empty_workspace_state(cx: &mut Context<WorkbenchApp>) -> impl IntoElement {
                 .text_sm()
                 .text_center()
                 .text_color(cx.theme().muted_foreground)
-                .child("选择一个目录作为工作区，聊天记录会保存在该目录的 .hadron 下。也可以直接选择已有会话目录，自动回到那段对话。"),
+                .child("选择一个目录作为工作区，聊天记录会保存在该目录的 .wb 下。也可以直接选择已有会话目录，自动回到那段对话。"),
         )
         .child(
             Button::new("empty-add-workspace")
@@ -336,7 +343,7 @@ fn no_session_state(cx: &mut Context<WorkbenchApp>) -> impl IntoElement {
 /// 没有工作区时给 chamber 用的「空壳」根目录。
 ///
 /// 左栏与浮层都需要一个 chamber 实例来绘制，但此时不该在用户目录里落下
-/// `.hadron/`，所以把壳放在数据目录下的 `shell/`，同时也不为它启动守护进程。
+/// `.wb/`，所以把壳放在数据目录下的 `shell/`，同时也不为它启动守护进程。
 fn empty_shell_root() -> std::path::PathBuf {
     wb_store::ensure_data_dir()
         .map(|dir| dir.join("shell"))
@@ -444,7 +451,7 @@ impl WorkbenchApp {
         let has_workspace = !workspaces.is_empty();
 
         // Hadron 聊天区 + 右侧栏：初始化字体/快捷键并构建嵌入式 Chamber。
-        // field 落在当前工作区的 `.hadron/field.jsonl`。
+        // field 落在当前工作区的 `.wb/field.jsonl`。
         wb_hadron::app::init_embedded(cx, &repo_root);
         wb_hadron::app::bind_embedded_keys(cx);
         let chamber_init = wb_hadron::app::prepare_embedded(&repo_root);
@@ -542,7 +549,11 @@ impl WorkbenchApp {
                 tray::hide_main_window(window);
                 return false;
             }
-            let _ = app.update(cx, |this, cx| this.flush_persistent_state(cx));
+            let _ = app.update(cx, |this, cx| {
+                this.flush_persistent_state(cx);
+                // 真正退出（非隐藏到托盘）时，一并停止本应用的守护进程。
+                this.stop_gluon_daemons();
+            });
             true
         });
 
@@ -603,6 +614,8 @@ impl WorkbenchApp {
             }
             TrayAction::Quit => {
                 self.flush_persistent_state(cx);
+                // 退出前收掉所有守护进程，避免任务管理器里残留 wb-gluon.exe。
+                self.stop_gluon_daemons();
                 tray::request_force_quit();
                 cx.quit();
             }
@@ -772,7 +785,12 @@ impl WorkbenchApp {
     /// `session:<id>`（工作区会话，`active` 表示当前活动会话）、
     /// `new-session`（归档当前会话并新开一个），以及 [`AppNav::from_view_id`]
     /// 能识别的页面 id。
-    pub(crate) fn handle_workbench_nav(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn handle_workbench_nav(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match id {
             "new-project" => {
                 self.tasks
@@ -926,9 +944,11 @@ impl WorkbenchApp {
         let Some(entry) = self.workspaces.get(workspace) else {
             return;
         };
-        if let Some(index) = self.open_sessions.iter().position(|session| {
-            session.belongs_to(workspace) && session.session_id == session_id
-        }) {
+        if let Some(index) = self
+            .open_sessions
+            .iter()
+            .position(|session| session.belongs_to(workspace) && session.session_id == session_id)
+        {
             self.active_session = Some(index);
             if focus {
                 self.set_nav(AppNav::Agent, cx);
@@ -952,6 +972,7 @@ impl WorkbenchApp {
             workspace,
             session_id: session_id.to_string(),
             label,
+            field_path: field,
             chamber,
             _gluon: gluon,
         });
@@ -978,7 +999,15 @@ impl WorkbenchApp {
         if index >= self.open_sessions.len() {
             return;
         }
-        self.open_sessions.remove(index);
+        let session = self.open_sessions.remove(index);
+        let field = session.field_path.clone();
+        // 先释放 chamber，再停守护进程，避免 RPC 还在等待时被强杀。
+        drop(session);
+        match wb_hadron::sys::stop_gluon_daemon(&field) {
+            Ok(true) => log::info!("已停止会话守护进程: {}", field.display()),
+            Ok(false) => {}
+            Err(err) => log::warn!("停止会话守护进程失败 {}: {err}", field.display()),
+        }
         self.active_session = match self.active_session {
             // 关掉的是前台：优先落到原位置的后一个，没有就退到最后一个。
             Some(active) if active == index => {
@@ -992,6 +1021,42 @@ impl WorkbenchApp {
             other => other,
         };
         cx.notify();
+    }
+
+    /// 收集本应用当前涉及的 field：每个工作区的默认 field + 已打开会话的 field。
+    ///
+    /// 退出时按这些 field 停守护进程；去重避免同一个默认 field 被停两次。
+    fn gluon_field_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut fields: Vec<std::path::PathBuf> = Vec::new();
+        for entry in &self.workspaces {
+            let field = entry.field_path();
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+        for session in &self.open_sessions {
+            if !fields.contains(&session.field_path) {
+                fields.push(session.field_path.clone());
+            }
+        }
+        fields
+    }
+
+    /// 停止本应用使用的所有 gluon 守护进程，避免退出后进程残留。
+    ///
+    /// 用 field 而不是子进程句柄来判断：应用可能复用了一个已在运行的守护进程
+    /// （此时本进程没有 Child 句柄），但退出时同样应该把它收掉。
+    fn stop_gluon_daemons(&mut self) {
+        for field in self.gluon_field_paths() {
+            match wb_hadron::sys::stop_gluon_daemon(&field) {
+                Ok(true) => log::info!("已停止守护进程: {}", field.display()),
+                Ok(false) => {}
+                Err(err) => log::warn!("停止守护进程失败 {}: {err}", field.display()),
+            }
+        }
+        // 句柄清空，Drop 兜底时不会重复停止。
+        self.open_sessions.iter_mut().for_each(|session| session._gluon = None);
+        self._gluon = None;
     }
 
     /// 在当前工作区新开一个并行会话：建独立目录 + 独立 field，然后入池并前置。
@@ -1046,9 +1111,8 @@ impl WorkbenchApp {
             session_id,
         };
         let host = cx.weak_entity();
-        let dialog = cx.new(|cx| {
-            crate::rename_dialog::RenameDialog::new(host, target, current, window, cx)
-        });
+        let dialog =
+            cx.new(|cx| crate::rename_dialog::RenameDialog::new(host, target, current, window, cx));
         dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
         self.rename = Some(dialog);
         cx.notify();
@@ -1095,7 +1159,7 @@ impl WorkbenchApp {
 
     /// 新增一个工作区并切换过去；目录已在列表里时直接切换。
     ///
-    /// 用户可能选到 `<repo>/.hadron`、`<repo>/.hadron/sessions` 甚至某个会话目录，
+    /// 用户可能选到 `<repo>/.wb`、`<repo>/.wb/sessions` 甚至某个会话目录，
     /// 这里统一上溯到仓库根；选中的是会话目录时顺便把该会话恢复出来。
     fn add_workspace(
         &mut self,
@@ -1250,6 +1314,14 @@ impl WorkbenchApp {
             p.focus_query(window, cx);
         });
         cx.notify();
+    }
+}
+
+impl Drop for WorkbenchApp {
+    /// 兜底清理：无论从哪条路径退出（窗口关闭、托盘退出、`cx.quit`），
+    /// 都尽量把本应用拉起的守护进程一并停止。
+    fn drop(&mut self) {
+        self.stop_gluon_daemons();
     }
 }
 
@@ -1428,7 +1500,7 @@ impl Render for WorkbenchApp {
             let archived: Vec<&WorkspaceSession> = entry
                 .sessions
                 .iter()
-                .filter(|session| !open_ids.iter().any(|id| *id == session.id))
+                .filter(|session| !open_ids.contains(&session.id))
                 .collect();
             if !archived.is_empty() {
                 let chevron = if entry.archived_open {
@@ -1517,9 +1589,12 @@ impl Render for WorkbenchApp {
                     v_flex()
                         .size_full()
                         .child(tab_bar)
-                        .child(div().flex_1().min_h_0().when_some(chat, |col, chat| {
-                            col.child(chat)
-                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .when_some(chat, |col, chat| col.child(chat)),
+                        )
                         .into_any_element()
                 }
             }
@@ -1627,6 +1702,7 @@ impl Render for WorkbenchApp {
                         let panel_radius = style::panel_radius(cx);
                         let panel_border = style::hairline(cx);
                         let main = v_flex()
+                            .relative()
                             .flex_1()
                             .h_full()
                             .min_w_0()
@@ -1651,12 +1727,14 @@ impl Render for WorkbenchApp {
                                         }),
                                 )
                             })
+                            // 无页头的页面（Agent / 知识库）把录音提示浮在右上角：
+                            // 绝对定位不参与布局，录音时不会把聊天区挤下去。
                             .when(hide_page_bar && ptt_held, |col| {
                                 col.child(
-                                    h_flex()
-                                        .px_3()
-                                        .py_1()
-                                        .justify_end()
+                                    div()
+                                        .absolute()
+                                        .top(px(6.))
+                                        .right(px(10.))
                                         .child(recording_chip(recording_bg, recording_fg)),
                                 )
                             })
@@ -1755,7 +1833,7 @@ impl Render for WorkbenchApp {
                                             .size_range(left_range)
                                             .fixed()
                                             .child(
-                                                div().size_full().p_1().child(
+                                                div().size_full().p_0p5().child(
                                                     div()
                                                         .size_full()
                                                         .overflow_hidden()
@@ -1768,7 +1846,7 @@ impl Render for WorkbenchApp {
                                     )
                                     .child(
                                         resizable_panel()
-                                            .child(div().size_full().p_1().child(main)),
+                                            .child(div().size_full().p_0p5().child(main)),
                                     )
                                     .when(show_right, move |row| {
                                         let right_size =
@@ -1784,7 +1862,7 @@ impl Render for WorkbenchApp {
                                                 .size_range(right_range)
                                                 .fixed()
                                                 .child(
-                                                    div().size_full().p_1().child(
+                                                    div().size_full().p_0p5().child(
                                                         div()
                                                             .size_full()
                                                             .overflow_hidden()

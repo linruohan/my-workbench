@@ -36,7 +36,7 @@ fn scratch_dir_for_root(root: &Path) -> PathBuf {
 impl ForgeMcpServer {
     #[tool(
         name = "hadron_forge_scratch_write",
-        description = "Write an ephemeral note, plan draft, or trace to the shared cross-worktree scratch bus (.hadron/scratch/)"
+        description = "Write an ephemeral note, plan draft, or trace to the shared cross-worktree scratch bus (.wb/scratch/)"
     )]
     pub async fn scratch_write(
         &self,
@@ -73,7 +73,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_scratch_read",
-        description = "Read an entry from the shared cross-worktree scratch bus (.hadron/scratch/)"
+        description = "Read an entry from the shared cross-worktree scratch bus (.wb/scratch/)"
     )]
     pub async fn scratch_read(
         &self,

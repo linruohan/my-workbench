@@ -72,8 +72,8 @@ fn should_skip_dir(name: &str, rel_prefix: &str) -> bool {
     matches!(
         name,
         ".git" | "target" | "node_modules" | "dist" | "build" | ".next" | "__pycache__" | "venv"
-    ) || (rel_prefix == ".hadron" && name == "trees")
-        || name == ".hadron"
+    ) || (rel_prefix == ".wb" && name == "trees")
+        || name == ".wb"
 }
 
 fn scan_repo_sync(repo_root: &Path, tokens: &[String]) -> (usize, Vec<(usize, String)>) {

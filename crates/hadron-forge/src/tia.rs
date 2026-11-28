@@ -35,7 +35,7 @@ pub fn compute_impacted_tests(changed_files: &[&str]) -> TestImpactPlan {
         .copied()
         .filter(|f| {
             let n = f.trim_start_matches("./");
-            !n.starts_with(".hadron/")
+            !n.starts_with(".wb/")
                 && !n.starts_with("docs/")
                 && !n.ends_with(".md")
                 && !n.ends_with(".txt")

@@ -204,12 +204,12 @@ pub fn resolve_from_registry_data(
     resolve_agent_command(agent)
 }
 
-/// Path to the cached ACP registry file: `~/.hadron/acp_registry.json`.
+/// Path to the cached ACP registry file: `~/.wb/acp_registry.json`.
 pub fn cache_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(
         PathBuf::from(home)
-            .join(".hadron")
+            .join(".wb")
             .join("acp_registry.json"),
     )
 }
@@ -267,7 +267,7 @@ fn trigger_background_registry_refresh_if_stale() {
     }
 }
 
-/// Read cached registry data from disk (`~/.hadron/acp_registry.json` or fallback).
+/// Read cached registry data from disk (`~/.wb/acp_registry.json` or fallback).
 pub fn load_cached_registry() -> Option<AcpRegistryData> {
     #[cfg(not(test))]
     trigger_background_registry_refresh_if_stale();
@@ -291,7 +291,7 @@ pub fn load_cached_registry() -> Option<AcpRegistryData> {
     bundled_registry()
 }
 
-/// Save registry data to `~/.hadron/acp_registry.json`.
+/// Save registry data to `~/.wb/acp_registry.json`.
 pub fn save_cached_registry(data: &AcpRegistryData) -> Result<(), std::io::Error> {
     let cp = cache_path()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No home dir"))?;
@@ -305,7 +305,7 @@ pub fn save_cached_registry(data: &AcpRegistryData) -> Result<(), std::io::Error
     Ok(())
 }
 
-/// Fetch latest registry from CDN via `curl` subprocess, cache to `~/.hadron/acp_registry.json`,
+/// Fetch latest registry from CDN via `curl` subprocess, cache to `~/.wb/acp_registry.json`,
 /// falling back to cached disk data if offline or fetch fails.
 pub fn fetch_and_cache_registry() -> Option<AcpRegistryData> {
     let output = std::process::Command::new("curl")

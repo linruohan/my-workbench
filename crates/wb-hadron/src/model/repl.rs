@@ -29,7 +29,7 @@ pub fn evaluate_repl_input(input: &str, repo_root: &Path) -> ReplResult {
         .strip_prefix('?')
         .or_else(|| trimmed.strip_prefix("note:"))
     {
-        let nucleus_notes = repo_root.join(".hadron").join("nucleus").join("notes");
+        let nucleus_notes = repo_root.join(".wb").join("nucleus").join("notes");
         let mut matches = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&nucleus_notes) {
             for entry in entries.flatten() {
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn test_repl_overlay_dispatch() {
         let temp = tempdir().unwrap();
-        let notes_dir = temp.path().join(".hadron").join("nucleus").join("notes");
+        let notes_dir = temp.path().join(".wb").join("nucleus").join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
         std::fs::write(notes_dir.join("chat-cache-reset.md"), "test content").unwrap();
         std::fs::write(notes_dir.join("vulkan-lavapipe.md"), "test content").unwrap();

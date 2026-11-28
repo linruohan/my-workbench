@@ -22,15 +22,15 @@ pub fn is_bwrap_available() -> bool {
     })
 }
 
-/// When `work_dir` is inside a Hadron quark worktree (`<repo_root>/.hadron/trees/<quark_id>`),
+/// When `work_dir` is inside a Hadron quark worktree (`<repo_root>/.wb/trees/<quark_id>`),
 /// returns the parent repository root (`<repo_root>`) so `bwrap` can bind `<repo_root>/.git`,
-/// `<repo_root>/.hadron/nucleus`, `<repo_root>/.hadron/docs`, `<repo_root>/.hadron/live`, and
+/// `<repo_root>/.wb/nucleus`, `<repo_root>/.wb/docs`, `<repo_root>/.wb/live`, and
 /// `<repo_root>/target` while keeping the main checkout working tree isolated.
 pub fn infer_repo_root_from_worktree(work_dir: &Path) -> Option<PathBuf> {
     for ancestor in work_dir.ancestors() {
         if ancestor.file_name().and_then(|n| n.to_str()) == Some("trees") {
             if let Some(hadron_dir) = ancestor.parent() {
-                if hadron_dir.file_name().and_then(|n| n.to_str()) == Some(".hadron") {
+                if hadron_dir.file_name().and_then(|n| n.to_str()) == Some(".wb") {
                     if let Some(repo_root) = hadron_dir.parent() {
                         return Some(repo_root.to_path_buf());
                     }
@@ -130,7 +130,7 @@ pub fn build_bwrap_args(
             ".config",
             ".cache",
             ".npm",
-            ".hadron",
+            ".wb",
         ] {
             let p = format!("{home}/{rw_rel}");
             bwrap.extend(["--bind-try".to_string(), p.clone(), p]);
@@ -157,7 +157,7 @@ pub fn build_bwrap_args(
             infer_repo_root_from_worktree(work_dir).unwrap_or_else(|| repo_root.clone());
         let root_str = repo_root.to_string_lossy().replace('\\', "/");
         let git_dir = format!("{root_str}/.git");
-        let hadron_dir = format!("{root_str}/.hadron");
+        let hadron_dir = format!("{root_str}/.wb");
         bwrap.extend([
             "--bind-try".to_string(),
             git_dir.clone(),
@@ -167,11 +167,11 @@ pub fn build_bwrap_args(
             hadron_dir,
         ]);
         for sub in ["nucleus", "docs", "skills", "preons", "live"] {
-            let sub_path = host_repo_root.join(".hadron").join(sub);
-            if host_repo_root.join(".hadron").is_dir() {
+            let sub_path = host_repo_root.join(".wb").join(sub);
+            if host_repo_root.join(".wb").is_dir() {
                 let _ = std::fs::create_dir_all(&sub_path);
             }
-            let sub_str = format!("{root_str}/.hadron/{sub}");
+            let sub_str = format!("{root_str}/.wb/{sub}");
             bwrap.extend(["--bind-try".to_string(), sub_str.clone(), sub_str]);
         }
         let target_dir = format!("{root_str}/target");
@@ -209,7 +209,7 @@ pub fn build_macos_sandbox_profile(
     let repo_subpaths = if let Some(repo_root) = infer_repo_root_from_worktree(work_dir) {
         let root_str = repo_root.display();
         format!(
-            "\n    (subpath \"{root_str}/.git\")\n    (subpath \"{root_str}/.hadron/nucleus\")\n    (subpath \"{root_str}/.hadron/docs\")\n    (subpath \"{root_str}/.hadron/skills\")\n    (subpath \"{root_str}/.hadron/preons\")\n    (subpath \"{root_str}/.hadron/live\")\n    (subpath \"{root_str}/target\")"
+            "\n    (subpath \"{root_str}/.git\")\n    (subpath \"{root_str}/.wb/nucleus\")\n    (subpath \"{root_str}/.wb/docs\")\n    (subpath \"{root_str}/.wb/skills\")\n    (subpath \"{root_str}/.wb/preons\")\n    (subpath \"{root_str}/.wb/live\")\n    (subpath \"{root_str}/target\")"
         )
     } else {
         String::new()
@@ -607,7 +607,7 @@ impl IsolatedSandbox {
             }
         }
         // Guarantee clean PATH if absent, and ensure standard user bin dirs (`~/.cargo/bin`,
-        // `~/.local/bin`, `~/.hadron/bin`) are present on Unix when `HOME` is set so
+        // `~/.local/bin`, `~/.wb/bin`) are present on Unix when `HOME` is set so
         // non-login daemon launches (e.g. desktop launchers or `wsl.exe --`) still find `cargo`.
         let base_path = scrubbed
             .remove("PATH")
@@ -620,7 +620,7 @@ impl IsolatedSandbox {
                 .or_else(|| std::env::var("HOME").ok())
             {
                 let mut parts: Vec<String> = Vec::new();
-                for rel in [".hadron/bin", ".local/bin", ".cargo/bin"] {
+                for rel in [".wb/bin", ".local/bin", ".cargo/bin"] {
                     let candidate = format!("{home}/{rel}");
                     if !base_path.split(':').any(|p| p == candidate) {
                         parts.push(candidate);
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn test_build_bwrap_args_jails_to_worktree_and_masks_home() {
         use std::path::Path;
-        let work_dir = Path::new("/home/user/project/.hadron/trees/test-quark");
+        let work_dir = Path::new("/home/user/project/.wb/trees/test-quark");
         let program = "cargo";
         let args = vec!["test".to_string()];
         let bwrap_args =
@@ -711,12 +711,12 @@ mod tests {
     #[test]
     fn test_macos_sandbox_profile_generation_and_args() {
         use std::path::Path;
-        let work_dir = Path::new("/Users/developer/hadron/.hadron/trees/test-quark");
+        let work_dir = Path::new("/Users/developer/hadron/.wb/trees/test-quark");
         let profile = build_macos_sandbox_profile(work_dir, SandboxMode::WorktreeOnly, false);
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read*)"));
-        assert!(profile.contains("/Users/developer/hadron/.hadron/trees/test-quark"));
+        assert!(profile.contains("/Users/developer/hadron/.wb/trees/test-quark"));
         assert!(profile.contains("(allow network*)"));
 
         let strict_profile = build_macos_sandbox_profile(work_dir, SandboxMode::Strict, false);
@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn test_windows_sandbox_args_and_script() {
         use std::path::Path;
-        let work_dir = Path::new("C:\\Users\\user\\project\\.hadron\\trees\\test-quark");
+        let work_dir = Path::new("C:\\Users\\user\\project\\.wb\\trees\\test-quark");
         let (prog, args) = build_windows_sandbox_args(
             work_dir,
             "cargo.exe",
@@ -760,7 +760,7 @@ mod tests {
             true,
         );
         assert!(script.contains("Set-Location -LiteralPath"));
-        assert!(script.contains("C:\\Users\\user\\project\\.hadron\\trees\\test-quark"));
+        assert!(script.contains("C:\\Users\\user\\project\\.wb\\trees\\test-quark"));
         assert!(script.contains("HTTP_PROXY"));
         assert!(script.contains("cargo.exe"));
     }
@@ -847,14 +847,14 @@ mod tests {
     fn test_bwrap_worktree_and_wsl_unc_resolution_never_uses_powershell() {
         use std::path::{Path, PathBuf};
 
-        let wt = Path::new("/home/user/dev/my-cloud/.hadron/trees/cli-agy");
+        let wt = Path::new("/home/user/dev/my-cloud/.wb/trees/cli-agy");
         assert_eq!(
             infer_repo_root_from_worktree(wt),
             Some(PathBuf::from("/home/user/dev/my-cloud"))
         );
 
         let unc_wt =
-            Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\my-cloud\.hadron\trees\cli-agy");
+            Path::new(r"\\wsl.localhost\Ubuntu\home\user\dev\my-cloud\.wb\trees\cli-agy");
         let bwrap_args = build_bwrap_args(
             unc_wt,
             "/home/user/.local/bin/agy",
@@ -863,7 +863,7 @@ mod tests {
             false,
         );
         // Must normalize WSL UNC work_dir to Linux path inside bwrap
-        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.hadron/trees/cli-agy".to_string()));
+        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.wb/trees/cli-agy".to_string()));
         // Must mount /run and /mnt/wsl BEFORE /etc so symlinked /etc/resolv.conf resolves
         let run_idx = bwrap_args
             .iter()
@@ -878,15 +878,15 @@ mod tests {
         assert!(bwrap_args.contains(&"/home/user/.local".to_string()));
         assert!(bwrap_args.contains(&"/home/user/.gemini".to_string()));
         assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.git".to_string()));
-        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.hadron/nucleus".to_string()));
-        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.hadron/docs".to_string()));
-        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.hadron/skills".to_string()));
-        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.hadron/preons".to_string()));
+        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.wb/nucleus".to_string()));
+        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.wb/docs".to_string()));
+        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.wb/skills".to_string()));
+        assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/.wb/preons".to_string()));
         assert!(bwrap_args.contains(&"/home/user/dev/my-cloud/target".to_string()));
 
         let macos_profile = build_macos_sandbox_profile(wt, SandboxMode::WorktreeOnly, false);
-        assert!(macos_profile.contains("/home/user/dev/my-cloud/.hadron/skills"));
-        assert!(macos_profile.contains("/home/user/dev/my-cloud/.hadron/preons"));
+        assert!(macos_profile.contains("/home/user/dev/my-cloud/.wb/skills"));
+        assert!(macos_profile.contains("/home/user/dev/my-cloud/.wb/preons"));
 
         // WSL UNC path must NEVER select WindowsHarness / powershell.exe
         let platform = detect_sandbox_platform_for_path(unc_wt);

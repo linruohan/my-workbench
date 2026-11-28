@@ -179,7 +179,7 @@ impl ModelParams {
 /// One granted external directory, as written in `team.json`.
 ///
 /// `writable` is the whole ladder: absent/false is read-only, which covers every case
-/// observed so far (reading `~/.hadron/sessions/`, a sibling repo) at a fraction of the
+/// observed so far (reading `~/.wb/sessions/`, a sibling repo) at a fraction of the
 /// risk. The enforcement type is `hadron_forge::file::ExternalAccess`; this is only the
 /// wire shape, so `hadron-lattice` does not have to depend on the forge crate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,7 +429,7 @@ impl Seat {
 /// A per-repo override of one catalogue seat, layered over the global definition.
 ///
 /// The definition — provider/model/command/transport plus the tunable knobs — lives
-/// once in the global catalogue (`~/.hadron/team.json`). A repo names a quark by `id`
+/// once in the global catalogue (`~/.wb/team.json`). A repo names a quark by `id`
 /// and records only what differs *here*: which role it plays, whether it participates,
 /// and any per-repo adjustment to the model or the session knobs. Everything left
 /// absent **inherits the catalogue's value**, so opening a fresh repo shows the shared
@@ -631,8 +631,8 @@ mod tests {
         let mut win_seat = Seat {
             transport: Transport::Acp,
             command: Some(AcpCommand {
-                program: r"C:\Users\user\.hadron\bridges\agy\venv\Scripts\python.exe".to_string(),
-                args: vec![r"C:\Users\user\.hadron\bridges\agy\agy_acp.py".to_string()],
+                program: r"C:\Users\user\.wb\bridges\agy\venv\Scripts\python.exe".to_string(),
+                args: vec![r"C:\Users\user\.wb\bridges\agy\agy_acp.py".to_string()],
             }),
             ..Seat::cli(
                 QuarkId::new("acp-agy"),

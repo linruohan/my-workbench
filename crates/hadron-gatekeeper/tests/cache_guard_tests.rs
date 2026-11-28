@@ -8,8 +8,8 @@ use tempfile::tempdir;
 
 #[test]
 fn test_metadata_salting_and_isolation_flags() {
-    let tree_1 = PathBuf::from("/home/dev/.hadron/trees/wt1");
-    let tree_2 = PathBuf::from("/home/dev/.hadron/trees/wt2");
+    let tree_1 = PathBuf::from("/home/dev/.wb/trees/wt1");
+    let tree_2 = PathBuf::from("/home/dev/.wb/trees/wt2");
 
     let salt_1 = compute_cache_salt("hadron-gluon", &tree_1);
     let salt_2 = compute_cache_salt("hadron-gluon", &tree_2);

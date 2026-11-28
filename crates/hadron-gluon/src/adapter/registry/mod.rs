@@ -25,7 +25,7 @@ use presets::{ACP_AGENTS, REGISTRY_ALIASES};
 /// substitution has one home and covers all three.
 pub const REPO_ROOT_TOKEN: &str = "{repo}";
 
-/// The token for "the user's Hadron directory" (`~/.hadron`), resolved by
+/// The token for "the user's Hadron directory" (`~/.wb`), resolved by
 /// [`AcpTarget::resolved`] the same way as [`REPO_ROOT_TOKEN`] — but against
 /// [`hadron_lattice::user_hadron_dir`], which needs no git and exists on every
 /// install. `{repo}` only works from a source checkout (the files it names live in

@@ -43,7 +43,7 @@ pub struct ResearchWriteArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResearchReadArgs {
-    /// Relative or absolute path to the research document (e.g. ".hadron/docs/research/2026-08-21-theme-research.md").
+    /// Relative or absolute path to the research document (e.g. ".wb/docs/research/2026-08-21-theme-research.md").
     pub path: String,
 }
 
@@ -51,7 +51,7 @@ pub struct ResearchReadArgs {
 impl ForgeMcpServer {
     #[tool(
         name = "hadron_forge_research_write",
-        description = "Write or update a structured research paper or investigation document in .hadron/docs/research/."
+        description = "Write or update a structured research paper or investigation document in .wb/docs/research/."
     )]
     pub async fn research_write(
         &self,
@@ -82,7 +82,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_research_list",
-        description = "List all existing research papers and investigation documents under .hadron/docs/research/."
+        description = "List all existing research papers and investigation documents under .wb/docs/research/."
     )]
     pub async fn research_list(&self) -> Json<ToolResponse> {
         match list_research(&self.root) {
@@ -96,7 +96,7 @@ impl ForgeMcpServer {
 
     #[tool(
         name = "hadron_forge_research_read",
-        description = "Read the markdown content of a research document under .hadron/docs/research/."
+        description = "Read the markdown content of a research document under .wb/docs/research/."
     )]
     pub async fn research_read(
         &self,

@@ -18,7 +18,7 @@ pub(super) fn upsert(skills: &mut Vec<ResolvedSkill>, skill: ResolvedSkill) {
 
 /// Read every `*.md` file directly under `dir` (non-recursive) as a candidate
 /// skill. A missing or unreadable directory yields no skills, silently — the
-/// caller passes `None` for "not configured" and an absent `~/.hadron/skills` on a
+/// caller passes `None` for "not configured" and an absent `~/.wb/skills` on a
 /// machine that has never used custom skills is the same case, not an error.
 pub(super) fn load_dir(dir: &Path) -> Vec<ResolvedSkill> {
     let Ok(entries) = fs::read_dir(dir) else {

@@ -341,10 +341,10 @@ mod tests {
 
     #[test]
     fn the_live_dir_sits_beside_the_field() {
-        let field = Path::new("/home/user/project/.hadron/field.jsonl");
+        let field = Path::new("/home/user/project/.wb/field.jsonl");
         assert_eq!(
             live_dir(field),
-            PathBuf::from("/home/user/project/.hadron/live")
+            PathBuf::from("/home/user/project/.wb/live")
         );
     }
 
@@ -462,7 +462,7 @@ mod tests {
     /// never a quark's own `<id>.json`, which is the whole point of `gates_dir`.
     #[test]
     fn a_published_gate_is_found_by_gates_and_lives_in_its_own_subdirectory() {
-        let field = tmp().join(".hadron").join("field.jsonl");
+        let field = tmp().join(".wb").join("field.jsonl");
         let dir = gates_dir(&field);
         assert_eq!(dir, live_dir(&field).join("gates"));
 
@@ -480,7 +480,7 @@ mod tests {
     /// separate subdirectory is what keeps a gate invisible to both.
     #[test]
     fn a_running_gate_does_not_feed_the_turn_watchdog() {
-        let field = tmp().join(".hadron").join("field.jsonl");
+        let field = tmp().join(".wb").join("field.jsonl");
         let quark = QuarkId::new("orch");
         let a = Activity::gating(quark.clone(), "quark/orch/some-branch", Utc::now());
         publish_gate(&gates_dir(&field), "quark/orch/some-branch", &a).unwrap();

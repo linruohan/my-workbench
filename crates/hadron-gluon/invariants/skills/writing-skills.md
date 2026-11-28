@@ -38,7 +38,7 @@ skills/
     supporting-file.* # Reusable tools or heavy reference (>100 lines) only
 ```
 
-- Flat namespace under `.hadron/skills/`.
+- Flat namespace under `.wb/skills/`.
 - Use separate files only for heavy reference (>100 lines) or executable scripts/templates. Keep principles and code patterns (<50 lines) inline.
 
 ## SKILL.md Structure & YAML Rules

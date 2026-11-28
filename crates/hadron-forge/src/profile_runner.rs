@@ -132,7 +132,7 @@ mod tests {
             ProfileType::Cpu,
             5,
             5,
-            Some(".hadron/screenshots/git_profile.svg"),
+            Some(".wb/screenshots/git_profile.svg"),
         )
         .unwrap();
 
@@ -141,7 +141,7 @@ mod tests {
         assert!(report.svg_path.is_some());
         assert!(temp
             .path()
-            .join(".hadron/screenshots/git_profile.svg")
+            .join(".wb/screenshots/git_profile.svg")
             .exists());
     }
 }

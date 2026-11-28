@@ -1012,7 +1012,7 @@ mod tests {
             program: "cargo".to_string(),
             args: vec!["check".to_string()],
             stdin: String::new(),
-            cwd: PathBuf::from("/home/user/project/.hadron/trees/test"),
+            cwd: PathBuf::from("/home/user/project/.wb/trees/test"),
             env: RedactedEnv::default(),
             stream: None,
             sandbox: hadron_gatekeeper::SandboxMode::WorktreeOnly,
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_cli_invocation_cross_platform_sandbox_builders() {
-        let cwd = PathBuf::from("/home/user/project/.hadron/trees/test");
+        let cwd = PathBuf::from("/home/user/project/.wb/trees/test");
         let mac_args = hadron_gatekeeper::build_macos_sandbox_args(
             &cwd,
             "cargo",
@@ -1096,7 +1096,7 @@ mod tests {
             args: vec!["--print".to_string(), "ok".to_string()],
             stdin: String::new(),
             cwd: PathBuf::from(
-                r"\\wsl.localhost\Ubuntu-22.04\home\user\project\.hadron\trees\cli-agy",
+                r"\\wsl.localhost\Ubuntu-22.04\home\user\project\.wb\trees\cli-agy",
             ),
             env: RedactedEnv::default(),
             stream: None,
@@ -1110,7 +1110,7 @@ mod tests {
                 "-d",
                 "Ubuntu-22.04",
                 "--cd",
-                "/home/user/project/.hadron/trees/cli-agy",
+                "/home/user/project/.wb/trees/cli-agy",
                 "--exec",
             ]
         );
@@ -1133,8 +1133,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path();
         let git_dir = repo_root.join(".git");
-        let nucleus_dir = repo_root.join(".hadron/nucleus");
-        let wt_dir = repo_root.join(".hadron/trees/cli-agy");
+        let nucleus_dir = repo_root.join(".wb/nucleus");
+        let wt_dir = repo_root.join(".wb/trees/cli-agy");
         std::fs::create_dir_all(&git_dir).unwrap();
         std::fs::create_dir_all(&nucleus_dir).unwrap();
         std::fs::create_dir_all(&wt_dir).unwrap();

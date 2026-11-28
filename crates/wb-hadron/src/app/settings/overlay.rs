@@ -13,7 +13,7 @@ thread_local! {
 pub(in crate::app) fn cached_schedule_registry(
     repo_root: &std::path::Path,
 ) -> hadron_lattice::ScheduleRegistry {
-    let schedules_path = repo_root.join(".hadron/schedules.json");
+    let schedules_path = repo_root.join(".wb/schedules.json");
     let mtime_nanos = std::fs::metadata(&schedules_path)
         .ok()
         .and_then(|m| m.modified().ok())
@@ -1363,7 +1363,7 @@ impl super::Chamber {
                 div()
                     .text_xs()
                     .text_color(theme::text_muted())
-                    .child("No custom skills found. Create a global (~/.hadron/skills/) or per-repo (.hadron/skills/) skill below."),
+                    .child("No custom skills found. Create a global (~/.wb/skills/) or per-repo (.wb/skills/) skill below."),
             );
         } else {
             for (idx, s_item) in skills.iter().enumerate() {
@@ -1371,9 +1371,9 @@ impl super::Chamber {
                 let skill_path = s_item.path.clone();
                 let is_global = s_item.is_global;
                 let scope_label = if is_global {
-                    "global (~/.hadron/skills/)"
+                    "global (~/.wb/skills/)"
                 } else {
-                    "repo (.hadron/skills/)"
+                    "repo (.wb/skills/)"
                 };
 
                 let path_to_open = skill_path.clone();
@@ -1495,7 +1495,7 @@ impl super::Chamber {
                                 div()
                                     .text_xs()
                                     .text_color(theme::text_muted())
-                                    .child("(.hadron/skills)"),
+                                    .child("(.wb/skills)"),
                             )
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 let val = f_repo.read(cx).value().trim().to_string();
@@ -1540,7 +1540,7 @@ impl super::Chamber {
                                 div()
                                     .text_xs()
                                     .text_color(theme::text_muted())
-                                    .child("(~/.hadron/skills)"),
+                                    .child("(~/.wb/skills)"),
                             )
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 let val = f_global.read(cx).value().trim().to_string();
@@ -1818,7 +1818,7 @@ impl super::Chamber {
         }
 
         let configured_section = settings_card_section(
-            "Configured Scheduled Tasks (.hadron/schedules/schedules.json)",
+            "Configured Scheduled Tasks (.wb/schedules/schedules.json)",
             Some(IconName::CircleCheck),
             jobs_list,
         );
@@ -1980,7 +1980,7 @@ impl super::Chamber {
                 policy_pills.into_any_element(),
             ))
             .child(settings_field_stacked(
-                "Task Prompt (.hadron/schedules/tasks/<id>/TASK.md)",
+                "Task Prompt (.wb/schedules/tasks/<id>/TASK.md)",
                 Input::new(&self.settings_schedule_prompt)
                     .w_full()
                     .into_any_element(),

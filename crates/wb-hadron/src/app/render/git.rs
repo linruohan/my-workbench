@@ -2274,7 +2274,7 @@ impl super::Chamber {
                                 theme::text()
                             })
                             .child(if stale_count > 0 {
-                                format!("{stale_count} stale worktree(s) marked in .hadron/trees/")
+                                format!("{stale_count} stale worktree(s) marked in .wb/trees/")
                             } else {
                                 "No stale worktrees".to_string()
                             }),
@@ -2340,7 +2340,7 @@ impl super::Chamber {
                                 this.post_chat_message(
                                     Actor::Human,
                                     format!(
-                                        "@orchestrator /memory-curation Repair nucleus integrity: audit .hadron/nucleus, index {} orphan note(s), prune {} broken link(s), and ensure budget constraints.",
+                                        "@orchestrator /memory-curation Repair nucleus integrity: audit .wb/nucleus, index {} orphan note(s), prune {} broken link(s), and ensure budget constraints.",
                                         orphans_count, broken_count
                                     ),
                                     cx,

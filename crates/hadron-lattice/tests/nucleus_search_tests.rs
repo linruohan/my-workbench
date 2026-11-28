@@ -6,7 +6,7 @@ use tempfile::tempdir;
 fn test_vectorized_nucleus_semantic_search() {
     let dir = tempdir().unwrap();
     let root = dir.path();
-    let notes = root.join(".hadron").join("nucleus").join("notes");
+    let notes = root.join(".wb").join("nucleus").join("notes");
     fs::create_dir_all(&notes).unwrap();
 
     fs::write(

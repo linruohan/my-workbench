@@ -46,7 +46,7 @@ type SharedQuark = Arc<AsyncMutex<Box<dyn Quark>>>;
 /// Which of an orchestrator seat's two turn slots a dispatch targets. Every
 /// non-orchestrator seat only ever runs on `Work` — a seat with no chat lane
 /// always resolves to `Work` regardless of who sent the message. See Task 6
-/// Step 4 of `.hadron/docs/plans/2026-07-31-responsive-orchestrator.md` for
+/// Step 4 of `.wb/docs/plans/2026-07-31-responsive-orchestrator.md` for
 /// why a seat keeps ONE `QuarkId` and up to two lanes instead of two ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lane {
@@ -201,7 +201,7 @@ pub(crate) fn workspace_root_of(field_path: &Path, base: &Path) -> PathBuf {
 
     field_path
         .ancestors()
-        .find(|p| p.join(".hadron").exists())
+        .find(|p| p.join(".wb").exists())
         .unwrap_or_else(|| field_path.parent().unwrap_or_else(|| Path::new("")))
         .to_path_buf()
 }
@@ -215,7 +215,7 @@ pub(crate) fn workspace_root_of(field_path: &Path, base: &Path) -> PathBuf {
 /// every quark on every turn, always, with no file to go missing.
 pub const STANDARD_MODEL: &str = include_str!("../invariants/standard_model.md");
 
-/// Read `<workspace_root>/.hadron/nucleus/features.md` into the nucleus
+/// Read `<workspace_root>/.wb/nucleus/features.md` into the nucleus
 /// digest. This is the reader Standard Model rule 9 promises — a missing
 /// file is the normal first-run case (a fresh project has no feature map
 /// yet), not an error.
@@ -223,7 +223,7 @@ pub const STANDARD_MODEL: &str = include_str!("../invariants/standard_model.md")
 /// It reads the file as an **index**, not whole: see [`features_index`].
 pub fn build_nucleus_digest(workspace_root: &Path) -> String {
     let path = workspace_root
-        .join(".hadron")
+        .join(".wb")
         .join("nucleus")
         .join("features.md");
     if !path.exists() {
@@ -287,17 +287,17 @@ pub fn features_index(features_md: &str) -> String {
     out
 }
 
-/// One-time, idempotent migration of the legacy `.hadron/memory/` lessons
-/// ledger into `.hadron/nucleus/`, the swarm's single knowledge root.
+/// One-time, idempotent migration of the legacy `.wb/memory/` lessons
+/// ledger into `.wb/nucleus/`, the swarm's single knowledge root.
 ///
-/// `.hadron/` is gitignored, so this is the ONLY thing that can relocate a
+/// `.wb/` is gitignored, so this is the ONLY thing that can relocate a
 /// user's real on-disk lessons — a quark-worktree `mv` would be invisible to
 /// the daemon that actually reads them. Called once at daemon boot, before
 /// any turn can run, so there is no race with a quark writing a fresh
 /// `nucleus/index.md` before migration sees the legacy one.
 pub fn migrate_legacy_memory(workspace_root: &Path) -> std::io::Result<bool> {
-    let nucleus_dir = workspace_root.join(".hadron").join("nucleus");
-    let legacy_dir = workspace_root.join(".hadron").join("memory");
+    let nucleus_dir = workspace_root.join(".wb").join("nucleus");
+    let legacy_dir = workspace_root.join(".wb").join("memory");
     if nucleus_dir.join("index.md").exists() {
         return Ok(false);
     }
@@ -320,7 +320,7 @@ mod nucleus_tests {
     #[test]
     fn build_nucleus_digest_reads_features_md() {
         let dir = tempfile::tempdir().unwrap();
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
         std::fs::write(nucleus.join("features.md"), "## Widget\nstatus: shipped\n").unwrap();
         let digest = build_nucleus_digest(dir.path());
@@ -380,14 +380,14 @@ mod nucleus_tests {
     #[test]
     fn migrates_legacy_index_and_notes_into_nucleus() {
         let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join(".hadron").join("memory");
+        let legacy = dir.path().join(".wb").join("memory");
         std::fs::create_dir_all(legacy.join("notes")).unwrap();
         std::fs::write(legacy.join("index.md"), "- **x** — real content\n").unwrap();
         std::fs::write(legacy.join("notes").join("x.md"), "the long version").unwrap();
 
         let moved = migrate_legacy_memory(dir.path()).unwrap();
         assert!(moved);
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         assert_eq!(
             std::fs::read_to_string(nucleus.join("index.md")).unwrap(),
             "- **x** — real content\n"
@@ -401,14 +401,14 @@ mod nucleus_tests {
     #[test]
     fn migration_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join(".hadron").join("memory");
+        let legacy = dir.path().join(".wb").join("memory");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("index.md"), "old").unwrap();
         assert!(migrate_legacy_memory(dir.path()).unwrap());
         // Second boot: nucleus/index.md now exists — must not touch anything again.
         std::fs::write(legacy.join("index.md"), "should be ignored now").unwrap();
         assert!(!migrate_legacy_memory(dir.path()).unwrap());
-        let nucleus = dir.path().join(".hadron").join("nucleus");
+        let nucleus = dir.path().join(".wb").join("nucleus");
         assert_eq!(
             std::fs::read_to_string(nucleus.join("index.md")).unwrap(),
             "old"
@@ -504,7 +504,7 @@ pub struct Engine {
     /// `HADRON_NO_HUMAN_MODE=1`/`true`, or [`Engine::with_no_human`]) does the
     /// suspend → adjudicate-by-orchestrator → resume loop become reachable.
     no_human: bool,
-    /// The **global** custom-skills directory (`~/.hadron/skills` in production),
+    /// The **global** custom-skills directory (`~/.wb/skills` in production),
     /// injected rather than resolved inline — the same seam as [`merge`](Self::merge):
     /// `None` is the hermetic default so `Engine::new` (what every unit test calls)
     /// never touches the real `$HOME`, and only the daemon bin wires the real path via
@@ -512,7 +512,7 @@ pub struct Engine {
     /// it is derived from `workspace_root` fresh in `projection_for`, which is already
     /// tempdir-controlled by every test that sets up a field under a `tempdir()`.
     global_skills_dir: Option<PathBuf>,
-    /// The **global** preons directory (`~/.hadron/preons` in production),
+    /// The **global** preons directory (`~/.wb/preons` in production),
     /// injected via the identical seam as [`Engine::global_skills_dir`] just
     /// above, for the identical reason: `None` is the hermetic default, so
     /// `Engine::new` never reads the real `$HOME`, and only the daemon bin opts
@@ -620,7 +620,7 @@ impl Engine {
             })
             .collect();
         let cas =
-            crate::cas::SemanticCas::new(field_path.parent().unwrap_or(Path::new(".hadron"))).ok();
+            crate::cas::SemanticCas::new(field_path.parent().unwrap_or(Path::new(".wb"))).ok();
         Engine {
             field_path,
             quarks,
@@ -640,7 +640,7 @@ impl Engine {
             resident,
             serviced_reboots: None,
             no_human: env_no_human_mode(),
-            // Hermetic default: `Engine::new` never reads the real `~/.hadron` — only
+            // Hermetic default: `Engine::new` never reads the real `~/.wb` — only
             // `with_global_skills_dir` (called by the daemon bin) opts a running
             // instance into it. See the field doc for why this mirrors `merge`.
             global_skills_dir: None,
@@ -740,12 +740,12 @@ impl Engine {
         self
     }
 
-    /// Sync active implementation plans from `<repo_root>/.hadron/docs/plans/` into `dag_scheduler`.
+    /// Sync active implementation plans from `<repo_root>/.wb/docs/plans/` into `dag_scheduler`.
     pub async fn sync_dag_scheduler_from_plans(&self) {
         let Some(repo_root) = &self.repo_root else {
             return;
         };
-        let plans_dir = repo_root.join(".hadron").join("docs").join("plans");
+        let plans_dir = repo_root.join(".wb").join("docs").join("plans");
         if !plans_dir.is_dir() {
             return;
         }
@@ -1090,7 +1090,7 @@ impl Engine {
     }
 
     /// Opt in to loading custom skills from a **global** directory (production:
-    /// `~/.hadron/skills`, via [`hadron_lattice::user_hadron_dir`]). `None` — the
+    /// `~/.wb/skills`, via [`hadron_lattice::user_hadron_dir`]). `None` — the
     /// default from [`Engine::new`] — means no global directory is consulted, so a
     /// test-constructed engine can never read the real `$HOME`. Only the daemon bin
     /// calls this, with the real path; every engine test either leaves it unset or
@@ -1102,7 +1102,7 @@ impl Engine {
     }
 
     /// Opt in to loading custom preons from a **global** directory (production:
-    /// `~/.hadron/preons`, via [`hadron_lattice::user_hadron_dir`]). The identical
+    /// `~/.wb/preons`, via [`hadron_lattice::user_hadron_dir`]). The identical
     /// seam as [`Engine::with_global_skills_dir`] just above, for the identical
     /// reason: `None` — the default from [`Engine::new`] — means no global
     /// directory is consulted, so a test-constructed engine can never read the
@@ -1166,7 +1166,7 @@ impl Engine {
     }
 
     /// The preons corpus for THIS call — global (injected, see
-    /// [`Engine::global_preons_dir`]) merged with `<workspace>/.hadron/preons`
+    /// [`Engine::global_preons_dir`]) merged with `<workspace>/.wb/preons`
     /// (repo), loaded fresh rather than cached.
     ///
     /// Unlike the skill corpus (loaded once inside `projection_for`, because
@@ -1177,13 +1177,13 @@ impl Engine {
     /// called once per *site*, not once per projection; the cost is the same
     /// handful of small file reads as skills, well short of a hot loop. `Engine::new`
     /// defaults `global_preons_dir` to `None`, so a test-constructed engine can
-    /// never read the real `~/.hadron/preons`; the repo half is derived from
+    /// never read the real `~/.wb/preons`; the repo half is derived from
     /// `workspace_root`, which every test already controls via its own tempdir
-    /// field — a missing `.hadron/preons` directory degrades to `[]`, same as skills.
+    /// field — a missing `.wb/preons` directory degrades to `[]`, same as skills.
     fn loaded_preons(&self) -> Vec<Preon> {
         let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let workspace_root = workspace_root_of(&self.field_path, &base);
-        let repo_preons_dir = workspace_root.join(".hadron").join("preons");
+        let repo_preons_dir = workspace_root.join(".wb").join("preons");
         preons::load_preons(self.global_preons_dir.as_deref(), Some(&repo_preons_dir))
     }
 }
@@ -1346,7 +1346,7 @@ fn has_path_prefix(s: &str) -> bool {
     let prefixes = [
         "crates/",
         "quark/",
-        ".hadron/",
+        ".wb/",
         "src/",
         "target/",
         "assets/",

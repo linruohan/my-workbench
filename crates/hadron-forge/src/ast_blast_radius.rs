@@ -35,7 +35,7 @@ impl AstBlastRadiusAnalyzer {
         let mut crates = HashSet::new();
         for file in changed_files {
             let normalized = file.trim_start_matches("./");
-            if normalized.starts_with(".hadron/")
+            if normalized.starts_with(".wb/")
                 || normalized.starts_with("docs/")
                 || normalized.ends_with(".md")
                 || normalized.ends_with(".txt")
@@ -135,7 +135,7 @@ pub fn resolve_affected_workspace_crates(
             Some(m) => {
                 direct.insert(m.package.clone());
             }
-            None if path.starts_with(".hadron/")
+            None if path.starts_with(".wb/")
                 || path.starts_with("docs/")
                 || path.ends_with(".md")
                 || path.ends_with(".txt") => {}
@@ -309,7 +309,7 @@ fn dependency_refs(member_dir: &str, manifest: &str) -> Vec<DepRef> {
             let header = t.trim_matches(|c| c == '[' || c == ']');
             let segments: Vec<&str> = header.split('.').collect();
             in_deps = segments.iter().any(|s| KINDS.contains(s));
-            // `[dependencies.hadron-lattice]` names the dependency in the header.
+            // `[dependencies.wb-lattice]` names the dependency in the header.
             if let Some(pos) = segments.iter().rposition(|s| KINDS.contains(s)) {
                 if let Some(name) = segments.get(pos + 1) {
                     refs.push(DepRef::Name(name.trim_matches('"').to_string()));
@@ -489,7 +489,7 @@ mod tests {
         assert!(wide(&[".github/workflows/ci.yml"]));
         assert!(wide(&["assets/icon.png"]), "non-member code/data");
         assert!(
-            wide(&["docs/only.md", ".hadron/x.json"]),
+            wide(&["docs/only.md", ".wb/x.json"]),
             "nothing to slice"
         );
         assert!(

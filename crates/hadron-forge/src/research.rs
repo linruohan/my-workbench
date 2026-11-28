@@ -1,6 +1,6 @@
 //! Autonomous Research Paper & Investigation Lifecycle.
 //!
-//! Provides structured research creation, listing, and inspection under `.hadron/docs/research/`.
+//! Provides structured research creation, listing, and inspection under `.wb/docs/research/`.
 
 use crate::file::{ForgeError, Root};
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ pub struct ResearchWriteOutput {
 }
 
 pub fn research_dir_of(root: &Root) -> PathBuf {
-    root.path().join(".hadron").join("docs").join("research")
+    root.path().join(".wb").join("docs").join("research")
 }
 
 fn current_date_str() -> String {
@@ -183,7 +183,7 @@ pub fn write_research(
     fs::create_dir_all(&dir).map_err(|e| ForgeError::Io(e.to_string()))?;
 
     let full_path = dir.join(&file_name);
-    let rel_path = format!(".hadron/docs/research/{file_name}");
+    let rel_path = format!(".wb/docs/research/{file_name}");
 
     let content = format_research_document(input, &date_str);
     fs::write(&full_path, &content).map_err(|e| ForgeError::Io(e.to_string()))?;
@@ -213,7 +213,7 @@ pub fn list_research(root: &Root) -> Result<Vec<ResearchDocSummary>, ForgeError>
                 .and_then(|f| f.to_str())
                 .unwrap_or_default()
                 .to_string();
-            let rel_path = format!(".hadron/docs/research/{filename}");
+            let rel_path = format!(".wb/docs/research/{filename}");
             let metadata = entry.metadata().ok();
             let size_bytes = metadata.map(|m| m.len()).unwrap_or(0);
             let content = fs::read_to_string(&path).unwrap_or_default();
@@ -270,7 +270,7 @@ mod tests {
         };
 
         let output = write_research(&root, &input).unwrap();
-        assert!(output.rel_path.starts_with(".hadron/docs/research/"));
+        assert!(output.rel_path.starts_with(".wb/docs/research/"));
         assert!(output.rel_path.ends_with("-dynamic-themes-research.md"));
 
         let content = read_research(&root, &output.rel_path).unwrap();

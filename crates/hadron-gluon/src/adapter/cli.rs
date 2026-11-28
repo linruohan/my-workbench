@@ -334,7 +334,7 @@ pub fn fit_projection_to_budget(
 }
 
 /// Atomically write an argv-overflow prompt to `<hadron_dir>/prompts/<id>.md` (temp +
-/// rename, same shape as `prompt_cost::save`). `.hadron/` is untracked, so the spill
+/// rename, same shape as `prompt_cost::save`). `.wb/` is untracked, so the spill
 /// never dirties a worktree's git status.
 pub fn spill_prompt(
     hadron_dir: &std::path::Path,
@@ -631,7 +631,7 @@ impl<R: CliRunner> CliQuark<R> {
     /// Fit a prompt that must ride as one argv element.
     ///
     /// The argv budget ([`SAFE_ARG_BYTES`], 24 KiB on Windows) sheds the transcript,
-    /// nucleus index and more. When that happens and a `.hadron` state dir exists, the
+    /// nucleus index and more. When that happens and a `.wb` state dir exists, the
     /// pipe-budget prompt is spilled to `<hadron-dir>/prompts/<id>.md` and the argv
     /// prompt opens with a pointer to it — so nothing shed is out of the quark's reach,
     /// while the argv prompt still carries everything that fits (a model that skips
@@ -940,9 +940,9 @@ fn sibling_gluon_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let bin_name = if cfg!(windows) {
-        "hadron-gluon.exe"
+        "wb-gluon.exe"
     } else {
-        "hadron-gluon"
+        "wb-gluon"
     };
     let candidate = dir.join(bin_name);
     candidate.is_file().then_some(candidate)
@@ -954,7 +954,7 @@ fn resolve_statusline_command(cwd: &std::path::Path) -> String {
             return format!("\"{}\" --statusline", sibling.display());
         }
     }
-    r#"sh -c 'p="$HADRON_STATUSLINE_OUT"; if [ -n "$p" ]; then (cat > "$p") 2>/dev/null || { d="$HOME/.hadron/statusline"; mkdir -p "$d" 2>/dev/null && cat > "$d/${p##*/}" 2>/dev/null; }; fi; echo hadron'"#.to_string()
+    r#"sh -c 'p="$HADRON_STATUSLINE_OUT"; if [ -n "$p" ]; then (cat > "$p") 2>/dev/null || { d="$HOME/.wb/statusline"; mkdir -p "$d" 2>/dev/null && cat > "$d/${p##*/}" 2>/dev/null; }; fi; echo hadron'"#.to_string()
 }
 
 fn build_statusline_settings_json(command: &str) -> String {
@@ -1426,7 +1426,7 @@ mod tests {
             CliSpec::agy(),
             runner,
         );
-        let wt = PathBuf::from("/repo/.hadron/trees/agy");
+        let wt = PathBuf::from("/repo/.wb/trees/agy");
         q.excite(projection_in("go", Mode::Write, wt.clone()))
             .await
             .unwrap();
@@ -2331,7 +2331,7 @@ mod tests {
         p.nucleus_index =
             "## How we get things wrong\n- [bug-canary](notes/bug-canary.md) — critical lesson\n"
                 .to_string();
-        p.nucleus_index_path = PathBuf::from("/repo/.hadron/nucleus/index.md");
+        p.nucleus_index_path = PathBuf::from("/repo/.wb/nucleus/index.md");
         p.field_window = vec![
             Event::new(
                 Actor::Human,
@@ -2396,7 +2396,7 @@ mod tests {
             "step\n".repeat(600)
         ));
         p.nucleus_index = big_index(pinned, 400);
-        p.nucleus_index_path = PathBuf::from("/repo/.hadron/nucleus/index.md");
+        p.nucleus_index_path = PathBuf::from("/repo/.wb/nucleus/index.md");
         p.nucleus_notes_dir = PathBuf::from("/nonexistent/notes");
         let mut omitted = p.clone();
         omitted.nucleus_index.clear();
@@ -2460,7 +2460,7 @@ mod tests {
         assert!(prompt.len() <= max);
         assert!(fitted.nucleus_index.is_empty());
         assert!(
-            prompt.contains("_Omitted to fit the prompt budget — open `/repo/.hadron/nucleus/index.md` on demand._"),
+            prompt.contains("_Omitted to fit the prompt budget — open `/repo/.wb/nucleus/index.md` on demand._"),
             "must point at the index it omitted:\n{prompt}"
         );
         assert!(!prompt.contains("nothing has been recorded here yet"));
@@ -2493,7 +2493,7 @@ mod tests {
         );
         p.nucleus_index = big_index(1, 600);
         assert!(p.nucleus_index.len() > 37_000);
-        p.nucleus_index_path = PathBuf::from("/repo/.hadron/nucleus/index.md");
+        p.nucleus_index_path = PathBuf::from("/repo/.wb/nucleus/index.md");
         p.nucleus_notes_dir = PathBuf::from("/nonexistent/notes");
 
         let (fitted, prompt) = fit_projection_with_sliding_pruner(
@@ -2517,7 +2517,7 @@ mod tests {
     #[tokio::test]
     async fn an_argv_overflow_spills_the_full_prompt_to_the_hadron_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let hadron_dir = tmp.path().join(".hadron");
+        let hadron_dir = tmp.path().join(".wb");
         std::fs::create_dir_all(&hadron_dir).unwrap();
 
         let mut turn = projection("do task");
@@ -2545,7 +2545,7 @@ mod tests {
 
         let spill = hadron_dir.join("prompts").join("cli-agy.md");
         let full =
-            std::fs::read_to_string(&spill).expect("prompt spilled to .hadron/prompts/<id>.md");
+            std::fs::read_to_string(&spill).expect("prompt spilled to .wb/prompts/<id>.md");
         assert!(
             full.contains("EVENT-00"),
             "the spill carries the oldest event"
@@ -2561,7 +2561,7 @@ mod tests {
         );
         drop(recorded);
 
-        // No `.hadron` dir → no spill, plain argv fit.
+        // No `.wb` dir → no spill, plain argv fit.
         let mut bare = CliQuark::new(
             QuarkId::new("cli-agy"),
             Flavor::Worker,
@@ -2863,7 +2863,7 @@ mod tests {
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        let hadron_dir = tmp.path().join(".hadron");
+        let hadron_dir = tmp.path().join(".wb");
         std::fs::create_dir_all(hadron_dir.join("live")).unwrap();
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let id = QuarkId::new("cli-agy");
@@ -2947,13 +2947,13 @@ mod tests {
 
         // Verify WSL UNC path translation and POSIX statusline command selection.
         let wsl_cwd =
-            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\trees\cli-agy");
+            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\trees\cli-agy");
         let wsl_out = std::path::Path::new(
-            r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\statusline\cli-agy.json",
+            r"\\wsl.localhost\Ubuntu\home\user\project\.wb\statusline\cli-agy.json",
         );
         assert_eq!(
             translate_statusline_out_for_child(wsl_out, wsl_cwd),
-            "/home/user/project/.hadron/statusline/cli-agy.json"
+            "/home/user/project/.wb/statusline/cli-agy.json"
         );
         assert!(resolve_statusline_command(wsl_cwd).starts_with("sh -c "));
     }

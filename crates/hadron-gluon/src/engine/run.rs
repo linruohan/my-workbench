@@ -275,7 +275,7 @@ impl super::Engine {
         // earlier unaddressed message — including the very message that caused the
         // interrupt, silently swallowing it. The task text rides along so an
         // abandoned turn's work can be handed to `interrupted_task` below instead of
-        // dropped (Task 3 of `.hadron/docs/plans/2026-08-02-fonts-tools-
+        // dropped (Task 3 of `.wb/docs/plans/2026-08-02-fonts-tools-
         // orchestrator.md`). Kept in lockstep with `in_flight`, same as
         // `cancel_requested`.
         let mut dispatched_assignment: HashMap<(QuarkId, Lane), Option<(ulid::Ulid, String)>> =
@@ -439,7 +439,7 @@ impl super::Engine {
                     );
                     let resuming_interrupted = interrupted_task.contains_key(&target);
                     // A message arrived mid-turn ADDS work, it does not replace it
-                    // (Task 3 of `.hadron/docs/plans/2026-08-02-fonts-tools-
+                    // (Task 3 of `.wb/docs/plans/2026-08-02-fonts-tools-
                     // orchestrator.md`): if this quark still owes an interrupted task,
                     // fold it into whatever is driving this dispatch instead of
                     // letting the grounded assignment (and the message that
@@ -468,7 +468,7 @@ impl super::Engine {
                         // A newly-pending message for a seat that is already working:
                         // interrupt it instead of leaving the message queued behind a
                         // turn that may run for a long time (Task 4 of
-                        // `.hadron/docs/plans/2026-07-31-responsive-orchestrator.md`).
+                        // `.wb/docs/plans/2026-07-31-responsive-orchestrator.md`).
                         // Only reachable when `in_flight` itself holds `key` (and is not
                         // already in the post-turn merge gate `in_gate`) — a seat caught
                         // by the `rebooted` half of the condition was already cleared
@@ -497,7 +497,7 @@ impl super::Engine {
                                     // The abandoned task is not gone — it is handed to
                                     // the next dispatch for this quark, which merges it
                                     // with whatever interrupted it (Task 3 of
-                                    // `.hadron/docs/plans/2026-08-02-fonts-tools-
+                                    // `.wb/docs/plans/2026-08-02-fonts-tools-
                                     // orchestrator.md`): "adds work, does not replace
                                     // it". A blank task (no task-bearing driver at
                                     // dispatch time) has nothing worth resuming.
@@ -508,7 +508,7 @@ impl super::Engine {
                                     }
                                     // Grounds the abandoned assignment BEFORE
                                     // taking the quark's lock below — Defect 2 of
-                                    // Task 9 (`.hadron/docs/plans/2026-07-31-
+                                    // Task 9 (`.wb/docs/plans/2026-07-31-
                                     // responsive-orchestrator.md`): without this,
                                     // `next_pending` kept finding the old
                                     // dispatch record unanswered and re-excited
@@ -556,7 +556,7 @@ impl super::Engine {
                                     {
                                         // Commit whatever this turn has written but not
                                         // yet committed BEFORE asking it to stop (Task 5
-                                        // of `.hadron/docs/plans/2026-07-31-responsive-
+                                        // of `.wb/docs/plans/2026-07-31-responsive-
                                         // orchestrator.md`): a cancel that never resolves
                                         // and falls through to the deadline abort above
                                         // never reaches `finish_turn`'s own commit, so an
@@ -671,7 +671,7 @@ impl super::Engine {
                         let base = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("."));
                         let workspace_root = workspace_root_of(&self.field_path, &base);
-                        let repo_skills_dir = workspace_root.join(".hadron").join("skills");
+                        let repo_skills_dir = workspace_root.join(".wb").join("skills");
                         let skill_corpus = crate::skills::load_skills(
                             self.global_skills_dir.as_deref(),
                             Some(&repo_skills_dir),
@@ -1061,7 +1061,7 @@ impl super::Engine {
                                 }
                             }
                         }
-                        let locks_path = root.join(".hadron").join("locks.json");
+                        let locks_path = root.join(".wb").join("locks.json");
                         if locks_path.exists() {
                             let lock_table =
                                 hadron_lattice::locks::IntentLockTable::load_from_file(&locks_path);
@@ -1363,7 +1363,7 @@ impl super::Engine {
                         // never resolves the request at all. `finish_turn` grounds this
                         // turn's assignment unconditionally (a cancelled turn is still a
                         // terminal one), so without this the interrupted task is gone the
-                        // instant it grounds. Task 3 of `.hadron/docs/plans/2026-08-02-
+                        // instant it grounds. Task 3 of `.wb/docs/plans/2026-08-02-
                         // fonts-tools-orchestrator.md`: hand it to `interrupted_task`
                         // instead, the same as the fallback path does.
                         if outcome.cancelled {

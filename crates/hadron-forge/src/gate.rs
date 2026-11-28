@@ -307,7 +307,7 @@ pub fn run_acceptance_suite(
         let t0 = std::time::Instant::now();
         let dir_path = match &screen_check.check_dir {
             Some(custom) => root.path().join(custom),
-            None => root.path().join(".hadron").join("screenshots"),
+            None => root.path().join(".wb").join("screenshots"),
         };
         let count = if dir_path.is_dir() {
             std::fs::read_dir(&dir_path)
@@ -404,7 +404,7 @@ mod tests {
         run(&["branch", "-M", "main"]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test"]);
-        std::fs::write(dir.path().join(".gitignore"), ".hadron/\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), ".wb/\n").unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(
             dir.path().join("src/lib.rs"),
@@ -444,8 +444,8 @@ mod tests {
         let dir = fixture_repo();
         let root = Root::new(dir.path());
 
-        // Create screenshot fixture in .hadron/screenshots/
-        let screen_dir = dir.path().join(".hadron").join("screenshots");
+        // Create screenshot fixture in .wb/screenshots/
+        let screen_dir = dir.path().join(".wb").join("screenshots");
         std::fs::create_dir_all(&screen_dir).unwrap();
         std::fs::write(screen_dir.join("smoke_test.png"), b"\x89PNG\r\n\x1a\n").unwrap();
 

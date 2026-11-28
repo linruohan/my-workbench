@@ -12,7 +12,7 @@ Tool Restriction & Posture Gate:
 - **Read-Only Posture:** The debate phase is strictly non-generative. Modifying repository files, creating git branches, and drafting execution plans are prohibited.
 - **Allowed Tools:** Inspection and navigation only (`read_file`, `grep_search`, `file_search`, `list_directory`, symbol outlines).
 - **Prohibited Tools:** `write_file`, `replace_file_content`, edit-by-hash, command execution that writes or deletes state, `git_commit`.
-- **Exit Gate:** Debate continues until settled (via `/settle` or human consensus). The debate produces an Architectural Decision Record (ADR) saved to `.hadron/docs/adr/`.
+- **Exit Gate:** Debate continues until settled (via `/settle` or human consensus). The debate produces an Architectural Decision Record (ADR) saved to `.wb/docs/adr/`.
 </HARD-GATE>
 
 ## Dialectic Roles
@@ -37,12 +37,12 @@ When multiple quarks participate, the orchestrator assigns distinct dialectic st
 ## Debate Checklist
 
 1. **Frame the Question:** State the architectural dilemma clearly in 1-2 sentences.
-2. **Surface Existing Precedents:** Check current types, modules, and nucleus notes (`.hadron/nucleus/`) for prior art.
+2. **Surface Existing Precedents:** Check current types, modules, and nucleus notes (`.wb/nucleus/`) for prior art.
 3. **Present Arguments:**
    - Option A vs Option B with concrete trade-off matrix.
    - Non-negotiable constraints and failure boundaries.
 4. **Identify Invariants Impacted:** Which Standard Model or project invariants apply?
 5. **Resolution via `/settle`:**
    - Summarize verdict.
-   - Record ADR in `.hadron/docs/adr/YYYY-MM-DD-<topic>.md`.
+   - Record ADR in `.wb/docs/adr/YYYY-MM-DD-<topic>.md`.
    - Hand off to `/brainstorm` or `/writing-plans` only if implementation is desired.

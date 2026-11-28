@@ -29,7 +29,7 @@ pub enum AdapterStreamEvent {
     },
 }
 
-/// Unified telemetry sink that normalizes live `.hadron/live/<quark>.json` updates
+/// Unified telemetry sink that normalizes live `.wb/live/<quark>.json` updates
 /// and preserves turn start timestamps across ACP, CLI stream, and local HTTP turns.
 #[derive(Debug, Clone)]
 pub struct TurnTelemetrySink {
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn deduplicate_turn_message_cleans_glued_waiting_lines_and_doubled_report() {
         let report = "@orchestrator\n\
-**Done**: Executed Task 2 of `/home/Jake/dev/hadron/.hadron/docs/plans/2026-11-03-single-lane-instant-job-queue.md` in `crates/hadron-chamber/` (`3cfd81e0`).\n\
+**Done**: Executed Task 2 of `/home/Jake/dev/hadron/.wb/docs/plans/2026-11-03-single-lane-instant-job-queue.md` in `crates/hadron-chamber/` (`3cfd81e0`).\n\
 \n\
 - **Done**:\n\
   - Retired `/steer` and `/cancel` commands from `COMMANDS` in `crates/hadron-chamber/src/text.rs`.\n\

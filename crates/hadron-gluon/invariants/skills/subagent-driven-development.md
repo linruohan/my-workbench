@@ -32,11 +32,11 @@ Always specify `Model` explicitly when invoking a subagent (omitted model inheri
 
 ### 1. File Handoffs & File Paths
 Do NOT paste large specs, diffs, or accumulated history into subagent prompts. Pass artifacts as file paths:
-- **Task Brief File:** Extract task text from plan into `.hadron/scratch/task-N-brief.md`.
-- **Report File:** Implementer writes full report to `.hadron/scratch/task-N-report.md`.
-- **Diff Package File:** For reviews, redirect `git log --oneline BASE..HEAD`, `git diff --stat BASE..HEAD`, and `git diff -U10 BASE..HEAD` into `.hadron/scratch/task-N-diff.txt`. Pass path to reviewer. (Use recorded `BASE`, NEVER `HEAD~1`).
+- **Task Brief File:** Extract task text from plan into `.wb/scratch/task-N-brief.md`.
+- **Report File:** Implementer writes full report to `.wb/scratch/task-N-report.md`.
+- **Diff Package File:** For reviews, redirect `git log --oneline BASE..HEAD`, `git diff --stat BASE..HEAD`, and `git diff -U10 BASE..HEAD` into `.wb/scratch/task-N-diff.txt`. Pass path to reviewer. (Use recorded `BASE`, NEVER `HEAD~1`).
 
-### 2. Progress Ledger (`.hadron/scratch/progress.md`)
+### 2. Progress Ledger (`.wb/scratch/progress.md`)
 - Check for existing ledger at start; resume from first incomplete task.
 - Upon clean review, append line: `Task N: complete (commits <base7>..<head7>, review clean)`.
 - Ledger is primary recovery map across context compactions.

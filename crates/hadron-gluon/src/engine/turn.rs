@@ -198,7 +198,7 @@ impl super::Engine {
         // wrong the first time two quarks answer at once. Stamped here, at the single
         // place a turn's events are written, so they cannot disagree.
         let turn = ulid::Ulid::new();
-        // A cancelled turn is not a completed one (Task 9 of `.hadron/docs/plans/
+        // A cancelled turn is not a completed one (Task 9 of `.wb/docs/plans/
         // 2026-07-31-responsive-orchestrator.md`): `addressee`'s `None` arm below
         // means "hands back to the human, done" as much as it means "was cut off
         // mid-work" — an absent message cannot tell the two apart, and

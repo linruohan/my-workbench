@@ -517,7 +517,7 @@ fn load_archived_messages_merges_sessions_and_tolerates_a_missing_dir() {
 #[test]
 fn test_clear_session_history_removes_session_dirs_and_preserves_ledger() {
     let dir = tempfile::tempdir().unwrap();
-    let hadron_dir = dir.path().join(".hadron");
+    let hadron_dir = dir.path().join(".wb");
     let sessions_dir = hadron_dir.join("sessions");
     let ledger_file = hadron_dir.join("ledger.db");
 
@@ -682,7 +682,7 @@ fn build_full_process_rows_avoids_prefix_pid_collision() {
         pid: 4201,
         ppid: 1,
         name: "agy".into(),
-        cmdline: "agy --cwd /repo/.hadron/trees/cli-agy-2/crates HADRON_WSL_TAG=hadron:cli-agy-2"
+        cmdline: "agy --cwd /repo/.wb/trees/cli-agy-2/crates HADRON_WSL_TAG=hadron:cli-agy-2"
             .into(),
         rss_bytes: Some(1024),
     }];

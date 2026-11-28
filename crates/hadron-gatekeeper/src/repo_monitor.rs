@@ -44,9 +44,9 @@ impl RepoMonitor {
         }
     }
 
-    /// Checks for stale worktrees in `.hadron/trees/` (marked with `.stale`).
+    /// Checks for stale worktrees in `.wb/trees/` (marked with `.stale`).
     pub fn check_stale_worktrees(repo_root: &Path) -> Vec<PathBuf> {
-        let trees_dir = repo_root.join(".hadron").join("trees");
+        let trees_dir = repo_root.join(".wb").join("trees");
         let mut stale = Vec::new();
         if trees_dir.exists() && trees_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&trees_dir) {
@@ -67,7 +67,7 @@ impl RepoMonitor {
 
     /// Audits nucleus integrity using `NucleusIntegrityLinter`.
     pub fn check_nucleus(repo_root: &Path) -> usize {
-        let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+        let nucleus_dir = repo_root.join(".wb").join("nucleus");
         if !nucleus_dir.exists() {
             return 0;
         }
@@ -86,7 +86,7 @@ impl RepoMonitor {
     pub fn check_repo(repo_root: &Path) -> RepoHealthReport {
         let has_cargo_lock_drift = Self::check_cargo_lock_drift(repo_root);
         let stale_worktrees = Self::check_stale_worktrees(repo_root);
-        let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+        let nucleus_dir = repo_root.join(".wb").join("nucleus");
         let team = hadron_lattice::load_team_for_repo(repo_root);
         let budget = team.nucleus_index_budget_bytes();
         let (
@@ -157,7 +157,7 @@ mod tests {
     fn test_repo_monitor_detects_stale_worktrees() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        let stale_tree = root.join(".hadron").join("trees").join("stale-quark");
+        let stale_tree = root.join(".wb").join("trees").join("stale-quark");
         std::fs::create_dir_all(&stale_tree).unwrap();
         std::fs::write(stale_tree.join(".stale"), "stale").unwrap();
 
@@ -173,7 +173,7 @@ mod tests {
     fn test_repo_monitor_detects_nucleus_issues() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        let nucleus = root.join(".hadron").join("nucleus");
+        let nucleus = root.join(".wb").join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
 
         // broken link in index.md
@@ -200,7 +200,7 @@ mod tests {
     fn test_repo_monitor_respects_custom_team_budget() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        let hadron_dir = root.join(".hadron");
+        let hadron_dir = root.join(".wb");
         let nucleus = hadron_dir.join("nucleus");
         std::fs::create_dir_all(&nucleus).unwrap();
 

@@ -1702,7 +1702,7 @@ mod tests {
     #[test]
     fn test_custom_themes_dirs_for_field_resolves_wsl_unc_path() {
         let unc_field =
-            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\field.jsonl");
+            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\field.jsonl");
         let dirs = custom_themes_dirs_for_field(Some(unc_field));
         assert!(
             dirs.iter().any(|d| d.to_string_lossy().contains("themes")),

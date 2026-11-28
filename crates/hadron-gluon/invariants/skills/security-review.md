@@ -19,7 +19,7 @@ Any code touching authentication, permissions, file access, process execution, n
 
 ### 2. Vulnerability Checklist
 - **Command / Shell Injection:** Ensure commands never interpolate unescaped strings into shell executors (`sh -c`, `bash -c`). Use argument vectors (`std::process::Command::arg`) and sanitize inputs.
-- **Path Traversal & Media Jailing:** Verify all file reads/writes are strictly anchored to authorized workspace roots or jailed capture paths (e.g. `<repo>/.hadron/screenshots/`). Prohibit un-sanitized `../` resolution.
+- **Path Traversal & Media Jailing:** Verify all file reads/writes are strictly anchored to authorized workspace roots or jailed capture paths (e.g. `<repo>/.wb/screenshots/`). Prohibit un-sanitized `../` resolution.
 - **Resource Exhaustion & Denial-of-Service:** Check unbounded loops, missing stream buffers, unbounded memory allocations on untrusted payloads, and missing process timeouts (`DEADLINE` constants).
 - **Deserialization / Protocol Hijacking:** Ensure strict schema validation on NDJSON/JSON inputs. Discard or safely reject unknown/malformed payloads without panicking.
 

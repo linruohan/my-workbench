@@ -74,7 +74,7 @@ fn render_event_line(
 
 /// Frame a task interrupted mid-turn together with the message that
 /// interrupted it, for use as a [`Projection::task`] — ADDS work, does not
-/// replace it (`.hadron/docs/plans/2026-08-02-fonts-tools-orchestrator.md`,
+/// replace it (`.wb/docs/plans/2026-08-02-fonts-tools-orchestrator.md`,
 /// Task 3). Before this, a re-dispatch after a graceful cancel carried only
 /// the interrupting message; the interrupted task was grounded (so
 /// `driver_for` never re-surfaces it) and silently dropped, even though the
@@ -136,7 +136,7 @@ pub fn build_cache_stable_prefix(projection: &Projection) -> String {
 
     // 5. Nucleus Digest
     if !projection.nucleus_digest.trim().is_empty() {
-        p.push_str("# Project knowledge (nucleus) — index only, open `.hadron/nucleus/features.md` before touching a feature\n");
+        p.push_str("# Project knowledge (nucleus) — index only, open `.wb/nucleus/features.md` before touching a feature\n");
         p.push_str(projection.nucleus_digest.trim());
         p.push_str("\n\n");
     }
@@ -268,10 +268,10 @@ pub fn build_dynamic_suffix(projection: &Projection, self_id: &QuarkId) -> Strin
         if projection.mode == Mode::Bypass {
             p.push_str(
                 "**Autonomous Bypass Execution Loop:** You are in Bypass Mode. Drive the overall task to 100% completion autonomously:\n\
-                 1. **Plan State Update**: When a task is verified complete, update the active plan file on disk (`.hadron/docs/plans/*.md`) changing `- [ ]` to `- [x] Task N (commit <hash>)` (leave it on disk; do NOT commit `.hadron/` files).\n\
+                 1. **Plan State Update**: When a task is verified complete, update the active plan file on disk (`.wb/docs/plans/*.md`) changing `- [ ]` to `- [x] Task N (commit <hash>)` (leave it on disk; do NOT commit `.wb/` files).\n\
                  2. **Continuous Dispatch**: Immediately dispatch the next unchecked task (`- [ ]`) without pausing or asking the human for options.\n\
                  3. **Recover, don't ask**: A blocker you can fix inside your own worktree is NOT a reason to stop — a failed or stranded merge, a branch that did not land, a rebase conflict, a dirty tree: carry the commit forward onto THIS turn's branch and keep going. NEVER hand the human a menu of options or ask which path to take when you can settle it yourself; decide and proceed.\n\
-                 4. **Autonomous Distillation (No Proposals)**: When discovering a non-obvious failure mode, invariant, or constraint, persist it directly to `.hadron/nucleus/` (`notes/<slug>.md` and `index.md`). Never generate proposal artifacts or pause for human approval before learning.\n\
+                 4. **Autonomous Distillation (No Proposals)**: When discovering a non-obvious failure mode, invariant, or constraint, persist it directly to `.wb/nucleus/` (`notes/<slug>.md` and `index.md`). Never generate proposal artifacts or pause for human approval before learning.\n\
                  5. **Completion Gate**: Hand control back to the human (reply without `@mention`) ONLY when 100% of tasks in the plan are marked `- [x]`, OR when genuinely blocked on something ONLY the human can resolve — missing credentials, an external decision, or a destructive/irreversible action needing sign-off. \"Unrecoverable\" means the human is the sole unblocker, not merely that the last attempt failed.\n\n",
             );
         }

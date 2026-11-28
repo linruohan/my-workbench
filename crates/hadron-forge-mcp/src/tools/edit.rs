@@ -327,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_edit_and_write_publish_gossip_to_shared_repo_hadron() {
         let repo = tempfile::tempdir().unwrap();
-        let wt = repo.path().join(".hadron").join("trees").join("cli-agy");
+        let wt = repo.path().join(".wb").join("trees").join("cli-agy");
         std::fs::create_dir_all(&wt).unwrap();
         let server = ForgeMcpServer::new(&wt);
 
@@ -340,16 +340,16 @@ mod tests {
             .await;
         assert!(res.0.ok);
         assert!(
-            !wt.join(".hadron").exists(),
-            "worktree must not grow a nested .hadron from GossipBus"
+            !wt.join(".wb").exists(),
+            "worktree must not grow a nested .wb from GossipBus"
         );
         assert!(
             repo.path()
-                .join(".hadron")
+                .join(".wb")
                 .join("gossip")
                 .join("bus.ndjson")
                 .is_file(),
-            "GossipBus must publish to shared <repo_root>/.hadron/gossip/bus.ndjson"
+            "GossipBus must publish to shared <repo_root>/.wb/gossip/bus.ndjson"
         );
     }
 }

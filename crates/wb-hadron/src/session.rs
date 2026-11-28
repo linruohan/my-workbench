@@ -142,12 +142,12 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tempdir");
         let field = dir.join("field.jsonl");
         let generated = ensure_session_name(&field).expect("name");
-        assert_eq!(read_session_name(&field).as_deref(), Some(generated.as_str()));
-        rename_session(&field, "bugfix-router").expect("rename");
         assert_eq!(
             read_session_name(&field).as_deref(),
-            Some("bugfix-router")
+            Some(generated.as_str())
         );
+        rename_session(&field, "bugfix-router").expect("rename");
+        assert_eq!(read_session_name(&field).as_deref(), Some("bugfix-router"));
         // 已有名字时 ensure 不覆盖。
         assert_eq!(
             ensure_session_name(&field).as_deref(),

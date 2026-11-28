@@ -234,7 +234,7 @@ pub fn parse_headless_command(args: &[String]) -> Option<HeadlessCommand> {
 
 /// Executes a headless batch command, appending a turn event to the field.
 pub fn run_headless_batch(cmd: HeadlessCommand, repo_root: &Path) -> Result<(), String> {
-    let field_path = repo_root.join(".hadron").join("field.jsonl");
+    let field_path = repo_root.join(".wb").join("field.jsonl");
     if let Some(parent) = field_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -392,16 +392,16 @@ pub fn discover_default_seats(
 
 /// Initializes a repository for Hadron from the CLI (`hadron init` / `hadron --init`):
 /// 1. Ensures Git repository + `.gitignore` + root commit on `main` via `crate::vcs::init_repository`.
-/// 2. Auto-discovers installed CLI agents & API keys and seeds `.hadron/team.json` with the first
+/// 2. Auto-discovers installed CLI agents & API keys and seeds `.wb/team.json` with the first
 ///    Quark promoted to `Flavor::Orchestrator`.
 pub fn run_cli_init(repo_root: &Path) -> Result<String, String> {
     let git_msg = crate::vcs::init_repository(repo_root)
         .map_err(|e| format!("Git initialization failed: {e}"))?;
     term::info(Source::Chamber, &git_msg);
 
-    let hadron_dir = repo_root.join(".hadron");
+    let hadron_dir = repo_root.join(".wb");
     std::fs::create_dir_all(&hadron_dir)
-        .map_err(|e| format!("Failed to create .hadron directory: {e}"))?;
+        .map_err(|e| format!("Failed to create .wb directory: {e}"))?;
     let team_path = hadron_dir.join("team.json");
     let mut team = if team_path.exists() {
         hadron_lattice::load_team(&team_path)
@@ -468,13 +468,13 @@ mod tests {
             "hadron".into(),
             "ci".into(),
             "--plan".into(),
-            ".hadron/docs/plans/task.md".into(),
+            ".wb/docs/plans/task.md".into(),
         ];
         let cmd = parse_headless_command(&args);
         assert_eq!(
             cmd,
             Some(HeadlessCommand::Ci {
-                plan_path: PathBuf::from(".hadron/docs/plans/task.md")
+                plan_path: PathBuf::from(".wb/docs/plans/task.md")
             })
         );
     }
@@ -484,13 +484,13 @@ mod tests {
         let args = vec![
             "hadron".into(),
             "ci".into(),
-            ".hadron/docs/plans/task.md".into(),
+            ".wb/docs/plans/task.md".into(),
         ];
         let cmd = parse_headless_command(&args);
         assert_eq!(
             cmd,
             Some(HeadlessCommand::Ci {
-                plan_path: PathBuf::from(".hadron/docs/plans/task.md")
+                plan_path: PathBuf::from(".wb/docs/plans/task.md")
             })
         );
     }
@@ -515,7 +515,7 @@ mod tests {
         let res = run_headless_batch(cmd, repo_root);
         assert!(res.is_ok());
 
-        let field_path = repo_root.join(".hadron").join("field.jsonl");
+        let field_path = repo_root.join(".wb").join("field.jsonl");
         assert!(field_path.exists());
 
         let events = read_events(&field_path).unwrap();
@@ -552,7 +552,7 @@ mod tests {
         let res = run_headless_batch(cmd, repo_root);
         assert!(res.is_ok());
 
-        let field_path = repo_root.join(".hadron").join("field.jsonl");
+        let field_path = repo_root.join(".wb").join("field.jsonl");
         let events = read_events(&field_path).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0].kind {
@@ -636,7 +636,7 @@ mod tests {
         assert!(summary.contains("Initialized Git repository"));
         assert!(crate::vcs::is_git_repo(repo_root));
         assert!(crate::vcs::has_commits(repo_root));
-        assert!(repo_root.join(".hadron").join("team.json").exists());
+        assert!(repo_root.join(".wb").join("team.json").exists());
     }
 
     #[test]

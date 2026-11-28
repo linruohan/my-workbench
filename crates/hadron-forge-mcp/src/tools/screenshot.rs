@@ -1,6 +1,6 @@
 //! The **screenshot** family: jailed desktop and window screen capture.
 //!
-//! Provides visual capture tools strictly confined to `<repo_root>/.hadron/screenshots/`,
+//! Provides visual capture tools strictly confined to `<repo_root>/.wb/screenshots/`,
 //! allowing agents to capture and verify graphical UI without risk of PII leakage.
 
 use super::{ForgeMcpServer, ToolResponse};
@@ -51,10 +51,10 @@ pub struct ScreenshotResult {
 
 #[tool_router(router = screenshot_router, vis = "pub(super)")]
 impl ForgeMcpServer {
-    /// Capture a desktop, window, or region screenshot saved into `.hadron/screenshots/`.
+    /// Capture a desktop, window, or region screenshot saved into `.wb/screenshots/`.
     #[tool(
         name = "hadron_forge_screenshot_capture",
-        description = "Capture a desktop, window, or region screenshot. The image is strictly saved to .hadron/screenshots/."
+        description = "Capture a desktop, window, or region screenshot. The image is strictly saved to .wb/screenshots/."
     )]
     pub async fn screenshot_capture(
         &self,
@@ -109,10 +109,10 @@ impl ForgeMcpServer {
         }
     }
 
-    /// List all screenshots currently stored in `.hadron/screenshots/`.
+    /// List all screenshots currently stored in `.wb/screenshots/`.
     #[tool(
         name = "hadron_forge_screenshot_list",
-        description = "List all screenshots currently stored in the .hadron/screenshots/ directory."
+        description = "List all screenshots currently stored in the .wb/screenshots/ directory."
     )]
     pub async fn screenshot_list(&self) -> Json<ToolResponse> {
         let manager = ScreenshotManager::new(self.root.clone());
@@ -125,10 +125,10 @@ impl ForgeMcpServer {
         }
     }
 
-    /// Prune screenshots in `.hadron/screenshots/` older than specified age or purge all.
+    /// Prune screenshots in `.wb/screenshots/` older than specified age or purge all.
     #[tool(
         name = "hadron_forge_screenshot_prune",
-        description = "Prune old screenshots in .hadron/screenshots/ to reclaim disk space."
+        description = "Prune old screenshots in .wb/screenshots/ to reclaim disk space."
     )]
     pub async fn screenshot_prune(
         &self,
@@ -186,7 +186,7 @@ pub mod tests {
     #[test]
     fn test_screenshot_result_carries_base64_png() {
         let res = ScreenshotResult {
-            path: ".hadron/screenshots/capture.png".to_string(),
+            path: ".wb/screenshots/capture.png".to_string(),
             filename: "capture.png".to_string(),
             width: 1920,
             height: 1080,

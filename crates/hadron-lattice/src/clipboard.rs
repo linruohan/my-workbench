@@ -1,4 +1,4 @@
-//! Shared Inter-Quark Artifact Clipboard (`.hadron/clipboard/clips.json`).
+//! Shared Inter-Quark Artifact Clipboard (`.wb/clipboard/clips.json`).
 //!
 //! Provides an out-of-band key-value clipboard buffer shared across all isolated
 //! quark worktrees and the Chamber UI so quarks can exchange code snippets,
@@ -24,13 +24,13 @@ struct ClipboardFile {
     clips: BTreeMap<String, ClipboardEntry>,
 }
 
-/// Resolve the shared `<repo>/.hadron` directory from any path (whether `<repo>`,
-/// `<repo>/.hadron`, `<repo>/.hadron/field.jsonl`, or an isolated worktree
-/// `<repo>/.hadron/trees/<quark>`).
+/// Resolve the shared `<repo>/.wb` directory from any path (whether `<repo>`,
+/// `<repo>/.wb`, `<repo>/.wb/field.jsonl`, or an isolated worktree
+/// `<repo>/.wb/trees/<quark>`).
 pub fn resolve_shared_hadron_dir(path: &Path) -> PathBuf {
     let mut cur = Some(path);
     while let Some(p) = cur {
-        if p.file_name().and_then(|n| n.to_str()) == Some(".hadron") {
+        if p.file_name().and_then(|n| n.to_str()) == Some(".wb") {
             return p.to_path_buf();
         }
         cur = p.parent();
@@ -40,10 +40,10 @@ pub fn resolve_shared_hadron_dir(path: &Path) -> PathBuf {
             return parent.to_path_buf();
         }
     }
-    path.join(".hadron")
+    path.join(".wb")
 }
 
-/// Path to the shared clipboard JSON store (`<repo>/.hadron/clipboard/clips.json`).
+/// Path to the shared clipboard JSON store (`<repo>/.wb/clipboard/clips.json`).
 pub fn clipboard_file_path(cwd_or_hadron: &Path) -> PathBuf {
     resolve_shared_hadron_dir(cwd_or_hadron)
         .join("clipboard")
@@ -72,7 +72,7 @@ fn save_store(path: &Path, store: &ClipboardFile) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Store or overwrite a named clipboard artifact in the shared `.hadron/clipboard/clips.json`.
+/// Store or overwrite a named clipboard artifact in the shared `.wb/clipboard/clips.json`.
 pub fn put_clip(
     cwd_or_hadron: &Path,
     key: &str,
@@ -103,21 +103,21 @@ pub fn put_clip(
     Ok(entry)
 }
 
-/// Retrieve a named clipboard entry from the shared `.hadron/clipboard/clips.json`.
+/// Retrieve a named clipboard entry from the shared `.wb/clipboard/clips.json`.
 pub fn get_clip(cwd_or_hadron: &Path, key: &str) -> std::io::Result<Option<ClipboardEntry>> {
     let path = clipboard_file_path(cwd_or_hadron);
     let store = load_store(&path)?;
     Ok(store.clips.get(key.trim()).cloned())
 }
 
-/// List all entries in the shared `.hadron/clipboard/clips.json` sorted by key.
+/// List all entries in the shared `.wb/clipboard/clips.json` sorted by key.
 pub fn list_clips(cwd_or_hadron: &Path) -> std::io::Result<Vec<ClipboardEntry>> {
     let path = clipboard_file_path(cwd_or_hadron);
     let store = load_store(&path)?;
     Ok(store.clips.into_values().collect())
 }
 
-/// Clear all entries in the shared `.hadron/clipboard/clips.json`, returning the number removed.
+/// Clear all entries in the shared `.wb/clipboard/clips.json`, returning the number removed.
 pub fn clear_clips(cwd_or_hadron: &Path) -> std::io::Result<usize> {
     let path = clipboard_file_path(cwd_or_hadron);
     let mut store = load_store(&path)?;
@@ -135,8 +135,8 @@ mod tests {
     #[test]
     fn shared_clipboard_resolves_across_isolated_worktrees() {
         let repo = tempdir().unwrap();
-        let wt_a = repo.path().join(".hadron").join("trees").join("cli-agy");
-        let wt_b = repo.path().join(".hadron").join("trees").join("acp-agy");
+        let wt_a = repo.path().join(".wb").join("trees").join("cli-agy");
+        let wt_b = repo.path().join(".wb").join("trees").join("acp-agy");
         fs::create_dir_all(&wt_a).unwrap();
         fs::create_dir_all(&wt_b).unwrap();
 

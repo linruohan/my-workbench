@@ -1772,11 +1772,11 @@ pub fn compute_crate_graph_fingerprint(repo_root: &std::path::Path) -> u64 {
     hash
 }
 
-/// Computes a fast, deterministic 64-bit metadata fingerprint across `.hadron/nucleus/index.md`,
-/// `.hadron/nucleus/features.md`, `.hadron/nucleus/invariants/*.md`, and `.hadron/nucleus/notes/*.md`
+/// Computes a fast, deterministic 64-bit metadata fingerprint across `.wb/nucleus/index.md`,
+/// `.wb/nucleus/features.md`, `.wb/nucleus/invariants/*.md`, and `.wb/nucleus/notes/*.md`
 /// using directory entry metadata.
 pub fn compute_nucleus_graph_fingerprint(repo_root: &std::path::Path) -> u64 {
-    let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+    let nucleus_dir = repo_root.join(".wb").join("nucleus");
     let mut entries_meta: Vec<(String, u64, u128)> = Vec::new();
 
     for root_doc in ["index.md", "features.md", "invariants.md"] {
@@ -1832,7 +1832,7 @@ pub fn compute_nucleus_graph_fingerprint(repo_root: &std::path::Path) -> u64 {
 }
 
 /// On-disk cache for `Dependencies` (`CachedCrateGraph`) and `Nucleus Graph` (`CachedNucleusGraph`)
-/// stored at `.hadron/cache/visualizer_graphs.json` for instant startup hydration while Hadron
+/// stored at `.wb/cache/visualizer_graphs.json` for instant startup hydration while Hadron
 /// checks for workspace changes in the background.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct VisualizerGraphsDiskCache {
@@ -1851,7 +1851,7 @@ pub struct VisualizerGraphsDiskCache {
 impl VisualizerGraphsDiskCache {
     pub fn cache_path(repo_root: &std::path::Path) -> std::path::PathBuf {
         repo_root
-            .join(".hadron")
+            .join(".wb")
             .join("cache")
             .join("visualizer_graphs.json")
     }
@@ -1882,7 +1882,7 @@ impl VisualizerGraphsDiskCache {
     }
 
     /// Compares workspace metadata fingerprints against `self`, rebuilds only missing or stale
-    /// graphs, updates `self`, and persists `.hadron/cache/visualizer_graphs.json` atomically.
+    /// graphs, updates `self`, and persists `.wb/cache/visualizer_graphs.json` atomically.
     pub fn revalidate(
         &mut self,
         repo_root: &std::path::Path,
@@ -1921,7 +1921,7 @@ impl VisualizerGraphsDiskCache {
                 self.nucleus_fingerprint = Some(nucleus_fp);
                 self.nucleus_graph = Some(ng.clone());
             }
-            if repo_root.join(".hadron").is_dir() {
+            if repo_root.join(".wb").is_dir() {
                 let _ = self.save(repo_root);
             }
         }
@@ -2091,7 +2091,7 @@ impl super::Chamber {
     }
 
     /// Hydrates `cached_crate_graph` and `cached_nucleus_graph` immediately from
-    /// `.hadron/cache/visualizer_graphs.json` if not yet in memory, then verifies
+    /// `.wb/cache/visualizer_graphs.json` if not yet in memory, then verifies
     /// workspace metadata fingerprints in the background and rebuilds only stale graphs.
     pub(crate) fn warm_visualizer_graphs(&self, cx: &mut Context<Self>) {
         if self.cached_crate_graph_loading.get() || self.cached_nucleus_graph_loading.get() {
@@ -2176,7 +2176,7 @@ impl super::Chamber {
     }
 
     /// Forces an asynchronous background rebuild of `CachedNucleusGraph` and updates
-    /// `.hadron/cache/visualizer_graphs.json` whenever `.hadron/nucleus/` files change on disk
+    /// `.wb/cache/visualizer_graphs.json` whenever `.wb/nucleus/` files change on disk
     /// or the user clicks `Refresh` in the `Nucleus Graph` header HUD.
     pub(crate) fn refresh_nucleus_graph(&self, cx: &mut Context<Self>) {
         self.cached_nucleus_graph_loading.set(true);
@@ -3075,9 +3075,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
-        // Setup minimal workspace + .hadron/nucleus
+        // Setup minimal workspace + .wb/nucleus
         let crate_src = root.join("crates/alpha/src");
-        let notes_dir = root.join(".hadron/nucleus/notes");
+        let notes_dir = root.join(".wb/nucleus/notes");
         std::fs::create_dir_all(&crate_src).unwrap();
         std::fs::create_dir_all(&notes_dir).unwrap();
 
@@ -3094,7 +3094,7 @@ mod tests {
         std::fs::write(crate_src.join("lib.rs"), "pub mod sub;\n").unwrap();
 
         std::fs::write(
-            root.join(".hadron/nucleus/index.md"),
+            root.join(".wb/nucleus/index.md"),
             "- [note-a](notes/note-a.md) — First note\n",
         )
         .unwrap();
@@ -3109,7 +3109,7 @@ mod tests {
         assert_eq!(crate_fp_1, compute_crate_graph_fingerprint(root));
         assert_eq!(nucleus_fp_1, compute_nucleus_graph_fingerprint(root));
 
-        // Initial revalidate populates .hadron/cache/visualizer_graphs.json
+        // Initial revalidate populates .wb/cache/visualizer_graphs.json
         let mut cache = VisualizerGraphsDiskCache::load(root);
         let (cg_1_opt, ng_1_opt) = cache.revalidate(root, false, false);
         let cg_1 = cg_1_opt.expect("cold cache must build crate graph");
@@ -3152,7 +3152,7 @@ mod tests {
         assert_eq!(disk_after_note.crate_fingerprint, Some(crate_fp_1));
 
         // Mutating invariants/always.md also invalidates the nucleus fingerprint
-        let inv_dir = root.join(".hadron/nucleus/invariants");
+        let inv_dir = root.join(".wb/nucleus/invariants");
         std::fs::create_dir_all(&inv_dir).unwrap();
         std::fs::write(
             inv_dir.join("always.md"),

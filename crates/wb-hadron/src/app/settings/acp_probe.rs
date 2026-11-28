@@ -149,7 +149,7 @@ impl super::Chamber {
     }
 
     /// Provision the `agy` ACP bridge's venv for `id`, off the UI thread — a no-op
-    /// 1c in `.hadron/docs/plans/2026-07-28-shippable-bridge-and-self-update.md`.
+    /// 1c in `.wb/docs/plans/2026-07-28-shippable-bridge-and-self-update.md`.
     /// Mirrors [`Self::start_acp_model_probe`]'s shape: a probe that resolves after the
     /// human has moved to another quark is dropped rather than mis-applied.
     pub(super) fn start_agy_bridge_provision(&mut self, id: &str, cx: &mut Context<Self>) {

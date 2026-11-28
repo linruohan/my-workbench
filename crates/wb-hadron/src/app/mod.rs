@@ -113,6 +113,8 @@ use input::split_leading_commands;
 
 mod reload;
 mod terminal;
+mod migrate;
+pub use migrate::{migrate_global_dir, migrate_repo_dir};
 pub mod update;
 pub use update::UpdateState;
 pub mod audio;
@@ -260,11 +262,11 @@ impl InjectedWorkbenchSettings {
 pub struct Chamber {
     view: ChamberView,
     prefs: ChamberPrefs,
-    /// The **repo** team file (`.hadron/team.json`): legacy full seats plus per-repo
+    /// The **repo** team file (`.wb/team.json`): legacy full seats plus per-repo
     /// role/state overrides. This is what the chamber edits and writes. The roster is
     /// projected from `resolve_team(&self.team, &self.global)`, not this directly.
     team: Team,
-    /// The **global catalogue** (`~/.hadron/team.json`): every quark's definition. A
+    /// The **global catalogue** (`~/.wb/team.json`): every quark's definition. A
     /// repo override names one of these; catalogue quarks not adopted here show greyed.
     global: Team,
     /// The field file this chamber reads from and steers into.
@@ -760,7 +762,7 @@ pub struct Chamber {
     _rpc_subscription: Option<crate::rpc_client::RpcSubscriptionHandle>,
     /// Whether the "gluon stopped" banner is currently shown. Set on the
     /// running→stopped edge, cleared on stopped→running or manual dismiss.
-    /// Whether `.hadron/nucleus/index.md` exceeds the 32 KiB prompt limit
+    /// Whether `.wb/nucleus/index.md` exceeds the 32 KiB prompt limit
     pub(super) nucleus_over_budget: bool,
     pub(super) gluon_stopped_notice: bool,
     #[allow(dead_code)]
@@ -845,21 +847,21 @@ pub struct EmbeddedChamberInit {
     path: PathBuf,
 }
 
-/// 为嵌入模式准备 chamber 状态：定位 `<repo>/.hadron/field.jsonl`，读出仓库
-/// team（`.hadron/team.json`）与全局目录（`~/.hadron/team.json`），执行一次性
+/// 为嵌入模式准备 chamber 状态：定位 `<repo>/.wb/field.jsonl`，读出仓库
+/// team（`.wb/team.json`）与全局目录（`~/.wb/team.json`），执行一次性
 /// 迁移，再把事件投影成初始视图。加载路径与 [`run`] 完全一致，但不注册全局
 /// 主题、不开独立窗口。
 pub fn prepare_embedded(repo_root: &Path) -> EmbeddedChamberInit {
-    prepare_embedded_at(repo_root, &repo_root.join(".hadron").join("field.jsonl"))
+    prepare_embedded_at(repo_root, &repo_root.join(".wb").join("field.jsonl"))
 }
 
 /// 与 [`prepare_embedded`] 相同，但显式指定要打开的 field。
 ///
-/// 并行多会话时，每个会话就是 `<repo>/.hadron/sessions/<id>/field.jsonl`；
+/// 并行多会话时，每个会话就是 `<repo>/.wb/sessions/<id>/field.jsonl`；
 /// 仓库级配置（team/nucleus/skills）仍按 [`prepare_embedded_at`] 的 `repo_root` 解析。
 pub fn prepare_embedded_at(repo_root: &Path, field_path: &Path) -> EmbeddedChamberInit {
-    // 与独立启动一样，先把 `.hadron/` 与 field 文件落盘，保证首次使用即可写事件。
-    let hadron_dir = repo_root.join(".hadron");
+    // 与独立启动一样，先把 `.wb/` 与 field 文件落盘，保证首次使用即可写事件。
+    let hadron_dir = repo_root.join(".wb");
     let _ = std::fs::create_dir_all(&hadron_dir);
     if let Some(parent) = field_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -899,6 +901,9 @@ pub fn prepare_embedded_at(repo_root: &Path, field_path: &Path) -> EmbeddedChamb
 /// 工作台嵌入前的一次性全局初始化：注册 chamber 自带字体并把 `file://` 链接
 /// 的打开策略指向工作区根目录。宿主应用负责主题与组件初始化。
 pub fn init_embedded(cx: &mut App, repo_root: &Path) {
+    // 品牌统一为 `.wb`：先把旧的 `.hadron` 目录（仓库级 + 全局）迁移过来。
+    migrate_global_dir();
+    migrate_repo_dir(repo_root);
     if let Err(e) = cx.text_system().add_fonts(crate::fonts::embedded()) {
         hadron_lattice::term::warn(
             hadron_lattice::term::Source::Chamber,
@@ -915,16 +920,18 @@ pub fn init_embedded(cx: &mut App, repo_root: &Path) {
 /// 与 [`init_embedded`] 的区别是不重复注册字体，宿主在工作区之间来回切换时
 /// 只需要调用这个轻量版本。
 pub fn set_embedded_workspace(repo_root: &Path) {
-    set_link_workspace_path(repo_root.join(".hadron").join("field.jsonl"));
+    // 切换工作区时也顺手迁移旧目录，覆盖启动后才添加的工作区。
+    migrate_repo_dir(repo_root);
+    set_link_workspace_path(repo_root.join(".wb").join("field.jsonl"));
 }
 
 /// 确保该仓库的 gluon 守护进程在运行：已经在跑就直接复用，没有就拉起一个
-/// 与宿主同目录的 `hadron-gluon`。
+/// 与宿主同目录的 `wb-gluon`。
 ///
 /// 返回**本次新拉起**的子进程句柄（已有守护进程时为 `None`）。调用方可以把它
 /// 存起来，进程退出时由系统一并回收；不存也不会影响守护进程继续工作。
 pub fn ensure_daemon_for_repo(repo_root: &Path) -> Option<std::process::Child> {
-    ensure_daemon_for_field(&repo_root.join(".hadron").join("field.jsonl"))
+    ensure_daemon_for_field(&repo_root.join(".wb").join("field.jsonl"))
 }
 
 /// 确保某个 field 的守护进程在运行。
@@ -947,7 +954,7 @@ pub fn ensure_daemon_for_field(field_path: &Path) -> Option<std::process::Child>
             hadron_lattice::term::info(
                 hadron_lattice::term::Source::Chamber,
                 &format!(
-                    "已为 {:?} 启动 hadron-gluon（PID {}）",
+                    "已为 {:?} 启动 wb-gluon（PID {}）",
                     field_path,
                     child.id()
                 ),
@@ -957,7 +964,7 @@ pub fn ensure_daemon_for_field(field_path: &Path) -> Option<std::process::Child>
         Err(e) => {
             hadron_lattice::term::warn(
                 hadron_lattice::term::Source::Chamber,
-                &format!("无法启动 hadron-gluon：{e:#}（聊天将无法收到回复）"),
+                &format!("无法启动 wb-gluon：{e:#}（聊天将无法收到回复）"),
             );
             None
         }
@@ -1033,7 +1040,7 @@ impl Chamber {
         };
         // `@`-mention autocomplete offers gitignored entries too (`d4679265`): a
         // wholly-ignored directory reaches us collapsed to one row (`target/`,
-        // `.hadron/`), so the list gains ~16 entries, not the 51k files under them.
+        // `.wb/`), so the list gains ~16 entries, not the 51k files under them.
         let completion_files = std::rc::Rc::new(std::cell::RefCell::new(files.clone()));
 
         let selector_search = cx.new(|cx| {
@@ -1483,7 +1490,7 @@ impl Chamber {
         });
         let settings_schedule_prompt = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Task instructions saved to .hadron/schedules/tasks/<id>/TASK.md...")
+                .placeholder("Task instructions saved to .wb/schedules/tasks/<id>/TASK.md...")
         });
         let custom_cli_model =
             cx.new(|cx| InputState::new(window, cx).placeholder("model name (optional)"));
@@ -2471,7 +2478,7 @@ impl Chamber {
                 0,
             )
         } else {
-            let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+            let nucleus_dir = repo_root.join(".wb").join("nucleus");
             let plan_paths = reload::scan_all_plan_paths(&repo_root);
             let active_plan =
                 reload::resolve_active_plan_with_plans(&repo_root, &view.messages, &plan_paths);
@@ -3259,8 +3266,8 @@ pub fn run(field_path: Option<String>, chamber_lock_file: Option<std::fs::File>)
             (dummy_path, WorkspaceMode::Selector)
         }
     };
-    // The repo team file (`.hadron/team.json`) and the separate global catalogue
-    // (`~/.hadron/team.json`, skipped when it IS the repo file).
+    // The repo team file (`.wb/team.json`) and the separate global catalogue
+    // (`~/.wb/team.json`, skipped when it IS the repo file).
     let repo_path = if workspace_mode == WorkspaceMode::Selector {
         None
     } else {
@@ -3727,7 +3734,7 @@ mod tests {
 
     #[test]
     fn resolve_link_for_active_workspace_routes_file_urls_and_ignores_http() {
-        set_link_workspace_path(PathBuf::from("/workspace/.hadron/field.jsonl"));
+        set_link_workspace_path(PathBuf::from("/workspace/.wb/field.jsonl"));
         let resolved = resolve_link_for_active_workspace("file:///workspace/src/main.rs#L42");
         assert_eq!(
             resolved,

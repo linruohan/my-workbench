@@ -13,7 +13,7 @@ type CancelFn = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 /// something cancellable (e.g. a booted resident session) and clears it when
 /// it does not; the engine keeps its own clone and reads through THAT, never
 /// through the quark's own lock — the whole reason this exists (Task 4 of
-/// `.hadron/docs/plans/2026-07-31-responsive-orchestrator.md`): a turn holds
+/// `.wb/docs/plans/2026-07-31-responsive-orchestrator.md`): a turn holds
 /// that lock for its entire duration, so a cancel routed through the quark
 /// itself would wait for the very turn it exists to interrupt.
 ///

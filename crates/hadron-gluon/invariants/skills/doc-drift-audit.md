@@ -13,7 +13,7 @@ Documentation is part of the system's contract. A document describing an API tha
 ## Drift Audit Checklist
 
 ### 1. Feature Map Audit (`features.md`)
-- Open `.hadron/nucleus/features.md`.
+- Open `.wb/nucleus/features.md`.
 - For every listed feature:
   - Verify entrypoint files exist on disk.
   - Verify key functions and structs named in the description exist and are referenced by live production callers (Rule 1).
@@ -27,7 +27,7 @@ Documentation is part of the system's contract. A document describing an API tha
 - Ensure all public commands appear in user-facing help and README documentation.
 
 ### 3. Nucleus Index & Invariants Audit
-- Check `.hadron/nucleus/index.md` size against the budget limit (Rule 9).
+- Check `.wb/nucleus/index.md` size against the budget limit (Rule 9).
 - Ensure every index line is a pointer (`- [slug](notes/slug.md) — hook`) and contains no inline content body.
 - Verify invariant claims in `invariants/` still reflect actual codebase enforcement rather than obsolete workarounds.
 

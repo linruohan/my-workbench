@@ -657,7 +657,7 @@ fn collect_code_files(
         if p.is_dir() {
             if matches!(
                 name,
-                ".git" | "target" | "node_modules" | "dist" | ".hadron" | "vendor" | ".cache"
+                ".git" | "target" | "node_modules" | "dist" | ".wb" | "vendor" | ".cache"
             ) {
                 continue;
             }
@@ -694,7 +694,7 @@ fn walk_dir_callers(
         if path.is_dir() {
             if matches!(
                 file_name,
-                ".git" | "target" | "node_modules" | "dist" | ".hadron" | "vendor" | ".cache"
+                ".git" | "target" | "node_modules" | "dist" | ".wb" | "vendor" | ".cache"
             ) {
                 continue;
             }

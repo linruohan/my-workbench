@@ -22,7 +22,7 @@ pub struct AcceptanceGateArgs {
     pub run_unit_tests: Option<bool>,
     /// When true, executes cargo workspace check
     pub run_lint_check: Option<bool>,
-    /// Minimum count of screenshot files required in .hadron/screenshots/
+    /// Minimum count of screenshot files required in .wb/screenshots/
     pub min_screenshots: Option<usize>,
     /// Custom shell commands to verify
     pub custom_commands: Option<Vec<String>>,
@@ -134,7 +134,7 @@ mod tests {
         run(&["branch", "-M", "main"]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test"]);
-        std::fs::write(dir.path().join(".gitignore"), ".hadron/\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), ".wb/\n").unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(
             dir.path().join("src/lib.rs"),

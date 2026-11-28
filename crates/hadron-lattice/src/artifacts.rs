@@ -28,7 +28,7 @@ struct StoredArtifact {
 }
 
 pub fn artifacts_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".hadron").join("artifacts")
+    repo_root.join(".wb").join("artifacts")
 }
 
 pub fn publish_artifact(

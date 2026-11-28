@@ -22,11 +22,11 @@ impl Chamber {
     /// Where `/clear` and `/resume` park archived sessions. Derived from the field path
     /// so nothing has to be told twice.
     ///
-    /// 会话 field 本身也位于 `<repo>/.hadron/sessions/<id>/`，所以这里按仓库根取
+    /// 会话 field 本身也位于 `<repo>/.wb/sessions/<id>/`，所以这里按仓库根取
     /// 共享的 sessions 目录，避免会话自己下面再套一层 `sessions/`。
     pub(super) fn sessions_dir(&self) -> std::path::PathBuf {
         hadron_lattice::repo_root_of(&self.path)
-            .join(".hadron")
+            .join(".wb")
             .join("sessions")
     }
 
@@ -288,7 +288,7 @@ impl Chamber {
     /// This is the whole reason "Open Workspace" was absent for so long: a daemon binds
     /// to one workspace at boot, so a chamber cannot repoint the running swarm at another
     /// repo. It does not have to — a chamber launched with a directory argument resolves
-    /// `<dir>/.hadron/field.jsonl` itself and auto-spawns that workspace's own gluon
+    /// `<dir>/.wb/field.jsonl` itself and auto-spawns that workspace's own gluon
     /// (guarded by its own `gluon.lock`), which is exactly what an editor's "Open Folder
     /// in New Window" does. Nothing here touches the current workspace's field, roster or
     /// daemon, so the failure mode `team_for_field-misses-repo-root` warns about — a
@@ -541,7 +541,7 @@ impl Chamber {
     }
 
     /// The skill corpus the engine would load for this workspace: built-ins, then
-    /// `~/.hadron/skills`, then `<repo>/.hadron/skills`, last wins by id.
+    /// `~/.wb/skills`, then `<repo>/.wb/skills`, last wins by id.
     ///
     /// Deliberately the **same pair of directories** the daemon passes
     /// (`hadron-gluon.rs:429` for the global, `engine/routing.rs:71` for the repo).
@@ -549,7 +549,7 @@ impl Chamber {
     /// what the quarks actually have.
     fn skill_corpus(&self) -> Vec<hadron_gluon::skills::ResolvedSkill> {
         let repo_dir = crate::vcs::repo_root_of(&self.path)
-            .join(".hadron")
+            .join(".wb")
             .join("skills");
         let global_dir = hadron_lattice::user_hadron_dir().map(|d| d.join("skills"));
         let wsl_dir = hadron_lattice::wsl::wsl_skills_dir_for_field(&self.path);
@@ -865,7 +865,7 @@ impl Chamber {
                     );
                 } else {
                     let msg = format!(
-                        "@orchestrator /writing-plans /executing-plans /goal Objective: {trimmed}\n\nExecute this end-to-end goal autonomously across the swarm: research context, write design spec in `.hadron/docs/specs/`, create actionable plan in `.hadron/docs/plans/`, dispatch tasks across available worker quarks (`@<quark>`), verify each task, and drive to 100% completion."
+                        "@orchestrator /writing-plans /executing-plans /goal Objective: {trimmed}\n\nExecute this end-to-end goal autonomously across the swarm: research context, write design spec in `.wb/docs/specs/`, create actionable plan in `.wb/docs/plans/`, dispatch tasks across available worker quarks (`@<quark>`), verify each task, and drive to 100% completion."
                     );
                     self.post_chat_message(Actor::Human, msg, cx);
                 }
@@ -971,14 +971,14 @@ impl Chamber {
                 if trimmed.is_empty() {
                     self.post_chat_message(
                         Actor::Gluon,
-                        "Usage: `/research <topic>`\nInitiate an exploratory research investigation and persist structured findings to `.hadron/docs/research/`.".to_string(),
+                        "Usage: `/research <topic>`\nInitiate an exploratory research investigation and persist structured findings to `.wb/docs/research/`.".to_string(),
                         cx,
                     );
                 } else {
                     let (named, topic) = crate::text::split_target(trimmed);
                     let target = named.unwrap_or(hadron_gluon::router::ORCHESTRATOR_ALIAS);
                     let msg = format!(
-                        "@{target} /research Topic: {topic}\n\nConduct thorough architectural and technical research on `{topic}`: analyze current codebase mechanisms, evaluate trade-offs and constraints, persist structured findings to `.hadron/docs/research/`, and recommend actionable next steps."
+                        "@{target} /research Topic: {topic}\n\nConduct thorough architectural and technical research on `{topic}`: analyze current codebase mechanisms, evaluate trade-offs and constraints, persist structured findings to `.wb/docs/research/`, and recommend actionable next steps."
                     );
                     self.post_chat_message(Actor::Human, msg, cx);
                 }
@@ -1431,7 +1431,7 @@ impl Chamber {
                 let path = self
                     .path
                     .parent()
-                    .unwrap_or(std::path::Path::new(".hadron"))
+                    .unwrap_or(std::path::Path::new(".wb"))
                     .join("nucleus")
                     .join("vocabulary.md");
                 let body = match std::fs::read_to_string(&path) {
@@ -1465,7 +1465,7 @@ impl Chamber {
                 if verdict.is_empty() {
                     self.post_chat_message(
                         Actor::Gluon,
-                        "Usage: `/settle <verdict>` (e.g. `/settle Adopt SQLite for metadata`). This records an Architectural Decision Record (ADR) in `.hadron/docs/adr/` and settles the debate.".to_string(),
+                        "Usage: `/settle <verdict>` (e.g. `/settle Adopt SQLite for metadata`). This records an Architectural Decision Record (ADR) in `.wb/docs/adr/` and settles the debate.".to_string(),
                         cx,
                     );
                 } else {
@@ -1473,7 +1473,7 @@ impl Chamber {
                     let slug = crate::text::slugify(verdict);
                     let filename = format!("{today}-{slug}.md");
                     let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
-                    let adr_dir = repo_root.join(".hadron").join("docs").join("adr");
+                    let adr_dir = repo_root.join(".wb").join("docs").join("adr");
                     let _ = std::fs::create_dir_all(&adr_dir);
                     let filepath = adr_dir.join(&filename);
                     let adr_content = format!(
@@ -1492,7 +1492,7 @@ impl Chamber {
                     let _ = std::fs::write(&filepath, adr_content);
                     let msg = format!(
                         "⚖️ **Debate Settled**: {verdict}\n\n\
-                         Architectural Decision Record saved to `.hadron/docs/adr/{filename}`.\n\
+                         Architectural Decision Record saved to `.wb/docs/adr/{filename}`.\n\
                          Proceed with `/brainstorm` or `/writing-plans` when ready to plan implementation."
                     );
                     self.post_chat_message(Actor::Human, msg, cx);
@@ -1922,7 +1922,7 @@ impl Chamber {
                 let target = args.trim().trim_start_matches('@');
                 let hadron_dir = match self.path.parent() {
                     Some(p) => p.to_path_buf(),
-                    None => std::path::PathBuf::from(".hadron"),
+                    None => std::path::PathBuf::from(".wb"),
                 };
                 let ledger_path =
                     hadron_lattice::ledger::resolve_sqlite_db_path(&hadron_dir.join("ledger.db"));
@@ -1957,8 +1957,8 @@ impl Chamber {
             // The human has already typed the full lesson — nothing left to interpret,
             // so this writes straight to disk rather than spending a billable turn on
             // it (same reasoning as `/clear`, above). Repo-scoped by default; only the
-            // explicit `-global` suffix writes to `~/.hadron` instead of this repo's
-            // `.hadron` — never the other way around, per the spec's security boundary.
+            // explicit `-global` suffix writes to `~/.wb` instead of this repo's
+            // `.wb` — never the other way around, per the spec's security boundary.
             "learn" | "learn-global" | "learn-std-model" | "learn-std-model-global" => {
                 let text = args.trim();
                 if text.is_empty() {
@@ -2037,7 +2037,7 @@ impl Chamber {
                         let msg = format!(
                             "`/{cmd}` refused — this would push `index.md` past its \
                              {budget_bytes}-byte budget ({current_len} + {} bytes). Prune \
-                             `.hadron/nucleus/index.md` first, or raise the budget in Settings.",
+                             `.wb/nucleus/index.md` first, or raise the budget in Settings.",
                             index_line.len()
                         );
                         eprintln!("chamber: {msg}");
@@ -2213,7 +2213,7 @@ impl Chamber {
                     move || {
                         if trimmed == "sync" {
                             let local_notes_dir =
-                                repo_root.join(".hadron").join("nucleus").join("notes");
+                                repo_root.join(".wb").join("nucleus").join("notes");
                             let mut local_map = std::collections::HashMap::new();
                             if let Ok(rd) = std::fs::read_dir(&local_notes_dir) {
                                 for e in rd.flatten() {
@@ -2254,7 +2254,7 @@ impl Chamber {
                         }
                         if let Some(query) = trimmed.strip_prefix("search ") {
                             let query = query.trim();
-                            let notes_dir = repo_root.join(".hadron").join("nucleus").join("notes");
+                            let notes_dir = repo_root.join(".wb").join("nucleus").join("notes");
                             let terms: Vec<String> = query
                                 .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
                                 .filter(|t| t.len() >= 2)
@@ -2356,7 +2356,7 @@ impl Chamber {
                 let lock_path = self
                     .path
                     .parent()
-                    .unwrap_or(std::path::Path::new(".hadron"))
+                    .unwrap_or(std::path::Path::new(".wb"))
                     .join("gluon.lock");
                 let daemon_pid = std::fs::read_to_string(&lock_path)
                     .ok()
@@ -2502,7 +2502,7 @@ impl Chamber {
                     .path
                     .parent()
                     .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| std::path::PathBuf::from(".hadron"));
+                    .unwrap_or_else(|| std::path::PathBuf::from(".wb"));
                 let exports_dir = hadron_dir.join("exports");
                 if let Err(e) = std::fs::create_dir_all(&exports_dir) {
                     eprintln!("chamber: failed to create exports dir: {e}");
@@ -2520,13 +2520,13 @@ impl Chamber {
                 self.post_chat_message(Actor::Gluon, body, cx);
                 true
             }
-            // `load_skills` globs `*.md` from `.hadron/skills` — writing one
+            // `load_skills` globs `*.md` from `.wb/skills` — writing one
             // validated file there is the entire feature, no registry edit. The
             // WRITE destination is always the sanitized basename inside that
             // directory (`add_skill_filename` for the inline form,
             // `Path::file_name` for the copy form — neither can contain `/` or
             // `..`), regardless of what the human typed or what path they read
-            // from, so this cannot write outside `.hadron/skills/`. The READ side
+            // from, so this cannot write outside `.wb/skills/`. The READ side
             // (an arbitrary local path in the `@path` form) is intentionally
             // unrestricted — this is the human's own chat box on their own
             // machine, reading a file they could already `cat`.
@@ -2544,7 +2544,7 @@ impl Chamber {
                     return true;
                 };
                 let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
-                let skills_dir = repo_root.join(".hadron").join("skills");
+                let skills_dir = repo_root.join(".wb").join("skills");
                 if let Err(e) = std::fs::create_dir_all(&skills_dir) {
                     eprintln!("chamber: failed to create {}: {e}", skills_dir.display());
                     return true;
@@ -2949,11 +2949,11 @@ impl Chamber {
                 let body = match sub {
                     "" | "list" => match hadron_lattice::clipboard::list_clips(&repo_root) {
                         Ok(clips) if clips.is_empty() => {
-                            "Shared clipboard is empty (`.hadron/clipboard/clips.json`). Use `/clip put <key> <value>` to store a clip.".to_string()
+                            "Shared clipboard is empty (`.wb/clipboard/clips.json`). Use `/clip put <key> <value>` to store a clip.".to_string()
                         }
                         Ok(clips) => {
                             let mut lines = vec![
-                                "### Shared Inter-Quark Clipboard (`.hadron/clipboard/clips.json`)".to_string(),
+                                "### Shared Inter-Quark Clipboard (`.wb/clipboard/clips.json`)".to_string(),
                                 "".to_string(),
                                 "| Key | Author | Size | Updated |".to_string(),
                                 "|---|---|---|---|".to_string(),
@@ -2979,7 +2979,7 @@ impl Chamber {
                         } else {
                             match hadron_lattice::clipboard::put_clip(&repo_root, key, val, "human") {
                                 Ok(entry) => format!(
-                                    "Stored clip `{}` ({} B) in `.hadron/clipboard/clips.json`.",
+                                    "Stored clip `{}` ({} B) in `.wb/clipboard/clips.json`.",
                                     entry.key,
                                     entry.content.len()
                                 ),
@@ -3003,7 +3003,7 @@ impl Chamber {
                         }
                     }
                     "clear" => match hadron_lattice::clipboard::clear_clips(&repo_root) {
-                        Ok(n) => format!("Cleared {n} clip(s) from `.hadron/clipboard/clips.json`."),
+                        Ok(n) => format!("Cleared {n} clip(s) from `.wb/clipboard/clips.json`."),
                         Err(e) => format!("Failed to clear clipboard: {e}"),
                     },
                     _ => "Usage: `/clip [list | put <key> <value> | get <key> | clear]`".to_string(),
@@ -3023,7 +3023,7 @@ impl Chamber {
         }
     }
 
-    /// Manage scheduled tasks defined in `.hadron/schedules/schedules.json`.
+    /// Manage scheduled tasks defined in `.wb/schedules/schedules.json`.
     pub(super) fn handle_schedule_command(
         &mut self,
         args: &str,
@@ -3037,14 +3037,14 @@ impl Chamber {
                 Ok(reg) if reg.jobs.is_empty() => {
                     self.post_chat_message(
                         Actor::Gluon,
-                        "No scheduled tasks defined in `.hadron/schedules/schedules.json`."
+                        "No scheduled tasks defined in `.wb/schedules/schedules.json`."
                             .to_string(),
                         cx,
                     );
                 }
                 Ok(reg) => {
                     let mut lines = vec![
-                            "### Scheduled Tasks (`.hadron/schedules/schedules.json`)".to_string(),
+                            "### Scheduled Tasks (`.wb/schedules/schedules.json`)".to_string(),
                             "".to_string(),
                             "| ID | Name | Task ID | Frequency | Cron | Target | Status | Missed | Last Run |".to_string(),
                             "|---|---|---|---|---|---|---|---|---|".to_string(),
@@ -3129,7 +3129,7 @@ impl Chamber {
                                 let freq = hadron_lattice::describe_cron(&cron);
                                 self.post_chat_message(
                                     Actor::Gluon,
-                                    format!("Scheduled task `{id}` saved ({freq}, `{cron}`). Task prompt written to `.hadron/schedules/tasks/{id}/TASK.md`."),
+                                    format!("Scheduled task `{id}` saved ({freq}, `{cron}`). Task prompt written to `.wb/schedules/tasks/{id}/TASK.md`."),
                                     cx,
                                 );
                             }
@@ -3379,7 +3379,7 @@ impl Chamber {
             format!("@{}", job.target)
         };
 
-        let task_dir_rel = format!(".hadron/schedules/tasks/{}/", job.task_id);
+        let task_dir_rel = format!(".wb/schedules/tasks/{}/", job.task_id);
         let body = format!(
             "[Scheduled Task: {} (`{}`)]\nSchedule: `{}` | Task Dir: `{}`\n{} {}",
             job.id,
@@ -4488,7 +4488,7 @@ impl Chamber {
         self.append_and_reload(Event::new(Actor::Human, Some(qid), Kind::Reboot), cx);
     }
 
-    /// Start or restart the `hadron-gluon` daemon for the current workspace on a
+    /// Start or restart the `wb-gluon` daemon for the current workspace on a
     /// background thread so the UI never blocks waiting for an exiting process.
     pub(super) fn restart_gluon_daemon(&mut self, cx: &mut Context<Self>) {
         let field_path = self.path.clone();
@@ -4507,7 +4507,7 @@ impl Chamber {
                         chamber.gluon_stopped_notice = false;
                         chamber.toast_manager.push(
                             ToastKind::Success,
-                            format!("Started hadron-gluon daemon (PID {pid})"),
+                            format!("Started wb-gluon daemon (PID {pid})"),
                             Some(3),
                         );
                         chamber.refresh_hadron_processes(cx);
@@ -4515,7 +4515,7 @@ impl Chamber {
                     Err(e) => {
                         chamber.toast_manager.push(
                             ToastKind::Error,
-                            format!("Failed to start hadron-gluon: {e}"),
+                            format!("Failed to start wb-gluon: {e}"),
                             Some(5),
                         );
                     }
@@ -4526,7 +4526,7 @@ impl Chamber {
         .detach();
     }
 
-    /// Stop the `hadron-gluon` daemon for the current workspace on a background thread.
+    /// Stop the `wb-gluon` daemon for the current workspace on a background thread.
     pub(super) fn stop_gluon_daemon(&mut self, cx: &mut Context<Self>) {
         let field_path = self.path.clone();
         cx.spawn(async move |this, cx| {
@@ -4540,7 +4540,7 @@ impl Chamber {
                         chamber.last_gluon_pid = None;
                         chamber.toast_manager.push(
                             ToastKind::Info,
-                            "Stopped hadron-gluon daemon".to_string(),
+                            "Stopped wb-gluon daemon".to_string(),
                             Some(3),
                         );
                         chamber.refresh_hadron_processes(cx);
@@ -4552,7 +4552,7 @@ impl Chamber {
                     Err(e) => {
                         chamber.toast_manager.push(
                             ToastKind::Error,
-                            format!("Failed to stop hadron-gluon: {e}"),
+                            format!("Failed to stop wb-gluon: {e}"),
                             Some(5),
                         );
                     }
@@ -4667,12 +4667,12 @@ impl Chamber {
         self.resolve_identity(name).color
     }
 
-    /// The repo `.hadron/team.json` path (the file the chamber edits), whether or not
+    /// The repo `.wb/team.json` path (the file the chamber edits), whether or not
     /// it exists yet.
     pub(super) fn repo_team_path(&self) -> PathBuf {
         let repo_root = crate::vcs::repo_root_of(&self.path).to_path_buf();
         hadron_lattice::repo_team_for_field(&self.path)
-            .unwrap_or_else(|| repo_root.join(".hadron").join("team.json"))
+            .unwrap_or_else(|| repo_root.join(".wb").join("team.json"))
     }
 
     /// Persist `self.team` to the repo file and re-project. The one write path for
@@ -4689,7 +4689,7 @@ impl Chamber {
         cx.notify();
     }
 
-    /// Persist the **global catalogue** (`~/.hadron/team.json`). The catalogue holds the
+    /// Persist the **global catalogue** (`~/.wb/team.json`). The catalogue holds the
     /// shared defaults that are the same in every repo — a quark's model default and its
     /// display name (a quark is the same quark everywhere, so its name is not a per-repo
     /// thing). Mirrors [`Self::save_repo_team`] but writes the catalogue file.
@@ -4786,8 +4786,8 @@ impl Chamber {
         cx.notify();
     }
 
-    /// Remove / delete a quark: purge from the global catalogue (`~/.hadron/team.json`),
-    /// repo team configuration (`.hadron/team.json`), and configured providers list.
+    /// Remove / delete a quark: purge from the global catalogue (`~/.wb/team.json`),
+    /// repo team configuration (`.wb/team.json`), and configured providers list.
     pub(super) fn remove_quark(&mut self, id: &str, cx: &mut Context<Self>) {
         let qid = QuarkId::new(id);
 
@@ -4833,7 +4833,7 @@ impl Chamber {
     }
 
     /// Save a newly-configured quark. Its **definition** goes to the global catalogue
-    /// (`~/.hadron/team.json`) so every repo can reach it; this repo **auto-adopts** it
+    /// (`~/.wb/team.json`) so every repo can reach it; this repo **auto-adopts** it
     /// (an enabled override), matching the "added quark joins the current repo" rule.
     /// When there is no separate catalogue (the repo file *is* the global file), fall
     /// back to a self-contained legacy seat — the pre-split behaviour.
@@ -5859,7 +5859,7 @@ mod tests {
     #[test]
     fn test_wsl_skills_dir_resolution_for_unc_path() {
         let unc_path =
-            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.hadron\field.jsonl");
+            std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user\project\.wb\field.jsonl");
         let wsl_skills = hadron_lattice::wsl::wsl_skills_dir_for_field(unc_path);
         assert!(wsl_skills.is_some());
         let s = wsl_skills.unwrap().to_string_lossy().to_string();

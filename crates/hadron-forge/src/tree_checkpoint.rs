@@ -1,5 +1,5 @@
 //! Pure logic for the `tree_checkpoint` tool family.
-//! Fast zero-commit atomic worktree snapshots, diffing, and restoration jailed under `.hadron/checkpoints/`.
+//! Fast zero-commit atomic worktree snapshots, diffing, and restoration jailed under `.wb/checkpoints/`.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -42,9 +42,9 @@ const IGNORED_DIRS: &[&str] = &[
     ".git",
     "target",
     "node_modules",
-    ".hadron/checkpoints",
-    ".hadron/cassettes",
-    ".hadron/screenshots",
+    ".wb/checkpoints",
+    ".wb/cassettes",
+    ".wb/screenshots",
 ];
 
 fn should_ignore(rel_path: &str) -> bool {
@@ -78,7 +78,7 @@ fn collect_files(base: &Path, current: &Path, out: &mut Vec<PathBuf>) {
 }
 
 pub fn save_checkpoint(root: &Root, label: &str) -> Result<CheckpointMeta, ForgeError> {
-    let checkpoints_dir = resolve_jailed_path(root, ".hadron/checkpoints")?;
+    let checkpoints_dir = resolve_jailed_path(root, ".wb/checkpoints")?;
     fs::create_dir_all(&checkpoints_dir)
         .map_err(|e| ForgeError::Io(format!("Failed to create checkpoints directory: {e}")))?;
 
@@ -131,7 +131,7 @@ pub fn save_checkpoint(root: &Root, label: &str) -> Result<CheckpointMeta, Forge
 }
 
 pub fn list_checkpoints(root: &Root) -> Result<Vec<CheckpointMeta>, ForgeError> {
-    let checkpoints_dir = resolve_jailed_path(root, ".hadron/checkpoints")?;
+    let checkpoints_dir = resolve_jailed_path(root, ".wb/checkpoints")?;
     if !checkpoints_dir.exists() {
         return Ok(Vec::new());
     }
@@ -160,7 +160,7 @@ pub fn list_checkpoints(root: &Root) -> Result<Vec<CheckpointMeta>, ForgeError> 
 }
 
 pub fn restore_checkpoint(root: &Root, id: &str) -> Result<Vec<String>, ForgeError> {
-    let checkpoints_dir = resolve_jailed_path(root, ".hadron/checkpoints")?;
+    let checkpoints_dir = resolve_jailed_path(root, ".wb/checkpoints")?;
     let ckpt_dir = checkpoints_dir.join(id);
     let files_dir = ckpt_dir.join("files");
 
@@ -194,7 +194,7 @@ pub fn restore_checkpoint(root: &Root, id: &str) -> Result<Vec<String>, ForgeErr
 }
 
 pub fn diff_checkpoint(root: &Root, id: &str) -> Result<String, ForgeError> {
-    let checkpoints_dir = resolve_jailed_path(root, ".hadron/checkpoints")?;
+    let checkpoints_dir = resolve_jailed_path(root, ".wb/checkpoints")?;
     let ckpt_dir = checkpoints_dir.join(id);
     let files_dir = ckpt_dir.join("files");
 
@@ -274,7 +274,7 @@ pub fn prune_checkpoints(root: &Root, keep: usize) -> Result<usize, ForgeError> 
         return Ok(0);
     }
 
-    let checkpoints_dir = resolve_jailed_path(root, ".hadron/checkpoints")?;
+    let checkpoints_dir = resolve_jailed_path(root, ".wb/checkpoints")?;
     let to_remove = &list[keep..];
     let mut pruned = 0;
 

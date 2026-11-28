@@ -73,13 +73,13 @@ impl NucleusLinter {
     }
 
     /// Creates a linter configured with the team budget resolved for `repo_root`
-    /// (`.hadron/team.json` `nucleus_index_budget_kb`, defaulting to 32 KB).
+    /// (`.wb/team.json` `nucleus_index_budget_kb`, defaulting to 32 KB).
     pub fn for_repo(repo_root: &Path) -> Self {
         let team = crate::load_team_for_repo(repo_root);
         Self::new(team.nucleus_index_budget_bytes())
     }
 
-    /// Run full nucleus lint against a `.hadron/nucleus` directory and its parent workspace root.
+    /// Run full nucleus lint against a `.wb/nucleus` directory and its parent workspace root.
     pub fn lint(&self, nucleus_dir: impl AsRef<Path>, repo_root: Option<&Path>) -> LintReport {
         let n_dir = nucleus_dir.as_ref();
         let mut report = LintReport::default();
@@ -263,7 +263,7 @@ impl NucleusLinter {
 /// Promotes a postmortem's prevention invariant to `invariants/always.md` (or `invariants.md`)
 /// and prunes the pointer from `index.md`.
 pub fn promote_postmortem_to_invariants(repo_root: &Path, slug: &str) -> std::io::Result<()> {
-    let nucleus_dir = repo_root.join(".hadron").join("nucleus");
+    let nucleus_dir = repo_root.join(".wb").join("nucleus");
     let note_path = nucleus_dir.join("notes").join(format!("{}.md", slug));
     if !note_path.is_file() {
         return Err(std::io::Error::new(
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn lint_detects_orphaned_pointers_and_unindexed_notes() {
         let tmp = tempdir().unwrap();
-        let nucleus = tmp.path().join(".hadron/nucleus");
+        let nucleus = tmp.path().join(".wb/nucleus");
         let notes = nucleus.join("notes");
         fs::create_dir_all(&notes).unwrap();
 
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_promote_postmortem_to_invariants() {
         let tmp = tempdir().unwrap();
-        let nucleus = tmp.path().join(".hadron/nucleus");
+        let nucleus = tmp.path().join(".wb/nucleus");
         let notes = nucleus.join("notes");
         fs::create_dir_all(&notes).unwrap();
 

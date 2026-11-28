@@ -1,8 +1,8 @@
 //! Autonomous Spec & DAG Compiler for Hadron swarm.
 //!
 //! Transforms high-level feature goals, requirements, or architecture descriptions into:
-//! 1. Formal Design Specifications (`.hadron/docs/specs/YYYY-MM-DD-<slug>-design.md`)
-//! 2. Deterministic Implementation Plans (`.hadron/docs/plans/YYYY-MM-DD-<slug>.md`)
+//! 1. Formal Design Specifications (`.wb/docs/specs/YYYY-MM-DD-<slug>-design.md`)
+//! 2. Deterministic Implementation Plans (`.wb/docs/plans/YYYY-MM-DD-<slug>.md`)
 //!
 //! Validates topological dependencies and formats tasks with standard TDD checkboxes
 //! matching the Gluon DAG engine (`hadron-gluon/src/engine/dag.rs`).
@@ -229,7 +229,7 @@ pub fn render_design_spec(
     doc.push_str("## 4. Invariants & Security Boundaries\n\n");
     doc.push_str("- All file modifications strictly jailed within worktree root.\n");
     doc.push_str("- Zero compiler warnings, 100% test pass rate required at gate.\n");
-    doc.push_str("- Media and runtime captures jailed strictly in `.hadron/screenshots/`.\n");
+    doc.push_str("- Media and runtime captures jailed strictly in `.wb/screenshots/`.\n");
 
     doc
 }
@@ -310,7 +310,7 @@ pub fn render_implementation_plan(input: &SpecCompileInput, tasks: &[SpecTaskInp
     doc
 }
 
-/// Compile and write both Design Spec and Implementation Plan into `.hadron/docs/`.
+/// Compile and write both Design Spec and Implementation Plan into `.wb/docs/`.
 pub fn compile_spec_and_plan(
     root: &Root,
     input: &SpecCompileInput,
@@ -333,8 +333,8 @@ pub fn compile_spec_and_plan(
     }
 
     let date_str = "2026-08-15"; // Canonical execution timestamp
-    let spec_rel = format!(".hadron/docs/specs/{date_str}-{}-design.md", input.slug);
-    let plan_rel = format!(".hadron/docs/plans/{date_str}-{}.md", input.slug);
+    let spec_rel = format!(".wb/docs/specs/{date_str}-{}-design.md", input.slug);
+    let plan_rel = format!(".wb/docs/plans/{date_str}-{}.md", input.slug);
 
     let spec_content = render_design_spec(date_str, input, &tasks);
     let plan_content = render_implementation_plan(input, &tasks);

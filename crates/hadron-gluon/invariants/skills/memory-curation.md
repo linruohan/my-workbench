@@ -1,11 +1,11 @@
 ---
 name: memory-curation
-description: Maintain .hadron/nucleus (Rule 9) — distill lessons into notes/, prune index.md, and update features.md
+description: Maintain .wb/nucleus (Rule 9) — distill lessons into notes/, prune index.md, and update features.md
 ---
 
 # Memory Curation
 
-Maintain the shared swarm memory under `.hadron/nucleus/` according to Standard Model Rule 9.
+Maintain the shared swarm memory under `.wb/nucleus/` according to Standard Model Rule 9.
 
 ## Core Principles (Rule 9)
 1. **The Index is a Routing Table, Not a Ledger:** One line per lesson (`- [<slug>](notes/<slug>.md) — <hook>`), hook capped at ~100 characters. Content in `index.md` is a bug.
@@ -17,12 +17,12 @@ Maintain the shared swarm memory under `.hadron/nucleus/` according to Standard 
 ## Curation Steps
 
 ### 1. Audit `index.md` Budget & Formatting
-- Verify total byte size of `index.md` stays comfortably within the workspace's configured budget (check via `hadron_forge_nucleus_lint` or `resolve_budget_bytes` / `.hadron/team.json` `nucleus_index_budget_kb`; defaults to 32 KB).
+- Verify total byte size of `index.md` stays comfortably within the workspace's configured budget (check via `hadron_forge_nucleus_lint` or `resolve_budget_bytes` / `.wb/team.json` `nucleus_index_budget_kb`; defaults to 32 KB).
 - Verify every line in `index.md` conforms to the routing format: `- [<slug>](notes/<slug>.md) — <hook>`.
 
 ### 2. Prune Stale Lessons & Promote Invariants
 - Delete lessons made obsolete by architectural rewrites or permanent structural guards.
-- If a lesson is resolved by enforcing a permanent codebase constraint, move that constraint to `.hadron/nucleus/invariants/always.md` and remove the post-mortem from `index.md`.
+- If a lesson is resolved by enforcing a permanent codebase constraint, move that constraint to `.wb/nucleus/invariants/always.md` and remove the post-mortem from `index.md`.
 
 ### 3. Upkeep Feature Map (`features.md`)
 - Update component statuses, entrypoint file paths, and high-level architectural references.

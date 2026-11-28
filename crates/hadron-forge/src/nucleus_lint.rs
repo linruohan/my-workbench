@@ -14,7 +14,7 @@ use crate::file::{ForgeError, Root};
 const DEFAULT_INDEX_BUDGET_BYTES: usize = hadron_lattice::DEFAULT_NUCLEUS_INDEX_BUDGET_BYTES;
 
 /// Resolve the active `index.md` byte budget from an explicit `budget_kb` override or
-/// the workspace's `.hadron/team.json` (`nucleus_index_budget_kb`), falling back to
+/// the workspace's `.wb/team.json` (`nucleus_index_budget_kb`), falling back to
 /// [`DEFAULT_INDEX_BUDGET_BYTES`] (32 KB).
 pub fn resolve_nucleus_budget_bytes(
     nucleus_dir: &std::path::Path,
@@ -29,7 +29,7 @@ pub fn resolve_nucleus_budget_bytes(
             return hadron_lattice::load_team(&team_path).nucleus_index_budget_bytes();
         }
         if let Some(repo_root) = hadron_dir.parent() {
-            let repo_team = repo_root.join(".hadron").join("team.json");
+            let repo_team = repo_root.join(".wb").join("team.json");
             if repo_team.is_file() {
                 return hadron_lattice::load_team_for_repo(repo_root).nucleus_index_budget_bytes();
             }
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn lint_nucleus_respects_team_json_configured_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let hadron_dir = dir.path().join(".hadron");
+        let hadron_dir = dir.path().join(".wb");
         let nucleus_dir = hadron_dir.join("nucleus");
         let notes_dir = nucleus_dir.join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();

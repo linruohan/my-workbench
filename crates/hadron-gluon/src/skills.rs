@@ -20,7 +20,7 @@
 //! Built-in bodies are `include_str!`d individually and never globbed: a skill file
 //! that nobody lists in [`SKILLS`] is a skill that silently never loads, which is
 //! the exact trap (`compiled-is-not-running`) this module exists to close. Custom
-//! skills loaded from `~/.hadron/skills` and `<repo>/.hadron/skills` (see
+//! skills loaded from `~/.wb/skills` and `<repo>/.wb/skills` (see
 //! [`load_skills`]) are the deliberate exception: those directories ARE globbed for
 //! `*.md`, because a human placing a file there and expecting it to load is the
 //! entire point of that feature — the trap being closed there is different (a

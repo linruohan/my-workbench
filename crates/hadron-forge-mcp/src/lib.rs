@@ -32,7 +32,7 @@ pub async fn run() -> Result<()> {
         (None, Some(sk)) => {
             let nucleus =
                 hadron_forge::nucleus::derive_nucleus_root(&root_path).unwrap_or_else(|_| {
-                    hadron_forge::file::Root::new(root_path.join(".hadron").join("nucleus"))
+                    hadron_forge::file::Root::new(root_path.join(".wb").join("nucleus"))
                 });
             ForgeMcpServer::with_skill(root_path, nucleus.path(), sk)
         }

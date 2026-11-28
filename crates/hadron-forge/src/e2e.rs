@@ -5,7 +5,7 @@
 //!
 //! **Invariants:**
 //! 1. Strictly local origins: Only `localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`, or `file://` allowed.
-//! 2. Jailed media output: All screenshots are stored under `.hadron/screenshots/`.
+//! 2. Jailed media output: All screenshots are stored under `.wb/screenshots/`.
 //! 3. Deterministic diagnostics: Returns structured step-by-step reports for autonomous recovery.
 
 use std::collections::HashMap;
@@ -305,7 +305,7 @@ pub fn run_e2e_assertion_suite(
             }
 
             E2eStep::Screenshot { output_path } => {
-                let screenshot_dir = root.path().join(".hadron").join("screenshots");
+                let screenshot_dir = root.path().join(".wb").join("screenshots");
                 let _ = fs::create_dir_all(&screenshot_dir);
                 let file_path = screenshot_dir.join(output_path);
 
@@ -321,7 +321,7 @@ pub fn run_e2e_assertion_suite(
 
                 match fs::write(&file_path, &png_bytes) {
                     Ok(_) => {
-                        let rel = format!(".hadron/screenshots/{}", output_path);
+                        let rel = format!(".wb/screenshots/{}", output_path);
                         captured_screenshots.push(rel.clone());
                         (
                             "screenshot".to_string(),
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(report.screenshots.len(), 1);
         assert!(temp
             .path()
-            .join(".hadron/screenshots/notes_smoke.png")
+            .join(".wb/screenshots/notes_smoke.png")
             .exists());
     }
 
