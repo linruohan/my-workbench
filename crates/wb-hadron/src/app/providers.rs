@@ -284,6 +284,8 @@ pub(super) enum SettingsTarget {
     Skills,
     Schedules,
     Human,
+    /// 工作台（workbench）自己的设置页：内容由宿主注入，chamber 只负责导航入口。
+    Workbench,
     Quark(String),
 }
 
@@ -299,6 +301,7 @@ impl SettingsTarget {
             SettingsTarget::Skills => "skills",
             SettingsTarget::Schedules => "schedules",
             SettingsTarget::Human => "human",
+            SettingsTarget::Workbench => "workbench",
             SettingsTarget::Quark(id) => id,
         }
     }

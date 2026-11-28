@@ -60,7 +60,8 @@ impl Engine {
         // is all the loop needs.
         let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<()>(1);
         let field_path = self.field_path().to_path_buf();
-        let hadron_dir = hadron_lattice::hadron_dir_of(self.field_path());
+        // RPC 端点写在「运行目录」里：会话 field 有自己的会话目录，多个会话可并行。
+        let hadron_dir = hadron_lattice::runtime_dir_of(self.field_path());
         let bus = crate::actor::bus::ActorBus::new(64);
         let mut _bus_rxs = Vec::new();
         for card in self.roster() {
@@ -483,8 +484,8 @@ mod tests {
         let (tx, rx) = watch::channel(false);
         let handle = tokio::spawn(async move { engine.serve(rx).await });
 
-        // Wait for gluon.rpc metadata to appear in hadron_dir_of(&field)
-        let hadron_dir = hadron_lattice::hadron_dir_of(&field);
+        // Wait for gluon.rpc metadata to appear in runtime_dir_of(&field)
+        let hadron_dir = hadron_lattice::runtime_dir_of(&field);
         let mut rpc_meta = None;
         for _ in 0..30 {
             if let Some(m) = hadron_lattice::wire::read_rpc_metadata(&hadron_dir) {

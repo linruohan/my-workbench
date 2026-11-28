@@ -325,7 +325,11 @@ pub async fn run() {
         std::process::exit(2);
     };
 
-    let field_dir = hadron_lattice::hadron_dir_of(&args.field_path);
+    // 运行文件（gluon.lock / gluon.rpc / ledger）跟着 field 走：会话 field 用自己的
+    // 会话目录，这样同一仓库的多个会话可以各起一个守护进程互不争锁。
+    let field_dir = hadron_lattice::runtime_dir_of(&args.field_path);
+    // 仓库级共享状态（构建产物清理记录等）仍写共享的 `.hadron`。
+    let hadron_dir = hadron_lattice::hadron_dir_of(&args.field_path);
     let _ = std::fs::create_dir_all(&field_dir);
     let lock_path = field_dir.join("gluon.lock");
     #[cfg(unix)]
@@ -564,7 +568,7 @@ pub async fn run() {
                     ),
                 );
             }
-            if let Err(e) = crate::worktree::record_artifact_sweep(&field_dir, &reap) {
+            if let Err(e) = crate::worktree::record_artifact_sweep(&hadron_dir, &reap) {
                 term::warn(
                     Source::Gluon,
                     &format!("could not record the artifact sweep (non-fatal): {e:#}"),

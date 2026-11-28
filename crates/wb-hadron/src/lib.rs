@@ -13,6 +13,8 @@ pub mod pty;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod rpc_client;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod session;
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod symbols;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod syntax;

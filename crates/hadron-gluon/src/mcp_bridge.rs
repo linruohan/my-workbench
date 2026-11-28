@@ -31,7 +31,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// Run the headless MCP bridge over process `stdin` / `stdout` targeting the
 /// `hadron-gluon` daemon managing `field_path`.
 pub async fn run_stdio(field_path: &Path) -> anyhow::Result<()> {
-    let field_dir = hadron_lattice::hadron_dir_of(field_path);
+    // 守护进程的 RPC 端点写在运行目录里（会话 field 落在自己的会话目录）。
+    let field_dir = hadron_lattice::runtime_dir_of(field_path);
     let stdin = BufReader::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();
     run_io(&field_dir, stdin, stdout).await

@@ -8,7 +8,7 @@ use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::setting::{
-    SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings, SettingsState,
 };
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -30,6 +30,12 @@ pub struct SettingsPane {
     hooks_json: Entity<InputState>,
     pub(crate) model_editor: ModelEditor,
     _model_subs: Vec<Subscription>,
+    /// 设置页选中状态：由 hadron 设置左侧导航驱动，组件自身的侧栏已隐藏。
+    settings_state: Entity<SettingsState>,
+    /// 固定停在工作台「外观」页的状态（用于合并进 hadron 的 Appearance 页）。
+    appearance_state: Entity<SettingsState>,
+    /// 固定停在工作台「技能」页的状态（用于合并进 hadron 的 Skills 页）。
+    skills_state: Entity<SettingsState>,
     font_count: usize,
     /// System font enumeration stays off the startup path.
     fonts_ready: bool,
@@ -56,6 +62,28 @@ pub struct SettingsPane {
     data_msg: String,
     skills_msg: String,
 }
+
+/// 工作台设置页签（顺序必须与 `SettingsPane::pages()` 返回的 `SettingPage` 一致）。
+///
+/// hadron 设置的 WORKBENCH 分组按这个列表逐行渲染；点击某行时把 id 传回来切页。
+pub(crate) const WORKBENCH_SETTINGS_TABS: &[(&str, &str)] = &[
+    ("general", "常规"),
+    ("appearance", "外观"),
+    ("tools", "工具"),
+    ("notify", "通知"),
+    ("voice", "语音输入"),
+    ("data", "数据"),
+    ("model", "模型"),
+    ("skills", "技能"),
+    ("plugins", "插件"),
+    ("commands", "命令"),
+    ("personality", "个性化"),
+    ("memory", "记忆"),
+    ("subagents", "子智能体"),
+    ("mcp", "MCP 服务器"),
+    ("hooks", "钩子"),
+    ("about", "关于"),
+];
 
 impl SettingsPane {
     pub fn new(state: AppState, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -100,6 +128,38 @@ impl SettingsPane {
                 .default_value(hooks_val)
         });
         let (model_editor, model_subs) = ModelEditor::new(state.clone(), window, cx);
+        let settings_state = cx.new(|cx| SettingsState::new(window, cx));
+        // 合并进 hadron 内置页的两个固定页状态：外观 / 技能。
+        let appearance_ix = WORKBENCH_SETTINGS_TABS
+            .iter()
+            .position(|(id, _)| *id == "appearance")
+            .unwrap_or(1);
+        let skills_ix = WORKBENCH_SETTINGS_TABS
+            .iter()
+            .position(|(id, _)| *id == "skills")
+            .unwrap_or(7);
+        let appearance_state = cx.new(|cx| {
+            let mut state = SettingsState::new(window, cx);
+            state.set_selected_index(
+                SelectIndex {
+                    page_ix: appearance_ix,
+                    group_ix: None,
+                },
+                cx,
+            );
+            state
+        });
+        let skills_state = cx.new(|cx| {
+            let mut state = SettingsState::new(window, cx);
+            state.set_selected_index(
+                SelectIndex {
+                    page_ix: skills_ix,
+                    group_ix: None,
+                },
+                cx,
+            );
+            state
+        });
         let font_count = 0;
         // Speech models are scanned after the window is up: hashing a few
         // hundred megabytes here would delay every cold start.
@@ -120,6 +180,9 @@ impl SettingsPane {
             hooks_json,
             model_editor,
             _model_subs: model_subs,
+            settings_state,
+            appearance_state,
+            skills_state,
             font_count,
             fonts_ready: false,
             speech_msg,
@@ -716,6 +779,67 @@ impl SettingsPane {
             Err(e) => format!("迁回默认失败：{e}"),
         };
         cx.notify();
+    }
+
+    /// 按页签 id 切换工作台设置页（供 hadron 设置导航调用）。
+    pub(crate) fn select_settings_page(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(page_ix) = WORKBENCH_SETTINGS_TABS
+            .iter()
+            .position(|(id, _)| *id == tab_id)
+        else {
+            return;
+        };
+        self.settings_state.update(cx, |state, cx| {
+            state.set_selected_index(
+                SelectIndex {
+                    page_ix,
+                    group_ix: None,
+                },
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    /// 渲染工作台设置的某个固定页面（不影响当前选中页），用于合并进 hadron 内置页。
+    ///
+    /// 页面组件本身是「填满父容器」的布局，放进 hadron 的滚动区时必须给定高度，
+    /// 否则会被压成 0 高；这里固定 640px，页面内容超出时在块内滚动。
+    fn render_fixed_page(
+        &self,
+        page: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let (id, state) = match page {
+            "appearance" => ("wb-settings-merged-appearance", &self.appearance_state),
+            _ => ("wb-settings-merged-skills", &self.skills_state),
+        };
+        div()
+            .w_full()
+            .h(px(640.))
+            .child(
+                Settings::new(id)
+                    .sidebar_width(px(0.))
+                    .sidebar_size_range(px(0.)..px(0.))
+                    .state(state)
+                    .with_group_variant(GroupBoxVariant::Fill)
+                    .pages(self.pages(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// 生成注入给 hadron 设置的内容：把工作台「外观」「技能」合并进内置页尾部。
+    pub(crate) fn merged_injected_settings(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> wb_hadron::app::InjectedWorkbenchSettings {
+        wb_hadron::app::InjectedWorkbenchSettings {
+            page: None,
+            merged: vec![
+                ("appearance", self.render_fixed_page("appearance", cx)),
+                ("skills", self.render_fixed_page("skills", cx)),
+            ],
+        }
     }
 
     fn pages(&self, cx: &mut Context<Self>) -> Vec<SettingPage> {
@@ -2897,7 +3021,10 @@ impl Render for SettingsPane {
         div().size_full().child(
             Settings::new("wb-settings")
                 .search_placeholder("搜索设置")
-                .sidebar_width(px(220.))
+                // 侧栏由 hadron 设置的 WORKBENCH 分组承担，这里收起到 0 宽。
+                .sidebar_width(px(0.))
+                .sidebar_size_range(px(0.)..px(0.))
+                .state(&self.settings_state)
                 .with_group_variant(GroupBoxVariant::Fill)
                 .leading({
                     let state = self.state.clone();

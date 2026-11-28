@@ -47,11 +47,18 @@ pub(in crate::app) fn invalidate_schedule_registry_cache() {
 impl super::Chamber {
     // `pub(crate)`, not `pub(super)`: called from `app::render::mod` (a sibling of
     // `settings`), the same reach it had when this fn lived directly in settings.rs.
-    pub(crate) fn settings_overlay(
+    /// 设置卡片的全部内容（左侧导航 + 右侧编辑区）。
+    ///
+    /// 独立窗口时由 [`Chamber::settings_overlay`] 套上遮罩层展示；嵌入工作台时
+    /// 由 [`Chamber::render_settings_surface`] 直接铺在「设置」导航页里。
+    /// `show_close` 控制右上角关闭按钮：内嵌时没有可关闭的浮层，传 `false`。
+    fn settings_card(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        show_close: bool,
+        mut injected: InjectedWorkbenchSettings,
+    ) -> gpui_kit::Div {
         let target = self.settings_target.clone();
 
         // Left nav: Settings (General: Appearance, Execution, Environment; Providers; Skills), then Roster (Human, Quarks)
@@ -153,6 +160,12 @@ impl super::Chamber {
             .child(self.settings_nav_row(SettingsTarget::Providers, &target, cx))
             .child(self.settings_nav_row(SettingsTarget::Skills, &target, cx))
             .child(self.settings_nav_row(SettingsTarget::Schedules, &target, cx))
+            // 工作台设置：不再单独分组，逐条并入 hadron 设置导航，与自带条目同级。
+            .children(self.workbench_tabs.iter().map(|(id, label)| {
+                let selected = matches!(self.settings_target, SettingsTarget::Workbench)
+                    && self.workbench_tab.as_deref() == Some(id.as_str());
+                self.workbench_nav_row(id.clone(), label.clone(), selected, cx)
+            }))
             .child(
                 div()
                     .px_1()
@@ -357,10 +370,17 @@ impl super::Chamber {
                         SettingsTarget::Providers => "Providers".to_string(),
                         SettingsTarget::Skills => "Skills".to_string(),
                         SettingsTarget::Schedules => "Scheduled Tasks".to_string(),
+                        // WORKBENCH 页签直接用当前选中的页签名做标题。
+                        SettingsTarget::Workbench => self
+                            .workbench_tabs
+                            .iter()
+                            .find(|(id, _)| Some(id.as_str()) == self.workbench_tab.as_deref())
+                            .map(|(_, label)| label.clone())
+                            .unwrap_or_else(|| "Workbench Settings".to_string()),
                         _ => format!("Editing {}", preview.name),
                     }),
             )
-            .child(
+            .children(show_close.then(|| {
                 div()
                     .id("settings-close")
                     .flex()
@@ -371,13 +391,21 @@ impl super::Chamber {
                     .text_color(theme::text_secondary())
                     .hover(|s| s.bg(theme::bg_surface_raised()).text_color(theme::text()))
                     .child(Icon::new(IconName::WindowClose).small())
-                    .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx))),
-            );
+                    .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx)))
+            }));
 
         let fields = match target {
             SettingsTarget::General => self.general_settings_view(window, cx).into_any_element(),
             SettingsTarget::Appearance => {
-                self.appearance_settings_view(window, cx).into_any_element()
+                // 工作台的「外观」合并进 hadron 外观页尾部。
+                let mut view = v_flex()
+                    .w_full()
+                    .gap_4()
+                    .child(self.appearance_settings_view(window, cx));
+                if let Some(extra) = injected.take_merged("appearance") {
+                    view = view.child(extra);
+                }
+                view.into_any_element()
             }
             SettingsTarget::Execution => {
                 self.execution_settings_view(window, cx).into_any_element()
@@ -386,10 +414,28 @@ impl super::Chamber {
                 .environment_settings_view(window, cx)
                 .into_any_element(),
             SettingsTarget::Providers => self.providers_view(window, cx).into_any_element(),
-            SettingsTarget::Skills => self.skills_settings_view(window, cx).into_any_element(),
+            SettingsTarget::Skills => {
+                // 工作台的「技能」合并进 hadron 技能页尾部。
+                let mut view = v_flex()
+                    .w_full()
+                    .gap_4()
+                    .child(self.skills_settings_view(window, cx));
+                if let Some(extra) = injected.take_merged("skills") {
+                    view = view.child(extra);
+                }
+                view.into_any_element()
+            }
             SettingsTarget::Schedules => {
                 self.schedules_settings_view(window, cx).into_any_element()
             }
+            // 工作台设置：内容由宿主（wb-app）渲染好后注入。
+            SettingsTarget::Workbench => injected.page.take().unwrap_or_else(|| {
+                div()
+                    .p_4()
+                    .text_color(theme::text_muted())
+                    .child("工作台设置暂不可用")
+                    .into_any_element()
+            }),
             _ => {
                 let is_quark = matches!(target, SettingsTarget::Quark(_));
                 let acp_quark =
@@ -721,6 +767,7 @@ impl super::Chamber {
                 | SettingsTarget::Providers
                 | SettingsTarget::Skills
                 | SettingsTarget::Schedules
+                | SettingsTarget::Workbench
         ) {
             div().into_any_element()
         } else {
@@ -775,8 +822,6 @@ impl super::Chamber {
             .occlude()
             .w_full()
             .h_full()
-            .max_w(px(1080.0))
-            .max_h(px(720.0))
             .rounded(INNER_RADIUS)
             .overflow_hidden()
             // Opaque: a focused settings modal shouldn't let the bright field bleed through
@@ -791,14 +836,26 @@ impl super::Chamber {
             .child(sidebar)
             .child(panel);
 
+        card
+    }
+
+    /// 独立窗口里的设置浮层：给设置卡片套上居中遮罩与最大尺寸。
+    pub(crate) fn settings_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let card = self
+            .settings_card(window, cx, true, InjectedWorkbenchSettings::default())
+            .max_w(px(1080.0))
+            .max_h(px(720.0));
+
         div()
             .id("settings-backdrop")
             .absolute()
             .inset_0()
             .p_8()
             .flex()
-            // Center on both axes deterministically (was relying on default
-            // align + a top margin, which sank the card to the window's foot).
             .flex_col()
             .items_center()
             .justify_center()
@@ -808,6 +865,21 @@ impl super::Chamber {
                 cx.listener(|this, _, window, cx| this.close_settings(window, cx)),
             )
             .child(card)
+    }
+
+    /// 嵌入宿主（工作台）设置浮层时的设置界面：铺满浮层卡片，不套遮罩。
+    ///
+    /// `injected` 携带宿主渲染好的工作台设置内容：独立页显示在对应条目下，
+    /// 合并页附加在 hadron 的 Appearance / Skills 页尾部。
+    pub fn render_settings_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        injected: InjectedWorkbenchSettings,
+    ) -> impl IntoElement {
+        let mut surface = self.settings_card(window, cx, false, injected);
+        surface.text_style().font_fallbacks = Some(crate::fonts::default_fallbacks());
+        surface
     }
 
     /// One indented sub-row under a category group (e.g. Appearance under General).
@@ -1007,6 +1079,17 @@ impl super::Chamber {
                 };
                 (identity_avatar(&resolved, 24.0).into_any_element(), dot)
             }
+            SettingsTarget::Workbench => (
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.0))
+                    .text_color(theme::text_muted())
+                    .child(Icon::new(IconName::Settings).small())
+                    .into_any_element(),
+                None,
+            ),
         };
 
         h_flex()
@@ -1055,6 +1138,7 @@ impl super::Chamber {
                                 SettingsTarget::Providers => "Providers".to_string(),
                                 SettingsTarget::Skills => "Skills".to_string(),
                                 SettingsTarget::Schedules => "Schedules".to_string(),
+                                SettingsTarget::Workbench => "Workbench".to_string(),
                                 _ => resolved.name.clone(),
                             }),
                     ),
@@ -1063,6 +1147,83 @@ impl super::Chamber {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select_settings_target(who.clone(), window, cx)
             }))
+    }
+
+    /// WORKBENCH 分组里的一行：图标 + 标签，点击切换到对应的工作台设置页。
+    fn workbench_nav_row(
+        &self,
+        id: String,
+        label: String,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let nav_id = SharedString::from(format!("settings-workbench-{id}"));
+        h_flex()
+            .id(nav_id)
+            .items_center()
+            .justify_between()
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                theme::glass_highlight()
+            } else {
+                gpui_kit::transparent_black()
+            })
+            .bg(if selected {
+                theme::bg_surface_raised()
+            } else {
+                theme::bg_base()
+            })
+            .hover(|s| s.bg(theme::bg_surface()))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .text_color(theme::text_muted())
+                            .child(Icon::new(IconName::Settings).small()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .truncate()
+                            .text_color(if selected {
+                                theme::text()
+                            } else {
+                                theme::text_secondary()
+                            })
+                            .child(label),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_workbench_tab(id.clone(), window, cx);
+            }))
+    }
+
+    /// 选中某个工作台设置页：先通知宿主切换页面，再把设置目标指到 Workbench。
+    pub(super) fn select_workbench_tab(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handler) = self.workbench_select.as_ref() {
+            handler(&id, cx);
+        }
+        self.workbench_tab = Some(id);
+        self.select_settings_target(SettingsTarget::Workbench, window, cx);
     }
 
     /// Dedicated Skills management view: standard swarm procedures, global & repo skills (with Edit & Delete), and skill creation.

@@ -54,7 +54,8 @@ impl Chamber {
             | SettingsTarget::Environment
             | SettingsTarget::Providers
             | SettingsTarget::Skills
-            | SettingsTarget::Schedules => None,
+            | SettingsTarget::Schedules
+            | SettingsTarget::Workbench => None,
         }
     }
 
@@ -114,6 +115,7 @@ impl Chamber {
                 || key == "providers"
                 || key == "skills"
                 || key == "schedules"
+                || key == "workbench"
             {
                 None
             } else {
@@ -617,7 +619,8 @@ impl Chamber {
             | SettingsTarget::Environment
             | SettingsTarget::Providers
             | SettingsTarget::Skills
-            | SettingsTarget::Schedules => {}
+            | SettingsTarget::Schedules
+            | SettingsTarget::Workbench => {}
         }
         self.load_settings_inputs(window, cx);
         let _ = config::save(&self.prefs);

@@ -1328,10 +1328,10 @@ pub fn spawn_gluon_for_field(
     spawn_with_console_pref(&prog, args, show_console)
 }
 
-/// Return the live `hadron-gluon` daemon PID for `field_path` if `<field_dir>/gluon.lock`
-/// contains a PID that is currently alive in the workspace context.
+/// Return the live `hadron-gluon` daemon PID for `field_path` if the field's runtime
+/// directory contains a `gluon.lock` holding a PID that is currently alive.
 pub fn probe_gluon_pid(field_path: &Path) -> Option<u32> {
-    let field_dir = hadron_lattice::hadron_dir_of(field_path);
+    let field_dir = hadron_lattice::runtime_dir_of(field_path);
     let lock_path = field_dir.join("gluon.lock");
     let pid = read_lock_pid(&lock_path)?;
     hadron_lattice::sys::inspect::is_process_alive_in_dir(pid, &field_dir).then_some(pid)
@@ -1340,7 +1340,7 @@ pub fn probe_gluon_pid(field_path: &Path) -> Option<u32> {
 /// Stop the running `hadron-gluon` daemon for `field_path`, if any.
 /// Returns `Ok(true)` if a running daemon was found and terminated, or `Ok(false)` if none was running.
 pub fn stop_gluon_daemon(field_path: &Path) -> std::io::Result<bool> {
-    let field_dir = hadron_lattice::hadron_dir_of(field_path);
+    let field_dir = hadron_lattice::runtime_dir_of(field_path);
     let lock_path = field_dir.join("gluon.lock");
     if let Some(pid) = read_lock_pid(&lock_path) {
         if hadron_lattice::sys::inspect::is_process_alive_in_dir(pid, &field_dir) {

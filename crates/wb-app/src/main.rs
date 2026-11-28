@@ -1,6 +1,8 @@
 mod app;
 mod appearance;
 mod command_palette;
+mod rename_dialog;
+mod session_tabs;
 mod state;
 mod style;
 mod themes;

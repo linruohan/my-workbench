@@ -21,10 +21,12 @@ fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
 impl Chamber {
     /// Where `/clear` and `/resume` park archived sessions. Derived from the field path
     /// so nothing has to be told twice.
+    ///
+    /// 会话 field 本身也位于 `<repo>/.hadron/sessions/<id>/`，所以这里按仓库根取
+    /// 共享的 sessions 目录，避免会话自己下面再套一层 `sessions/`。
     pub(super) fn sessions_dir(&self) -> std::path::PathBuf {
-        self.path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".hadron"))
+        hadron_lattice::repo_root_of(&self.path)
+            .join(".hadron")
             .join("sessions")
     }
 
@@ -682,6 +684,25 @@ pub(super) fn perform_clear_field(
 }
 
 impl Chamber {
+    /// 工作台「新会话」入口：归档当前 field 并开启一个全新会话。
+    ///
+    /// 宿主应在下一帧（`cx.defer_in`）调用，避免在导航点击回调里重入借用。
+    pub fn new_workbench_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.handle_chat_command("clear", "", window, cx)
+    }
+
+    /// 工作台「恢复会话」入口：把指定 id 的归档会话重新设为活动 field。
+    ///
+    /// 同样应由宿主延后一帧调用，避开 chamber 自身的点击回调。
+    pub fn resume_workbench_session(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.handle_chat_command("resume", session_id, window, cx)
+    }
+
     pub(super) fn handle_chat_command(
         &mut self,
         cmd: &str,

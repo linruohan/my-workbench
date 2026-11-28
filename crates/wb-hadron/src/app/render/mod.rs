@@ -30,6 +30,7 @@ pub mod split_canvas;
 mod stats;
 mod terminal;
 pub mod visualizer;
+pub mod workbench_nav;
 
 pub use gpui_kit::component::scroll::ScrollableElement;
 
@@ -91,24 +92,7 @@ impl Render for Chamber {
         let (top_radius, bottom_radius) = frame_corner_radii(window);
         let titlebar = self.titlebar(window, cx);
         let body = self.body(window, cx);
-        let settings = self
-            .settings_open
-            .then(|| self.settings_overlay(window, cx));
-        let info = self
-            .info_panel
-            .is_some()
-            .then(|| self.info_panel_overlay(window, cx));
-        let about = self.about_open.then(|| self.about_overlay(cx));
-        let changelog = self.changelog_open.then(|| self.changelog_overlay(cx));
-        let app_menu = self.app_menu_open.then(|| self.app_menu_overlay(cx));
-        let processes = self.process_manager_open.then(|| self.process_overlay(cx));
-        let toasts = self.render_toasts(cx);
-        let repl = self
-            .repl_overlay_open
-            .then(|| self.repl_overlay(window, cx));
-        let project_switcher = self
-            .project_switcher_open
-            .then(|| self.project_switcher_overlay(window, cx));
+        let overlays = self.overlay_elements(window, cx);
 
         let mut content = self
             .action_surface(cx)
@@ -125,15 +109,7 @@ impl Render for Chamber {
             .text_color(theme::text())
             .child(titlebar)
             .child(body)
-            .children(settings)
-            .children(info)
-            .children(about)
-            .children(changelog)
-            .children(app_menu)
-            .children(processes)
-            .children(repl)
-            .children(project_switcher)
-            .children(toasts);
+            .children(overlays);
         content.text_style().font_fallbacks = Some(crate::fonts::default_fallbacks());
 
         let wrapped_content = crate::window_frame::window_frame(window, cx, content);
@@ -313,6 +289,58 @@ impl Chamber {
             .child(self.terminal_pane(cx));
         surface.text_style().font_fallbacks = Some(crate::fonts::default_fallbacks());
         surface
+    }
+
+    /// 所有悬浮层的元素列表（按当前状态生成）。
+    ///
+    /// 整窗渲染与嵌入模式共用这一份，避免两个入口各维护一套「哪些浮层开着」。
+    fn overlay_elements(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui_kit::AnyElement> {
+        let mut elements = Vec::new();
+        if self.settings_open {
+            elements.push(self.settings_overlay(window, cx).into_any_element());
+        }
+        if self.info_panel.is_some() {
+            elements.push(self.info_panel_overlay(window, cx).into_any_element());
+        }
+        if self.about_open {
+            elements.push(self.about_overlay(cx).into_any_element());
+        }
+        if self.changelog_open {
+            elements.push(self.changelog_overlay(cx).into_any_element());
+        }
+        if self.app_menu_open {
+            elements.push(self.app_menu_overlay(cx).into_any_element());
+        }
+        if self.process_manager_open {
+            elements.push(self.process_overlay(cx).into_any_element());
+        }
+        if self.repl_overlay_open {
+            elements.push(self.repl_overlay(window, cx).into_any_element());
+        }
+        if self.project_switcher_open {
+            elements.push(self.project_switcher_overlay(window, cx).into_any_element());
+        }
+        if let Some(toasts) = self.render_toasts(cx) {
+            elements.push(toasts.into_any_element());
+        }
+        elements
+    }
+
+    /// 嵌入模式：把 chamber 的悬浮层叠到宿主窗口根部（应用菜单、关于、更新
+    /// 日志、进程管理、REPL、项目切换、信息面板与 toast）。
+    pub fn render_overlays(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .children(self.overlay_elements(window, cx))
     }
 
     /// The body: the left roster ("friends list") at a locked width, then the

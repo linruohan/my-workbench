@@ -104,6 +104,7 @@ use widgets::{
 
 mod actions;
 mod render;
+pub use render::workbench_nav::{WorkbenchNavGroup, WorkbenchNavIcon, WorkbenchNavItem};
 mod settings;
 
 mod input;
@@ -229,6 +230,26 @@ pub(super) struct TerminalTab {
     pub title: String,
     pub term: Option<crate::pty::PtyTerminal>,
     pub error: Option<String>,
+}
+
+/// 宿主（工作台）注入的设置内容。
+///
+/// hadron 不知道宿主设置页的具体类型，只负责把它们摆到正确的位置：
+/// `page` 是左侧工作台条目对应的内容，`merged` 是按内置页标识附在原生页尾部的内容。
+#[derive(Default)]
+pub struct InjectedWorkbenchSettings {
+    /// 独立工作台页（左侧「常规/工具/…」条目）的内容。
+    pub page: Option<gpui_kit::AnyElement>,
+    /// 合并进 hadron 内置页的附加内容，键为 `"appearance"` / `"skills"`。
+    pub merged: Vec<(&'static str, gpui_kit::AnyElement)>,
+}
+
+impl InjectedWorkbenchSettings {
+    /// 取出并移除某个内置页的附加内容。
+    pub(crate) fn take_merged(&mut self, key: &str) -> Option<gpui_kit::AnyElement> {
+        let idx = self.merged.iter().position(|(k, _)| *k == key)?;
+        Some(self.merged.remove(idx).1)
+    }
 }
 
 /// 工作台内嵌模式的 Chamber 实体。
@@ -443,6 +464,18 @@ pub struct Chamber {
     /// Whether the Settings overlay is showing, and which identity it edits.
     settings_open: bool,
     settings_target: SettingsTarget,
+    /// 宿主（wb-app）注入的工作台设置页签：(id, 显示名)。为空表示不显示 WORKBENCH 分组。
+    workbench_tabs: Vec<(String, String)>,
+    /// 当前选中的工作台设置页签 id，用于导航行高亮。
+    workbench_tab: Option<String>,
+    /// 点击工作台设置页签时通知宿主切换页面（chamber 不感知宿主类型）。
+    workbench_select: Option<Box<dyn Fn(&str, &mut App)>>,
+    /// 宿主注入的左侧导航分组（任务 / 项目 / 工作区）。
+    workbench_nav_groups: Vec<render::workbench_nav::WorkbenchNavGroup>,
+    /// 左栏底部固定项（账户 / 设置入口）。
+    workbench_nav_footer: Option<render::workbench_nav::WorkbenchNavItem>,
+    /// 点击左栏条目时通知宿主切换页面。
+    workbench_nav_select: Option<Box<dyn Fn(&str, &mut Window, &mut App)>>,
     /// Settings editor fields (display name + image path for the current target).
     settings_name: Entity<InputState>,
     settings_path: Entity<InputState>,
@@ -817,13 +850,24 @@ pub struct EmbeddedChamberInit {
 /// 迁移，再把事件投影成初始视图。加载路径与 [`run`] 完全一致，但不注册全局
 /// 主题、不开独立窗口。
 pub fn prepare_embedded(repo_root: &Path) -> EmbeddedChamberInit {
+    prepare_embedded_at(repo_root, &repo_root.join(".hadron").join("field.jsonl"))
+}
+
+/// 与 [`prepare_embedded`] 相同，但显式指定要打开的 field。
+///
+/// 并行多会话时，每个会话就是 `<repo>/.hadron/sessions/<id>/field.jsonl`；
+/// 仓库级配置（team/nucleus/skills）仍按 [`prepare_embedded_at`] 的 `repo_root` 解析。
+pub fn prepare_embedded_at(repo_root: &Path, field_path: &Path) -> EmbeddedChamberInit {
     // 与独立启动一样，先把 `.hadron/` 与 field 文件落盘，保证首次使用即可写事件。
     let hadron_dir = repo_root.join(".hadron");
     let _ = std::fs::create_dir_all(&hadron_dir);
-    let field_path = hadron_dir.join("field.jsonl");
-    if !field_path.exists() {
-        let _ = std::fs::File::create(&field_path);
+    if let Some(parent) = field_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
+    if !field_path.exists() {
+        let _ = std::fs::File::create(field_path);
+    }
+    let field_path = field_path.to_path_buf();
     let repo_path = hadron_lattice::repo_team_for_field(&field_path);
     let global_path =
         hadron_lattice::team_config_path().filter(|g| Some(g.as_path()) != repo_path.as_deref());
@@ -863,6 +907,14 @@ pub fn init_embedded(cx: &mut App, repo_root: &Path) {
             ),
         );
     }
+    set_embedded_workspace(repo_root);
+}
+
+/// 切换嵌入模式的「当前工作区」：后续 `file://` 链接解析都会相对这个仓库。
+///
+/// 与 [`init_embedded`] 的区别是不重复注册字体，宿主在工作区之间来回切换时
+/// 只需要调用这个轻量版本。
+pub fn set_embedded_workspace(repo_root: &Path) {
     set_link_workspace_path(repo_root.join(".hadron").join("field.jsonl"));
 }
 
@@ -872,12 +924,25 @@ pub fn init_embedded(cx: &mut App, repo_root: &Path) {
 /// 返回**本次新拉起**的子进程句柄（已有守护进程时为 `None`）。调用方可以把它
 /// 存起来，进程退出时由系统一并回收；不存也不会影响守护进程继续工作。
 pub fn ensure_daemon_for_repo(repo_root: &Path) -> Option<std::process::Child> {
-    let field_path = repo_root.join(".hadron").join("field.jsonl");
-    if crate::sys::probe_gluon_pid(&field_path).is_some() {
+    ensure_daemon_for_field(&repo_root.join(".hadron").join("field.jsonl"))
+}
+
+/// 确保某个 field 的守护进程在运行。
+///
+/// 并行多会话时每个会话 field 都有自己的运行目录（`gluon.lock`/`gluon.rpc`），
+/// 因此这里按 field 而不是按仓库判断，天然支持一个仓库多个守护进程。
+pub fn ensure_daemon_for_field(field_path: &Path) -> Option<std::process::Child> {
+    if let Some(parent) = field_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !field_path.exists() {
+        let _ = std::fs::File::create(field_path);
+    }
+    if crate::sys::probe_gluon_pid(field_path).is_some() {
         return None;
     }
     let show_console = config::load().show_console_window;
-    match crate::sys::spawn_gluon_for_field(&field_path, show_console) {
+    match crate::sys::spawn_gluon_for_field(field_path, show_console) {
         Ok(child) => {
             hadron_lattice::term::info(
                 hadron_lattice::term::Source::Chamber,
@@ -900,13 +965,34 @@ pub fn ensure_daemon_for_repo(repo_root: &Path) -> Option<std::process::Child> {
 }
 
 impl Chamber {
+    /// 注入工作台设置的页签列表（顺序即左侧导航顺序）。
+    ///
+    /// hadron 只负责把它们渲染成 WORKBENCH 分组下的独立导航行；具体页面内容
+    /// 由宿主通过 [`Chamber::render_settings_surface`] 的 `workbench` 参数提供。
+    pub fn set_workbench_settings_tabs(&mut self, tabs: Vec<(String, String)>) {
+        if self.workbench_tab.is_none() {
+            self.workbench_tab = tabs.first().map(|(id, _)| id.clone());
+        }
+        self.workbench_tabs = tabs;
+    }
+
+    /// 注入「工作台页签被点击」的回调，宿主据此切换自己的设置页。
+    pub fn set_workbench_settings_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(&str, &mut App) + 'static,
+    {
+        self.workbench_select = Some(Box::new(handler));
+    }
+}
+
+impl Chamber {
     /// 嵌入式构造：由宿主窗口承载渲染，不打开独立窗口、不覆盖全局主题。
     pub fn embedded(
         init: EmbeddedChamberInit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(
+        let mut chamber = Self::new(
             init.view,
             init.events,
             init.prefs,
@@ -917,7 +1003,10 @@ impl Chamber {
             WorkspaceMode::Chamber,
             window,
             cx,
-        )
+        );
+        // 设置页默认落在「General → Appearance」，而不是身份编辑页。
+        chamber.select_settings_target(SettingsTarget::Appearance, window, cx);
+        chamber
     }
 }
 
@@ -2576,6 +2665,12 @@ impl Chamber {
             process_manager_open: false,
             settings_open: false,
             settings_target: SettingsTarget::Human,
+            workbench_tabs: Vec::new(),
+            workbench_tab: None,
+            workbench_select: None,
+            workbench_nav_groups: Vec::new(),
+            workbench_nav_footer: None,
+            workbench_nav_select: None,
             settings_name,
             settings_path,
             settings_model,
